@@ -261,7 +261,10 @@ def _apply_theme(app: QApplication, colors: dict) -> None:
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(colors["text_selected"]))
     app.setPalette(palette)
 
-    app.setStyleSheet(_BASE_QSS.format(**colors))
+    qss = _BASE_QSS
+    for key, value in colors.items():
+        qss = qss.replace(f"{{{key}}}", value)
+    app.setStyleSheet(qss)
 
 
 def apply_dark_theme(app: QApplication) -> None:
