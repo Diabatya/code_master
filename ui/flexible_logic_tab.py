@@ -279,6 +279,16 @@ class FlexibleLogicTab(QWidget):
         """Сохраняет правила в конфигурацию."""
         self._config.set("flexible_rules", self._rules)
 
+    def get_config(self) -> List[Dict[str, object]]:
+        """Возвращает текущие правила для экспорта."""
+        self._save_config()
+        return self._config.get("flexible_rules", [])
+
+    def set_config(self, rules: List[Dict[str, object]]) -> None:
+        """Загружает правила из импортированного профиля."""
+        self._config.set("flexible_rules", rules)
+        self._load_config()
+
     def _refresh_table(self) -> None:
         """Обновляет таблицу правил."""
         self._table.setRowCount(len(self._rules))

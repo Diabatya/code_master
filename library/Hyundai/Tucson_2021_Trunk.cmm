@@ -1,0 +1,16 @@
+{
+  "name": "Hyundai Tucson 2021 — открытие багажника",
+  "description": "Открытие багажника по удержанию кнопки брелка, эмуляция CAN-команды багажника.",
+  "version": "1.0",
+  "triggers": [
+    {
+      "active": true,
+      "id": "0x2A0",
+      "data": "10",
+      "resp_id": "0x2A0",
+      "resp_data": "10 01 00 00 00 00 00 00",
+      "delay": 50
+    }
+  ],
+  "flexible_rules": []
+}

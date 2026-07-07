@@ -1,0 +1,19 @@
+{
+  "name": "Универсальный — OBD2 PID фильтр",
+  "description": "Правила для обработки стандартных OBD2 запросов PID 0x00–0x0A.",
+  "version": "1.0",
+  "triggers": [],
+  "flexible_rules": [
+    {
+      "active": true,
+      "id": "0x7DF",
+      "mask": "FF 00 FF FF FF FF FF FF",
+      "condition_data": "02 00 01 00 00 00 00 00",
+      "resp_id": "0x7E8",
+      "resp_data": "03 41 01 00 00 00 00 00",
+      "resp_mask": "FF FF FF FF FF FF FF FF",
+      "resp_channel": "",
+      "delay": 0
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "name": "Демо — простой сниффер",
+  "description": "Демонстрационная конфигурация с двумя триггерами для тестирования библиотеки.",
+  "version": "1.0",
+  "triggers": [
+    {
+      "active": true,
+      "id": "0x123",
+      "data": "",
+      "resp_id": "0x123",
+      "resp_data": "AA BB CC DD",
+      "delay": 0
+    }
+  ],
+  "flexible_rules": [
+    {
+      "active": false,
+      "id": "0x456",
+      "mask": "FF FF 00 00 00 00 00 00",
+      "condition_data": "11 22 00 00 00 00 00 00",
+      "resp_id": "0x456",
+      "resp_data": "99 88 77 66",
+      "resp_mask": "FF FF FF FF 00 00 00 00",
+      "resp_channel": "",
+      "delay": 100
+    }
+  ]
+}

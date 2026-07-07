@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.dbc_manager import DBCManager
 from core.serial_manager import SerialManager
 from models.logger import get_logger
 from models.translations import _ as tr
@@ -46,6 +47,7 @@ class CanGraphTab(QWidget):
         """
         super().__init__(parent)
         self._serial_manager = serial_manager
+        self._dbc_manager = DBCManager()
         self._frames: deque[Dict[str, object]] = deque(maxlen=MAX_FRAMES)
         self._paused = False
 
@@ -99,8 +101,8 @@ class CanGraphTab(QWidget):
             self._axes = None
 
         self._table = QTableWidget()
-        self._table.setColumnCount(4)
-        self._table.setHorizontalHeaderLabels([tr("ID"), tr("Количество"), tr("Последнее время"), tr("Данные")])
+        self._table.setColumnCount(5)
+        self._table.setHorizontalHeaderLabels([tr("ID"), tr("Количество"), tr("Последнее время"), tr("Данные"), tr("Описание")])
         self._table.setFont(font)
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -109,6 +111,7 @@ class CanGraphTab(QWidget):
         self._table.setColumnWidth(1, 80)
         self._table.setColumnWidth(2, 120)
         self._table.setColumnWidth(3, 160)
+        self._table.setColumnWidth(4, 150)
 
         self._update_timer = QTimer(self)
         self._update_timer.timeout.connect(self._update_chart)
@@ -194,6 +197,11 @@ class CanGraphTab(QWidget):
             self._axes.scatter(times, ids, c=colors, s=15, alpha=0.7)
             self._axes.set_ylabel(tr("ID пакета"))
             self._axes.set_xlabel(tr("Время"))
+            if self._dbc_manager.is_loaded() and ids:
+                unique_ids = sorted(set(ids))
+                labels = [(self._dbc_manager.get_message(can_id) or {}).get("name", int_to_hex(can_id, 8 if can_id > 0x7FF else 3)) for can_id in unique_ids]
+                self._axes.set_yticks(unique_ids)
+                self._axes.set_yticklabels(labels, fontsize=8)
         else:  # По частоте
             buckets: Dict[int, int] = Counter(int(f["time"]) for f in frames)
             if buckets:
@@ -229,9 +237,20 @@ class CanGraphTab(QWidget):
             info = stats[can_id]
             id_text = int_to_hex(can_id, 8 if can_id > 0x7FF else 3)
             data_text = " ".join(format_data_bytes(info["data"]))
-            self._table.setItem(i, 0, QTableWidgetItem(id_text))
+            message = self._dbc_manager.get_message(can_id)
+            description = message.get("name", "") if message else ""
+            tooltip = self._dbc_manager.describe_frame(can_id, info["data"]) if self._dbc_manager.is_loaded() else ""
+
+            id_item = QTableWidgetItem(id_text)
+            id_item.setToolTip(tooltip)
+            self._table.setItem(i, 0, id_item)
             count_item = QTableWidgetItem(str(info["count"]))
             count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._table.setItem(i, 1, count_item)
             self._table.setItem(i, 2, QTableWidgetItem(_time_label(info["last_time"])))
-            self._table.setItem(i, 3, QTableWidgetItem(data_text))
+            data_item = QTableWidgetItem(data_text)
+            data_item.setToolTip(tooltip)
+            self._table.setItem(i, 3, data_item)
+            desc_item = QTableWidgetItem(description)
+            desc_item.setToolTip(tooltip)
+            self._table.setItem(i, 4, desc_item)

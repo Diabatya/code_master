@@ -30,6 +30,7 @@ from core.update_checker import check_for_updates
 from models.config import Config
 from models.logger import get_logger, open_log_folder
 from models.translations import _ as tr, set_language
+from ui.can_analyzer import CanAnalyzer
 from ui.can_graph_tab import CanGraphTab
 from ui.can_monitor_tab import CanMonitorTab
 from ui.can_overlay import CanOverlay
@@ -37,6 +38,8 @@ from ui.can_trigger_tab import CanTriggerTab
 from ui.dark_theme import apply_dark_theme, apply_light_theme
 from ui.firmware_page import FirmwarePage
 from ui.flexible_logic_tab import FlexibleLogicTab
+from ui.library_browser import LibraryBrowser
+from ui.script_editor import ScriptEditor
 
 logger = get_logger(__name__)
 
@@ -558,12 +561,15 @@ class MainWindow(QMainWindow):
             ("🧩", tr("Гибкая логика")),
             ("⚙️", tr("Прошивка")),
             ("📈", tr("График")),
+            ("📚", tr("Библиотека")),
+            ("📝", tr("Скрипты")),
+            ("🔬", tr("Анализатор")),
         ]
         for icon, text in menu_items:
             btn = QPushButton(f"{icon}\n{text}")
             btn.setObjectName("menuButton")
             btn.setCheckable(True)
-            btn.setFixedSize(100, 60)
+            btn.setFixedSize(80, 60)
             btn.setFont(QFont("Segoe UI", 9))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self._menu_buttons.append(btn)
@@ -581,6 +587,9 @@ class MainWindow(QMainWindow):
         self._monitor_tab = CanMonitorTab(self._serial_manager, self)
         self._flexible_logic_tab = FlexibleLogicTab(self._serial_manager, self)
         self._graph_tab = CanGraphTab(self._serial_manager, self)
+        self._library_browser = LibraryBrowser(self._trigger_tab, self._flexible_logic_tab, self)
+        self._script_editor = ScriptEditor(self._serial_manager, self)
+        self._can_analyzer = CanAnalyzer(self._serial_manager, self)
 
         self._main_stack.addWidget(self._trigger_tab)       # 0 Триггеры
         self._main_stack.addWidget(self._monitor_tab)        # 1 Мониторинг
@@ -588,6 +597,9 @@ class MainWindow(QMainWindow):
         self._firmware_page = FirmwarePage(self._serial_manager, self)
         self._main_stack.addWidget(self._firmware_page)       # 3 Прошивка
         self._main_stack.addWidget(self._graph_tab)           # 4 График
+        self._main_stack.addWidget(self._library_browser)     # 5 Библиотека
+        self._main_stack.addWidget(self._script_editor)       # 6 Скрипты
+        self._main_stack.addWidget(self._can_analyzer)        # 7 Анализатор
 
         # Статус-бар
         self._status_bar = QStatusBar()
@@ -670,6 +682,8 @@ class MainWindow(QMainWindow):
         self._serial_manager.new_can_frame.connect(self._trigger_tab.process_frame)
         self._serial_manager.new_can_frame.connect(self._flexible_logic_tab.process_frame)
         self._serial_manager.new_can_frame.connect(self._graph_tab.process_frame)
+        self._serial_manager.new_can_frame.connect(self._script_editor.process_frame)
+        self._serial_manager.new_can_frame.connect(self._can_analyzer.process_frame)
         self._serial_manager.heartbeat.connect(self._overlay.pulse)
         self._serial_manager.new_can_frame.connect(self._overlay.pulse)
         self._monitor_tab.create_trigger_requested.connect(self._on_create_trigger_from_packet)

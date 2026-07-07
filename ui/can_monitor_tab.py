@@ -28,10 +28,11 @@ from PySide6.QtWidgets import (
 )
 
 from core.can_protocol import MARKER_TX_EXT, pack_can_frame
+from core.dbc_manager import DBCManager
 from core.serial_manager import SerialManager
 from models.logger import get_logger
 from models.translations import _ as tr
-from models.utils import format_data_bytes, hex_to_int, int_to_hex, parse_data_bytes
+from models.utils import bytes_to_hex_string, format_data_bytes, hex_to_int, int_to_hex, parse_data_bytes
 
 logger = get_logger(__name__)
 
@@ -102,9 +103,9 @@ class CanChannelMonitor(QWidget):
         self._search_edit.textChanged.connect(self._apply_search)
 
         self._table = QTableWidget()
-        self._table.setColumnCount(11)
+        self._table.setColumnCount(12)
         self._table.setHorizontalHeaderLabels(
-            [tr("Время"), "ID", "D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "DLC"]
+            [tr("Время"), "ID", "D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "DLC", tr("Описание")]
         )
         self._table.setFont(QFont("Segoe UI", 9))
         self._table.setAlternatingRowColors(False)
@@ -213,6 +214,39 @@ class CanChannelMonitor(QWidget):
             color = "#1A3A1A"  # Зеленоватый, пакеты идут
         self.setStyleSheet(f"CanChannelMonitor {{ background-color: {color}; border-radius: 6px; }}")
 
+    def _update_dbc_descriptions(self) -> None:
+        """Обновляет описания и подсказки для уже отображённых строк."""
+        dbc_manager = DBCManager()
+        if not dbc_manager.is_loaded():
+            return
+        for row in range(self._table.rowCount()):
+            id_item = self._table.item(row, 1)
+            if id_item is None:
+                continue
+            can_id = hex_to_int(id_item.text())
+            if can_id is None:
+                continue
+            data_values = []
+            for col in range(2, 10):
+                item = self._table.item(row, col)
+                data_values.append(item.text() if item is not None else "")
+            data = bytes(parse_data_bytes(data_values))
+            message = dbc_manager.get_message(can_id)
+            description = message.get("name", "") if message else ""
+            desc_item = self._table.item(row, 11)
+            if desc_item is None:
+                desc_item = QTableWidgetItem(description)
+                desc_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._table.setItem(row, 11, desc_item)
+            else:
+                desc_item.setText(description)
+            tooltip = dbc_manager.describe_frame(can_id, data)
+            if tooltip:
+                for col in range(self._table.columnCount()):
+                    item = self._table.item(row, col)
+                    if item is not None:
+                        item.setToolTip(tooltip)
+
     def _start(self) -> None:
         """Запускает отображение пакетов канала."""
         self._running = True
@@ -246,7 +280,7 @@ class CanChannelMonitor(QWidget):
             return
         for row in range(self._table.rowCount()):
             match = False
-            for col in range(1, 10):  # ID + D0..D7
+            for col in range(1, 12):  # ID + D0..D7 + Описание
                 item = self._table.item(row, col)
                 if item is not None and query in item.text().lower():
                     match = True
@@ -378,9 +412,17 @@ class CanChannelMonitor(QWidget):
         items.extend(data_hex[:8])
         items.append(str(len(data)))
 
+        dbc_manager = DBCManager()
+        message = dbc_manager.get_message(frame_id)
+        description = message.get("name", "") if message else ""
+        items.append(description)
+        tooltip = dbc_manager.describe_frame(frame_id, data) if dbc_manager.is_loaded() else ""
+
         for col, text in enumerate(items):
             table_item = QTableWidgetItem(text)
             table_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if tooltip:
+                table_item.setToolTip(tooltip)
             self._table.setItem(row, col, table_item)
 
         if frame_id in self._manual_send_ids:
@@ -495,12 +537,19 @@ class CanMonitorTab(QWidget):
         self._record_button.setFont(QFont("Segoe UI", 9))
         self._record_button.clicked.connect(self._toggle_recording)
 
+        self._dbc_button = QPushButton(tr("Загрузить DBC"))
+        self._dbc_button.setFixedSize(110, 28)
+        self._dbc_button.setFont(QFont("Segoe UI", 9))
+        self._dbc_button.clicked.connect(self._on_load_dbc)
+        self._dbc_manager = DBCManager()
+
         # Панель отправки и триггера
         self._send_id_edit = QLineEdit()
         self._send_id_edit.setFixedWidth(90)
-        self._send_id_edit.setMaxLength(8)
+        self._send_id_edit.setMaxLength(32)
         self._send_id_edit.setFont(QFont("Segoe UI", 9))
-        self._send_id_edit.setPlaceholderText(tr("ID HEX"))
+        self._send_id_edit.setPlaceholderText(tr("ID HEX или имя DBC"))
+        self._send_id_edit.editingFinished.connect(self._autofill_send_from_dbc)
 
         self._send_data_edit = QLineEdit()
         self._send_data_edit.setFixedWidth(140)
@@ -567,6 +616,7 @@ class CanMonitorTab(QWidget):
         buttons_layout.addWidget(self._stop_all_button)
         buttons_layout.addWidget(self._clear_all_button)
         buttons_layout.addWidget(self._record_button)
+        buttons_layout.addWidget(self._dbc_button)
         buttons_layout.addStretch()
         layout.addLayout(buttons_layout)
 
@@ -616,6 +666,33 @@ class CanMonitorTab(QWidget):
         if not text:
             return []
         return parse_data_bytes(text.split())
+
+    def _autofill_send_from_dbc(self) -> None:
+        """Автоматически подставляет ID и данные по имени сообщения из DBC."""
+        text = self._send_id_edit.text().strip()
+        if not text or hex_to_int(text) is not None:
+            return
+        if not self._dbc_manager.is_loaded():
+            return
+        message = self._dbc_manager.get_message_by_name(text)
+        can_id: Optional[int] = None
+        if message is None:
+            for cid, msg in self._dbc_manager.get_all().items():
+                for signal in msg.get("signals", []):
+                    if signal.get("name") == text:
+                        message = msg
+                        can_id = cid
+                        break
+                if message is not None:
+                    break
+        if message is None or can_id is None:
+            can_id = self._dbc_manager.get_id_by_name(text)
+            if can_id is None:
+                return
+        dlc = int(message.get("dlc", 8)) if message else 8
+        self._send_id_edit.setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
+        self._send_data_edit.setText(" ".join(["00"] * dlc))
+        self._send_status_label.setText(tr("Автозаполнено из DBC: {0}").format(text))
 
     def _on_send_clicked(self) -> None:
         """Отправляет пакет с учётом повторов и интервала."""
@@ -704,9 +781,9 @@ class CanMonitorTab(QWidget):
         """Выбирает файл и начинает запись CSV."""
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "Сохранить запись CAN-трафика",
+            tr("Сохранить запись CAN-трафика"),
             "",
-            "CSV files (*.csv)",
+            tr("CSV files (*.csv)"),
         )
         if not path:
             return
@@ -716,11 +793,11 @@ class CanMonitorTab(QWidget):
             self._csv_writer = csv.writer(self._csv_file)
             self._csv_writer.writerow(["timestamp", "channel", "id", "dlc", "data"])
             self._recording = True
-            self._record_button.setText("Остановить запись")
+            self._record_button.setText(tr("Остановить запись"))
             logger.info("Запись CAN-трафика начата: %s", path)
         except Exception as exc:  # noqa: BLE001
             logger.error("Ошибка открытия CSV: %s", exc)
-            QMessageBox.critical(self, "Ошибка", f"Не удалось открыть файл: {exc}")
+            QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось открыть файл: {0}").format(exc))
 
     def _stop_recording(self) -> None:
         """Останавливает запись и закрывает CSV-файл."""
@@ -734,7 +811,28 @@ class CanMonitorTab(QWidget):
             finally:
                 self._csv_file = None
                 self._csv_writer = None
-        self._record_button.setText("Записать в CSV")
+        self._record_button.setText(tr("Записать в CSV"))
+
+    def _on_load_dbc(self) -> None:
+        """Загружает DBC-файл и активирует описания в таблице."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("Загрузить DBC"),
+            "",
+            "DBC files (*.dbc)",
+        )
+        if not path:
+            return
+        if self._dbc_manager.load_dbc(path):
+            QMessageBox.information(self, tr("Готово"), tr("DBC загружен: {0}").format(path))
+            self._update_dbc_columns()
+        else:
+            QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось загрузить DBC"))
+
+    def _update_dbc_columns(self) -> None:
+        """Пересчитывает описания в таблицах каналов после загрузки DBC."""
+        for monitor in (self._monitor1, self._monitor2):
+            monitor._update_dbc_descriptions()
 
     def _write_frame_to_csv(self, frame: Dict[str, object]) -> None:
         """Записывает один CAN-кадр в CSV-файл.

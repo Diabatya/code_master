@@ -1,0 +1,16 @@
+{
+  "name": "Kia Sportage 2019 — складывание зеркал",
+  "description": "Складывание боковых зеркал по удержанию кнопки закрытия центрального замка.",
+  "version": "1.0",
+  "triggers": [
+    {
+      "active": true,
+      "id": "0x33A",
+      "data": "02",
+      "resp_id": "0x33A",
+      "resp_data": "01 00 00 00 00 00 00 00",
+      "delay": 200
+    }
+  ],
+  "flexible_rules": []
+}
