@@ -10,48 +10,102 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
           pip install pyinstaller
-
       - name: Build with PyInstaller
         run: pyinstaller build_win.spec
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodeMaster-windows
+          path: dist/CodeMaster.exe
 
-      - name: Determine release tag and name
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+      - name: Build with PyInstaller
+        run: pyinstaller build_mac.spec
+      - name: Create DMG
+        run: hdiutil create -volname "CodeMaster" -srcfolder dist/CodeMaster.app -ov -format UDZO dist/CodeMaster.dmg
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodeMaster-macos
+          path: dist/CodeMaster.dmg
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-dev binutils
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+      - name: Build with PyInstaller
+        run: pyinstaller build_linux.spec
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodeMaster-linux
+          path: dist/CodeMaster
+
+  release:
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Determine release info
         id: release_info
         shell: bash
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            TAG_NAME="${GITHUB_REF#refs/tags/}"
-            RELEASE_NAME="Release $TAG_NAME"
-            PRERELEASE="false"
-          else
-            TAG_NAME="nightly-$(date +'%Y%m%d-%H%M%S')"
-            RELEASE_NAME="Nightly build $(date +'%Y-%m-%d %H:%M')"
-            PRERELEASE="true"
-          fi
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
           echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
-          echo "release_name=$RELEASE_NAME" >> $GITHUB_OUTPUT
-          echo "prerelease=$PRERELEASE" >> $GITHUB_OUTPUT
-
-      - name: Create/Update Release and Upload Asset
+          echo "release_name=Release $TAG_NAME" >> $GITHUB_OUTPUT
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Rename artifacts for release
+        run: |
+          mkdir dist
+          mv artifacts/CodeMaster-windows/CodeMaster.exe dist/CodeMaster.exe
+          mv artifacts/CodeMaster-macos/CodeMaster.dmg dist/CodeMaster.dmg
+          mv artifacts/CodeMaster-linux/CodeMaster dist/CodeMaster
+          chmod +x dist/CodeMaster
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_info.outputs.tag_name }}
           name: ${{ steps.release_info.outputs.release_name }}
-          prerelease: ${{ steps.release_info.outputs.prerelease }}
-          files: dist/CodeMaster.exe
+          prerelease: false
+          files: |
+            dist/CodeMaster.exe
+            dist/CodeMaster.dmg
+            dist/CodeMaster
           fail_on_unmatched_files: true
           generate_release_notes: true
         env:

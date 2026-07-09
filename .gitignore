@@ -9,4 +9,6 @@ dist/
 build/
 *.spec
 !build_win.spec
+!build_mac.spec
+!build_linux.spec
 *.spec.bak

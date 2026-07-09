@@ -2,7 +2,7 @@
 
 import logging
 import logging.handlers
-import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -62,12 +62,19 @@ def setup_logging() -> None:
     logging.getLogger("code_master").info("Логирование настроено. Файл: %s", LOG_FILE)
 
 
+def get_log_dir() -> Path:
+    """Возвращает путь к папке с логами."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    return LOG_DIR
+
+
 def open_log_folder() -> None:
     """Открывает папку с лог-файлом в стандартном проводнике системы."""
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    folder = str(get_log_dir())
     if sys.platform == "win32":
-        os.startfile(LOG_DIR)  # type: ignore[attr-defined]
+        import os
+        os.startfile(folder)  # type: ignore[attr-defined]
     elif sys.platform == "darwin":
-        os.system(f"open '{LOG_DIR}'")
+        subprocess.run(["open", folder], check=False)
     else:
-        os.system(f"xdg-open '{LOG_DIR}'")
+        subprocess.run(["xdg-open", folder], check=False)
