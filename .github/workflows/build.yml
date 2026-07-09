@@ -76,15 +76,22 @@ jobs:
   release:
     needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
     steps:
       - name: Determine release info
         id: release_info
         shell: bash
         run: |
-          TAG_NAME="${GITHUB_REF#refs/tags/}"
-          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
-          echo "release_name=Release $TAG_NAME" >> $GITHUB_OUTPUT
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG_NAME="${GITHUB_REF#refs/tags/}"
+            echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+            echo "release_name=Release $TAG_NAME" >> $GITHUB_OUTPUT
+            echo "is_tag=true" >> $GITHUB_OUTPUT
+          else
+            echo "tag_name=latest" >> $GITHUB_OUTPUT
+            echo "release_name=Latest build" >> $GITHUB_OUTPUT
+            echo "is_tag=false" >> $GITHUB_OUTPUT
+          fi
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -96,7 +103,20 @@ jobs:
           mv artifacts/CodeMaster-macos/CodeMaster.dmg dist/CodeMaster.dmg
           mv artifacts/CodeMaster-linux/CodeMaster dist/CodeMaster
           chmod +x dist/CodeMaster
-      - name: Create Release
+      - name: Create/Update latest release
+        if: steps.release_info.outputs.is_tag == 'false'
+        uses: marvinpinto/action-automatic-releases@latest
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          automatic_release_tag: latest
+          prerelease: true
+          title: Latest build
+          files: |
+            dist/CodeMaster.exe
+            dist/CodeMaster.dmg
+            dist/CodeMaster
+      - name: Create versioned release
+        if: steps.release_info.outputs.is_tag == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_info.outputs.tag_name }}

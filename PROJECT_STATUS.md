@@ -68,7 +68,7 @@
 - ✅ Открытие папки логов через `subprocess.run` (open/xdg-open/os.startfile).
 - ✅ `build_win.spec`, `build_mac.spec`, `build_linux.spec` проверены: в `hiddenimports` перечислены `PySide6`, `matplotlib`, `pyqtgraph`, `cantools`, `serial`, `logging.handlers` и все внутренние модули.
 - ✅ `build_mac.spec` корректно формирует `.app` через `BUNDLE`.
-- ✅ `.github/workflows/build.yml` с тремя job'ами (Windows, macOS, Linux): сборка `.exe`, `.dmg` через `hdiutil` и исполняемого файла Linux; единый релиз по тегу `v*`.
+- ✅ `.github/workflows/build.yml` с тремя job'ами (Windows, macOS, Linux): сборка `.exe`, `.dmg` через `hdiutil` и исполняемого файла Linux; единый релиз по тегу `v*` и автоматический `latest` pre-release при каждом пуше в `main`.
 
 ## Общая оценка готовности
 
