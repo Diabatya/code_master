@@ -14,6 +14,8 @@ a = Analysis(
         'matplotlib.backends.backend_qtagg',
         'serial',
         'serial.tools.list_ports',
+        'logging',
+        'logging.handlers',
         'core.bootloader',
         'core.can_protocol',
         'core.dbc_manager',

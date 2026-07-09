@@ -92,6 +92,7 @@ class SettingsWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self._serial_manager.new_can_frame.connect(self._trigger_tab.process_frame)
+        self._serial_manager.new_can_frame.connect(self._gateway_tab.process_frame)
         self._serial_manager.new_can_frame.connect(self._monitor_tab.process_frame)
         self._serial_manager.new_can_frame.connect(self._flexible_tab.process_frame)
         self._serial_manager.new_can_frame.connect(self._graph_tab.process_frame)
@@ -142,6 +143,7 @@ class SettingsWindow(QMainWindow):
         """Уведомляет все вкладки о смене загруженного DBC."""
         for tab in (
             self._trigger_tab,
+            self._gateway_tab,
             self._monitor_tab,
             self._flexible_tab,
             self._graph_tab,

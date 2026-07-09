@@ -28,6 +28,7 @@ from models.config import Config
 from models.logger import get_logger
 from models.translations import _ as tr
 from models.utils import hex_to_int, int_to_hex, parse_data_bytes
+from ui.can_monitor_tab import DbcSignalDialog
 
 logger = get_logger(__name__)
 
@@ -72,6 +73,11 @@ class RuleEditDialog(QDialog):
         self._condition_data_edit.setPlaceholderText(tr("D0 D1 ... (8 байт)"))
         self._condition_data_edit.setToolTip(tr("Эталонные данные для сравнения по маске (8 байт)."))
 
+        self._from_dbc_button = QPushButton(tr("Из DBC"))
+        self._from_dbc_button.setFixedSize(80, 26)
+        self._from_dbc_button.setFont(font)
+        self._from_dbc_button.clicked.connect(self._on_from_dbc)
+
         self._resp_id_edit = QLineEdit()
         self._resp_id_edit.setFont(font)
         self._resp_id_edit.setPlaceholderText(tr("ID HEX"))
@@ -115,7 +121,11 @@ class RuleEditDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.addWidget(self._active_check)
         layout.addWidget(QLabel(tr("ID условия:")))
-        layout.addWidget(self._id_edit)
+        id_layout = QHBoxLayout()
+        id_layout.addWidget(self._id_edit)
+        id_layout.addWidget(self._from_dbc_button)
+        id_layout.addStretch()
+        layout.addLayout(id_layout)
         layout.addWidget(QLabel(tr("Маска данных (8 байт):")))
         layout.addWidget(self._mask_edit)
         layout.addWidget(QLabel(tr("Эталонные данные условия (8 байт):")))
@@ -148,6 +158,19 @@ class RuleEditDialog(QDialog):
         self._resp_mask_edit.setText(self._rule.get("resp_mask", ""))
         self._resp_channel_edit.setText(self._rule.get("resp_channel", ""))
         self._delay_spin.setValue(int(self._rule.get("delay", 0)))
+
+    def _on_from_dbc(self) -> None:
+        """Заполняет ID и данные условия из выбранного DBC-сигнала."""
+        dialog = DbcSignalDialog(self)
+        if dialog.exec() != 1:  # QDialog.DialogCode.Accepted == 1
+            return
+        result = dialog.get_result()
+        if result is None:
+            return
+        can_id, data = result
+        self._id_edit.setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
+        self._mask_edit.setText("FF " * 8)
+        self._condition_data_edit.setText(" ".join(f"{b:02X}" for b in data))
 
     def get_rule(self) -> Optional[Dict[str, object]]:
         """Возвращает правило из полей диалога."""
