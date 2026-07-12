@@ -90,6 +90,10 @@ class LibraryBrowser(QWidget):
         self._build_layout()
         self._scan_library()
 
+    def retranslate_ui(self) -> None:
+        """Обновляет статические строки библиотеки (заглушка)."""
+        pass
+
     def _create_widgets(self) -> None:
         """Создаёт элементы управления."""
         font = QFont("Segoe UI", 10)

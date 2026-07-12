@@ -48,6 +48,10 @@ class SignalGraphTab(QWidget):
         self._setup_update_timer()
         self._populate_dbc()
 
+    def retranslate_ui(self) -> None:
+        """Обновляет статические строки графиков (заглушка)."""
+        pass
+
     def _create_widgets(self) -> None:
         font = QFont("Segoe UI", 10)
 

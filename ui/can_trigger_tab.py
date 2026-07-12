@@ -45,9 +45,19 @@ class _IdValidator:
     def __init__(self, edit: QLineEdit, bit_combo: QComboBox) -> None:
         self._edit = edit
         self._bit_combo = bit_combo
-        self._edit.setValidator(QRegularExpressionValidator(QRegularExpression("[0-9A-Fa-f]{0,8}")))
         self._edit.textChanged.connect(self._validate)
-        self._bit_combo.currentIndexChanged.connect(self._validate)
+        self._bit_combo.currentIndexChanged.connect(self._update_bitness)
+        self._update_bitness()
+
+    def _update_bitness(self) -> None:
+        """Меняет максимальную длину HEX ID в зависимости от битности."""
+        # 11-битный ID = 0x7FF (3 HEX), 29-битный = 0x1FFFFFFF (8 HEX)
+        max_chars = 8 if self._bit_combo.currentIndex() == 1 else 3
+        self._edit.setMaxLength(max_chars)
+        self._edit.setValidator(
+            QRegularExpressionValidator(QRegularExpression(f"[0-9A-Fa-f]{{0,{max_chars}}}"))
+        )
+        self._validate()
 
     def _validate(self) -> None:
         text = self._edit.text()
@@ -102,9 +112,8 @@ class CanTriggerTab(QWidget):
         edit = QLineEdit()
         edit.setFixedWidth(90)
         edit.setFont(font)
-        edit.setMaxLength(8)
         edit.setPlaceholderText("ID")
-        _IdValidator(edit, bit_combo)
+        edit._id_validator = _IdValidator(edit, bit_combo)
         return edit
 
     def _make_data_edits(self, font: QFont) -> List[QLineEdit]:
@@ -450,13 +459,7 @@ class CanTriggerTab(QWidget):
 
             cache_check = QCheckBox(tr("Автоматическая запись DATA в Кэш"))
             cache_check.setFont(font)
-
-            cache_active = QCheckBox(tr("Активно"))
-            cache_active.setFont(font)
-            cache_active.stateChanged.connect(lambda state, idx=i: self._on_cache_active_changed(idx, state))
-
-            cache_check.stateChanged.connect(lambda state, box=cache_active: self._sync_cache_check(box, state))
-            cache_active.stateChanged.connect(lambda state, box=cache_check: self._sync_cache_check(box, state))
+            cache_check.stateChanged.connect(lambda state, idx=i: self._on_cache_active_changed(idx, state))
 
             recv = self._create_receive_row(font, tr("Приём"))
             response = self._create_response_block(font)
@@ -466,17 +469,11 @@ class CanTriggerTab(QWidget):
                 "group": group,
                 "active": active,
                 "cache_check": cache_check,
-                "cache_active": cache_active,
                 "recv": recv,
                 "response": response,
                 "cache": cache,
             }
             self._blocks.append(block)
-
-    def _sync_cache_check(self, box: QCheckBox, state: int) -> None:
-        box.blockSignals(True)
-        box.setChecked(state == Qt.CheckState.Checked.value)
-        box.blockSignals(False)
 
     def _build_layout(self) -> None:
         font = QFont("Segoe UI", 9)
@@ -507,7 +504,6 @@ class CanTriggerTab(QWidget):
             top = QHBoxLayout()
             top.addWidget(block["active"])
             top.addWidget(block["cache_check"])
-            top.addWidget(block["cache_active"])
             top.addStretch()
             content_layout.addLayout(top)
 
@@ -542,6 +538,18 @@ class CanTriggerTab(QWidget):
         block["response"]["group"].setEnabled(not enabled)
         block["cache"]["group"].setEnabled(enabled)
 
+    def retranslate_ui(self) -> None:
+        """Обновляет статические строки вкладки триггеров."""
+        self._apply_button.setText(tr("Применить триггеры"))
+        self._save_button.setText(tr("Сохранить триггеры"))
+        self._load_button.setText(tr("Загрузить триггеры"))
+        for i, block in enumerate(self._blocks):
+            block["group"].setTitle(tr("Триггер {0}").format(i + 1))
+            block["active"].setText(tr("Активен"))
+            block["cache_check"].setText(tr("Автоматическая запись DATA в Кэш"))
+            block["response"]["group"].setTitle(tr("Ответ"))
+            block["cache"]["group"].setTitle(tr("Кэш"))
+
     def _parse_id(self, text: str) -> Optional[int]:
         return hex_to_int(text.strip())
 
@@ -569,7 +577,7 @@ class CanTriggerTab(QWidget):
                 "recv_id": recv_id,
                 "recv_data": self._parse_data(block["recv"]["data"]),
                 "recv_channel": block["recv"]["channel"].currentIndex(),
-                "cache": block["cache_active"].isChecked(),
+                "cache": block["cache_check"].isChecked(),
                 "responses": self._collect_responses(block["response"]["rows"]),
                 "cache_data": self._collect_cache(block["cache"]),
                 "cached_frame": None,
@@ -635,7 +643,7 @@ class CanTriggerTab(QWidget):
             cache = block["cache"]
             config.append({
                 "active": block["active"].isChecked(),
-                "cache": block["cache_active"].isChecked(),
+                "cache": block["cache_check"].isChecked(),
                 "recv_channel": block["recv"]["channel"].currentIndex(),
                 "recv_bit": block["recv"]["bit"].currentIndex(),
                 "recv_id": block["recv"]["id"].text(),
@@ -659,7 +667,6 @@ class CanTriggerTab(QWidget):
             trigger = triggers[i] if i < len(triggers) else {}
             block["active"].setChecked(bool(trigger.get("active", False)))
             cache_active = bool(trigger.get("cache", False))
-            block["cache_active"].setChecked(cache_active)
             block["cache_check"].setChecked(cache_active)
             self._on_cache_active_changed(i, Qt.CheckState.Checked.value if cache_active else Qt.CheckState.Unchecked.value)
 

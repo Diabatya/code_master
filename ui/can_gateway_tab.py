@@ -52,6 +52,10 @@ class CanGatewayTab(QWidget):
         self._build_layout()
         self._load_config()
 
+    def retranslate_ui(self) -> None:
+        """Обновляет статические строки вкладки шлюза (заглушка для полной локализации)."""
+        pass
+
     def _create_widgets(self) -> None:
         font = QFont("Segoe UI", 9)
 

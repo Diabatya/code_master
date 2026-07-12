@@ -3,6 +3,7 @@
 import subprocess
 import sys
 import traceback
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
@@ -11,11 +12,13 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QStackedWidget,
     QStatusBar,
@@ -31,7 +34,7 @@ from models.logger import get_logger, get_log_dir
 from models.translations import _ as tr, set_language
 from ui.com_settings_dialog import ComSettingsDialog
 from ui.dark_theme import apply_theme
-from ui.firmware_page import FirmwarePage
+from ui.firmware_page import BootloaderWorker, FirmwarePage
 from ui.settings_window import SettingsWindow
 
 logger = get_logger(__name__)
@@ -96,8 +99,8 @@ class MainWindow(QMainWindow):
         self._theme_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._theme_button.setToolTip(tr("Выбор темы оформления"))
         self._theme_menu = QMenu(self._theme_button)
-        self._theme_menu.addAction(tr("Тёмный"), self._set_dark_theme)
-        self._theme_menu.addAction(tr("Светлый"), self._set_light_theme)
+        self._dark_theme_action = self._theme_menu.addAction(tr("Тёмный"), self._set_dark_theme)
+        self._light_theme_action = self._theme_menu.addAction(tr("Светлый"), self._set_light_theme)
         self._theme_button.setMenu(self._theme_menu)
 
         self._language_combo = QComboBox()
@@ -132,6 +135,13 @@ class MainWindow(QMainWindow):
         self._configure_button.setFont(QFont("Segoe UI", 16))
         self._configure_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._configure_button.clicked.connect(self._on_configure_clicked)
+
+        self._flash_button = QPushButton(tr("Прошить микроконтроллер"))
+        self._flash_button.setFixedSize(240, 100)
+        self._flash_button.setFont(QFont("Segoe UI", 14))
+        self._flash_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._flash_button.setToolTip(tr("Загрузить .bin или .hex через UART bootloader"))
+        self._flash_button.clicked.connect(self._on_flash_clicked)
 
         # Главное меню
         self._central_stack = QStackedWidget()
@@ -182,21 +192,30 @@ class MainWindow(QMainWindow):
         action_layout.addStretch()
         action_layout.addWidget(self._update_button)
         action_layout.addWidget(self._configure_button)
+        action_layout.addStretch()
         root.addLayout(action_layout)
+
+        flash_layout = QHBoxLayout()
+        flash_layout.setContentsMargins(20, 16, 20, 0)
+        flash_layout.setSpacing(16)
+        flash_layout.addStretch()
+        flash_layout.addWidget(self._flash_button)
+        flash_layout.addStretch()
+        root.addLayout(flash_layout)
 
         startup_layout = QVBoxLayout(self._startup_page)
         startup_layout.setContentsMargins(40, 40, 40, 40)
         startup_layout.setSpacing(30)
         startup_layout.addStretch(1)
-        title = QLabel(tr("Код Мастер"))
-        title.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setProperty("title", True)
-        startup_layout.addWidget(title)
-        subtitle = QLabel(tr("Выберите режим работы"))
-        subtitle.setFont(QFont("Segoe UI", 12))
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        startup_layout.addWidget(subtitle)
+        self._startup_title = QLabel(tr("Код Мастер"))
+        self._startup_title.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
+        self._startup_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._startup_title.setProperty("title", True)
+        startup_layout.addWidget(self._startup_title)
+        self._startup_subtitle = QLabel(tr("Выберите режим работы"))
+        self._startup_subtitle.setFont(QFont("Segoe UI", 12))
+        self._startup_subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        startup_layout.addWidget(self._startup_subtitle)
         startup_layout.addStretch(2)
 
         firmware_container = QWidget()
@@ -243,6 +262,25 @@ class MainWindow(QMainWindow):
             return
         self._central_stack.setCurrentIndex(1)
         self._status_label.setText(tr("Страница прошивки"))
+
+    def _on_flash_clicked(self) -> None:
+        """Открывает диалог выбора файла и запускает прошивку через BootloaderWorker."""
+        if not self._ensure_port_selected():
+            return
+        if self._serial_manager.current_port_name() == "FAKE":
+            QMessageBox.warning(self, tr("Внимание"), tr("Прошивка требует реальный COM-порт"))
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("Выберите файл прошивки"),
+            "",
+            "Firmware (*.bin *.hex)",
+        )
+        if not path:
+            return
+        dialog = _FlashDialog(self._serial_manager, self)
+        dialog.flash(path)
+        dialog.exec()
 
     def _on_configure_clicked(self) -> None:
         """Открывает окно настроек CAN, скрывая главное окно."""
@@ -293,17 +331,17 @@ class MainWindow(QMainWindow):
         apply_theme(app, True)
 
     def _on_language_changed(self, index: int) -> None:
-        """Переключает язык через выпадающий список."""
+        """Переключает язык через выпадающий список и обновляет открытые окна."""
         lang = self._language_combo.itemData(index)
         if lang is None:
             return
         self._config.set("language", lang)
         set_language(lang)
-        QMessageBox.information(
-            self,
-            tr("Переключить язык"),
-            tr("Перезапустите приложение, чтобы применить новый язык."),
-        )
+        self.retranslate_ui()
+        if self._settings_window is not None:
+            self._settings_window.retranslate_ui()
+        if self._firmware_page is not None and hasattr(self._firmware_page, "retranslate_ui"):
+            self._firmware_page.retranslate_ui()
 
     def _set_language_combo(self) -> None:
         """Устанавливает текущий язык в выпадающем списке."""
@@ -312,6 +350,28 @@ class MainWindow(QMainWindow):
             if self._language_combo.itemData(idx) == current:
                 self._language_combo.setCurrentIndex(idx)
                 break
+
+    def retranslate_ui(self) -> None:
+        """Обновляет все статические строки главного окна."""
+        self.setWindowTitle(tr("Код Мастер"))
+        self._logo_label.setText("🛠️ " + tr("Код Мастер"))
+        self._port_indicator.setToolTip(tr("Индикатор подключения COM-порта"))
+        if not self._serial_manager.is_open() and not self._config.get("port"):
+            self._port_label.setText(tr("Нет подключения"))
+        self._theme_button.setText(tr("Тема"))
+        self._theme_button.setToolTip(tr("Выбор темы оформления"))
+        self._dark_theme_action.setText(tr("Тёмный"))
+        self._light_theme_action.setText(tr("Светлый"))
+        self._logs_button.setText("📄 " + tr("Логи"))
+        self._update_check_button.setToolTip(tr("Проверка обновлений"))
+        self._update_button.setText("🔄 " + tr("Обновить"))
+        self._configure_button.setText("⚙️ " + tr("Настроить"))
+        self._flash_button.setText(tr("Прошить микроконтроллер"))
+        self._flash_button.setToolTip(tr("Загрузить .bin или .hex через UART bootloader"))
+        self._firmware_page_back_button.setText(tr("← Назад"))
+        self._startup_title.setText(tr("Код Мастер"))
+        self._startup_subtitle.setText(tr("Выберите режим работы"))
+        self._status_label.setText(tr("Готов"))
 
     def _set_theme_button_icon(self) -> None:
         """Оставляет текст кнопки темы без изменений."""
@@ -373,6 +433,69 @@ class MainWindow(QMainWindow):
         if self._settings_window is not None:
             self._settings_window.close()
         self._serial_manager.close_port()
+        event.accept()
+
+
+class _FlashDialog(QDialog):
+    """Модальный диалог прошивки микроконтроллера с прогресс-баром."""
+
+    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._serial_manager = serial_manager
+        self._worker: Optional[BootloaderWorker] = None
+        self.setWindowTitle(tr("Прошивка микроконтроллера"))
+        self.setFixedSize(420, 180)
+        self.setModal(True)
+
+        self._status = QLabel(tr("Подготовка..."))
+        self._status.setFont(QFont("Segoe UI", 10))
+
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+
+        self._close_button = QPushButton(tr("Отмена"))
+        self._close_button.setFixedSize(100, 30)
+        self._close_button.clicked.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.addWidget(self._status)
+        layout.addWidget(self._progress)
+        layout.addWidget(self._close_button, alignment=Qt.AlignmentFlag.AlignCenter)
+
+    def flash(self, firmware_path: str) -> None:
+        """Запускает прошивку выбранным файлом."""
+        self._status.setText(tr("Прошивка: {0}").format(Path(firmware_path).name))
+        self._worker = BootloaderWorker(self._serial_manager, "flash", firmware_path, self)
+        self._worker.progress.connect(self._progress.setValue)
+        self._worker.finished_success.connect(self._on_success)
+        self._worker.finished_error.connect(self._on_error)
+        self.rejected.connect(self._stop_worker)
+        self._worker.start()
+
+    def _on_success(self, message: str) -> None:
+        self._status.setText(message)
+        self._progress.setValue(100)
+        self._close_button.setText(tr("Закрыть"))
+        self._close_button.clicked.disconnect(self.reject)
+        self._close_button.clicked.connect(self.accept)
+        QMessageBox.information(self, tr("Готово"), message)
+
+    def _on_error(self, message: str) -> None:
+        self._status.setText(tr("Ошибка: {0}").format(message))
+        self._close_button.setText(tr("Закрыть"))
+        self._close_button.clicked.disconnect(self.reject)
+        self._close_button.clicked.connect(self.accept)
+        QMessageBox.critical(self, tr("Ошибка прошивки"), message)
+
+    def _stop_worker(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.stop()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._stop_worker()
         event.accept()
 
 

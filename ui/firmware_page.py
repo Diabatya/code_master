@@ -111,6 +111,18 @@ class FirmwarePage(QWidget):
         self._populate_fw_list()
         self._populate_car_list()
 
+    def _make_browse_button(self, callback) -> QPushButton:
+        """Создаёт чёткую кнопку выбора файла с крупным символом папки."""
+        button = QPushButton("📂")
+        button.setFixedSize(40, 40)
+        button.setFont(QFont("Segoe UI", 24))
+        button.setToolTip(tr("Выбрать файл с компьютера"))
+        button.setStyleSheet(
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+        )
+        button.clicked.connect(callback)
+        return button
+
     def _create_widgets(self) -> None:
         font = QFont("Segoe UI", 10)
 
@@ -126,11 +138,7 @@ class FirmwarePage(QWidget):
         self._fw_update_button = QPushButton(tr("Обновить"))
         setup_button(self._fw_update_button, height=30)
         self._fw_update_button.clicked.connect(self._on_fw_update)
-        self._fw_browse_button = QPushButton("📂")
-        self._fw_browse_button.setFixedSize(34, 30)
-        self._fw_browse_button.setFont(font)
-        self._fw_browse_button.setToolTip(tr("Выбрать файл с компьютера"))
-        self._fw_browse_button.clicked.connect(self._on_fw_browse)
+        self._fw_browse_button = self._make_browse_button(self._on_fw_browse)
 
         # Столбец 2: Автомобиль
         self._car_group = QGroupBox(tr("Автомобиль"))
@@ -144,11 +152,7 @@ class FirmwarePage(QWidget):
         self._car_update_button = QPushButton(tr("Обновить"))
         setup_button(self._car_update_button, height=30)
         self._car_update_button.clicked.connect(self._on_car_update)
-        self._car_browse_button = QPushButton("📂")
-        self._car_browse_button.setFixedSize(34, 30)
-        self._car_browse_button.setFont(font)
-        self._car_browse_button.setToolTip(tr("Выбрать файл с компьютера"))
-        self._car_browse_button.clicked.connect(self._on_car_browse)
+        self._car_browse_button = self._make_browse_button(self._on_car_browse)
 
         # Столбец 3: Конфигурация
         self._config_group = QGroupBox(tr("Конфигурация"))
@@ -160,11 +164,7 @@ class FirmwarePage(QWidget):
         self._config_update_button = QPushButton(tr("Обновить"))
         setup_button(self._config_update_button, height=30)
         self._config_update_button.clicked.connect(self._on_config_update)
-        self._config_browse_button = QPushButton("📂")
-        self._config_browse_button.setFixedSize(34, 30)
-        self._config_browse_button.setFont(font)
-        self._config_browse_button.setToolTip(tr("Выбрать файл с компьютера"))
-        self._config_browse_button.clicked.connect(self._on_config_browse)
+        self._config_browse_button = self._make_browse_button(self._on_config_browse)
 
         # Общий прогресс и статус
         self._progress = QProgressBar()

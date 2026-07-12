@@ -108,6 +108,33 @@ class SettingsWindow(QMainWindow):
 
         self._connect_signals()
 
+    def retranslate_ui(self) -> None:
+        """Обновляет статические строки окна настроек и всех вкладок."""
+        self.setWindowTitle(tr("Настройки — Код Мастер"))
+        self._search_edit.setPlaceholderText(tr("Поиск по разделам..."))
+        self._tabs.setTabText(0, "⚡ " + tr("Триггеры"))
+        self._tabs.setTabText(1, "🔍 " + tr("Мониторинг"))
+        self._tabs.setTabText(2, "🚦 " + tr("Шлюз"))
+        self._tabs.setTabText(3, "🧩 " + tr("Гибкая логика"))
+        self._tabs.setTabText(4, "📚 " + tr("Библиотека"))
+        self._tabs.setTabText(5, "📈 " + tr("Графики"))
+        self._tabs.setTabText(6, "🔬 " + tr("Трэйс"))
+        self._save_button.setText(tr("Сохранить"))
+        self._save_config_button.setText(tr("Сохранить конфигурацию"))
+        self._factory_reset_button.setText(tr("Заводские настройки"))
+        self._back_button.setText(tr("Назад"))
+        for tab in (
+            self._trigger_tab,
+            self._monitor_tab,
+            self._gateway_tab,
+            self._flexible_tab,
+            self._library_tab,
+            self._graph_tab,
+            self._analyzer_tab,
+        ):
+            if hasattr(tab, "retranslate_ui"):
+                tab.retranslate_ui()
+
     def _connect_signals(self) -> None:
         self._serial_manager.new_can_frame.connect(self._trigger_tab.process_frame)
         self._serial_manager.new_can_frame.connect(self._gateway_tab.process_frame)

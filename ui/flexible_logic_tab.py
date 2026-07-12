@@ -212,6 +212,10 @@ class FlexibleLogicTab(QWidget):
         self._build_layout()
         self._load_config()
 
+    def retranslate_ui(self) -> None:
+        """Обновляет статические строки страницы гибкой логики (заглушка)."""
+        pass
+
     def _create_widgets(self) -> None:
         """Создаёт элементы управления страницы."""
         self._title = QLabel(tr("Гибкая логика"))

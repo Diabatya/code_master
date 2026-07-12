@@ -220,20 +220,26 @@ class CanChannelMonitor(QWidget):
     def _create_widgets(self) -> None:
         font = QFont("Segoe UI", 9)
 
+        compact_font = QFont("Segoe UI", 9)
+
         self._start_button = QPushButton(tr("Старт"))
-        setup_button(self._start_button)
+        self._start_button.setFixedSize(80, 28)
+        self._start_button.setFont(compact_font)
         self._start_button.clicked.connect(self._start)
 
         self._stop_button = QPushButton(tr("Стоп"))
-        setup_button(self._stop_button)
+        self._stop_button.setFixedSize(80, 28)
+        self._stop_button.setFont(compact_font)
         self._stop_button.clicked.connect(self._stop)
 
         self._clear_button = QPushButton(tr("Очистить"))
-        setup_button(self._clear_button)
+        self._clear_button.setFixedSize(80, 28)
+        self._clear_button.setFont(compact_font)
         self._clear_button.clicked.connect(self._clear)
 
         self._filter_button = QPushButton(tr("Фильтр"))
-        setup_button(self._filter_button)
+        self._filter_button.setFixedSize(80, 28)
+        self._filter_button.setFont(compact_font)
         self._filter_button.clicked.connect(self._show_filter_stub)
 
         self._filter_from = QLineEdit()
@@ -296,7 +302,7 @@ class CanChannelMonitor(QWidget):
         self._send_id_edit.setMaxLength(8)
         self._send_id_edit.setFont(font)
         self._send_id_edit.setPlaceholderText("ID")
-        _IdValidator(self._send_id_edit, self._send_bit_combo)
+        self._send_id_validator = _IdValidator(self._send_id_edit, self._send_bit_combo)
 
         self._send_dlc_spin = QSpinBox()
         self._send_dlc_spin.setRange(1, 8)
@@ -323,12 +329,17 @@ class CanChannelMonitor(QWidget):
         self._send_period_spin.setFixedWidth(80)
 
         self._send_button = QPushButton(tr("Отправить"))
-        setup_button(self._send_button, height=26)
+        self._send_button.setFixedSize(80, 28)
+        self._send_button.setFont(font)
         self._send_button.clicked.connect(self._send_manual)
 
         self._cyclic_button = QPushButton("∞")
-        self._cyclic_button.setFixedSize(34, 26)
-        self._cyclic_button.setFont(font)
+        self._cyclic_button.setFixedSize(40, 40)
+        self._cyclic_button.setFont(QFont("Segoe UI", 24))
+        self._cyclic_button.setStyleSheet(
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+        )
+        self._cyclic_button.setToolTip(tr("Циклически"))
         self._cyclic_button.setCheckable(True)
         self._cyclic_button.toggled.connect(self._on_cyclic_toggled)
 
@@ -721,6 +732,24 @@ class CanChannelMonitor(QWidget):
         """Уведомляет канал о смене DBC."""
         self._apply_filters()
 
+    def retranslate_ui(self) -> None:
+        """Обновляет статические строки панели мониторинга канала."""
+        self._start_button.setText(tr("Старт"))
+        self._stop_button.setText(tr("Стоп"))
+        self._clear_button.setText(tr("Очистить"))
+        self._filter_button.setText(tr("Фильтр"))
+        self._filter_from.setPlaceholderText(tr("ID от"))
+        self._filter_to.setPlaceholderText(tr("ID до"))
+        self._exclude_edit.setPlaceholderText(tr("Исключить ID"))
+        self._pause_check.setText(tr("Приостановить"))
+        self._search_edit.setPlaceholderText(tr("Поиск по ID или данным…"))
+        self._table.setHorizontalHeaderLabels(
+            [tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("Счётчик"), tr("ASCII"), tr("Пояснение")]
+        )
+        self._send_button.setText(tr("Отправить"))
+        self._cyclic_button.setToolTip(tr("Циклически"))
+        self._stats_label.setText(tr("Принято: 0 | Скорость: 0 пак/с"))
+
 
 class CanMonitorTab(QWidget):
     """Вкладка мониторинга CAN с двумя каналами."""
@@ -739,16 +768,21 @@ class CanMonitorTab(QWidget):
         self._layout_widgets()
 
     def _create_widgets(self) -> None:
+        compact_font = QFont("Segoe UI", 9)
+
         self._start_all_button = QPushButton(tr("Запустить оба"))
-        setup_button(self._start_all_button)
+        self._start_all_button.setFixedSize(80, 28)
+        self._start_all_button.setFont(compact_font)
         self._start_all_button.clicked.connect(self._start_all)
 
         self._stop_all_button = QPushButton(tr("Остановить оба"))
-        setup_button(self._stop_all_button)
+        self._stop_all_button.setFixedSize(80, 28)
+        self._stop_all_button.setFont(compact_font)
         self._stop_all_button.clicked.connect(self._stop_all)
 
         self._clear_all_button = QPushButton(tr("Очистить всё"))
-        setup_button(self._clear_all_button)
+        self._clear_all_button.setFixedSize(80, 28)
+        self._clear_all_button.setFont(compact_font)
         self._clear_all_button.clicked.connect(self._clear_all)
 
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -798,6 +832,14 @@ class CanMonitorTab(QWidget):
         """Уведомляет вкладку о смене DBC."""
         for monitor in (self._monitor1, self._monitor2):
             monitor.set_dbc(dbc)
+
+    def retranslate_ui(self) -> None:
+        """Обновляет статические строки вкладки мониторинга."""
+        self._start_all_button.setText(tr("Запустить оба"))
+        self._stop_all_button.setText(tr("Остановить оба"))
+        self._clear_all_button.setText(tr("Очистить всё"))
+        self._monitor1.retranslate_ui()
+        self._monitor2.retranslate_ui()
 
     def _start_recording(self, path: str) -> None:
         try:
