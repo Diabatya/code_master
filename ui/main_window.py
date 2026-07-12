@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QStackedWidget,
@@ -89,12 +90,15 @@ class MainWindow(QMainWindow):
         self._port_label = QLabel(tr("Нет подключения"))
         self._port_label.setFont(font)
 
-        self._theme_button = QPushButton("☀")
-        self._theme_button.setFixedSize(36, 28)
+        self._theme_button = QPushButton(tr("Тема"))
+        self._theme_button.setFixedSize(70, 28)
         self._theme_button.setFont(font)
         self._theme_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._theme_button.setToolTip(tr("Переключить светлую/тёмную тему"))
-        self._theme_button.clicked.connect(self._on_theme_clicked)
+        self._theme_button.setToolTip(tr("Выбор темы оформления"))
+        self._theme_menu = QMenu(self._theme_button)
+        self._theme_menu.addAction(tr("Тёмный"), self._set_dark_theme)
+        self._theme_menu.addAction(tr("Светлый"), self._set_light_theme)
+        self._theme_button.setMenu(self._theme_menu)
 
         self._language_combo = QComboBox()
         self._language_combo.setFixedSize(110, 28)
@@ -103,24 +107,11 @@ class MainWindow(QMainWindow):
         self._language_combo.addItem(tr("English"), "en")
         self._language_combo.currentIndexChanged.connect(self._on_language_changed)
 
-        self._top_update_button = QPushButton("🔄 " + tr("Обновить Код Мастер"))
-        self._top_update_button.setFixedHeight(28)
-        self._top_update_button.setFont(font)
-        self._top_update_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._top_update_button.clicked.connect(self._on_update_clicked)
-
         self._logs_button = QPushButton("📄 " + tr("Логи"))
         self._logs_button.setFixedSize(80, 28)
         self._logs_button.setFont(font)
         self._logs_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._logs_button.clicked.connect(self._open_logs)
-
-        self._dbc_button = QPushButton("📄 " + tr("DBC"))
-        self._dbc_button.setFixedSize(80, 28)
-        self._dbc_button.setFont(font)
-        self._dbc_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._dbc_button.setToolTip(tr("Загрузить DBC-файл"))
-        self._dbc_button.clicked.connect(self._on_load_dbc)
 
         self._update_check_button = QPushButton("🔄")
         self._update_check_button.setFixedSize(36, 28)
@@ -129,22 +120,16 @@ class MainWindow(QMainWindow):
         self._update_check_button.setToolTip(tr("Проверка обновлений"))
         self._update_check_button.clicked.connect(self._on_check_updates_clicked)
 
-        self._exit_button = QPushButton("✕ " + tr("Выход"))
-        self._exit_button.setFixedSize(90, 28)
-        self._exit_button.setFont(font)
-        self._exit_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._exit_button.clicked.connect(self.close)
-
-        # Маленькие кнопки в правом верхнем углу
+        # Главные кнопки в теле окна
         self._update_button = QPushButton("🔄 " + tr("Обновить"))
-        self._update_button.setFixedSize(90, 28)
-        self._update_button.setFont(font)
+        self._update_button.setFixedSize(240, 100)
+        self._update_button.setFont(QFont("Segoe UI", 16))
         self._update_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._update_button.clicked.connect(self._on_update_clicked)
 
         self._configure_button = QPushButton("⚙️ " + tr("Настроить"))
-        self._configure_button.setFixedSize(100, 28)
-        self._configure_button.setFont(font)
+        self._configure_button.setFixedSize(240, 100)
+        self._configure_button.setFont(QFont("Segoe UI", 16))
         self._configure_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._configure_button.clicked.connect(self._on_configure_clicked)
 
@@ -182,20 +167,22 @@ class MainWindow(QMainWindow):
         top_layout.setSpacing(10)
         top_layout.addWidget(self._logo_label)
         top_layout.addWidget(self._language_combo)
-        top_layout.addWidget(self._top_update_button)
         top_layout.addStretch()
         top_layout.addWidget(self._port_indicator)
         top_layout.addWidget(self._port_label)
         top_layout.addSpacing(10)
         top_layout.addWidget(self._theme_button)
         top_layout.addWidget(self._logs_button)
-        top_layout.addWidget(self._dbc_button)
         top_layout.addWidget(self._update_check_button)
-        top_layout.addSpacing(12)
-        top_layout.addWidget(self._update_button)
-        top_layout.addWidget(self._configure_button)
-        top_layout.addWidget(self._exit_button)
         root.addWidget(self._top_panel)
+
+        action_layout = QHBoxLayout()
+        action_layout.setContentsMargins(20, 20, 20, 0)
+        action_layout.setSpacing(16)
+        action_layout.addStretch()
+        action_layout.addWidget(self._update_button)
+        action_layout.addWidget(self._configure_button)
+        root.addLayout(action_layout)
 
         startup_layout = QVBoxLayout(self._startup_page)
         startup_layout.setContentsMargins(40, 40, 40, 40)
@@ -238,7 +225,6 @@ class MainWindow(QMainWindow):
         modifier = Qt.KeyboardModifier.MetaModifier if sys.platform == "darwin" else Qt.KeyboardModifier.ControlModifier
         QShortcut(QKeySequence(modifier | Qt.Key.Key_O), self, activated=self._on_update_clicked)
         QShortcut(QKeySequence(modifier | Qt.Key.Key_M), self, activated=self._on_configure_clicked)
-        QShortcut(QKeySequence(modifier | Qt.Key.Key_T), self, activated=self._on_theme_clicked)
         QShortcut(QKeySequence("Esc"), self, activated=self.setFocus)
 
     def _ensure_port_selected(self) -> bool:
@@ -259,15 +245,15 @@ class MainWindow(QMainWindow):
         self._status_label.setText(tr("Страница прошивки"))
 
     def _on_configure_clicked(self) -> None:
-        """Открывает окно настроек CAN после проверки порта."""
+        """Открывает окно настроек CAN, скрывая главное окно."""
         if not self._ensure_port_selected():
             return
-        if self._settings_window is None or not self._settings_window.isVisible():
+        if self._settings_window is None:
             self._settings_window = SettingsWindow(self._serial_manager, self)
-            self._settings_window.show()
-        if self._settings_window is not None:
-            self._settings_window.raise_()
-            self._settings_window.activateWindow()
+        self._settings_window.show()
+        self._settings_window.raise_()
+        self._settings_window.activateWindow()
+        self.hide()
         self._status_label.setText(tr("Открыто окно настроек"))
 
     def _show_startup_page(self) -> None:
@@ -290,19 +276,21 @@ class MainWindow(QMainWindow):
             logger.error("Не удалось открыть папку с логами: %s", exc)
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось открыть папку с логами: {0}").format(exc))
 
-    def _on_theme_clicked(self) -> None:
-        """Переключает светлую/тёмную тему."""
+    def _set_dark_theme(self) -> None:
+        """Устанавливает тёмную тему."""
         app = QApplication.instance()
         if app is None:
             return
-        light = not self._config.get("light_theme", False)
-        self._config.set("light_theme", light)
-        if light:
-            apply_light_theme(app)
-            self._theme_button.setText("☾")
-        else:
-            apply_dark_theme(app)
-            self._theme_button.setText("☀")
+        self._config.set("light_theme", False)
+        apply_dark_theme(app)
+
+    def _set_light_theme(self) -> None:
+        """Устанавливает светлую тему."""
+        app = QApplication.instance()
+        if app is None:
+            return
+        self._config.set("light_theme", True)
+        apply_light_theme(app)
 
     def _on_language_changed(self, index: int) -> None:
         """Переключает язык через выпадающий список."""
@@ -326,8 +314,8 @@ class MainWindow(QMainWindow):
                 break
 
     def _set_theme_button_icon(self) -> None:
-        """Обновляет иконку кнопки темы."""
-        self._theme_button.setText("☾" if self._config.get("light_theme", False) else "☀")
+        """Оставляет текст кнопки темы без изменений."""
+        pass
 
     def _on_load_dbc(self) -> None:
         """Загружает DBC-файл и обновляет интерфейсы."""

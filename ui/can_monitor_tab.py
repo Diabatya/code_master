@@ -1,13 +1,13 @@
-"""Вкладка «Мониторинг CAN» с продвинутыми функциями анализа."""
+"""Вкладка «Мониторинг CAN» с двумя каналами."""
 
 import csv
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, TextIO, Tuple
+from typing import Any, Dict, List, Optional, Set, TextIO
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont
+from PySide6.QtCore import QRegularExpression, Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.can_protocol import MARKER_TX_EXT, pack_can_frame
+from core.can_protocol import pack_can_frame
 from core.dbc_manager import DBCManager
 from core.dbc_parser import decode_frame
 from core.serial_manager import SerialManager
@@ -45,10 +45,35 @@ MAX_TABLE_ROWS = 50_000
 HIGHLIGHT_COLOR = "#4A6A8A"
 HIGHLIGHT_MS = 2000
 
+BIT_RATES = [tr("11 бит"), tr("29 бит")]
+
 
 def _ascii_from_data(data: bytes) -> str:
     """Возвращает печатные ASCII-символы для байт, непечатные заменяются на '.'."""
     return "".join(chr(b) if 32 <= b < 127 else "." for b in data)
+
+
+class _IdValidator:
+    """Валидатор HEX ID с цветовой индикацией."""
+
+    def __init__(self, edit: QLineEdit, bit_combo: QComboBox) -> None:
+        self._edit = edit
+        self._bit_combo = bit_combo
+        self._edit.setValidator(QRegularExpressionValidator(QRegularExpression("[0-9A-Fa-f]{0,8}")))
+        self._edit.textChanged.connect(self._validate)
+        self._bit_combo.currentIndexChanged.connect(self._validate)
+
+    def _validate(self) -> None:
+        text = self._edit.text().strip()
+        if not text:
+            self._edit.setStyleSheet("")
+            return
+        value = hex_to_int(text)
+        if value is None:
+            self._edit.setStyleSheet("color: #F44336;")
+            return
+        max_value = 0x1FFFFFFF if self._bit_combo.currentIndex() == 1 else 0x7FF
+        self._edit.setStyleSheet("color: #4CAF50;" if value <= max_value else "color: #F44336;")
 
 
 class DataVariantsDialog(QDialog):
@@ -91,7 +116,6 @@ class BitmapDialog(QDialog):
                     f"background-color: {'#4A6A8A' if (byte >> bit) & 1 else '#2B2B2B'}; "
                     "border: 1px solid #555; min-width: 22px; min-height: 22px;"
                 )
-                # little-endian bit order: bit 0 = LSB
                 layout.addWidget(label, byte_idx, 7 - bit)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         buttons.accepted.connect(self.accept)
@@ -106,7 +130,7 @@ class DbcSignalDialog(QDialog):
         self.setWindowTitle(tr("Выбор сигнала из DBC"))
         self.resize(360, 180)
         self._dbc_manager = DBCManager()
-        self._result: Optional[Tuple[int, List[int]]] = None
+        self._result: Optional[Any] = None
         layout = QVBoxLayout(self)
         self._message_combo = QComboBox()
         self._signal_combo = QComboBox()
@@ -153,7 +177,7 @@ class DbcSignalDialog(QDialog):
             return
         self.accept()
 
-    def get_result(self) -> Optional[Tuple[int, List[int]]]:
+    def get_result(self) -> Optional[Any]:
         return self._result
 
 
@@ -169,15 +193,12 @@ class CanChannelMonitor(QWidget):
         self._serial_manager = serial_manager
         self._running = False
         self._paused = False
-        self._unique_mode = True
         self._received_count = 0
         self._packet_times: deque[float] = deque()
-        self._manual_send_ids: Set[int] = set()
         self._last_packet_time: Optional[float] = None
-        self._send_history: List[Dict[str, object]] = []
+        self._cyclic_frame: Optional[bytes] = None
         self._dbc_manager = DBCManager()
 
-        # Для режима уникальных ID
         self._id_to_row: Dict[int, int] = {}
         self._id_stats: Dict[int, Dict[str, Any]] = {}
         self._id_data_variants: Dict[int, Set[bytes]] = {}
@@ -205,10 +226,10 @@ class CanChannelMonitor(QWidget):
         self._clear_button.setFont(font)
         self._clear_button.clicked.connect(self._clear)
 
-        self._mode_button = QPushButton(tr("Режим: уникальные"))
-        self._mode_button.setFixedSize(130, 24)
-        self._mode_button.setFont(font)
-        self._mode_button.clicked.connect(self._toggle_mode)
+        self._filter_button = QPushButton(tr("Фильтр"))
+        self._filter_button.setFixedSize(70, 24)
+        self._filter_button.setFont(font)
+        self._filter_button.clicked.connect(self._show_filter_stub)
 
         self._filter_from = QLineEdit()
         self._filter_from.setFixedWidth(70)
@@ -226,11 +247,6 @@ class CanChannelMonitor(QWidget):
         self._exclude_edit.setFixedWidth(120)
         self._exclude_edit.setFont(font)
         self._exclude_edit.setPlaceholderText(tr("Исключить ID"))
-        self._exclude_edit.textChanged.connect(self._apply_filters)
-
-        self._known_only_check = QCheckBox(tr("Только известные ID"))
-        self._known_only_check.setFont(font)
-        self._known_only_check.stateChanged.connect(self._apply_filters)
 
         self._pause_check = QCheckBox(tr("Приостановить"))
         self._pause_check.setFont(font)
@@ -242,21 +258,11 @@ class CanChannelMonitor(QWidget):
         self._search_edit.setPlaceholderText(tr("Поиск по ID или данным…"))
         self._search_edit.textChanged.connect(self._apply_search)
 
-        self._export_button = QPushButton(tr("Экспорт"))
-        self._export_button.setFixedSize(80, 24)
-        self._export_button.setFont(font)
-        self._export_button.setMenu(self._build_export_menu())
-
         self._table = QTableWidget()
-        self._table.setColumnCount(15)
+        self._table.setColumnCount(7)
         self._table.setHorizontalHeaderLabels(
-            [
-                tr("Время"), "ID", "D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7",
-                tr("DLC"), tr("Период"), tr("Счётчик"), tr("ASCII"), tr("Сигналы"),
-            ]
+            [tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("Счётчик"), tr("ASCII"), tr("Пояснение")]
         )
-        self._table.setColumnHidden(0, True)
-        self._table.horizontalHeader().setSectionHidden(0, True)
         self._table.setFont(font)
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -264,60 +270,59 @@ class CanChannelMonitor(QWidget):
         self._table.customContextMenuRequested.connect(self._show_context_menu)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
+        self._send_bit_combo = QComboBox()
+        self._send_bit_combo.setFont(font)
+        self._send_bit_combo.addItems(BIT_RATES)
+        self._send_bit_combo.setFixedWidth(90)
+
         self._send_id_edit = QLineEdit()
         self._send_id_edit.setFixedWidth(80)
         self._send_id_edit.setMaxLength(8)
         self._send_id_edit.setFont(font)
         self._send_id_edit.setPlaceholderText("ID")
+        _IdValidator(self._send_id_edit, self._send_bit_combo)
+
+        self._send_dlc_spin = QSpinBox()
+        self._send_dlc_spin.setRange(1, 8)
+        self._send_dlc_spin.setValue(8)
+        self._send_dlc_spin.setFont(font)
+        self._send_dlc_spin.setFixedWidth(50)
 
         self._send_data_edits: List[QLineEdit] = []
         for i in range(8):
             edit = QLineEdit()
-            edit.setFixedWidth(30)
+            edit.setFixedWidth(28)
             edit.setFont(font)
             edit.setMaxLength(2)
             edit.setPlaceholderText(f"D{i}")
             self._send_data_edits.append(edit)
 
-        self._send_from_dbc_button = QPushButton(tr("Из DBC"))
-        self._send_from_dbc_button.setFixedSize(70, 24)
-        self._send_from_dbc_button.setFont(font)
-        self._send_from_dbc_button.clicked.connect(self._on_send_from_dbc)
-
-        self._send_history_combo = QComboBox()
-        self._send_history_combo.setFixedWidth(150)
-        self._send_history_combo.setFont(font)
-        self._send_history_combo.activated.connect(self._on_history_activated)
-        self._rebuild_history_combo()
-
-        self._cyclic_check = QCheckBox(tr("Циклически"))
-        self._cyclic_check.setFont(font)
-        self._cyclic_check.stateChanged.connect(self._on_cyclic_changed)
-
-        self._cyclic_interval_edit = QLineEdit()
-        self._cyclic_interval_edit.setFixedWidth(50)
-        self._cyclic_interval_edit.setMaxLength(5)
-        self._cyclic_interval_edit.setFont(font)
-        self._cyclic_interval_edit.setText("1000")
+        self._send_period_spin = QSpinBox()
+        self._send_period_spin.setRange(0, 9999)
+        self._send_period_spin.setValue(1000)
+        self._send_period_spin.setSuffix(" ms")
+        self._send_period_spin.setFont(font)
+        self._send_period_spin.setFixedWidth(90)
 
         self._send_button = QPushButton(tr("Отправить"))
-        self._send_button.setFixedSize(80, 26)
+        self._send_button.setFixedSize(90, 26)
         self._send_button.setFont(font)
         self._send_button.clicked.connect(self._send_manual)
 
+        self._cyclic_button = QPushButton("∞")
+        self._cyclic_button.setFixedSize(32, 26)
+        self._cyclic_button.setFont(font)
+        self._cyclic_button.setCheckable(True)
+        self._cyclic_button.toggled.connect(self._on_cyclic_toggled)
+
         self._cyclic_timer = QTimer(self)
         self._cyclic_timer.timeout.connect(self._send_cyclic_frame)
-        self._cyclic_frame: Optional[bytes] = None
+
+        self._send_dlc_spin.valueChanged.connect(self._on_send_dlc_changed)
+        self._on_send_dlc_changed(self._send_dlc_spin.value())
 
         self._stats_label = QLabel(tr("Принято: 0 | Скорость: 0 пак/с"))
         self._stats_label.setFont(font)
-
-    def _build_export_menu(self) -> QMenu:
-        menu = QMenu(self)
-        menu.addAction(tr("Текущую таблицу в CSV"), self._export_current_table)
-        menu.addAction(tr("Поток в CSV"), self._export_stream_csv)
-        menu.addAction(tr("Трассировка (CarBus формат)"), self._export_carbus_trace)
-        return menu
 
     def _layout_widgets(self) -> None:
         layout = QVBoxLayout(self)
@@ -329,35 +334,36 @@ class CanChannelMonitor(QWidget):
         control_layout.addWidget(self._start_button, 0, 0)
         control_layout.addWidget(self._stop_button, 0, 1)
         control_layout.addWidget(self._clear_button, 0, 2)
-        control_layout.addWidget(self._mode_button, 0, 3)
+        control_layout.addWidget(self._filter_button, 0, 3)
         control_layout.addWidget(QLabel(tr("ID от")), 0, 4)
         control_layout.addWidget(self._filter_from, 0, 5)
         control_layout.addWidget(QLabel(tr("до")), 0, 6)
         control_layout.addWidget(self._filter_to, 0, 7)
         control_layout.addWidget(QLabel(tr("Искл.")), 0, 8)
         control_layout.addWidget(self._exclude_edit, 0, 9)
-        control_layout.addWidget(self._known_only_check, 1, 0, 1, 2)
-        control_layout.addWidget(self._pause_check, 1, 2, 1, 2)
+        control_layout.addWidget(self._pause_check, 1, 0, 1, 2)
         control_layout.addWidget(QLabel(tr("Поиск:")), 1, 4)
         control_layout.addWidget(self._search_edit, 1, 5, 1, 3)
-        control_layout.addWidget(self._export_button, 1, 8, 1, 2)
         layout.addLayout(control_layout)
 
         layout.addWidget(self._table, 1)
 
-        send_layout = QGridLayout()
+        send_layout = QHBoxLayout()
         send_layout.setSpacing(4)
-        send_layout.addWidget(QLabel(tr("Отправить:")), 0, 0)
-        send_layout.addWidget(self._send_id_edit, 0, 1)
-        for idx, edit in enumerate(self._send_data_edits):
-            send_layout.addWidget(edit, 0, 2 + idx)
-        send_layout.addWidget(self._send_from_dbc_button, 0, 10)
-        send_layout.addWidget(self._send_button, 0, 11)
-        send_layout.addWidget(self._send_history_combo, 0, 12, 1, 2)
-        send_layout.addWidget(self._cyclic_check, 1, 1)
-        send_layout.addWidget(QLabel(tr("интервал мс:")), 1, 2)
-        send_layout.addWidget(self._cyclic_interval_edit, 1, 3)
-        send_layout.setColumnStretch(13, 1)
+        send_layout.addWidget(QLabel(tr("Бит")))
+        send_layout.addWidget(self._send_bit_combo)
+        send_layout.addWidget(QLabel("ID"))
+        send_layout.addWidget(self._send_id_edit)
+        send_layout.addWidget(QLabel("DLC"))
+        send_layout.addWidget(self._send_dlc_spin)
+        send_layout.addWidget(QLabel(tr("Data")))
+        for edit in self._send_data_edits:
+            send_layout.addWidget(edit)
+        send_layout.addWidget(QLabel(tr("Период")))
+        send_layout.addWidget(self._send_period_spin)
+        send_layout.addWidget(self._send_button)
+        send_layout.addWidget(self._cyclic_button)
+        send_layout.addStretch()
         layout.addLayout(send_layout)
 
         layout.addWidget(self._stats_label)
@@ -366,23 +372,21 @@ class CanChannelMonitor(QWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._update_stats)
         self._timer.start(1000)
-        self._activity_timer = QTimer(self)
-        self._activity_timer.timeout.connect(self._update_activity_color)
-        self._activity_timer.start(500)
 
-    def _update_activity_color(self) -> None:
-        if self._last_packet_time is None:
-            color = "#2B2B2B"
-        elif time.time() - self._last_packet_time > 1.0:
-            color = "#3A2020"
+    def _show_filter_stub(self) -> None:
+        QMessageBox.information(self, tr("Фильтр"), tr("Функция в разработке"))
+
+    def _on_send_dlc_changed(self, value: int) -> None:
+        for i, edit in enumerate(self._send_data_edits):
+            edit.setEnabled(i < value)
+
+    def _on_cyclic_toggled(self, checked: bool) -> None:
+        if checked:
+            self._cyclic_button.setStyleSheet("background-color: #4CAF50; color: #FFFFFF;")
+            self._send_manual()
         else:
-            color = "#1A3A1A"
-        self.setStyleSheet(f"CanChannelMonitor {{ background-color: {color}; border-radius: 6px; }}")
-
-    def _toggle_mode(self) -> None:
-        self._unique_mode = not self._unique_mode
-        self._mode_button.setText(tr("Режим: уникальные") if self._unique_mode else tr("Режим: поток"))
-        self._clear()
+            self._cyclic_button.setStyleSheet("")
+            self._stop_cyclic_timer()
 
     def _start(self) -> None:
         self._running = True
@@ -390,6 +394,7 @@ class CanChannelMonitor(QWidget):
 
     def _stop(self) -> None:
         self._running = False
+        self._cyclic_button.setChecked(False)
         self._stop_cyclic_timer()
         logger.info("Мониторинг CAN%d остановлен", self._channel)
 
@@ -405,12 +410,11 @@ class CanChannelMonitor(QWidget):
         self._packet_times.clear()
         self._last_packet_time = None
         self._stats_label.setText(tr("Принято: 0 | Скорость: 0 пак/с"))
-        self._update_activity_color()
 
     def _on_pause_changed(self, state: int) -> None:
         self._paused = state == Qt.CheckState.Checked.value
 
-    def _filter_range(self) -> Tuple[Optional[int], Optional[int]]:
+    def _filter_range(self) -> tuple[Optional[int], Optional[int]]:
         return (hex_to_int(self._filter_from.text()), hex_to_int(self._filter_to.text()))
 
     def _exclude_ids(self) -> Set[int]:
@@ -424,10 +428,9 @@ class CanChannelMonitor(QWidget):
     def _apply_filters(self) -> None:
         f_from, f_to = self._filter_range()
         exclude = self._exclude_ids()
-        known_only = self._known_only_check.isChecked()
         for row in range(self._table.rowCount()):
             hidden = False
-            id_item = self._table.item(row, 1)
+            id_item = self._table.item(row, 0)
             if id_item is not None:
                 can_id = hex_to_int(id_item.text())
                 if can_id is not None:
@@ -436,8 +439,6 @@ class CanChannelMonitor(QWidget):
                     if f_to is not None and can_id > f_to:
                         hidden = True
                     if can_id in exclude:
-                        hidden = True
-                    if known_only and not self._dbc_manager.get_message(can_id):
                         hidden = True
             self._table.setRowHidden(row, hidden)
 
@@ -450,7 +451,7 @@ class CanChannelMonitor(QWidget):
             return
         for row in range(self._table.rowCount()):
             hidden = True
-            for col in range(1, 15):
+            for col in range(self._table.columnCount()):
                 item = self._table.item(row, col)
                 if item is not None and query in item.text().lower():
                     hidden = False
@@ -461,60 +462,20 @@ class CanChannelMonitor(QWidget):
         can_id = hex_to_int(self._send_id_edit.text())
         if can_id is None:
             return
-        data = parse_data_bytes([edit.text() for edit in self._send_data_edits])
-        self._cyclic_frame = pack_can_frame(self._channel_byte, can_id, bytes(data))
+        dlc = self._send_dlc_spin.value()
+        data = self._data_from_send_edits(dlc)
+        self._cyclic_frame = pack_can_frame(self._channel_byte, can_id, data)
         if self._send_cyclic_frame():
-            self._add_to_history(can_id, data)
-        if self._cyclic_check.isChecked():
-            self._start_cyclic_timer()
+            if self._cyclic_button.isChecked():
+                self._start_cyclic_timer()
 
-    def _on_send_from_dbc(self) -> None:
-        dialog = DbcSignalDialog(self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        result = dialog.get_result()
-        if result is None:
-            return
-        can_id, data = result
-        self._send_id_edit.setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
-        for i, edit in enumerate(self._send_data_edits):
-            edit.setText(f"{data[i]:02X}" if i < len(data) else "")
-
-    def _add_to_history(self, can_id: int, data: List[int]) -> None:
-        entry = {"id": can_id, "data": data[:8]}
-        self._send_history = [e for e in self._send_history if not (e["id"] == can_id and e["data"] == entry["data"])]
-        self._send_history.insert(0, entry)
-        self._send_history = self._send_history[:10]
-        self._rebuild_history_combo()
-
-    def _rebuild_history_combo(self) -> None:
-        self._send_history_combo.blockSignals(True)
-        self._send_history_combo.clear()
-        self._send_history_combo.addItem(tr("— История —"), None)
-        for entry in self._send_history:
-            id_text = int_to_hex(entry["id"], 8 if entry["id"] > 0x7FF else 3)
-            data_text = " ".join(int_to_hex(b, 2) for b in entry["data"])
-            self._send_history_combo.addItem(f"ID: {id_text} Data: {data_text}", entry)
-        self._send_history_combo.blockSignals(False)
-
-    def _on_history_activated(self, index: int) -> None:
-        entry = self._send_history_combo.itemData(index)
-        if not isinstance(entry, dict):
-            return
-        can_id = entry.get("id")
-        data = entry.get("data", [])
-        if can_id is None:
-            return
-        self._send_id_edit.setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
-        for i, edit in enumerate(self._send_data_edits):
-            edit.setText(int_to_hex(data[i], 2) if i < len(data) else "")
+    def _data_from_send_edits(self, dlc: int) -> bytes:
+        values = [edit.text() for edit in self._send_data_edits[:dlc]]
+        parsed = parse_data_bytes(values)
+        return bytes(parsed[:dlc])
 
     def _start_cyclic_timer(self) -> None:
-        try:
-            interval_ms = int(self._cyclic_interval_edit.text().strip() or "1000")
-        except ValueError:
-            interval_ms = 1000
-        interval_ms = max(10, interval_ms)
+        interval_ms = max(10, self._send_period_spin.value())
         self._cyclic_timer.start(interval_ms)
 
     def _stop_cyclic_timer(self) -> None:
@@ -524,18 +485,7 @@ class CanChannelMonitor(QWidget):
     def _send_cyclic_frame(self) -> bool:
         if self._cyclic_frame is None:
             return False
-        if self._serial_manager.send_data(self._cyclic_frame):
-            can_id = int.from_bytes(self._cyclic_frame[2:6], "little") if self._cyclic_frame[0] == MARKER_TX_EXT else (self._cyclic_frame[2] | (self._cyclic_frame[3] << 8))
-            self._manual_send_ids.add(can_id)
-            return True
-        return False
-
-    def _on_cyclic_changed(self, state: int) -> None:
-        if state == Qt.CheckState.Checked.value:
-            if self._cyclic_frame is not None:
-                self._start_cyclic_timer()
-        else:
-            self._stop_cyclic_timer()
+        return self._serial_manager.send_data(self._cyclic_frame)
 
     def _update_stats(self) -> None:
         now = time.time()
@@ -564,17 +514,15 @@ class CanChannelMonitor(QWidget):
         if stats is None or stats.get("last_time") is None:
             return ""
         period_ms = int((now - stats["last_time"]) * 1000)
-        return f"{period_ms} мс"
+        return f"{period_ms} ms"
 
     def _build_row_items(self, frame_id: int, data: bytes, timestamp: str, period: str, count: int) -> List[str]:
         id_width = 8 if frame_id > 0x7FF else 3
-        data_hex = format_data_bytes(data) + [""] * (8 - len(data))
         signals = self._format_signals(frame_id, data)
         return [
-            timestamp,
             int_to_hex(frame_id, id_width),
-            *data_hex[:8],
             str(len(data)),
+            " ".join(format_data_bytes(data)),
             period,
             str(count),
             _ascii_from_data(data),
@@ -582,7 +530,7 @@ class CanChannelMonitor(QWidget):
         ]
 
     def _reset_row_highlight(self, row: int) -> None:
-        for col in range(2, 10):
+        for col in range(self._table.columnCount()):
             item = self._table.item(row, col)
             if item is not None:
                 item.setBackground(QColor())
@@ -591,13 +539,11 @@ class CanChannelMonitor(QWidget):
         if row in self._highlight_timers:
             self._highlight_timers[row].stop()
         color = QColor(HIGHLIGHT_COLOR)
-        for col in range(2, 10):
-            byte_idx = col - 2
-            item = self._table.item(row, col)
-            if item is None:
-                continue
-            if byte_idx < len(new_data) and (byte_idx >= len(old_data) or new_data[byte_idx] != old_data[byte_idx]):
-                item.setBackground(color)
+        data_text = " ".join(format_data_bytes(new_data))
+        old_text = " ".join(format_data_bytes(old_data))
+        data_item = self._table.item(row, 2)
+        if data_item is not None:
+            data_item.setBackground(color)
         timer = QTimer(self)
         timer.setSingleShot(True)
         timer.timeout.connect(lambda r=row: self._reset_row_highlight(r))
@@ -615,8 +561,6 @@ class CanChannelMonitor(QWidget):
         if f_to is not None and frame_id > f_to:
             return
         if frame_id in exclude:
-            return
-        if self._known_only_check.isChecked() and not self._dbc_manager.get_message(frame_id):
             return
 
         self._received_count += 1
@@ -637,7 +581,7 @@ class CanChannelMonitor(QWidget):
         if self._dbc_manager.is_loaded():
             tooltip = self._dbc_manager.describe_frame(frame_id, data)
 
-        if self._unique_mode and frame_id in self._id_to_row:
+        if frame_id in self._id_to_row:
             row = self._id_to_row[frame_id]
             old_data = stats["last_data"]
             for col, text in enumerate(items):
@@ -654,15 +598,13 @@ class CanChannelMonitor(QWidget):
         else:
             if self._table.rowCount() >= MAX_TABLE_ROWS:
                 self._table.removeRow(0)
-                if self._unique_mode:
-                    # Перестраиваем словарь, так как индексы сместились (редкий случай)
-                    self._id_to_row = {}
-                    for r in range(self._table.rowCount()):
-                        id_item = self._table.item(r, 1)
-                        if id_item is not None:
-                            fid = hex_to_int(id_item.text())
-                            if fid is not None:
-                                self._id_to_row[fid] = r
+                self._id_to_row = {}
+                for r in range(self._table.rowCount()):
+                    id_item = self._table.item(r, 0)
+                    if id_item is not None:
+                        fid = hex_to_int(id_item.text())
+                        if fid is not None:
+                            self._id_to_row[fid] = r
             row = self._table.rowCount()
             self._table.insertRow(row)
             for col, text in enumerate(items):
@@ -671,18 +613,10 @@ class CanChannelMonitor(QWidget):
                 if tooltip:
                     item.setToolTip(tooltip)
                 self._table.setItem(row, col, item)
-            if self._unique_mode:
-                self._id_to_row[frame_id] = row
+            self._id_to_row[frame_id] = row
 
         stats["last_data"] = data
         self._id_data_variants.setdefault(frame_id, set()).add(data)
-
-        if frame_id in self._manual_send_ids:
-            highlight_color = QColor(HIGHLIGHT_COLOR)
-            for col in range(self._table.columnCount()):
-                item = self._table.item(row, col)
-                if item is not None:
-                    item.setBackground(highlight_color)
 
         self._table.scrollToBottom()
         if self._search_edit.text().strip():
@@ -704,34 +638,29 @@ class CanChannelMonitor(QWidget):
         menu.exec(self._table.viewport().mapToGlobal(position))
 
     def _copy_selected_id(self, row: int) -> None:
-        item = self._table.item(row, 1)
+        item = self._table.item(row, 0)
         if item is not None:
             QApplication.clipboard().setText(item.text())
 
     def _copy_selected_data(self, row: int) -> None:
-        values = []
-        for col in range(2, 10):
-            item = self._table.item(row, col)
-            if item is not None and item.text():
-                values.append(item.text())
-        QApplication.clipboard().setText(" ".join(values))
+        item = self._table.item(row, 2)
+        if item is not None:
+            QApplication.clipboard().setText(item.text())
 
     def _copy_selected_row(self, row: int) -> None:
         values = [self._table.item(row, col).text() if self._table.item(row, col) is not None else "" for col in range(self._table.columnCount())]
         QApplication.clipboard().setText("  ".join(values))
 
     def _create_trigger_from_row(self, row: int) -> None:
-        id_item = self._table.item(row, 1)
+        id_item = self._table.item(row, 0)
+        data_item = self._table.item(row, 2)
         if id_item is None:
             return
-        data_values = []
-        for col in range(2, 10):
-            item = self._table.item(row, col)
-            data_values.append(item.text() if item is not None else "")
+        data_values = data_item.text().split() if data_item is not None else []
         self.create_trigger_requested.emit({"id": id_item.text(), "data": data_values})
 
     def _show_data_variants(self, row: int) -> None:
-        id_item = self._table.item(row, 1)
+        id_item = self._table.item(row, 0)
         if id_item is None:
             return
         can_id = hex_to_int(id_item.text())
@@ -745,67 +674,21 @@ class CanChannelMonitor(QWidget):
         dialog.exec()
 
     def _show_bitmap(self, row: int) -> None:
-        id_item = self._table.item(row, 1)
+        id_item = self._table.item(row, 0)
+        data_item = self._table.item(row, 2)
         if id_item is None:
             return
         can_id = hex_to_int(id_item.text())
         if can_id is None:
             return
-        data_values = []
-        for col in range(2, 10):
-            item = self._table.item(row, col)
-            data_values.append(item.text() if item is not None else "")
+        data_values = data_item.text().split() if data_item is not None else []
         data = bytes(parse_data_bytes(data_values))
         dialog = BitmapDialog(can_id, data, self)
         dialog.exec()
 
-    def _export_current_table(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, tr("Сохранить таблицу в CSV"), "", "CSV files (*.csv)")
-        if not path:
-            return
-        try:
-            with open(path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow([self._table.horizontalHeaderItem(c).text() for c in range(self._table.columnCount())])
-                for row in range(self._table.rowCount()):
-                    if self._table.isRowHidden(row):
-                        continue
-                    writer.writerow([self._table.item(row, col).text() if self._table.item(row, col) is not None else "" for col in range(self._table.columnCount())])
-            logger.info("Таблица экспортирована в %s", path)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Ошибка экспорта таблицы: %s", exc)
-            QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось экспортировать CSV: {0}").format(exc))
-
-    def _export_stream_csv(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, tr("Сохранить поток в CSV"), "", "CSV files (*.csv)")
-        if not path:
-            return
-        QMessageBox.information(self, tr("Информация"), tr("Потоковая запись начнётся при получении кадров."))
-        # Метка для внешнего обработчика — текущий CSV-рекордер вкладки
-        # (используется в CanMonitorTab._start_recording)
-        self._pending_stream_csv = path
-
-    def _export_carbus_trace(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, tr("Сохранить трассировку"), "", "Trace files (*.trc)")
-        if not path:
-            return
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(";CANalyzer\n")
-                for row in range(self._table.rowCount()):
-                    if self._table.isRowHidden(row):
-                        continue
-                    time_item = self._table.item(row, 0)
-                    id_item = self._table.item(row, 1)
-                    data_items = [self._table.item(row, c) for c in range(2, 10)]
-                    if time_item is None or id_item is None:
-                        continue
-                    data = " ".join(i.text() for i in data_items if i is not None and i.text())
-                    f.write(f"{time_item.text()}  {id_item.text()}  {data}\n")
-            logger.info("Трассировка CarBus экспортирована в %s", path)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Ошибка экспорта трассировки: %s", exc)
-            QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось экспортировать трассировку: {0}").format(exc))
+    def set_dbc(self, dbc) -> None:
+        """Уведомляет канал о смене DBC."""
+        self._apply_filters()
 
 
 class CanMonitorTab(QWidget):
@@ -840,11 +723,6 @@ class CanMonitorTab(QWidget):
         self._clear_all_button.setFont(QFont("Segoe UI", 9))
         self._clear_all_button.clicked.connect(self._clear_all)
 
-        self._dbc_button = QPushButton(tr("Загрузить DBC"))
-        self._dbc_button.setFixedSize(110, 28)
-        self._dbc_button.setFont(QFont("Segoe UI", 9))
-        self._dbc_button.clicked.connect(self._on_load_dbc)
-
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._monitor1 = CanChannelMonitor(1, self._serial_manager, self)
         self._monitor2 = CanChannelMonitor(2, self._serial_manager, self)
@@ -862,7 +740,6 @@ class CanMonitorTab(QWidget):
         buttons_layout.addWidget(self._start_all_button)
         buttons_layout.addWidget(self._stop_all_button)
         buttons_layout.addWidget(self._clear_all_button)
-        buttons_layout.addWidget(self._dbc_button)
         buttons_layout.addStretch()
         layout.addLayout(buttons_layout)
         layout.addWidget(self._splitter)
@@ -889,21 +766,10 @@ class CanMonitorTab(QWidget):
             self._monitor2.add_frame(frame)
         self._write_frame_to_csv(frame)
 
-    def _on_load_dbc(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, tr("Загрузить DBC"), "", "DBC files (*.dbc)")
-        if not path:
-            return
-        if self._dbc_manager.load_dbc(path):
-            QMessageBox.information(self, tr("Готово"), tr("DBC загружен: {0}").format(path))
-            for monitor in (self._monitor1, self._monitor2):
-                monitor._apply_filters()
-        else:
-            QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось загрузить DBC"))
-
     def set_dbc(self, dbc) -> None:
         """Уведомляет вкладку о смене DBC."""
         for monitor in (self._monitor1, self._monitor2):
-            monitor._apply_filters()
+            monitor.set_dbc(dbc)
 
     def _start_recording(self, path: str) -> None:
         try:

@@ -139,7 +139,12 @@ class SerialManager(QObject):
 
     def is_open(self) -> bool:
         """Возвращает True, если порт открыт."""
-        return self._port is not None and self._port.is_open()
+        if self._port is None:
+            return False
+        is_open = getattr(self._port, "is_open", False)
+        if callable(is_open):
+            is_open = is_open()
+        return bool(is_open)
 
     def current_port_name(self) -> str:
         """Возвращает имя текущего порта или пустую строку."""
@@ -238,7 +243,7 @@ class SerialManager(QObject):
         Returns:
             True, если отправка выполнена, иначе False.
         """
-        if self._port is None or not self._port.is_open():
+        if self._port is None or not self.is_open():
             logger.warning("Попытка отправки в закрытый порт")
             return False
 

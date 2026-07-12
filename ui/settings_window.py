@@ -83,10 +83,15 @@ class SettingsWindow(QMainWindow):
         self._factory_reset_button.setFixedSize(150, 32)
         self._factory_reset_button.clicked.connect(self._factory_reset)
 
+        self._back_button = QPushButton(tr("Назад"))
+        self._back_button.setFixedSize(100, 32)
+        self._back_button.clicked.connect(self._on_back)
+
         bottom_layout.addStretch()
         bottom_layout.addWidget(self._save_button)
         bottom_layout.addWidget(self._save_config_button)
         bottom_layout.addWidget(self._factory_reset_button)
+        bottom_layout.addWidget(self._back_button)
         layout.addLayout(bottom_layout)
 
         self._connect_signals()
@@ -171,6 +176,10 @@ class SettingsWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сбросить: {0}").format(exc))
 
+    def _on_back(self) -> None:
+        """Закрывает окно настроек и возвращает главное окно."""
+        self.close()
+
     def set_dbc(self, dbc_manager) -> None:
         """Уведомляет все вкладки о смене загруженного DBC."""
         for tab in (
@@ -186,4 +195,6 @@ class SettingsWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         logger.info("Закрыто окно настроек")
+        if self.parent() is not None:
+            self.parent().show()
         event.accept()
