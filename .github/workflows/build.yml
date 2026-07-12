@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install "pyinstaller<7.0"
       - name: Build with PyInstaller
         run: pyinstaller build_win.spec
       - name: Upload Windows artifact
@@ -39,7 +39,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install "pyinstaller<7.0"
       - name: Build with PyInstaller
         run: pyinstaller build_mac.spec
       - name: Create DMG
@@ -64,7 +64,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install "pyinstaller<7.0"
       - name: Build with PyInstaller
         run: pyinstaller build_linux.spec
       - name: Upload Linux artifact

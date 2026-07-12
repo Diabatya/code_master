@@ -1,5 +1,4 @@
 # -*- mode: python ; coding: utf-8 -*-
-block_cipher = None
 
 a = Analysis(
     ['main.py'],
@@ -41,6 +40,7 @@ a = Analysis(
         'ui.script_editor',
         'ui.settings_window',
         'ui.signal_graph_tab',
+        'ui.ui_utils',
         'pyqtgraph',
         'cantools',
         'cantools.database',
@@ -52,18 +52,15 @@ a = Analysis(
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='CodeMaster',
     debug=False,
     bootloader_ignore_signals=False,
@@ -79,8 +76,18 @@ exe = EXE(
     entitlements_file=None,
 )
 
-app = BUNDLE(
+coll = COLLECT(
     exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='CodeMaster',
+)
+
+app = BUNDLE(
+    coll,
     name='CodeMaster.app',
     icon=None,
     bundle_identifier='com.codemaster.app',

@@ -41,6 +41,7 @@ a = Analysis(
         'ui.script_editor',
         'ui.settings_window',
         'ui.signal_graph_tab',
+        'ui.ui_utils',
         'pyqtgraph',
         'cantools',
         'cantools.database',
