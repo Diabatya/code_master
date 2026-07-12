@@ -683,7 +683,7 @@ class CanTriggerTab(QWidget):
         for r, row in enumerate(rows):
             data = responses[r] if r < len(responses) else {}
             self._set_response(row, data)
-        while len(rows) > len(responses):
+        while len(rows) > len(responses) and len(rows) > 1:
             self._remove_response_row(response_block, rows[-1])
         for r in range(len(rows), len(responses)):
             self._add_response_row(response_block, self._font)

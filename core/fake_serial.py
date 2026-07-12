@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QTimer
 
-from core.can_protocol import MARKER_RX, MARKER_RX_EXT, MARKER_TX, MARKER_TX_EXT, pack_can_frame, xor_checksum
+from core.can_protocol import MARKER_RX, MARKER_RX_EXT, xor_checksum
 from models.logger import get_logger
 from models.utils import hex_to_int
 
@@ -149,7 +149,7 @@ class FakeSerial:
             self._replay_timer.start(int(delay * 1000))
             return
 
-        frame = self._swap_marker(pack_can_frame(channel, can_id, data))
+        frame = self._build_rx_frame(channel, can_id, data)
         with self._buffer_lock:
             self._rx_buffer.extend(frame)
         self._replay_index += 1
@@ -169,7 +169,7 @@ class FakeSerial:
         length = random.randint(1, 8)
         data = bytes(random.randint(0, 255) for _ in range(length))
         # В эмуляторе используем маркер приёма
-        frame = self._swap_marker(pack_can_frame(channel, can_id, data))
+        frame = self._build_rx_frame(channel, can_id, data)
 
         # Симуляция ошибки CAN: портится контрольная сумма
         if random.randint(1, 100) <= self._error_probability:
@@ -184,9 +184,19 @@ class FakeSerial:
         self._timer.start()
 
     @staticmethod
-    def _swap_marker(frame: bytes) -> bytes:
-        """Меняет маркер отправки на маркер приёма."""
-        return bytes([MARKER_RX_EXT if b == MARKER_TX_EXT else (MARKER_RX if b == MARKER_TX else b) for b in frame])
+    def _build_rx_frame(channel: int, can_id: int, data: bytes) -> bytes:
+        """Формирует входящий CAN-кадр с корректной XOR-контрольной суммой."""
+        data = bytes(data)[:8]
+        length = len(data)
+        if can_id > 0x7FF:
+            frame = bytes([MARKER_RX_EXT, channel & 0xFF])
+            frame += can_id.to_bytes(4, "little")
+            frame += bytes([length])
+        else:
+            frame = bytes([MARKER_RX, channel & 0xFF, can_id & 0xFF, (can_id >> 8) & 0xFF, length])
+        frame += data
+        frame += bytes([xor_checksum(frame)])
+        return frame
 
     @staticmethod
     def _corrupt_frame(frame: bytes) -> bytes:
