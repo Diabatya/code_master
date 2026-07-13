@@ -10,7 +10,14 @@ from typing import Optional, Union
 
 from PySide6.QtCore import QObject, QThread, Signal, QTimer
 
-from core.can_protocol import parse_all_frames
+from core.can_protocol import (
+    CMD_AUTO_SPEED,
+    CMD_AUTO_SPEED_RESP,
+    CMD_DEVICE_ID,
+    CMD_DEVICE_ID_RESP,
+    DEVICE_TYPE_BASIC,
+    parse_all_frames,
+)
 from core.fake_serial import FakeSerial
 
 import serial
@@ -121,6 +128,8 @@ class SerialManager(QObject):
     error_occurred = Signal(str)
     connection_changed = Signal(bool)
     heartbeat = Signal()
+    device_identified = Signal(int, int)
+    can_speed_detected = Signal(int)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         """Создаёт менеджер без открытого порта."""
@@ -197,6 +206,7 @@ class SerialManager(QObject):
             self._reader.heartbeat.connect(self.heartbeat)
             self._reader.finished.connect(self._on_reader_finished)
             self._reader.start()
+            self._detect_device_id()
             self._config.set_bulk(
                 {"port": port_name, "baudrate": baudrate, "emulation": emulation, "auto_reconnect": auto_reconnect, "error_probability": error_probability}
             )
@@ -272,6 +282,103 @@ class SerialManager(QObject):
                 self._port = None
         except Exception:  # noqa: S110
             pass
+
+    def _detect_device_id(self) -> None:
+        """Отправляет запрос ID устройства, ждёт 0.5 с и сохраняет результат в Config."""
+        if self._port is None:
+            return
+        self._closing = True
+        self._stop_reader()
+        try:
+            self._port.reset_input_buffer()
+            self._port.write(bytes([CMD_DEVICE_ID]))
+            deadline = time.time() + 0.5
+            buffer = bytearray()
+            while time.time() < deadline:
+                available = self._port_in_waiting()
+                if available:
+                    buffer.extend(self._port.read(available))
+                    if CMD_DEVICE_ID_RESP in buffer:
+                        idx = buffer.index(CMD_DEVICE_ID_RESP)
+                        if idx + 2 < len(buffer):
+                            device_type = buffer[idx + 1]
+                            device_version = buffer[idx + 2]
+                            self._config.set_bulk({"device_type": device_type, "device_version": device_version})
+                            self.device_identified.emit(device_type, device_version)
+                            logger.info("Устройство идентифицировано: type=0x%02X version=%d", device_type, device_version)
+                            return
+                time.sleep(0.01)
+            self._config.set_bulk({"device_type": DEVICE_TYPE_BASIC, "device_version": 0})
+            self.device_identified.emit(DEVICE_TYPE_BASIC, 0)
+            logger.info("Устройство не ответило на запрос ID, используем базовый CAN 2.0")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Ошибка определения устройства: %s", exc)
+            self._config.set_bulk({"device_type": DEVICE_TYPE_BASIC, "device_version": 0})
+            self.device_identified.emit(DEVICE_TYPE_BASIC, 0)
+        finally:
+            self._start_reader()
+            self._closing = False
+
+    def auto_detect_can_speed(self) -> Optional[int]:
+        """Останавливает чтение, отправляет 0xA0, ждёт 0xA1 с определённой скоростью.
+
+        Returns:
+            Скорость CAN в кбит/с или None.
+        """
+        if self._port is None or not self.is_open():
+            return None
+        self._closing = True
+        self._stop_reader()
+        try:
+            self._port.reset_input_buffer()
+            self._port.write(bytes([CMD_AUTO_SPEED]))
+            deadline = time.time() + 3.0
+            buffer = bytearray()
+            while time.time() < deadline:
+                available = self._port_in_waiting()
+                if available:
+                    buffer.extend(self._port.read(available))
+                    if CMD_AUTO_SPEED_RESP in buffer:
+                        idx = buffer.index(CMD_AUTO_SPEED_RESP)
+                        if idx + 2 < len(buffer):
+                            speed = (buffer[idx + 1] << 8) | buffer[idx + 2]
+                            self._config.set("can_speed_auto", True)
+                            self.can_speed_detected.emit(speed)
+                            logger.info("Скорость CAN определена: %d кбит/с", speed)
+                            return speed
+                time.sleep(0.01)
+            logger.info("Автоопределение скорости не дало результата")
+            return None
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Ошибка автоопределения скорости: %s", exc)
+            return None
+        finally:
+            self._start_reader()
+            self._closing = False
+
+    def _stop_reader(self) -> None:
+        """Останавливает поток чтения и ждёт его завершения."""
+        if self._reader is not None:
+            self._reader.stop()
+            self._reader = None
+
+    def _start_reader(self) -> None:
+        """Создаёт и запускает поток чтения повторно."""
+        if self._port is None or not self.is_open():
+            return
+        self._reader = SerialReader(self._port, self)
+        self._reader.new_frame.connect(self.new_can_frame)
+        self._reader.error.connect(self.error_occurred)
+        self._reader.heartbeat.connect(self.heartbeat)
+        self._reader.finished.connect(self._on_reader_finished)
+        self._reader.start()
+
+    def _port_in_waiting(self) -> int:
+        """Возвращает количество байт в буфере порта."""
+        try:
+            return self._port.in_waiting()  # type: ignore
+        except TypeError:
+            return self._port.in_waiting  # type: ignore
 
     def _on_reader_finished(self) -> None:
         """Вызывается при завершении потока чтения; планирует переподключение."""

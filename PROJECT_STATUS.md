@@ -150,6 +150,20 @@
 - ✅ `models/utils.py`, `ui/id_edit.py`, `ui/can_monitor_tab.py`, `ui/can_trigger_tab.py`: при вставке строки пакета в поле ID поля ID, DLC и Data заполняются автоматически.
 - ✅ `python3 -m py_compile` проходит; smoke-test расширен и проверяет автопереход Data, вставку пакета, фильтр/сортировку/подсветку в Мониторинге и запись Трейса.
 
+## 17. Поддержка разных устройств (CAN 2.0, CAN FD, аналоговые порты) (13.07.2026)
+
+- ✅ `core/can_protocol.py`: добавлены команды `CMD_DEVICE_ID = 0x90`/`CMD_DEVICE_ID_RESP = 0x91` и `CMD_AUTO_SPEED = 0xA0`/`CMD_AUTO_SPEED_RESP = 0xA1`; увеличен лимит `pack_can_frame` до 64 байт для CAN FD.
+- ✅ `core/fake_serial.py`: эмулятор отвечает на запрос ID как CAN FD (type=0x01) и на автоскорость возвращает 500 кбит/с.
+- ✅ `models/config.py`: добавлены поля `device_type`, `device_version`, `can1_speed`, `can2_speed`, `can_speed_auto`; метод `max_data_bytes()` возвращает 64 для CAN FD и 8 для остальных.
+- ✅ `core/serial_manager.py`: при открытии порта отправляется `CMD_DEVICE_ID`, результат сохраняется в Config; добавлен метод `auto_detect_can_speed()` с таймаутом 3 с и сигналы `device_identified`/`can_speed_detected`.
+- ✅ `ui/com_settings_dialog.py`: добавлены раздельные комбобоксы скоростей CAN1/CAN2, кнопка «Автоопределение скорости» в фоновом потоке, отображение типа устройства; поля объединяются для базового CAN 2.0.
+- ✅ `ui/hex_edit.py`: добавлен `create_data_field_widget()` — горизонтальный контейнер с `HexDataEdit`, для count > 8 оборачивается в `QScrollArea`.
+- ✅ `ui/can_trigger_tab.py`, `ui/can_monitor_tab.py`: поля Data адаптируются к `max_data_bytes` (8/64); при смене устройства через `device_identified` поля пересоздаются с сохранением текущих значений.
+- ✅ `ui/can_monitor_tab.py`: для CAN FD добавлены заглушки-чекбоксы FD, BRS, ESI.
+- ✅ `ui/analog_ports_tab.py`: новая вкладка-заглушка с таблицей настройки имён/цветов пинов для устройств с аналоговыми портами.
+- ✅ `ui/settings_window.py`: вкладка «Аналоговые порты» добавляется/удаляется автоматически при смене типа устройства.
+- ✅ `python3 -m py_compile` проходит; smoke-test проверяет запуск интерфейса с новыми полями и динамическую адаптацию под CAN FD.
+
 ## Итоговая оценка готовности
 
 **99 %**

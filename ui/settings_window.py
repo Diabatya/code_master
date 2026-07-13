@@ -21,6 +21,7 @@ from models.config import Config
 from models.logger import get_logger
 from models.translations import _ as tr
 from ui.ui_utils import setup_button
+from ui.analog_ports_tab import AnalogPortsTab
 from ui.can_analyzer import CanAnalyzer
 from ui.can_gateway_tab import CanGatewayTab
 from ui.signal_graph_tab import SignalGraphTab
@@ -59,6 +60,7 @@ class SettingsWindow(QMainWindow):
         self._library_tab = LibraryBrowser(self._trigger_tab, self._flexible_tab, self)
         self._graph_tab = SignalGraphTab(self._serial_manager, self)
         self._analyzer_tab = CanAnalyzer(self._serial_manager, self)
+        self._analog_tab: Optional[AnalogPortsTab] = None
 
         self._tabs.addTab(self._trigger_tab, "⚡ " + tr("Триггеры"))
         self._tabs.addTab(self._monitor_tab, "🔍 " + tr("Мониторинг"))
@@ -67,6 +69,8 @@ class SettingsWindow(QMainWindow):
         self._tabs.addTab(self._library_tab, "📚 " + tr("Библиотека"))
         self._tabs.addTab(self._graph_tab, "📈 " + tr("Графики"))
         self._tabs.addTab(self._analyzer_tab, "🔬 " + tr("Трэйс"))
+        self._update_analog_tab()
+        self._serial_manager.device_identified.connect(self._update_analog_tab)
 
         search_layout = QHBoxLayout()
         search_layout.setSpacing(8)
@@ -108,17 +112,37 @@ class SettingsWindow(QMainWindow):
 
         self._connect_signals()
 
+    def _update_analog_tab(self) -> None:
+        """Добавляет или удаляет вкладку аналоговых портов в зависимости от типа устройства."""
+        analog_index = self._tabs.indexOf(self._analog_tab) if self._analog_tab else -1
+        if self._config.get("device_type") == 0x02:
+            if analog_index < 0:
+                self._analog_tab = AnalogPortsTab(self)
+                self._tabs.addTab(self._analog_tab, "🌊 " + tr("Аналоговые порты"))
+        else:
+            if analog_index >= 0:
+                self._tabs.removeTab(analog_index)
+                self._analog_tab = None
+
     def retranslate_ui(self) -> None:
         """Обновляет статические строки окна настроек и всех вкладок."""
         self.setWindowTitle(tr("Настройки — Код Мастер"))
         self._search_edit.setPlaceholderText(tr("Поиск по разделам..."))
-        self._tabs.setTabText(0, "⚡ " + tr("Триггеры"))
-        self._tabs.setTabText(1, "🔍 " + tr("Мониторинг"))
-        self._tabs.setTabText(2, "🚦 " + tr("Шлюз"))
-        self._tabs.setTabText(3, "🧩 " + tr("Гибкая логика"))
-        self._tabs.setTabText(4, "📚 " + tr("Библиотека"))
-        self._tabs.setTabText(5, "📈 " + tr("Графики"))
-        self._tabs.setTabText(6, "🔬 " + tr("Трэйс"))
+        titles = {
+            self._trigger_tab: "⚡ " + tr("Триггеры"),
+            self._monitor_tab: "🔍 " + tr("Мониторинг"),
+            self._gateway_tab: "🚦 " + tr("Шлюз"),
+            self._flexible_tab: "🧩 " + tr("Гибкая логика"),
+            self._library_tab: "📚 " + tr("Библиотека"),
+            self._graph_tab: "📈 " + tr("Графики"),
+            self._analyzer_tab: "🔬 " + tr("Трэйс"),
+        }
+        if self._analog_tab is not None:
+            titles[self._analog_tab] = "🌊 " + tr("Аналоговые порты")
+        for widget, title in titles.items():
+            idx = self._tabs.indexOf(widget)
+            if idx >= 0:
+                self._tabs.setTabText(idx, title)
         self._save_button.setText(tr("Сохранить"))
         self._save_config_button.setText(tr("Сохранить конфигурацию"))
         self._factory_reset_button.setText(tr("Заводские настройки"))

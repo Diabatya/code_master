@@ -10,6 +10,7 @@ from PySide6.QtCore import QRegularExpression, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -35,11 +36,12 @@ from core.can_protocol import pack_can_frame
 from core.dbc_manager import DBCManager
 from core.dbc_parser import decode_frame
 from core.serial_manager import SerialManager
+from models.config import Config
 from models.logger import get_logger
 from models.translations import _ as tr
 from models.utils import bytes_to_hex_string, format_data_bytes, hex_to_int, int_to_hex, parse_data_bytes
 from ui.filter_dialog import FilterDialog
-from ui.hex_edit import HexDataEdit
+from ui.hex_edit import HexDataEdit, create_data_field_widget
 from ui.id_edit import IdPasteEdit
 from ui.ui_utils import setup_button
 
@@ -200,6 +202,7 @@ class CanChannelMonitor(QWidget):
         self._channel = channel
         self._channel_byte = channel
         self._serial_manager = serial_manager
+        self._config = Config()
         self._running = True
         self._received_count = 0
         self._packet_times: deque[float] = deque()
@@ -212,6 +215,7 @@ class CanChannelMonitor(QWidget):
         self._id_data_variants: Dict[int, Set[bytes]] = {}
         self._highlight_timers: Dict[int, QTimer] = {}
 
+        self._serial_manager.device_identified.connect(self._rebuild_send_data_fields)
         self._create_widgets()
         self._layout_widgets()
         self._setup_timers()
@@ -219,6 +223,7 @@ class CanChannelMonitor(QWidget):
 
     def _create_widgets(self) -> None:
         font = QFont("Segoe UI", 9)
+        self._font = font
 
         compact_font = QFont("Segoe UI", 9)
 
@@ -270,19 +275,27 @@ class CanChannelMonitor(QWidget):
         self._send_id_edit.set_fill_callback(self._fill_send_from_packet)
 
         self._send_dlc_spin = QSpinBox()
-        self._send_dlc_spin.setRange(1, 8)
-        self._send_dlc_spin.setValue(8)
+        max_bytes = self._config.max_data_bytes()
+        self._send_dlc_spin.setRange(1, max_bytes)
+        self._send_dlc_spin.setValue(8 if max_bytes >= 8 else max_bytes)
         self._send_dlc_spin.setFont(font)
         self._send_dlc_spin.setFixedWidth(45)
 
-        self._send_data_edits: List[QLineEdit] = []
-        for i in range(8):
-            edit = HexDataEdit(f"D{i}")
-            edit.setFixedWidth(38)
-            edit.setFont(font)
-            self._send_data_edits.append(edit)
-        for edit in self._send_data_edits:
-            edit.set_siblings(self._send_data_edits)
+        self._send_data_edits, self._send_data_widget = create_data_field_widget(font, max_bytes, edit_width=38)
+
+        self._send_fd_check = QCheckBox(tr("FD"))
+        self._send_fd_check.setFont(font)
+        self._send_fd_check.setToolTip(tr("CAN FD"))
+        self._send_brs_check = QCheckBox(tr("BRS"))
+        self._send_brs_check.setFont(font)
+        self._send_brs_check.setToolTip(tr("Bit Rate Switch"))
+        self._send_esi_check = QCheckBox(tr("ESI"))
+        self._send_esi_check.setFont(font)
+        self._send_esi_check.setToolTip(tr("Error State Indicator"))
+        fd_visible = self._config.get("device_type") == 0x01
+        self._send_fd_check.setVisible(fd_visible)
+        self._send_brs_check.setVisible(fd_visible)
+        self._send_esi_check.setVisible(fd_visible)
 
         self._send_period_spin = QSpinBox()
         self._send_period_spin.setRange(0, 9999)
@@ -344,9 +357,12 @@ class CanChannelMonitor(QWidget):
         send_top.addWidget(QLabel("DLC"))
         send_top.addWidget(self._send_dlc_spin)
         send_top.addWidget(QLabel(tr("Data")))
-        for edit in self._send_data_edits:
-            send_top.addWidget(edit)
+        send_top.addWidget(self._send_data_widget)
+        send_top.addWidget(self._send_fd_check)
+        send_top.addWidget(self._send_brs_check)
+        send_top.addWidget(self._send_esi_check)
         send_top.addStretch()
+        self._send_top_layout = send_top
 
         send_bottom = QHBoxLayout()
         send_bottom.setSpacing(4)
@@ -382,12 +398,32 @@ class CanChannelMonitor(QWidget):
             return
         self._send_bit_combo.setCurrentIndex(1 if can_id > 0x7FF else 0)
         self._send_id_edit.setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
-        dlc = max(1, min(8, parsed.get("dlc", 8)))
+        max_bytes = self._config.max_data_bytes()
+        dlc = max(1, min(max_bytes, parsed.get("dlc", 8)))
         self._send_dlc_spin.setValue(dlc)
         data = parsed.get("data", [])
         for i, edit in enumerate(self._send_data_edits):
             edit.setText(f"{data[i]:02X}" if i < len(data) else "")
         self._on_send_dlc_changed(dlc)
+
+    def _rebuild_send_data_fields(self) -> None:
+        """Пересоздаёт поля Data в панели отправки при смене типа устройства."""
+        max_bytes = self._config.max_data_bytes()
+        old_values = [e.text() for e in self._send_data_edits]
+        self._send_data_widget.setParent(None)
+        self._send_data_widget.deleteLater()
+        self._send_data_edits, self._send_data_widget = create_data_field_widget(self._font, max_bytes, edit_width=38)
+        for i, edit in enumerate(self._send_data_edits):
+            edit.setText(old_values[i] if i < len(old_values) else "")
+        self._send_top_layout.insertWidget(7, self._send_data_widget)
+        self._send_dlc_spin.setRange(1, max_bytes)
+        if self._send_dlc_spin.value() > max_bytes:
+            self._send_dlc_spin.setValue(max_bytes)
+        self._on_send_dlc_changed(self._send_dlc_spin.value())
+        fd_visible = self._config.get("device_type") == 0x01
+        self._send_fd_check.setVisible(fd_visible)
+        self._send_brs_check.setVisible(fd_visible)
+        self._send_esi_check.setVisible(fd_visible)
 
     def _on_cyclic_toggled(self, checked: bool) -> None:
         if checked:

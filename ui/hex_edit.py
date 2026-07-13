@@ -1,10 +1,10 @@
 """Поле ввода одного HEX-байта с автопереходом фокуса."""
 
-from typing import List
+from typing import List, Tuple
 
 from PySide6.QtCore import QRegularExpression, Qt
-from PySide6.QtGui import QKeyEvent, QRegularExpressionValidator
-from PySide6.QtWidgets import QLineEdit
+from PySide6.QtGui import QFont, QKeyEvent, QRegularExpressionValidator
+from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QScrollArea, QWidget
 
 _HEX_CHARS = set("0123456789ABCDEFabcdef")
 
@@ -60,3 +60,35 @@ class HexDataEdit(QLineEdit):
                 prev.selectAll()
             else:
                 prev._focus_prev() if isinstance(prev, HexDataEdit) else None
+
+
+def create_data_field_widget(
+    font: QFont, count: int, edit_width: int = 32, placeholder_prefix: str = "D"
+) -> Tuple[List[QLineEdit], QWidget]:
+    """Создаёт виджет с count полями HexDataEdit. Для count > 8 оборачивает в QScrollArea."""
+    edits: List[QLineEdit] = []
+    container = QWidget()
+    layout = QHBoxLayout(container)
+    layout.setSpacing(2)
+    layout.setContentsMargins(0, 0, 0, 0)
+    for i in range(count):
+        edit = HexDataEdit(f"{placeholder_prefix}{i}")
+        edit.setFixedWidth(edit_width)
+        edit.setFont(font)
+        edits.append(edit)
+    for edit in edits:
+        edit.set_siblings(edits)
+        layout.addWidget(edit)
+    layout.addStretch()
+
+    if count > 8:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFixedHeight(40)
+        scroll.setMinimumWidth(280)
+        scroll.setMaximumWidth(420)
+        scroll.setWidget(container)
+        return edits, scroll
+    return edits, container

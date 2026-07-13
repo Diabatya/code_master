@@ -14,7 +14,16 @@ from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QTimer
 
-from core.can_protocol import MARKER_RX, MARKER_RX_EXT, xor_checksum
+from core.can_protocol import (
+    CMD_AUTO_SPEED,
+    CMD_AUTO_SPEED_RESP,
+    CMD_DEVICE_ID,
+    CMD_DEVICE_ID_RESP,
+    DEVICE_TYPE_CAN_FD,
+    MARKER_RX,
+    MARKER_RX_EXT,
+    xor_checksum,
+)
 from models.logger import get_logger
 from models.utils import hex_to_int
 
@@ -260,6 +269,16 @@ class FakeSerial:
         """
         if not data:
             return 0
+
+        # Эмуляция команд идентификации и автоопределения скорости моста
+        if data[0] == CMD_DEVICE_ID:
+            self._append_response(bytes([CMD_DEVICE_ID_RESP, DEVICE_TYPE_CAN_FD, 0x00]))
+            return len(data)
+
+        if data[0] == CMD_AUTO_SPEED:
+            speed = 500
+            self._append_response(bytes([CMD_AUTO_SPEED_RESP, (speed >> 8) & 0xFF, speed & 0xFF]))
+            return len(data)
 
         # Базовая эмуляция бутлоадера STM32
         if data[0] == 0x7F:

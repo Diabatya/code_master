@@ -12,6 +12,17 @@ MARKER_RX = 0xAA  # Маркер входящего кадра
 MARKER_TX_EXT = 0xBC  # Маркер исходящего кадра с Extended CAN-ID
 MARKER_RX_EXT = 0xAB  # Маркер входящего кадра с Extended CAN-ID
 
+# Команды управления и конфигурации USB-моста
+CMD_DEVICE_ID = 0x90        # Запрос типа/версии устройства
+CMD_DEVICE_ID_RESP = 0x91   # Ответ на запрос ID
+CMD_AUTO_SPEED = 0xA0       # Запрос автоопределения скорости CAN
+CMD_AUTO_SPEED_RESP = 0xA1  # Ответ с определённой скоростью
+
+# Типы устройств
+DEVICE_TYPE_BASIC = 0x00   # Базовое CAN 2.0
+DEVICE_TYPE_CAN_FD = 0x01
+DEVICE_TYPE_ANALOG = 0x02
+
 
 def xor_checksum(data: bytes) -> int:
     """Вычисляет XOR-сумму всех байт переданных данных.
@@ -34,12 +45,12 @@ def pack_can_frame(channel: int, can_id: int, data: bytes) -> bytes:
     Args:
         channel: Номер канала (0x01 для CAN1, 0x02 для CAN2).
         can_id: 11-битный или 29-битный идентификатор CAN.
-        data: Полезные данные, от 0 до 8 байт.
+        data: Полезные данные, от 0 до 64 байт (8 для CAN 2.0, 64 для CAN FD).
 
     Returns:
         Упакованный байтовый кадр с контрольной суммой.
     """
-    data = bytes(data)[:8]
+    data = bytes(data)[:64]
     length = len(data)
     if can_id > 0x7FF:
         marker = MARKER_TX_EXT

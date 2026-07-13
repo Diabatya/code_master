@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from core.can_protocol import DEVICE_TYPE_ANALOG, DEVICE_TYPE_BASIC, DEVICE_TYPE_CAN_FD
 from core.serial_manager import SerialManager
 from models.config import Config
 from models.logger import get_logger
@@ -30,6 +31,24 @@ except Exception:  # noqa: BLE001
 
 
 logger = get_logger(__name__)
+
+
+class CanSpeedDetectThread(QThread):
+    """Фоновый поток автоопределения скорости CAN."""
+
+    speed_detected = Signal(int)
+    failed = Signal()
+
+    def __init__(self, serial_manager: SerialManager, parent: Optional[QDialog] = None) -> None:
+        super().__init__(parent)
+        self._serial_manager = serial_manager
+
+    def run(self) -> None:
+        speed = self._serial_manager.auto_detect_can_speed()
+        if speed is not None and speed > 0:
+            self.speed_detected.emit(speed)
+        else:
+            self.failed.emit()
 
 
 class BaudRateDetector(QThread):
@@ -105,6 +124,32 @@ class ComSettingsDialog(QDialog):
         self._emulation_check = QCheckBox(tr("Режим эмуляции"))
         self._emulation_check.setFont(font)
 
+        self._device_label = QLabel(tr("Устройство: не определено"))
+        self._device_label.setFont(font)
+
+        self._can_speed_label = QLabel(tr("Скорость CAN"))
+        self._can_speed_label.setFont(font)
+
+        self._can1_speed_label = QLabel(tr("CAN1:"))
+        self._can1_speed_label.setFont(font)
+        self._can1_speed_combo = QComboBox()
+        self._can1_speed_combo.setFont(font)
+        for label, value in [("125 kbit/s", 125000), ("250 kbit/s", 250000), ("500 kbit/s", 500000), ("1000 kbit/s", 1000000)]:
+            self._can1_speed_combo.addItem(label, value)
+
+        self._can2_speed_label = QLabel(tr("CAN2:"))
+        self._can2_speed_label.setFont(font)
+        self._can2_speed_combo = QComboBox()
+        self._can2_speed_combo.setFont(font)
+        for label, value in [("125 kbit/s", 125000), ("250 kbit/s", 250000), ("500 kbit/s", 500000), ("1000 kbit/s", 1000000)]:
+            self._can2_speed_combo.addItem(label, value)
+
+        self._auto_can_speed_button = QPushButton(tr("Автоопределение скорости"))
+        self._auto_can_speed_button.setFixedSize(180, 30)
+        self._auto_can_speed_button.setFont(font)
+        self._auto_can_speed_button.clicked.connect(self._on_auto_can_speed)
+        self._auto_can_speed_button.setEnabled(self._serial_manager.is_open())
+
         self._status_label = QLabel("")
         self._status_label.setFont(font)
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -131,6 +176,21 @@ class ComSettingsDialog(QDialog):
         layout.addLayout(baud_layout)
         layout.addWidget(self._emulation_check)
         layout.addSpacing(8)
+        layout.addWidget(self._device_label)
+
+        layout.addWidget(self._can_speed_label)
+        can1_layout = QHBoxLayout()
+        can1_layout.addWidget(self._can1_speed_label)
+        can1_layout.addWidget(self._can1_speed_combo, 1)
+        layout.addLayout(can1_layout)
+
+        can2_layout = QHBoxLayout()
+        can2_layout.addWidget(self._can2_speed_label)
+        can2_layout.addWidget(self._can2_speed_combo, 1)
+        layout.addLayout(can2_layout)
+
+        layout.addWidget(self._auto_can_speed_button)
+        layout.addSpacing(8)
         layout.addWidget(self._status_label)
         layout.addStretch()
         layout.addWidget(self._button_box)
@@ -151,6 +211,60 @@ class ComSettingsDialog(QDialog):
             self._baud_combo.setCurrentIndex(index)
 
         self._emulation_check.setChecked(self._config.get("emulation", False))
+        self._update_device_label()
+        self._set_can_speed_combo(self._config.get("can1_speed", 500000), self._can1_speed_combo)
+        self._set_can_speed_combo(self._config.get("can2_speed", 500000), self._can2_speed_combo)
+        self._update_speed_visibility()
+
+    def _update_device_label(self) -> None:
+        device_type = self._config.get("device_type", DEVICE_TYPE_BASIC)
+        version = self._config.get("device_version", 0)
+        if device_type == DEVICE_TYPE_CAN_FD:
+            name = tr("CAN FD")
+        elif device_type == DEVICE_TYPE_ANALOG:
+            name = tr("Аналоговые порты")
+        else:
+            name = tr("CAN 2.0")
+        self._device_label.setText(tr("Устройство: {0} (версия {1})").format(name, version))
+
+    def _update_speed_visibility(self) -> None:
+        device_type = self._config.get("device_type", DEVICE_TYPE_BASIC)
+        separate = device_type in (DEVICE_TYPE_CAN_FD, DEVICE_TYPE_ANALOG)
+        self._can2_speed_label.setVisible(separate)
+        self._can2_speed_combo.setVisible(separate)
+        if not separate:
+            self._can_speed_label.setText(tr("Скорость CAN"))
+        else:
+            self._can_speed_label.setText(tr("Скорости CAN"))
+
+    def _set_can_speed_combo(self, speed: int, combo: QComboBox) -> None:
+        index = combo.findData(speed)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        elif speed > 0:
+            combo.addItem(f"{speed // 1000} kbit/s", speed)
+            combo.setCurrentIndex(combo.count() - 1)
+
+    def _on_auto_can_speed(self) -> None:
+        if not self._serial_manager.is_open():
+            self._set_status(tr("Сначала подключитесь к порту"), error=True)
+            return
+        self._auto_can_speed_button.setEnabled(False)
+        self._set_status(tr("Определение скорости CAN..."), error=False)
+        self._can_speed_thread = CanSpeedDetectThread(self._serial_manager, self)
+        self._can_speed_thread.speed_detected.connect(self._on_can_speed_found)
+        self._can_speed_thread.failed.connect(self._on_can_speed_not_found)
+        self._can_speed_thread.finished.connect(lambda: self._auto_can_speed_button.setEnabled(True))
+        self._can_speed_thread.start()
+
+    def _on_can_speed_found(self, speed: int) -> None:
+        self._set_can_speed_combo(speed, self._can1_speed_combo)
+        self._set_can_speed_combo(speed, self._can2_speed_combo)
+        self._config.set("can_speed_auto", True)
+        self._set_status(tr("Скорость CAN определена: {0} kbit/s").format(speed), error=False)
+
+    def _on_can_speed_not_found(self) -> None:
+        self._set_status(tr("Не удалось определить скорость CAN"), error=True)
 
     def _refresh_ports(self) -> None:
         current = self._port_combo.currentText()
@@ -212,7 +326,12 @@ class ComSettingsDialog(QDialog):
                 "port": port_name,
                 "baudrate": baudrate,
                 "emulation": emulation,
+                "can1_speed": self._can1_speed_combo.currentData(),
+                "can2_speed": self._can2_speed_combo.currentData() if self._can2_speed_combo.isVisible() else self._can1_speed_combo.currentData(),
             })
+            self._update_device_label()
+            self._update_speed_visibility()
+            self._auto_can_speed_button.setEnabled(True)
             self._set_status(tr("Подключено к {0}").format(port_name), error=False)
             logger.info("Подключение через диалог: %s", port_name)
             self.connected.emit()
