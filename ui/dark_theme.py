@@ -6,8 +6,11 @@
 
 from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import QApplication
+from pathlib import Path
 from string import Template
 
+
+_CHECK_ICON = str((Path(__file__).parent.parent / "assets" / "icons" / "check.svg").resolve())
 
 _BASE_QSS = """
 QMainWindow, QDialog, QWidget {
@@ -190,7 +193,7 @@ QCheckBox::indicator {
 QCheckBox::indicator:checked {
     background-color: #6C8CFF;
     border-color: #6C8CFF;
-    image: none;
+    image: url($check_icon);
     color: #FFFFFF;
 }
 QCheckBox::indicator:hover {
@@ -326,6 +329,7 @@ def _apply_theme(app: QApplication, colors: dict) -> None:
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(colors["text_selected"]))
     app.setPalette(palette)
 
+    colors["check_icon"] = _CHECK_ICON
     app.setStyleSheet(Template(_BASE_QSS).safe_substitute(**colors))
 
 

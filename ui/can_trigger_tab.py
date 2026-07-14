@@ -31,6 +31,7 @@ from models.translations import _ as tr
 from models.utils import hex_to_int, int_to_hex, parse_data_bytes
 from ui.hex_edit import HexDataEdit, create_data_field_widget
 from ui.id_edit import IdPasteEdit
+from ui.memory_indicator import MemoryIndicator
 
 logger = get_logger(__name__)
 
@@ -94,8 +95,7 @@ class CanTriggerTab(QWidget):
         self._serial_manager = serial_manager
         self._config = Config()
         self._blocks: List[Dict[str, Any]] = []
-
-        self._serial_manager.device_identified.connect(self._rebuild_data_fields)
+        self._memory_indicator = MemoryIndicator(self)
 
         self._create_widgets()
         self._build_layout()
@@ -118,8 +118,7 @@ class CanTriggerTab(QWidget):
         return edit
 
     def _make_data_edits(self, font: QFont) -> Tuple[List[QLineEdit], QWidget]:
-        count = self._config.max_data_bytes()
-        return create_data_field_widget(font, count, edit_width=35)
+        return create_data_field_widget(font, 8, edit_width=35)
 
     def _make_channel_combo(self, font: QFont) -> QComboBox:
         combo = QComboBox()
@@ -137,14 +136,13 @@ class CanTriggerTab(QWidget):
 
     def _make_dlc_spin(self, font: QFont) -> QSpinBox:
         spin = QSpinBox()
-        max_bytes = self._config.max_data_bytes()
-        spin.setRange(1, max_bytes)
-        spin.setValue(8 if max_bytes >= 8 else max_bytes)
+        spin.setRange(1, 8)
+        spin.setValue(8)
         spin.setFont(font)
         spin.setFixedWidth(50)
         return spin
 
-    def _make_count_spin(self, font: QFont, max_value: int = 64) -> QSpinBox:
+    def _make_count_spin(self, font: QFont, max_value: int = 100) -> QSpinBox:
         spin = QSpinBox()
         spin.setRange(1, max_value)
         spin.setValue(1)
@@ -448,55 +446,6 @@ class CanTriggerTab(QWidget):
             else:
                 edit.setEnabled(True)
 
-    def _rebuild_data_widget(
-        self, layout: QHBoxLayout, old_widget: QWidget, old_edits: List[QLineEdit]
-    ) -> Tuple[List[QLineEdit], QWidget]:
-        """Заменяет старый контейнер Data на новый с актуальным количеством байт."""
-        new_edits, new_widget = create_data_field_widget(self._font, self._config.max_data_bytes(), edit_width=35)
-        old_values = [e.text() for e in old_edits]
-        for i, edit in enumerate(new_edits):
-            edit.setText(old_values[i] if i < len(old_values) else "")
-        layout.replaceWidget(old_widget, new_widget)
-        old_widget.setParent(None)
-        old_widget.deleteLater()
-        return new_edits, new_widget
-
-    def _rebuild_data_fields(self) -> None:
-        """Пересоздаёт все поля Data при смене типа устройства, сохраняя значения."""
-        max_bytes = self._config.max_data_bytes()
-        for block in self._blocks:
-            recv = block["recv"]
-            recv["data"], recv["data_widget"] = self._rebuild_data_widget(
-                recv["layout"], recv["data_widget"], recv["data"]
-            )
-            recv["dlc"].setRange(1, max_bytes)
-            recv["dlc"].valueChanged.disconnect()
-            recv["dlc"].valueChanged.connect(lambda value, r=recv: self._set_data_enabled(r["data"], value))
-            self._set_data_enabled(recv["data"], recv["dlc"].value())
-
-            for row in block["response"]["rows"]:
-                row["data"], row["data_widget"] = self._rebuild_data_widget(
-                    row["layout"], row["data_widget"], row["data"]
-                )
-                row["dlc"].setRange(1, max_bytes)
-                row["dlc"].valueChanged.disconnect()
-                row["dlc"].valueChanged.connect(lambda value, r=row: self._set_data_enabled(r["data"], value))
-                self._set_data_enabled(row["data"], row["dlc"].value())
-
-            cache = block["cache"]
-            cache["from_data"], cache["from_data_widget"] = self._rebuild_data_widget(
-                cache["row2_layout"], cache["from_data_widget"], cache["from_data"]
-            )
-            cache["to_data"], cache["to_data_widget"] = self._rebuild_data_widget(
-                cache["row2_layout"], cache["to_data_widget"], cache["to_data"]
-            )
-            cache["dlc"].setRange(1, max_bytes)
-            cache["dlc"].valueChanged.disconnect()
-            cache["dlc"].valueChanged.connect(lambda value, c=cache: self._set_data_enabled(c["from_data"], value))
-            cache["dlc"].valueChanged.connect(lambda value, c=cache: self._set_data_enabled(c["to_data"], value))
-            self._set_data_enabled(cache["from_data"], cache["dlc"].value())
-            self._set_data_enabled(cache["to_data"], cache["dlc"].value())
-
     def _fill_row_from_packet(self, row: Dict[str, Any], parsed: Dict[str, Any]) -> None:
         """Заполняет строку (ID, DLC, Data) из распарсенного пакета."""
         can_id = parsed.get("id")
@@ -505,8 +454,7 @@ class CanTriggerTab(QWidget):
         bit_index = 1 if can_id > 0x7FF else 0
         row["bit"].setCurrentIndex(bit_index)
         row["id"].setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
-        max_bytes = self._config.max_data_bytes()
-        dlc = max(1, min(max_bytes, parsed.get("dlc", 8)))
+        dlc = max(1, min(8, parsed.get("dlc", 8)))
         row["dlc"].setValue(dlc)
         data = parsed.get("data", [])
         for i, edit in enumerate(row["data"]):
@@ -521,8 +469,7 @@ class CanTriggerTab(QWidget):
         bit_index = 1 if can_id > 0x7FF else 0
         cache["bit"].setCurrentIndex(bit_index)
         cache["id"].setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
-        max_bytes = self._config.max_data_bytes()
-        dlc = max(1, min(max_bytes, parsed.get("dlc", 8)))
+        dlc = max(1, min(8, parsed.get("dlc", 8)))
         cache["dlc"].setValue(dlc)
         data = parsed.get("data", [])
         for i, edit in enumerate(cache["from_data"]):
@@ -594,6 +541,7 @@ class CanTriggerTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(scroll)
+        layout.addWidget(self._memory_indicator)
 
     def _on_cache_active_changed(self, index: int, state: int) -> None:
         enabled = state == Qt.CheckState.Checked.value
@@ -601,8 +549,19 @@ class CanTriggerTab(QWidget):
         self._set_cache_enabled(block, enabled)
 
     def _set_cache_enabled(self, block: Dict[str, Any], enabled: bool) -> None:
-        block["response"]["group"].setEnabled(not enabled)
-        block["cache"]["fields_widget"].setEnabled(enabled)
+        """Включает либо блок ответа, либо блок кэша в зависимости от чекбокса."""
+        response_group = block["response"]["group"]
+        cache_fields = block["cache"]["fields_widget"]
+
+        response_group.setEnabled(not enabled)
+        cache_fields.setEnabled(enabled)
+
+        if enabled:
+            response_group.setStyleSheet("QGroupBox { color: #555555; } QWidget { opacity: 0.5; }")
+            cache_fields.setStyleSheet("")
+        else:
+            response_group.setStyleSheet("")
+            cache_fields.setStyleSheet("QWidget { color: #555555; } QLineEdit, QComboBox, QSpinBox { background-color: #2B2B2B; color: #555555; }")
 
     def retranslate_ui(self) -> None:
         """Обновляет статические строки вкладки триггеров."""
@@ -683,7 +642,9 @@ class CanTriggerTab(QWidget):
         self.set_config(triggers if isinstance(triggers, list) else [])
 
     def _save_config(self) -> None:
-        self._config.set("triggers", self._collect_config())
+        triggers = self._collect_config()
+        self._config.set("triggers", triggers)
+        self._memory_indicator.update_usage(self._memory_indicator.estimate_triggers(triggers))
 
     def _collect_config(self) -> List[Dict[str, Any]]:
         config = []

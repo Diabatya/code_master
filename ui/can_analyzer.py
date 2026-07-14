@@ -1,12 +1,15 @@
 """Трэйс CAN-шины: две хронологические таблицы для CAN1 и CAN2."""
 
+import csv
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -47,6 +50,8 @@ class CanAnalyzer(QWidget):
     def retranslate_ui(self) -> None:
         self._start_button.setText(tr("Начать анализ"))
         self._stop_button.setText(tr("Завершить анализ"))
+        self._export_csv_button.setText(tr("Экспорт CSV"))
+        self._export_custom_button.setText(tr("Экспорт .trace"))
         self._title.setText(tr("Трэйс CAN-шины"))
         for table in (self._table1, self._table2):
             table.setHorizontalHeaderLabels(
@@ -72,6 +77,16 @@ class CanAnalyzer(QWidget):
         self._stop_button.setMinimumHeight(32)
         self._stop_button.clicked.connect(self._stop_analysis)
 
+        self._export_csv_button = QPushButton(tr("Экспорт CSV"))
+        self._export_csv_button.setFont(font)
+        self._export_csv_button.setMinimumHeight(32)
+        self._export_csv_button.clicked.connect(self._export_csv)
+
+        self._export_custom_button = QPushButton(tr("Экспорт .trace"))
+        self._export_custom_button.setFont(font)
+        self._export_custom_button.setMinimumHeight(32)
+        self._export_custom_button.clicked.connect(self._export_custom)
+
         self._table1 = self._build_table(font)
         self._table2 = self._build_table(font)
 
@@ -93,7 +108,7 @@ class CanAnalyzer(QWidget):
         table.setColumnWidth(3, 220)
         table.setColumnWidth(4, 90)
         table.setColumnWidth(5, 90)
-        table.setColumnWidth(6, 150)
+        table.setColumnWidth(6, 260)
         return table
 
     def _build_layout(self) -> None:
@@ -106,6 +121,8 @@ class CanAnalyzer(QWidget):
         top_layout.setSpacing(8)
         top_layout.addWidget(self._start_button)
         top_layout.addWidget(self._stop_button)
+        top_layout.addWidget(self._export_csv_button)
+        top_layout.addWidget(self._export_custom_button)
         top_layout.addStretch()
         layout.addLayout(top_layout)
 
@@ -128,6 +145,8 @@ class CanAnalyzer(QWidget):
         self._analyzing = False
         self._start_button.setEnabled(True)
         self._stop_button.setEnabled(False)
+        self._table1.scrollToBottom()
+        self._table2.scrollToBottom()
         logger.info("Трэйс остановлен")
 
     def process_frame(self, frame: Dict[str, Any]) -> None:
@@ -174,6 +193,8 @@ class CanAnalyzer(QWidget):
             return
         menu = QMenu(self)
         menu.addAction(tr("Копировать пакет"), lambda: self._copy_packet(table, row))
+        menu.addAction(tr("Копировать для отправки"), lambda: self._copy_for_send(table, row))
+        menu.addAction(tr("Копировать для триггера"), lambda: self._copy_for_trigger(table, row))
         menu.exec(table.viewport().mapToGlobal(position))
 
     def _copy_packet(self, table: QTableWidget, row: int) -> None:
@@ -184,6 +205,40 @@ class CanAnalyzer(QWidget):
             return
         text = f"ID={id_item.text()} DLC={dlc_item.text()} DATA={data_item.text()}"
         QApplication.clipboard().setText(text)
+
+    def _copy_for_send(self, table: QTableWidget, row: int) -> None:
+        self._copy_packet(table, row)
+
+    def _copy_for_trigger(self, table: QTableWidget, row: int) -> None:
+        self._copy_packet(table, row)
+
+    def _export_csv(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, tr("Экспорт трейса в CSV"), "", "CSV files (*.csv)")
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["channel", "time", "id", "dlc", "data", "period", "ascii", "explanation"])
+                for table, channel in ((self._table1, 1), (self._table2, 2)):
+                    for row in range(table.rowCount()):
+                        writer.writerow([channel] + [table.item(row, col).text() if table.item(row, col) else "" for col in range(7)])
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Ошибка экспорта CSV: %s", exc)
+
+    def _export_custom(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, tr("Экспорт трейса в .trace"), "", "Trace files (*.trace)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for table, channel in ((self._table1, 1), (self._table2, 2)):
+                    f.write(f"[CAN{channel}]\n")
+                    for row in range(table.rowCount()):
+                        values = [table.item(row, col).text() if table.item(row, col) else "" for col in range(7)]
+                        f.write(f"{values[0]} ID={values[1]} DLC={values[2]} DATA={values[3]} PERIOD={values[4]} ASCII={values[5]} EXPL={values[6]}\n")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Ошибка экспорта .trace: %s", exc)
 
     @staticmethod
     def parse_packet_string(text: str) -> Optional[Dict[str, Any]]:

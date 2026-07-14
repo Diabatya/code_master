@@ -2,9 +2,10 @@
 
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QStringListModel
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QCompleter,
     QFileDialog,
     QHBoxLayout,
     QLineEdit,
@@ -78,6 +79,16 @@ class SettingsWindow(QMainWindow):
         self._search_edit.setPlaceholderText(tr("Поиск по разделам..."))
         self._search_edit.setFixedWidth(220)
         self._search_edit.textChanged.connect(self._on_search_changed)
+
+        self._completer = QCompleter(self._search_edit)
+        self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self._search_edit.setCompleter(self._completer)
+        self._completer.activated.connect(self._on_search_activated)
+
+        self._search_map: Dict[str, int] = {}
+        self._build_search_keywords()
+
         search_layout.addWidget(self._search_edit)
         search_layout.addStretch()
         layout.addLayout(search_layout)
@@ -115,14 +126,16 @@ class SettingsWindow(QMainWindow):
     def _update_analog_tab(self) -> None:
         """Добавляет или удаляет вкладку аналоговых портов в зависимости от типа устройства."""
         analog_index = self._tabs.indexOf(self._analog_tab) if self._analog_tab else -1
-        if self._config.get("device_type") == 0x02:
+        if self._config.get("device_type") == 0x01:
             if analog_index < 0:
                 self._analog_tab = AnalogPortsTab(self)
                 self._tabs.addTab(self._analog_tab, "🌊 " + tr("Аналоговые порты"))
+                self._build_search_keywords()
         else:
             if analog_index >= 0:
                 self._tabs.removeTab(analog_index)
                 self._analog_tab = None
+                self._build_search_keywords()
 
     def retranslate_ui(self) -> None:
         """Обновляет статические строки окна настроек и всех вкладок."""
@@ -143,6 +156,7 @@ class SettingsWindow(QMainWindow):
             idx = self._tabs.indexOf(widget)
             if idx >= 0:
                 self._tabs.setTabText(idx, title)
+        self._build_search_keywords()
         self._save_button.setText(tr("Сохранить"))
         self._save_config_button.setText(tr("Сохранить конфигурацию"))
         self._factory_reset_button.setText(tr("Заводские настройки"))
@@ -173,18 +187,56 @@ class SettingsWindow(QMainWindow):
         self._trigger_tab.create_trigger_from_packet(packet)
         self._tabs.setCurrentWidget(self._trigger_tab)
 
+    def _build_search_keywords(self) -> None:
+        """Строит словарь ключевых слов для быстрого поиска вкладок."""
+        keywords: Dict[QWidget, List[str]] = {
+            self._trigger_tab: ["trigger", "триггеры", "триггер", "кэш", "cache", "ответ", "response", "frame", "фрейм", "data", "данные"],
+            self._monitor_tab: ["monitor", "monitoring", "мониторинг", "фильтр", "filter", "канал", "channel", "can1", "can2", "поиск", "search", "send", "отправить"],
+            self._gateway_tab: ["gateway", "шлюз", "rule", "правило", "ignore", "игнорировать", "replace", "подмена"],
+            self._flexible_tab: ["flexible logic", "гибкая логика", "logic", "логика", "rules", "правила"],
+            self._library_tab: ["library", "библиотека", "dbc", "id", "make", "марка", "model", "модель", "database", "база"],
+            self._graph_tab: ["graph", "график", "signal", "сигнал", "chart", "plot"],
+            self._analyzer_tab: ["trace", "трейс", "analyzer", "анализатор", "log", "лог"],
+        }
+        if self._analog_tab is not None:
+            keywords[self._analog_tab] = ["analog", "аналоговые порты", "ports", "порты", "adc"]
+
+        self._search_map = {}
+        for widget, words in keywords.items():
+            idx = self._tabs.indexOf(widget)
+            if idx < 0:
+                continue
+            title = self._tabs.tabText(idx).strip().lower()
+            if title:
+                self._search_map[title] = idx
+                clean = "".join(ch for ch in title if ch.isalnum() or ch.isspace()).strip()
+                if clean:
+                    self._search_map[clean] = idx
+                for part in title.split():
+                    self._search_map[part] = idx
+            for word in words:
+                self._search_map[word.lower()] = idx
+
+        self._completer.setModel(QStringListModel(sorted(self._search_map.keys())))
+
     def _on_search_changed(self, text: str) -> None:
         """Переключает вкладку по введённой подстроке (регистр не важен)."""
         query = text.strip().lower()
         if not query:
             return
-        for i in range(self._tabs.count()):
-            tab_text = self._tabs.tabText(i).lower()
-            # Убираем эмодзи и пробелы для сравнения
-            clean_text = "".join(ch for ch in tab_text if ch.isalnum() or ch.isspace()).strip()
-            if query in clean_text or query in tab_text:
-                self._tabs.setCurrentIndex(i)
+        if query in self._search_map:
+            self._tabs.setCurrentIndex(self._search_map[query])
+            return
+        for keyword, idx in self._search_map.items():
+            if query in keyword:
+                self._tabs.setCurrentIndex(idx)
                 return
+
+    def _on_search_activated(self, text: str) -> None:
+        """Переключает вкладку при выборе пункта из выпадающего списка."""
+        query = text.strip().lower()
+        if query in self._search_map:
+            self._tabs.setCurrentIndex(self._search_map[query])
 
     def _on_serial_error(self, message: str) -> None:
         logger.error("Ошибка COM-порта: %s", message)

@@ -29,6 +29,7 @@ from models.logger import get_logger
 from models.translations import _ as tr
 from models.utils import hex_to_int, int_to_hex, parse_data_bytes
 from ui.ui_utils import setup_button
+from ui.memory_indicator import MemoryIndicator
 
 logger = get_logger(__name__)
 
@@ -48,6 +49,7 @@ class CanGatewayTab(QWidget):
         self._running = False
         self._ignore_edits: List[QLineEdit] = []
         self._rule_blocks: List[Dict[str, Any]] = []
+        self._memory_indicator = MemoryIndicator(self)
         self._create_widgets()
         self._build_layout()
         self._load_config()
@@ -217,6 +219,7 @@ class CanGatewayTab(QWidget):
         buttons.addWidget(self._save_button)
         buttons.addWidget(self._load_button)
         layout.addLayout(buttons)
+        layout.addWidget(self._memory_indicator)
 
     def _on_ignore_changed(self) -> None:
         has_value = any(edit.text().strip() for edit in self._ignore_edits)
@@ -265,6 +268,7 @@ class CanGatewayTab(QWidget):
             })
         self._config.set("gateway_rules", rules)
         self._config.set("gateway_ignore", [edit.text().strip() for edit in self._ignore_edits])
+        self._memory_indicator.update_usage(self._memory_indicator.estimate_rules(rules))
 
     def _parse_id(self, text: str) -> Optional[int]:
         return hex_to_int(text.strip())

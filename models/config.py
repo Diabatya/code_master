@@ -29,14 +29,16 @@ class Config:
         "ignore_list": [],
         "device_type": 0x00,
         "device_version": 0,
+        "serial_number": "",
+        "total_memory": 1024,
         "can1_speed": 500000,
         "can2_speed": 500000,
         "can_speed_auto": False,
     }
 
     def max_data_bytes(self) -> int:
-        """Возвращает максимальную длину поля Data для текущего типа устройства."""
-        return 64 if self.get("device_type") == 0x01 else 8
+        """Возвращает максимальную длину поля Data (8 байт для CAN 2.0)."""
+        return 8
 
     def __new__(cls) -> "Config":
         """Создаёт или возвращает единственный экземпляр настроек."""

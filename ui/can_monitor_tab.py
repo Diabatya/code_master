@@ -43,6 +43,7 @@ from models.utils import bytes_to_hex_string, format_data_bytes, hex_to_int, int
 from ui.filter_dialog import FilterDialog
 from ui.hex_edit import HexDataEdit, create_data_field_widget
 from ui.id_edit import IdPasteEdit
+from ui.memory_indicator import MemoryIndicator
 from ui.ui_utils import setup_button
 
 logger = get_logger(__name__)
@@ -214,8 +215,8 @@ class CanChannelMonitor(QWidget):
         self._id_stats: Dict[int, Dict[str, Any]] = {}
         self._id_data_variants: Dict[int, Set[bytes]] = {}
         self._highlight_timers: Dict[int, QTimer] = {}
+        self._ignored_ids: set[int] = set()
 
-        self._serial_manager.device_identified.connect(self._rebuild_send_data_fields)
         self._create_widgets()
         self._layout_widgets()
         self._setup_timers()
@@ -227,10 +228,20 @@ class CanChannelMonitor(QWidget):
 
         compact_font = QFont("Segoe UI", 9)
 
-        self._filter_button = QPushButton(tr("Фильтр"))
-        self._filter_button.setFixedSize(80, 28)
-        self._filter_button.setFont(compact_font)
-        self._filter_button.clicked.connect(self._show_filter_dialog)
+        self._start_button = QPushButton(tr("Запустить"))
+        self._start_button.setFixedSize(80, 28)
+        self._start_button.setFont(compact_font)
+        self._start_button.clicked.connect(self._start)
+
+        self._stop_button = QPushButton(tr("Остановить"))
+        self._stop_button.setFixedSize(80, 28)
+        self._stop_button.setFont(compact_font)
+        self._stop_button.clicked.connect(self._stop)
+
+        self._clear_button = QPushButton(tr("Очистить"))
+        self._clear_button.setFixedSize(80, 28)
+        self._clear_button.setFont(compact_font)
+        self._clear_button.clicked.connect(self._clear)
 
         self._search_edit = QLineEdit()
         self._search_edit.setFixedWidth(160)
@@ -275,27 +286,12 @@ class CanChannelMonitor(QWidget):
         self._send_id_edit.set_fill_callback(self._fill_send_from_packet)
 
         self._send_dlc_spin = QSpinBox()
-        max_bytes = self._config.max_data_bytes()
-        self._send_dlc_spin.setRange(1, max_bytes)
-        self._send_dlc_spin.setValue(8 if max_bytes >= 8 else max_bytes)
+        self._send_dlc_spin.setRange(1, 8)
+        self._send_dlc_spin.setValue(8)
         self._send_dlc_spin.setFont(font)
         self._send_dlc_spin.setFixedWidth(45)
 
-        self._send_data_edits, self._send_data_widget = create_data_field_widget(font, max_bytes, edit_width=38)
-
-        self._send_fd_check = QCheckBox(tr("FD"))
-        self._send_fd_check.setFont(font)
-        self._send_fd_check.setToolTip(tr("CAN FD"))
-        self._send_brs_check = QCheckBox(tr("BRS"))
-        self._send_brs_check.setFont(font)
-        self._send_brs_check.setToolTip(tr("Bit Rate Switch"))
-        self._send_esi_check = QCheckBox(tr("ESI"))
-        self._send_esi_check.setFont(font)
-        self._send_esi_check.setToolTip(tr("Error State Indicator"))
-        fd_visible = self._config.get("device_type") == 0x01
-        self._send_fd_check.setVisible(fd_visible)
-        self._send_brs_check.setVisible(fd_visible)
-        self._send_esi_check.setVisible(fd_visible)
+        self._send_data_edits, self._send_data_widget = create_data_field_widget(font, 8, edit_width=38)
 
         self._send_period_spin = QSpinBox()
         self._send_period_spin.setRange(0, 9999)
@@ -337,7 +333,9 @@ class CanChannelMonitor(QWidget):
 
         control_layout = QHBoxLayout()
         control_layout.setSpacing(4)
-        control_layout.addWidget(self._filter_button)
+        control_layout.addWidget(self._start_button)
+        control_layout.addWidget(self._stop_button)
+        control_layout.addWidget(self._clear_button)
         control_layout.addWidget(QLabel(tr("Поиск:")))
         control_layout.addWidget(self._search_edit)
         control_layout.addStretch()
@@ -358,9 +356,6 @@ class CanChannelMonitor(QWidget):
         send_top.addWidget(self._send_dlc_spin)
         send_top.addWidget(QLabel(tr("Data")))
         send_top.addWidget(self._send_data_widget)
-        send_top.addWidget(self._send_fd_check)
-        send_top.addWidget(self._send_brs_check)
-        send_top.addWidget(self._send_esi_check)
         send_top.addStretch()
         self._send_top_layout = send_top
 
@@ -398,32 +393,12 @@ class CanChannelMonitor(QWidget):
             return
         self._send_bit_combo.setCurrentIndex(1 if can_id > 0x7FF else 0)
         self._send_id_edit.setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
-        max_bytes = self._config.max_data_bytes()
-        dlc = max(1, min(max_bytes, parsed.get("dlc", 8)))
+        dlc = max(1, min(8, parsed.get("dlc", 8)))
         self._send_dlc_spin.setValue(dlc)
         data = parsed.get("data", [])
         for i, edit in enumerate(self._send_data_edits):
             edit.setText(f"{data[i]:02X}" if i < len(data) else "")
         self._on_send_dlc_changed(dlc)
-
-    def _rebuild_send_data_fields(self) -> None:
-        """Пересоздаёт поля Data в панели отправки при смене типа устройства."""
-        max_bytes = self._config.max_data_bytes()
-        old_values = [e.text() for e in self._send_data_edits]
-        self._send_data_widget.setParent(None)
-        self._send_data_widget.deleteLater()
-        self._send_data_edits, self._send_data_widget = create_data_field_widget(self._font, max_bytes, edit_width=38)
-        for i, edit in enumerate(self._send_data_edits):
-            edit.setText(old_values[i] if i < len(old_values) else "")
-        self._send_top_layout.insertWidget(7, self._send_data_widget)
-        self._send_dlc_spin.setRange(1, max_bytes)
-        if self._send_dlc_spin.value() > max_bytes:
-            self._send_dlc_spin.setValue(max_bytes)
-        self._on_send_dlc_changed(self._send_dlc_spin.value())
-        fd_visible = self._config.get("device_type") == 0x01
-        self._send_fd_check.setVisible(fd_visible)
-        self._send_brs_check.setVisible(fd_visible)
-        self._send_esi_check.setVisible(fd_visible)
 
     def _on_cyclic_toggled(self, checked: bool) -> None:
         if checked:
@@ -615,11 +590,33 @@ class CanChannelMonitor(QWidget):
         self._table.scrollToBottom()
 
     def _matches_filter(self, frame_id: int, data: bytes) -> bool:
-        for rule in self._filter_rules:
-            if rule.get("id") is not None and rule["id"] != frame_id:
+        if frame_id in self._ignored_ids:
+            return True
+
+        allow_rules = [r for r in self._filter_rules if r.get("mode") == "show"]
+        hide_rules = [r for r in self._filter_rules if r.get("mode") != "show"]
+
+        if allow_rules:
+            if not self._rule_matches(allow_rules, frame_id, data):
+                return True
+
+        if self._rule_matches(hide_rules, frame_id, data):
+            return True
+
+        return False
+
+    def _rule_matches(self, rules: List[Dict[str, Any]], frame_id: int, data: bytes) -> bool:
+        for rule in rules:
+            id_from = rule.get("id_from")
+            id_to = rule.get("id_to")
+            if id_from is not None and id_to is not None:
+                if not (id_from <= frame_id <= id_to):
+                    continue
+            elif id_from is not None and frame_id != id_from:
                 continue
-            from_bytes = rule.get("from", b"")
-            to_bytes = rule.get("to", b"")
+
+            from_bytes = rule.get("data_from", b"")
+            to_bytes = rule.get("data_to", b"")
             length = min(len(data), len(from_bytes), len(to_bytes))
             if length == 0 and (len(from_bytes) > 0 or len(to_bytes) > 0):
                 continue
@@ -663,15 +660,7 @@ class CanChannelMonitor(QWidget):
         self._highlight_timers.pop(row, None)
 
     def _show_filter_dialog(self) -> None:
-        dialog = FilterDialog(self._filter_rules, self._filter_enabled, self._highlight_interval_ms, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        result = dialog.get_result()
-        if result is None:
-            return
-        self._filter_enabled = result["enabled"]
-        self._highlight_interval_ms = result["interval_ms"]
-        self._filter_rules = result["rules"]
+        """Переключено на глобальное управление фильтром в CanMonitorTab."""
 
     def _show_context_menu(self, position) -> None:
         row = self._table.currentRow()
@@ -739,9 +728,22 @@ class CanChannelMonitor(QWidget):
         """Уведомляет канал о смене DBC."""
         self._apply_search(self._search_edit.text())
 
+    def set_filter(self, enabled: bool, rules: List[Dict[str, Any]], ignored_ids: List[int], interval_ms: int) -> None:
+        """Устанавливает правила фильтрации и интервал подсветки."""
+        self._filter_enabled = enabled
+        self._filter_rules = rules
+        self._ignored_ids = set(ignored_ids)
+        self._highlight_interval_ms = max(0, interval_ms)
+
+    def get_known_ids(self) -> List[int]:
+        """Возвращает список ID, которые уже были получены в канале."""
+        return list(self._id_to_row.keys())
+
     def retranslate_ui(self) -> None:
         """Обновляет статические строки панели мониторинга канала."""
-        self._filter_button.setText(tr("Фильтр"))
+        self._start_button.setText(tr("Запустить"))
+        self._stop_button.setText(tr("Остановить"))
+        self._clear_button.setText(tr("Очистить"))
         self._search_edit.setPlaceholderText(tr("Поиск по ID или данным…"))
         self._table.setHorizontalHeaderLabels(
             [tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("Счётчик"), tr("ASCII"), tr("Пояснение")]
@@ -764,26 +766,24 @@ class CanMonitorTab(QWidget):
         self._csv_writer: Optional[csv.writer] = None
         self._csv_path: Optional[Path] = None
         self._dbc_manager = DBCManager()
+        self._memory_indicator = MemoryIndicator(self)
         self._create_widgets()
         self._layout_widgets()
 
     def _create_widgets(self) -> None:
         compact_font = QFont("Segoe UI", 9)
 
-        self._start_all_button = QPushButton(tr("Запустить оба"))
-        self._start_all_button.setFixedSize(80, 28)
-        self._start_all_button.setFont(compact_font)
-        self._start_all_button.clicked.connect(self._start_all)
+        self._filter_button = QPushButton(tr("Фильтр"))
+        self._filter_button.setFixedSize(80, 28)
+        self._filter_button.setFont(compact_font)
+        self._filter_button.clicked.connect(self._show_filter_dialog)
 
-        self._stop_all_button = QPushButton(tr("Остановить оба"))
-        self._stop_all_button.setFixedSize(80, 28)
-        self._stop_all_button.setFont(compact_font)
-        self._stop_all_button.clicked.connect(self._stop_all)
-
-        self._clear_all_button = QPushButton(tr("Очистить всё"))
-        self._clear_all_button.setFixedSize(80, 28)
-        self._clear_all_button.setFont(compact_font)
-        self._clear_all_button.clicked.connect(self._clear_all)
+        self._highlight_interval_spin = QSpinBox()
+        self._highlight_interval_spin.setRange(0, 9999)
+        self._highlight_interval_spin.setValue(500)
+        self._highlight_interval_spin.setSuffix(tr(" мс"))
+        self._highlight_interval_spin.setFont(compact_font)
+        self._highlight_interval_spin.valueChanged.connect(self._on_highlight_interval_changed)
 
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._monitor1 = CanChannelMonitor(1, self._serial_manager, self)
@@ -799,26 +799,36 @@ class CanMonitorTab(QWidget):
         layout.setSpacing(8)
         layout.setContentsMargins(10, 10, 10, 10)
         buttons_layout = QHBoxLayout()
-        buttons_layout.addWidget(self._start_all_button)
-        buttons_layout.addWidget(self._stop_all_button)
-        buttons_layout.addWidget(self._clear_all_button)
+        buttons_layout.addWidget(self._filter_button)
+        buttons_layout.addWidget(QLabel(tr("Интервал подсветки")))
+        buttons_layout.addWidget(self._highlight_interval_spin)
         buttons_layout.addStretch()
         layout.addLayout(buttons_layout)
         layout.addWidget(self._splitter)
+        layout.addWidget(self._memory_indicator)
 
-    def _start_all(self) -> None:
-        self._monitor1._start()
-        self._monitor2._start()
-        logger.info("Запущен мониторинг обоих CAN-каналов")
+    def _show_filter_dialog(self) -> None:
+        """Открывает диалог фильтра и применяет настройки к обоим каналам."""
+        first = self._monitor1._filter_rules
+        enabled = self._monitor1._filter_enabled
+        ignored = list(self._monitor1._ignored_ids)
+        dialog = FilterDialog(first, enabled, ignored, self._get_known_ids, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        result = dialog.get_result()
+        if result is None:
+            return
+        interval = self._highlight_interval_spin.value()
+        self._monitor1.set_filter(result["enabled"], result["rules"], result["ignored_ids"], interval)
+        self._monitor2.set_filter(result["enabled"], result["rules"], result["ignored_ids"], interval)
+        self._memory_indicator.update_usage(self._memory_indicator.estimate_rules(result["rules"]))
 
-    def _stop_all(self) -> None:
-        self._monitor1._stop()
-        self._monitor2._stop()
-        logger.info("Остановлен мониторинг обоих CAN-каналов")
+    def _get_known_ids(self) -> List[int]:
+        return list(set(self._monitor1.get_known_ids() + self._monitor2.get_known_ids()))
 
-    def _clear_all(self) -> None:
-        self._monitor1._clear()
-        self._monitor2._clear()
+    def _on_highlight_interval_changed(self, value: int) -> None:
+        self._monitor1._highlight_interval_ms = value
+        self._monitor2._highlight_interval_ms = value
 
     def process_frame(self, frame: Dict[str, object]) -> None:
         channel = int(frame["channel"])
@@ -835,9 +845,7 @@ class CanMonitorTab(QWidget):
 
     def retranslate_ui(self) -> None:
         """Обновляет статические строки вкладки мониторинга."""
-        self._start_all_button.setText(tr("Запустить оба"))
-        self._stop_all_button.setText(tr("Остановить оба"))
-        self._clear_all_button.setText(tr("Очистить всё"))
+        self._filter_button.setText(tr("Фильтр"))
         self._monitor1.retranslate_ui()
         self._monitor2.retranslate_ui()
 

@@ -300,12 +300,27 @@ class SerialManager(QObject):
                     buffer.extend(self._port.read(available))
                     if CMD_DEVICE_ID_RESP in buffer:
                         idx = buffer.index(CMD_DEVICE_ID_RESP)
-                        if idx + 2 < len(buffer):
+                        if idx + 3 < len(buffer):
                             device_type = buffer[idx + 1]
                             device_version = buffer[idx + 2]
-                            self._config.set_bulk({"device_type": device_type, "device_version": device_version})
+                            serial_len = buffer[idx + 3]
+                            end_idx = idx + 4 + serial_len
+                            if end_idx <= len(buffer):
+                                serial_number = bytes(buffer[idx + 4 : end_idx]).decode("utf-8", errors="ignore").strip()
+                            else:
+                                serial_number = ""
+                            # Если устройство передаёт total_memory сразу за serial, ожидаем 2 байта
+                            total_memory = 1024
+                            if end_idx + 2 <= len(buffer):
+                                total_memory = (buffer[end_idx] << 8) | buffer[end_idx + 1]
+                            self._config.set_bulk({
+                                "device_type": device_type,
+                                "device_version": device_version,
+                                "serial_number": serial_number,
+                                "total_memory": total_memory if total_memory > 0 else 1024,
+                            })
                             self.device_identified.emit(device_type, device_version)
-                            logger.info("Устройство идентифицировано: type=0x%02X version=%d", device_type, device_version)
+                            logger.info("Устройство идентифицировано: type=0x%02X version=%d serial=%s mem=%d", device_type, device_version, serial_number or "-", total_memory)
                             return
                 time.sleep(0.01)
             self._config.set_bulk({"device_type": DEVICE_TYPE_BASIC, "device_version": 0})

@@ -263,7 +263,6 @@ class Translator:
                 "Не удалось определить скорость": "Could not detect baudrate",
                 "Устройство: {0} (версия {1})": "Device: {0} (version {1})",
                 "CAN 2.0": "CAN 2.0",
-                "CAN FD": "CAN FD",
                 "Аналоговые порты": "Analog ports",
                 "Скорость CAN": "CAN speed",
                 "Скорости CAN": "CAN speeds",
