@@ -30,6 +30,7 @@ from ui.can_monitor_tab import CanMonitorTab
 from ui.can_trigger_tab import CanTriggerTab
 from ui.flexible_logic_tab import FlexibleLogicTab
 from ui.library_browser import LibraryBrowser
+from ui.logic_tab import LogicTab
 
 logger = get_logger(__name__)
 
@@ -58,6 +59,7 @@ class SettingsWindow(QMainWindow):
         self._monitor_tab = CanMonitorTab(self._serial_manager, self)
         self._gateway_tab = CanGatewayTab(self._serial_manager, self)
         self._flexible_tab = FlexibleLogicTab(self._serial_manager, self)
+        self._logic_tab = LogicTab(self._serial_manager, self)
         self._library_tab = LibraryBrowser(self._trigger_tab, self._flexible_tab, self)
         self._graph_tab = SignalGraphTab(self._serial_manager, self)
         self._analyzer_tab = CanAnalyzer(self._serial_manager, self)
@@ -66,6 +68,7 @@ class SettingsWindow(QMainWindow):
         self._tabs.addTab(self._trigger_tab, "⚡ " + tr("Триггеры"))
         self._tabs.addTab(self._monitor_tab, "🔍 " + tr("Мониторинг"))
         self._tabs.addTab(self._gateway_tab, "🚦 " + tr("Шлюз"))
+        self._tabs.addTab(self._logic_tab, "🧩 " + tr("Логика"))
         self._tabs.addTab(self._flexible_tab, "🧩 " + tr("Гибкая логика"))
         self._tabs.addTab(self._library_tab, "📚 " + tr("Библиотека"))
         self._tabs.addTab(self._graph_tab, "📈 " + tr("Графики"))
@@ -145,6 +148,7 @@ class SettingsWindow(QMainWindow):
             self._trigger_tab: "⚡ " + tr("Триггеры"),
             self._monitor_tab: "🔍 " + tr("Мониторинг"),
             self._gateway_tab: "🚦 " + tr("Шлюз"),
+            self._logic_tab: "🧩 " + tr("Логика"),
             self._flexible_tab: "🧩 " + tr("Гибкая логика"),
             self._library_tab: "📚 " + tr("Библиотека"),
             self._graph_tab: "📈 " + tr("Графики"),
@@ -165,6 +169,7 @@ class SettingsWindow(QMainWindow):
             self._trigger_tab,
             self._monitor_tab,
             self._gateway_tab,
+            self._logic_tab,
             self._flexible_tab,
             self._library_tab,
             self._graph_tab,
@@ -193,6 +198,7 @@ class SettingsWindow(QMainWindow):
             self._trigger_tab: ["trigger", "триггеры", "триггер", "кэш", "cache", "ответ", "response", "frame", "фрейм", "data", "данные"],
             self._monitor_tab: ["monitor", "monitoring", "мониторинг", "фильтр", "filter", "канал", "channel", "can1", "can2", "поиск", "search", "send", "отправить"],
             self._gateway_tab: ["gateway", "шлюз", "rule", "правило", "ignore", "игнорировать", "replace", "подмена"],
+            self._logic_tab: ["logic", "логика", "events", "события", "conditions", "условия", "actions", "действия", "chain", "цепочка"],
             self._flexible_tab: ["flexible logic", "гибкая логика", "logic", "логика", "rules", "правила"],
             self._library_tab: ["library", "библиотека", "dbc", "id", "make", "марка", "model", "модель", "database", "база"],
             self._graph_tab: ["graph", "график", "signal", "сигнал", "chart", "plot"],

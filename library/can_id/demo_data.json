@@ -1,0 +1,94 @@
+[
+  {
+    "make": "Toyota",
+    "model": "Camry",
+    "year": 2018,
+    "messages": [
+      {"id": "0x0C0", "bit": 0, "dlc": 8, "name": "EngineSpeed", "description": "Обороты двигателя", "data": "00 00 00 00 00 00 00 00"},
+      {"id": "0x0B0", "bit": 0, "dlc": 8, "name": "VehicleSpeed", "description": "Скорость автомобиля", "data": "00 00 00 00 00 00 00 00"},
+      {"id": "0x180", "bit": 0, "dlc": 8, "name": "Throttle", "description": "Положение дроссельной заслонки", "data": "00 00 00 00 00 00 00 00"}
+    ]
+  },
+  {
+    "make": "Kia",
+    "model": "Rio",
+    "year": 2019,
+    "messages": [
+      {"id": "0x130", "bit": 0, "dlc": 8, "name": "DoorStatus", "description": "Статус дверей", "data": "00 00 00 00 00 00 00 00"},
+      {"id": "0x3A0", "bit": 0, "dlc": 8, "name": "LightStatus", "description": "Статус освещения", "data": "00 00 00 00 00 00 00 00"},
+      {"id": "0x260", "bit": 0, "dlc": 8, "name": "TurnSignals", "description": "Поворотники", "data": "00 00 00 00 00 00 00 00"}
+    ]
+  },
+  {
+    "make": "BMW",
+    "model": "E46",
+    "year": 2003,
+    "messages": [
+      {"id": "0x1A0", "bit": 0, "dlc": 8, "name": "EngineTemp", "description": "Температура двигателя", "data": "00 00 00 00 00 00 00 00"},
+      {"id": "0x2C0", "bit": 0, "dlc": 8, "name": "ABS", "description": "ABS/ESP статус", "data": "00 00 00 00 00 00 00 00"}
+    ]
+  },
+  {
+    "make": "Ford",
+    "model": "Focus",
+    "year": 2015,
+    "messages": [
+      {"id": "0x090", "bit": 0, "dlc": 8, "name": "SteeringAngle", "description": "Угол поворота руля", "data": "00 00 00 00 00 00 00 00"},
+      {"id": "0x1F0", "bit": 0, "dlc": 8, "name": "BrakePedal", "description": "Педаль тормоза", "data": "00 00 00 00 00 00 00 00"}
+    ]
+  },
+  {
+    "make": "Volkswagen",
+    "model": "Golf",
+    "year": 2016,
+    "messages": [
+      {"id": "0x320", "bit": 0, "dlc": 8, "name": "Climate", "description": "Климат-контроль", "data": "00 00 00 00 00 00 00 00"},
+      {"id": "0x470", "bit": 0, "dlc": 8, "name": "SeatBelt", "description": "Ремень безопасности", "data": "00 00 00 00 00 00 00 00"}
+    ]
+  },
+  {
+    "make": "Honda",
+    "model": "Civic",
+    "year": 2017,
+    "messages": [
+      {"id": "0x1B0", "bit": 0, "dlc": 8, "name": "RPMSpeed", "description": "Обороты и скорость", "data": "00 00 00 00 00 00 00 00"},
+      {"id": "0x1D0", "bit": 0, "dlc": 8, "name": "Odometer", "description": "Пробег", "data": "00 00 00 00 00 00 00 00"}
+    ]
+  },
+  {
+    "make": "Nissan",
+    "model": "Leaf",
+    "year": 2020,
+    "messages": [
+      {"id": "0x1DB", "bit": 0, "dlc": 8, "name": "BatterySOC", "description": "Заряд батареи", "data": "00 00 00 00 00 00 00 00"},
+      {"id": "0x1DC", "bit": 0, "dlc": 8, "name": "BatteryVoltage", "description": "Напряжение батареи", "data": "00 00 00 00 00 00 00 00"}
+    ]
+  },
+  {
+    "make": "Tesla",
+    "model": "Model 3",
+    "year": 2021,
+    "messages": [
+      {"id": "0x118", "bit": 0, "dlc": 8, "name": "DrivePower", "description": "Мощность привода", "data": "00 00 00 00 00 00 00 00"},
+      {"id": "0x2E0", "bit": 0, "dlc": 8, "name": "ChargeState", "description": "Состояние зарядки", "data": "00 00 00 00 00 00 00 00"}
+    ]
+  },
+  {
+    "make": "Mazda",
+    "model": "CX-5",
+    "year": 2019,
+    "messages": [
+      {"id": "0x240", "bit": 0, "dlc": 8, "name": "TirePressure", "description": "Давление в шинах", "data": "00 00 00 00 00 00 00 00"},
+      {"id": "0x430", "bit": 0, "dlc": 8, "name": "HVAC", "description": "Отопление/вентиляция", "data": "00 00 00 00 00 00 00 00"}
+    ]
+  },
+  {
+    "make": "Subaru",
+    "model": "Outback",
+    "year": 2018,
+    "messages": [
+      {"id": "0x130", "bit": 0, "dlc": 8, "name": "CruiseControl", "description": "Круиз-контроль", "data": "00 00 00 00 00 00 00 00"},
+      {"id": "0x2A0", "bit": 0, "dlc": 8, "name": "AWD", "description": "Статус полного привода", "data": "00 00 00 00 00 00 00 00"}
+    ]
+  }
+]

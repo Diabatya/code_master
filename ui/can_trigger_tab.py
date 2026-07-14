@@ -884,6 +884,8 @@ class CanTriggerTab(QWidget):
         can_id = int(packet["id"])
         block["recv"]["id"].setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
         block["recv"]["bit"].setCurrentIndex(1 if can_id > 0x7FF else 0)
+        if "dlc" in packet:
+            block["recv"]["dlc"].setValue(packet["dlc"])
         bytes_data = bytes(packet["data"])
         for d, edit in enumerate(block["recv"]["data"]):
             edit.setText(f"{bytes_data[d]:02X}" if d < len(bytes_data) else "")
