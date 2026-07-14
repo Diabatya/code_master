@@ -9,13 +9,14 @@ import argparse
 import sys
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 from core.bootloader import Bootloader, BootloaderError
 from core.serial_manager import SerialManager
 from models.config import Config
 from models.logger import setup_logging
 from ui.dark_theme import apply_dark_theme, apply_light_theme
+from ui.disclaimer_dialog import DisclaimerDialog
 from ui.main_window import MainWindow
 
 
@@ -93,6 +94,11 @@ def main() -> int:
         apply_dark_theme(app)
 
     serial_manager = SerialManager()
+
+    disclaimer = DisclaimerDialog()
+    if disclaimer.exec() != QDialog.DialogCode.Accepted:
+        return 0
+
     main_window = MainWindow(serial_manager)
     main_window.show()
 
