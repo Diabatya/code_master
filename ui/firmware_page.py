@@ -113,35 +113,16 @@ class BootloaderWorker(QThread):
 
 
 class FirmwarePage(QWidget):
-    """Страница управления прошивкой STM32."""
+    """Страница выбора типа устройства для прошивки."""
 
     def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
-        self._worker: Optional[BootloaderWorker] = None
         self._config = Config()
         self._create_widgets()
         self._build_layout()
         self._connect_signals()
-        self._refresh_ports()
-        self._update_connection_status()
         self._update_device_info()
-        self._populate_fw_list()
-        self._populate_car_list()
-
-    def _make_browse_button(self, callback) -> QPushButton:
-        """Создаёт чёткую кнопку выбора файла со стандартной иконкой папки."""
-        button = QPushButton()
-        button.setFixedSize(36, 36)
-        button.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
-        button.setIconSize(QSize(24, 24))
-        button.setToolTip(tr("Выбрать файл с компьютера"))
-        button.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; border: none; border-radius: 4px; }"
-            "QPushButton:hover { background-color: #4A4A6A; }"
-        )
-        button.clicked.connect(callback)
-        return button
 
     def _create_widgets(self) -> None:
         font = QFont("Segoe UI", 10)
@@ -150,89 +131,16 @@ class FirmwarePage(QWidget):
         self._title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         self._title.setProperty("title", True)
 
-        # Панель подключения
-        self._interface_label = QLabel(tr("Интерфейс"))
-        self._interface_label.setFont(font)
-        self._interface_combo = QComboBox()
-        self._interface_combo.setFont(font)
-        self._interface_combo.setEditable(True)
-        self._interface_combo.setMinimumWidth(180)
-
-        self._connect_button = QPushButton(tr("Подключиться"))
-        self._connect_button.setFont(font)
-        self._connect_button.setFixedHeight(30)
-        self._connect_button.clicked.connect(self._on_connect_clicked)
-
-        self._refresh_ports_button = QPushButton(tr("🔄"))
-        self._refresh_ports_button.setFont(font)
-        self._refresh_ports_button.setFixedSize(30, 30)
-        self._refresh_ports_button.setToolTip(tr("Обновить список портов"))
-        self._refresh_ports_button.clicked.connect(self._refresh_ports)
-
-        self._connection_status = QLabel(tr("Не подключено"))
-        self._connection_status.setFont(font)
-        self._connection_status.setStyleSheet("color: #F44336;")
-
         self._device_type_label = QLabel(tr("Устройство"))
         self._device_type_label.setFont(font)
+
         self._device_type_combo = QComboBox()
         self._device_type_combo.setFont(font)
-        self._device_type_combo.setMinimumWidth(140)
+        self._device_type_combo.setMinimumWidth(160)
         self._device_type_combo.addItem(tr("2 CAN"), FIRMWARE_DEVICE_TYPE_2_CAN)
         self._device_type_combo.addItem(tr("2 CAN FD"), FIRMWARE_DEVICE_TYPE_2_CAN_FD)
         self._device_type_combo.addItem(tr("2 CAN +"), FIRMWARE_DEVICE_TYPE_2_CAN_PLUS)
         self._device_type_combo.currentIndexChanged.connect(self._on_device_type_changed)
-
-        self._serial_number_label = QLabel(tr("Серийный номер: -"))
-        self._serial_number_label.setFont(font)
-
-        # Столбец 1: ПО блока
-        self._fw_group = QGroupBox(tr("ПО блока"))
-        self._fw_group.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        self._fw_list = QListWidget()
-        self._fw_list.setFont(font)
-        self._fw_update_button = QPushButton(tr("Обновить"))
-        setup_button(self._fw_update_button, height=30)
-        self._fw_update_button.clicked.connect(self._on_fw_update)
-        self._fw_browse_button = self._make_browse_button(self._on_fw_browse)
-
-        # Столбец 2: Автомобиль
-        self._car_group = QGroupBox(tr("Автомобиль"))
-        self._car_group.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        self._car_search = QLineEdit()
-        self._car_search.setFont(font)
-        self._car_search.setPlaceholderText(tr("Поиск по авто или версии"))
-        self._car_search.textChanged.connect(self._on_car_search)
-        self._car_list = QListWidget()
-        self._car_list.setFont(font)
-        self._car_update_button = QPushButton(tr("Обновить"))
-        setup_button(self._car_update_button, height=30)
-        self._car_update_button.clicked.connect(self._on_car_update)
-        self._car_browse_button = self._make_browse_button(self._on_car_browse)
-
-        # Столбец 3: Конфигурация
-        self._config_group = QGroupBox(tr("Конфигурация"))
-        self._config_group.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        self._config_label = QLabel(tr("Конфигурация не загружена"))
-        self._config_label.setFont(font)
-        self._config_label.setWordWrap(True)
-        self._config_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self._config_update_button = QPushButton(tr("Обновить"))
-        setup_button(self._config_update_button, height=30)
-        self._config_update_button.clicked.connect(self._on_config_update)
-        self._config_browse_button = self._make_browse_button(self._on_config_browse)
-
-        # Общий прогресс и статус
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 100)
-        self._progress.setValue(0)
-        self._progress.setTextVisible(True)
-        self._progress.setFont(font)
-
-        self._status_label = QLabel("")
-        self._status_label.setFont(font)
-        self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._status_label.setWordWrap(True)
 
     def _build_layout(self) -> None:
         layout = QVBoxLayout(self)
@@ -240,273 +148,30 @@ class FirmwarePage(QWidget):
         layout.setSpacing(10)
         layout.addWidget(self._title)
 
-        connection_layout = QHBoxLayout()
-        connection_layout.setSpacing(8)
-        connection_layout.addWidget(self._interface_label)
-        connection_layout.addWidget(self._interface_combo)
-        connection_layout.addWidget(self._refresh_ports_button)
-        connection_layout.addWidget(self._connect_button)
-        connection_layout.addWidget(self._connection_status)
-        connection_layout.addStretch()
-        connection_layout.addWidget(self._device_type_label)
-        connection_layout.addWidget(self._device_type_combo)
-        connection_layout.addWidget(self._serial_number_label)
-        layout.addLayout(connection_layout)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addStretch()
+        row.addWidget(self._device_type_label)
+        row.addWidget(self._device_type_combo)
+        row.addStretch()
+        layout.addLayout(row)
 
-        columns = QHBoxLayout()
-        columns.setSpacing(12)
-
-        # ПО блока
-        fw_layout = QVBoxLayout(self._fw_group)
-        fw_layout.setSpacing(8)
-        fw_layout.addWidget(self._fw_list, 1)
-        fw_buttons = QHBoxLayout()
-        fw_buttons.addWidget(self._fw_update_button)
-        fw_buttons.addWidget(self._fw_browse_button)
-        fw_layout.addLayout(fw_buttons)
-        columns.addWidget(self._fw_group, 1)
-
-        # Автомобиль
-        car_layout = QVBoxLayout(self._car_group)
-        car_layout.setSpacing(8)
-        car_layout.addWidget(self._car_search)
-        car_layout.addWidget(self._car_list, 1)
-        car_buttons = QHBoxLayout()
-        car_buttons.addWidget(self._car_update_button)
-        car_buttons.addWidget(self._car_browse_button)
-        car_layout.addLayout(car_buttons)
-        columns.addWidget(self._car_group, 1)
-
-        # Конфигурация
-        config_layout = QVBoxLayout(self._config_group)
-        config_layout.setSpacing(8)
-        config_layout.addWidget(self._config_label, 1)
-        config_buttons = QHBoxLayout()
-        config_buttons.addWidget(self._config_update_button)
-        config_buttons.addWidget(self._config_browse_button)
-        config_layout.addLayout(config_buttons)
-        columns.addWidget(self._config_group, 1)
-
-        layout.addLayout(columns, 1)
-        layout.addWidget(self._progress)
-        layout.addWidget(self._status_label)
-
-    def _populate_fw_list(self) -> None:
-        self._fw_list.clear()
-        for version in sorted(DEMO_FW_VERSIONS.keys()):
-            display = self._display_name(version, DEMO_FW_VERSIONS[version])
-            item = QListWidgetItem(display)
-            item.setData(Qt.ItemDataRole.UserRole, DEMO_FW_VERSIONS[version])
-            self._fw_list.addItem(item)
-        if self._fw_list.count():
-            self._fw_list.setCurrentRow(0)
-
-    def _populate_car_list(self, filter_text: str = "") -> None:
-        self._car_list.clear()
-        text = filter_text.strip().lower()
-        for name in sorted(DEMO_CARS.keys()):
-            if text and text not in name.lower():
-                continue
-            display = self._display_name(name, DEMO_CARS[name])
-            item = QListWidgetItem(display)
-            item.setData(Qt.ItemDataRole.UserRole, DEMO_CARS[name])
-            self._car_list.addItem(item)
-        if self._car_list.count():
-            self._car_list.setCurrentRow(0)
-
-    def _display_name(self, name: str, path: str) -> str:
-        if path:
-            return name
-        return f"{name} {tr('(загрузите файл)')}"
-
-    def _selected_file(self, list_widget: QListWidget) -> Optional[str]:
-        item = list_widget.currentItem()
-        if item is None:
-            return None
-        path = item.data(Qt.ItemDataRole.UserRole)
-        if isinstance(path, str):
-            return path
-        return None
-
-    def _browse_firmware(self) -> Optional[str]:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            tr("Выбор файла прошивки"),
-            "",
-            tr("Firmware files (*.bin *.hex);;All files (*.*)"),
-        )
-        return path if path else None
-
-    def _flash_file(self, path: str) -> None:
-        self._start_worker("flash", path)
-
-    def _on_fw_update(self) -> None:
-        path = self._selected_file(self._fw_list)
-        if not path:
-            QMessageBox.warning(self, tr("Внимание"), tr("Для выбранной версии ПО не выбран файл. Нажмите кнопку 📂."))
-            return
-        self._flash_file(path)
-
-    def _on_fw_browse(self) -> None:
-        path = self._browse_firmware()
-        if not path:
-            return
-        item = self._fw_list.currentItem()
-        if item is not None:
-            base = item.text().replace(f" {tr('(загрузите файл)')}", "").strip()
-            item.setText(base)
-            item.setData(Qt.ItemDataRole.UserRole, path)
-        self._flash_file(path)
-
-    def _on_car_update(self) -> None:
-        path = self._selected_file(self._car_list)
-        if not path:
-            QMessageBox.warning(self, tr("Внимание"), tr("Для выбранного автомобиля не выбран файл. Нажмите кнопку 📂."))
-            return
-        self._flash_file(path)
-
-    def _on_car_browse(self) -> None:
-        path = self._browse_firmware()
-        if not path:
-            return
-        item = self._car_list.currentItem()
-        if item is not None:
-            base = item.text().replace(f" {tr('(загрузите файл)')}", "").strip()
-            item.setText(base)
-            item.setData(Qt.ItemDataRole.UserRole, path)
-        self._flash_file(path)
-
-    def _on_car_search(self, text: str) -> None:
-        self._populate_car_list(text)
-
-    def _on_config_update(self) -> None:
-        path = self._config.label if hasattr(self._config, "label") else None
-        # Демо-заглушка: берём путь из Config, если сохранён
-        config_path = self._config.get("last_config_firmware", "")
-        if not config_path:
-            self._set_status(tr("Конфигурация не загружена"), error=True)
-            return
-        self._flash_file(config_path)
-
-    def _on_config_browse(self) -> None:
-        path = self._browse_firmware()
-        if not path:
-            return
-        self._config.set("last_config_firmware", path)
-        self._config_label.setText(tr("Конфигурация: {0}").format(Path(path).name))
-        self._flash_file(path)
-
-    def _set_status(self, text: str, error: bool = False) -> None:
-        self._status_label.setText(text)
-        color = "#F44336" if error else "#4CAF50"
-        self._status_label.setStyleSheet(f"color: {color};")
-
-    def _start_worker(self, mode: str, firmware_path: str = "") -> None:
-        if self._worker is not None and self._worker.isRunning():
-            QMessageBox.warning(self, tr("Внимание"), tr("Операция уже выполняется"))
-            return
-
-        if not self._serial_manager.is_open():
-            self._set_status(tr("COM-порт не открыт. Подключитесь в мастере подключения."), error=True)
-            return
-
-        self._progress.setValue(0)
-        self._set_status(tr("Выполнение..."))
-        self._set_buttons_enabled(False)
-
-        self._worker = BootloaderWorker(self._serial_manager, mode, firmware_path, self)
-        self._worker.progress.connect(self._progress.setValue)
-        self._worker.finished_success.connect(self._on_success)
-        self._worker.finished_error.connect(self._on_error)
-        self._worker.info_ready.connect(self._on_info_ready)
-        self._worker.finished.connect(self._on_worker_finished)
-        self._worker.start()
-
-    def _set_buttons_enabled(self, enabled: bool) -> None:
-        self._fw_update_button.setEnabled(enabled)
-        self._fw_browse_button.setEnabled(enabled)
-        self._car_update_button.setEnabled(enabled)
-        self._car_browse_button.setEnabled(enabled)
-        self._config_update_button.setEnabled(enabled)
-        self._config_browse_button.setEnabled(enabled)
-
-    def _on_success(self, message: str) -> None:
-        self._set_status(message)
-        QMessageBox.information(self, tr("Готово"), message)
-
-    def _on_error(self, message: str) -> None:
-        self._set_status(message, error=True)
-        QMessageBox.critical(self, tr("Ошибка"), message)
-
-    def _on_info_ready(self, message: str) -> None:
-        self._set_status(message)
+        layout.addStretch(1)
 
     def _connect_signals(self) -> None:
         """Подключает сигналы SerialManager к UI."""
-        self._serial_manager.connection_changed.connect(self._update_connection_status)
         self._serial_manager.device_identified.connect(self._update_device_info)
 
-    def _refresh_ports(self) -> None:
-        """Обновляет список доступных COM-портов."""
-        current = self._interface_combo.currentText()
-        self._interface_combo.clear()
-        self._interface_combo.addItem(tr("FAKE (эмулятор)"))
-        for port_info in comports():
-            self._interface_combo.addItem(port_info.device)
-        if current:
-            index = self._interface_combo.findText(current)
-            if index >= 0:
-                self._interface_combo.setCurrentIndex(index)
-            else:
-                self._interface_combo.setCurrentIndex(0)
-
-    def _on_connect_clicked(self) -> None:
-        """Подключается или отключается от выбранного COM-порта."""
-        if self._serial_manager.is_open():
-            self._serial_manager.close_port()
-            return
-        port_text = self._interface_combo.currentText()
-        port_name = "FAKE" if port_text.startswith("FAKE") else port_text
-        if not port_name:
-            QMessageBox.warning(self, tr("Внимание"), tr("Выберите COM-порт"))
-            return
-        baudrate = int(self._config.get("baudrate", 115200))
-        emulation = port_name == "FAKE"
-        if self._serial_manager.open_port(port_name, baudrate, emulation):
-            self._set_status(tr("Подключено к {0}").format(port_name), error=False)
-        else:
-            self._set_status(tr("Не удалось подключиться к {0}").format(port_name), error=True)
-            QMessageBox.critical(
-                self,
-                tr("Ошибка"),
-                tr("Не удалось подключиться к {0}").format(port_name),
-            )
-
-    def _update_connection_status(self) -> None:
-        """Обновляет статус подключения и кнопку."""
-        if self._serial_manager.is_open():
-            port_name = self._serial_manager.current_port_name() or "-"
-            self._connect_button.setText(tr("Отключиться"))
-            self._connection_status.setText(tr("Подключено к {0}").format(port_name))
-            self._connection_status.setStyleSheet("color: #4CAF50;")
-        else:
-            self._connect_button.setText(tr("Подключиться"))
-            self._connection_status.setText(tr("Не подключено"))
-            self._connection_status.setStyleSheet("color: #F44336;")
-
     def _update_device_info(self, device_type: int = 0, device_version: int = 0) -> None:
-        """Обновляет информацию об устройстве."""
+        """Обновляет выпадающий список типа устройства из конфига."""
         _ = device_version
         device_type = self._config.get("device_type", device_type)
-        serial_number = self._config.get("serial_number", "")
-        # Синхронизируем выпадающий список без лишних сигналов
         index = self._device_type_combo.findData(device_type)
         if index < 0:
             index = 0
         self._device_type_combo.blockSignals(True)
         self._device_type_combo.setCurrentIndex(index)
         self._device_type_combo.blockSignals(False)
-        self._serial_number_label.setText(tr("Серийный номер: {0}").format(serial_number or "-"))
 
     def _on_device_type_changed(self, index: int) -> None:
         """Сохраняет выбранный тип устройства в конфиг."""
@@ -515,10 +180,8 @@ class FirmwarePage(QWidget):
             self._config.set("device_type", device_type)
 
     def retranslate_ui(self) -> None:
-        """Обновляет статические строки страницы прошивки."""
+        """Обновляет статические строки страницы."""
         self._title.setText(tr("Прошивка STM32"))
-        self._interface_label.setText(tr("Интерфейс"))
-        self._refresh_ports_button.setToolTip(tr("Обновить список портов"))
         self._device_type_label.setText(tr("Устройство"))
         current_type = self._device_type_combo.currentData()
         self._device_type_combo.clear()
@@ -529,14 +192,3 @@ class FirmwarePage(QWidget):
             index = self._device_type_combo.findData(current_type)
             if index >= 0:
                 self._device_type_combo.setCurrentIndex(index)
-        self._update_connection_status()
-        self._update_device_info()
-        self._fw_group.setTitle(tr("ПО блока"))
-        self._car_group.setTitle(tr("Автомобиль"))
-        self._config_group.setTitle(tr("Конфигурация"))
-        self._populate_fw_list()
-        self._populate_car_list()
-
-    def _on_worker_finished(self) -> None:
-        self._set_buttons_enabled(True)
-        self._worker = None

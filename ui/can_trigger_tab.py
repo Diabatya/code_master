@@ -120,7 +120,7 @@ class CanTriggerTab(QWidget):
         return edit
 
     def _make_data_edits(self, font: QFont) -> Tuple[List[QLineEdit], QWidget]:
-        return create_data_field_widget(font, 8, edit_width=35)
+        return create_data_field_widget(font, 8, edit_width=42)
 
     def _make_channel_combo(self, font: QFont) -> QComboBox:
         combo = QComboBox()

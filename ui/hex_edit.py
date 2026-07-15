@@ -63,7 +63,7 @@ class HexDataEdit(QLineEdit):
 
 
 def create_data_field_widget(
-    font: QFont, count: int, edit_width: int = 32, placeholder_prefix: str = "D"
+    font: QFont, count: int, edit_width: int = 40, placeholder_prefix: str = "D"
 ) -> Tuple[List[QLineEdit], QWidget]:
     """Создаёт виджет с count полями HexDataEdit. Для count > 8 оборачивает в QScrollArea."""
     edits: List[QLineEdit] = []

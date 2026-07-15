@@ -3,9 +3,9 @@
 import re
 from typing import Any, Callable, Dict, List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QClipboard, QFont
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QPushButton, QSizePolicy, QWidget
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QPushButton, QSizePolicy, QStyle, QWidget
 
 from models.logger import get_logger
 from models.translations import _ as tr
@@ -59,14 +59,18 @@ def create_clipboard_buttons(
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-    copy_button = QPushButton("📋")
+    copy_button = QPushButton()
     copy_button.setToolTip(tr("Копировать"))
-    paste_button = QPushButton("📄")
+    copy_button.setIcon(copy_button.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon))
+
+    paste_button = QPushButton()
     paste_button.setToolTip(tr("Вставить"))
+    paste_button.setIcon(paste_button.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton))
 
     for button in (copy_button, paste_button):
         _style_clipboard_button(button)
         button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        button.setIconSize(QSize(18, 18))
 
     copy_button.clicked.connect(
         lambda: _copy_packet(id_edit, dlc_spin, data_edits or [], data_edit)

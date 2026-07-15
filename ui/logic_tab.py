@@ -114,7 +114,7 @@ class _LogicRow(QWidget):
         self._dlc_spin.setFixedWidth(50)
         self._dlc_spin.valueChanged.connect(self._on_dlc_changed)
 
-        self._data_edits, self._data_widget = create_data_field_widget(self._font, 8, edit_width=35)
+        self._data_edits, self._data_widget = create_data_field_widget(self._font, 8, edit_width=42)
 
         self._can_frame = QWidget()
         can_layout = QHBoxLayout(self._can_frame)
