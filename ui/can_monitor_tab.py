@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtGui import QIntValidator
+from PySide6.QtGui import QDoubleValidator
 
 from core.can_protocol import pack_can_frame
 from core.dbc_manager import DBCManager
@@ -802,10 +802,15 @@ class CanMonitorTab(QWidget):
         self._can1_speed_combo.setFont(compact_font)
         self._can1_speed_combo.setEditable(True)
         self._can1_speed_combo.setFixedWidth(120)
-        for preset in ["125", "250", "500", "1000"]:
+        for preset in ["33.3", "125", "250", "500", "1000"]:
             self._can1_speed_combo.addItem(preset)
-        self._can1_speed_combo.lineEdit().setValidator(QIntValidator(1, 10000, self))
+        self._can1_speed_combo.lineEdit().setValidator(QDoubleValidator(0.1, 10000.0, 1, self))
         self._can1_speed_combo.lineEdit().setPlaceholderText(tr("кбит/с"))
+
+        self._can1_terminator_check = QCheckBox(tr("Включить терминатный резистор 120 Ом"))
+        self._can1_terminator_check.setFont(compact_font)
+        self._can1_terminator_check.setChecked(self._config.get("can1_terminator", False))
+        self._can1_terminator_check.toggled.connect(lambda checked: self._config.set("can1_terminator", checked))
 
         self._can2_speed_label = QLabel(tr("Скорость CAN2"))
         self._can2_speed_label.setFont(compact_font)
@@ -813,10 +818,15 @@ class CanMonitorTab(QWidget):
         self._can2_speed_combo.setFont(compact_font)
         self._can2_speed_combo.setEditable(True)
         self._can2_speed_combo.setFixedWidth(120)
-        for preset in ["125", "250", "500", "1000"]:
+        for preset in ["33.3", "125", "250", "500", "1000"]:
             self._can2_speed_combo.addItem(preset)
-        self._can2_speed_combo.lineEdit().setValidator(QIntValidator(1, 10000, self))
+        self._can2_speed_combo.lineEdit().setValidator(QDoubleValidator(0.1, 10000.0, 1, self))
         self._can2_speed_combo.lineEdit().setPlaceholderText(tr("кбит/с"))
+
+        self._can2_terminator_check = QCheckBox(tr("Включить терминатный резистор 120 Ом"))
+        self._can2_terminator_check.setFont(compact_font)
+        self._can2_terminator_check.setChecked(self._config.get("can2_terminator", False))
+        self._can2_terminator_check.toggled.connect(lambda checked: self._config.set("can2_terminator", checked))
 
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -830,11 +840,11 @@ class CanMonitorTab(QWidget):
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 1)
 
-        self._can1_speed_combo.setCurrentText(str(self._config.get("can1_speed", 500000) // 1000))
+        self._can1_speed_combo.setCurrentText(self._format_speed(self._config.get("can1_speed", 500000)))
         self._can1_speed_combo.currentIndexChanged.connect(self._on_can1_speed_changed)
         self._can1_speed_combo.lineEdit().editingFinished.connect(self._on_can1_speed_changed)
 
-        self._can2_speed_combo.setCurrentText(str(self._config.get("can2_speed", 500000) // 1000))
+        self._can2_speed_combo.setCurrentText(self._format_speed(self._config.get("can2_speed", 500000)))
         self._can2_speed_combo.currentIndexChanged.connect(self._on_can2_speed_changed)
         self._can2_speed_combo.lineEdit().editingFinished.connect(self._on_can2_speed_changed)
 
@@ -848,8 +858,10 @@ class CanMonitorTab(QWidget):
         buttons_layout.addWidget(self._highlight_interval_spin)
         buttons_layout.addWidget(self._can1_speed_label)
         buttons_layout.addWidget(self._can1_speed_combo)
+        buttons_layout.addWidget(self._can1_terminator_check)
         buttons_layout.addWidget(self._can2_speed_label)
         buttons_layout.addWidget(self._can2_speed_combo)
+        buttons_layout.addWidget(self._can2_terminator_check)
         buttons_layout.addStretch()
         layout.addLayout(buttons_layout)
         layout.addWidget(self._splitter)
@@ -878,19 +890,29 @@ class CanMonitorTab(QWidget):
         self._monitor1._highlight_interval_ms = value
         self._monitor2._highlight_interval_ms = value
 
+    def _format_speed(self, speed_bps: int) -> str:
+        """Форматирует скорость в кбит/с для отображения в комбобоксе."""
+        if speed_bps == 33300:
+            return "33.3"
+        if speed_bps and speed_bps % 1000 == 0:
+            return str(speed_bps // 1000)
+        if speed_bps:
+            return f"{speed_bps / 1000:.1f}"
+        return "500"
+
     def _on_can1_speed_changed(self) -> None:
         try:
-            speed_kbps = int(self._can1_speed_combo.currentText().strip() or "500")
+            speed_kbps = float(self._can1_speed_combo.currentText().strip() or "500")
         except ValueError:
-            speed_kbps = 500
-        self._config.set("can1_speed", max(1000, speed_kbps * 1000))
+            speed_kbps = 500.0
+        self._config.set("can1_speed", max(1000, int(round(speed_kbps * 1000))))
 
     def _on_can2_speed_changed(self) -> None:
         try:
-            speed_kbps = int(self._can2_speed_combo.currentText().strip() or "500")
+            speed_kbps = float(self._can2_speed_combo.currentText().strip() or "500")
         except ValueError:
-            speed_kbps = 500
-        self._config.set("can2_speed", max(1000, speed_kbps * 1000))
+            speed_kbps = 500.0
+        self._config.set("can2_speed", max(1000, int(round(speed_kbps * 1000))))
 
     def process_frame(self, frame: Dict[str, object]) -> None:
         channel = int(frame["channel"])
@@ -909,7 +931,9 @@ class CanMonitorTab(QWidget):
         """Обновляет статические строки вкладки мониторинга."""
         self._filter_button.setText(tr("Фильтр"))
         self._can1_speed_label.setText(tr("Скорость CAN1"))
+        self._can1_terminator_check.setText(tr("Включить терминатный резистор 120 Ом"))
         self._can2_speed_label.setText(tr("Скорость CAN2"))
+        self._can2_terminator_check.setText(tr("Включить терминатный резистор 120 Ом"))
         self._monitor1.retranslate_ui()
         self._monitor2.retranslate_ui()
 

@@ -23,7 +23,11 @@ from PySide6.QtWidgets import (
 )
 
 from core.bootloader import Bootloader, BootloaderError
-from core.can_protocol import DEVICE_TYPE_ANALOG, DEVICE_TYPE_BASIC
+from core.can_protocol import (
+    DEVICE_TYPE_BASIC as FIRMWARE_DEVICE_TYPE_2_CAN,
+    DEVICE_TYPE_ANALOG as FIRMWARE_DEVICE_TYPE_2_CAN_PLUS,
+    DEVICE_TYPE_CAN_FD as FIRMWARE_DEVICE_TYPE_2_CAN_FD,
+)
 from core.serial_manager import SerialManager
 from models.config import Config
 from models.logger import get_logger
@@ -31,9 +35,7 @@ from models.translations import _ as tr
 from ui.ui_utils import setup_button
 
 # Новые типы устройств для выбора в окне прошивки
-FIRMWARE_DEVICE_TYPE_2_CAN = 0
-FIRMWARE_DEVICE_TYPE_2_CAN_FD = 1
-FIRMWARE_DEVICE_TYPE_2_CAN_PLUS = 2
+# 2 CAN = 0x00, 2 CAN+ (с аналоговыми портами) = 0x01, 2 CAN FD = 0x02
 
 try:
     from serial.tools.list_ports import comports
@@ -138,8 +140,8 @@ class FirmwarePage(QWidget):
         self._device_type_combo.setFont(font)
         self._device_type_combo.setMinimumWidth(160)
         self._device_type_combo.addItem(tr("2 CAN"), FIRMWARE_DEVICE_TYPE_2_CAN)
-        self._device_type_combo.addItem(tr("2 CAN FD"), FIRMWARE_DEVICE_TYPE_2_CAN_FD)
         self._device_type_combo.addItem(tr("2 CAN +"), FIRMWARE_DEVICE_TYPE_2_CAN_PLUS)
+        self._device_type_combo.addItem(tr("2 CAN FD"), FIRMWARE_DEVICE_TYPE_2_CAN_FD)
         self._device_type_combo.currentIndexChanged.connect(self._on_device_type_changed)
 
     def _build_layout(self) -> None:
@@ -186,8 +188,8 @@ class FirmwarePage(QWidget):
         current_type = self._device_type_combo.currentData()
         self._device_type_combo.clear()
         self._device_type_combo.addItem(tr("2 CAN"), FIRMWARE_DEVICE_TYPE_2_CAN)
-        self._device_type_combo.addItem(tr("2 CAN FD"), FIRMWARE_DEVICE_TYPE_2_CAN_FD)
         self._device_type_combo.addItem(tr("2 CAN +"), FIRMWARE_DEVICE_TYPE_2_CAN_PLUS)
+        self._device_type_combo.addItem(tr("2 CAN FD"), FIRMWARE_DEVICE_TYPE_2_CAN_FD)
         if current_type is not None:
             index = self._device_type_combo.findData(current_type)
             if index >= 0:

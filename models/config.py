@@ -34,6 +34,12 @@ class Config:
         "can1_speed": 500000,
         "can2_speed": 500000,
         "can_speed_auto": False,
+        "can1_terminator": False,
+        "can2_terminator": False,
+        "stlink_path": "",
+        "jlink_path": "",
+        "dfu_util_path": "",
+        "programmer_method": "stlink",
     }
 
     def max_data_bytes(self) -> int:

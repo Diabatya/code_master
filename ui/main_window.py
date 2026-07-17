@@ -34,7 +34,8 @@ from models.logger import get_logger, get_log_dir
 from models.translations import _ as tr, set_language
 from ui.com_settings_dialog import ComSettingsDialog
 from ui.dark_theme import apply_theme
-from ui.firmware_page import BootloaderWorker, FirmwarePage
+from ui.firmware_page import FirmwarePage
+from ui.flash_dialog import FlashDialog
 from ui.settings_window import SettingsWindow
 
 logger = get_logger(__name__)
@@ -140,7 +141,7 @@ class MainWindow(QMainWindow):
         self._flash_button.setFixedSize(260, 110)
         self._flash_button.setFont(QFont("Segoe UI", 13))
         self._flash_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._flash_button.setToolTip(tr("Загрузить .bin или .hex через UART bootloader"))
+        self._flash_button.setToolTip(tr("Открыть окно прошивки"))
         self._flash_button.clicked.connect(self._on_flash_clicked)
 
         # Главное меню
@@ -264,22 +265,8 @@ class MainWindow(QMainWindow):
         self._status_label.setText(tr("Страница прошивки"))
 
     def _on_flash_clicked(self) -> None:
-        """Открывает диалог выбора файла и запускает прошивку через BootloaderWorker."""
-        if not self._ensure_port_selected():
-            return
-        if self._serial_manager.current_port_name() == "FAKE":
-            QMessageBox.warning(self, tr("Внимание"), tr("Прошивка требует реальный COM-порт"))
-            return
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            tr("Выберите файл прошивки"),
-            "",
-            "Firmware (*.bin *.hex)",
-        )
-        if not path:
-            return
-        dialog = _FlashDialog(self._serial_manager, self)
-        dialog.flash(path)
+        """Открывает полноценный диалог прошивки микроконтроллера."""
+        dialog = FlashDialog(self._serial_manager, self)
         dialog.exec()
 
     def _on_configure_clicked(self) -> None:
@@ -368,7 +355,7 @@ class MainWindow(QMainWindow):
         self._update_button.setText("🔄 " + tr("Обновить"))
         self._configure_button.setText("⚙️ " + tr("Настроить"))
         self._flash_button.setText(tr("Прошить\nмикроконтроллер"))
-        self._flash_button.setToolTip(tr("Загрузить .bin или .hex через UART bootloader"))
+        self._flash_button.setToolTip(tr("Открыть окно прошивки"))
         self._firmware_page_back_button.setText(tr("← Назад"))
         self._startup_title.setText(tr("Код Мастер"))
         self._startup_subtitle.setText(tr("Выберите режим работы"))
@@ -434,69 +421,6 @@ class MainWindow(QMainWindow):
         if self._settings_window is not None:
             self._settings_window.close()
         self._serial_manager.close_port()
-        event.accept()
-
-
-class _FlashDialog(QDialog):
-    """Модальный диалог прошивки микроконтроллера с прогресс-баром."""
-
-    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self._serial_manager = serial_manager
-        self._worker: Optional[BootloaderWorker] = None
-        self.setWindowTitle(tr("Прошивка микроконтроллера"))
-        self.setFixedSize(420, 180)
-        self.setModal(True)
-
-        self._status = QLabel(tr("Подготовка..."))
-        self._status.setFont(QFont("Segoe UI", 10))
-
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 100)
-        self._progress.setValue(0)
-
-        self._close_button = QPushButton(tr("Отмена"))
-        self._close_button.setFixedSize(100, 30)
-        self._close_button.clicked.connect(self.reject)
-
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.addWidget(self._status)
-        layout.addWidget(self._progress)
-        layout.addWidget(self._close_button, alignment=Qt.AlignmentFlag.AlignCenter)
-
-    def flash(self, firmware_path: str) -> None:
-        """Запускает прошивку выбранным файлом."""
-        self._status.setText(tr("Прошивка: {0}").format(Path(firmware_path).name))
-        self._worker = BootloaderWorker(self._serial_manager, "flash", firmware_path, self)
-        self._worker.progress.connect(self._progress.setValue)
-        self._worker.finished_success.connect(self._on_success)
-        self._worker.finished_error.connect(self._on_error)
-        self.rejected.connect(self._stop_worker)
-        self._worker.start()
-
-    def _on_success(self, message: str) -> None:
-        self._status.setText(message)
-        self._progress.setValue(100)
-        self._close_button.setText(tr("Закрыть"))
-        self._close_button.clicked.disconnect(self.reject)
-        self._close_button.clicked.connect(self.accept)
-        QMessageBox.information(self, tr("Готово"), message)
-
-    def _on_error(self, message: str) -> None:
-        self._status.setText(tr("Ошибка: {0}").format(message))
-        self._close_button.setText(tr("Закрыть"))
-        self._close_button.clicked.disconnect(self.reject)
-        self._close_button.clicked.connect(self.accept)
-        QMessageBox.critical(self, tr("Ошибка прошивки"), message)
-
-    def _stop_worker(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.stop()
-
-    def closeEvent(self, event) -> None:  # noqa: N802
-        self._stop_worker()
         event.accept()
 
 

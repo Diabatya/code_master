@@ -5,6 +5,7 @@ from typing import List, Optional
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QStandardItemModel, QStandardItem
 from PySide6.QtWidgets import (
+    QComboBox,
     QCompleter,
     QFileDialog,
     QHBoxLayout,
@@ -19,6 +20,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from core.can_protocol import DEVICE_TYPE_ANALOG, DEVICE_TYPE_BASIC, DEVICE_TYPE_CAN_FD
 
 from core.serial_manager import SerialManager
 from models.config import Config
@@ -54,6 +57,23 @@ class SettingsWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
+
+        font = QFont("Segoe UI", 10)
+        self._device_label = QLabel(tr("Устройство"))
+        self._device_label.setFont(font)
+        self._device_combo = QComboBox()
+        self._device_combo.setFont(font)
+        self._device_combo.setMinimumWidth(180)
+        self._device_combo.addItem(tr("2 CAN"), DEVICE_TYPE_BASIC)
+        self._device_combo.addItem(tr("2 CAN +"), DEVICE_TYPE_ANALOG)
+        self._device_combo.addItem(tr("2 CAN FD"), DEVICE_TYPE_CAN_FD)
+        self._device_combo.currentIndexChanged.connect(self._on_device_type_changed)
+        device_layout = QHBoxLayout()
+        device_layout.setSpacing(8)
+        device_layout.addWidget(self._device_label)
+        device_layout.addWidget(self._device_combo)
+        device_layout.addStretch()
+        self._device_layout = device_layout
 
         self._tabs = QTabWidget()
         self._tabs.setFont(QFont("Segoe UI", 10))
@@ -101,6 +121,7 @@ class SettingsWindow(QMainWindow):
 
         search_layout.addWidget(self._search_edit)
         search_layout.addStretch()
+        layout.addLayout(self._device_layout)
         layout.addLayout(search_layout)
 
         layout.addWidget(self._tabs, 1)
@@ -133,10 +154,17 @@ class SettingsWindow(QMainWindow):
 
         self._connect_signals()
 
+    def _on_device_type_changed(self, index: int) -> None:
+        """Сохраняет выбранный тип устройства в конфигурации."""
+        device_type = self._device_combo.itemData(index)
+        if device_type is not None:
+            self._config.set("device_type", device_type)
+            self._update_analog_tab()
+
     def _update_analog_tab(self) -> None:
         """Добавляет или удаляет вкладку аналоговых портов в зависимости от типа устройства."""
         analog_index = self._tabs.indexOf(self._analog_tab) if self._analog_tab else -1
-        if self._config.get("device_type") == 0x01:
+        if self._config.get("device_type") == DEVICE_TYPE_ANALOG:
             if analog_index < 0:
                 self._analog_tab = AnalogPortsTab(self)
                 self._tabs.addTab(self._analog_tab, "🌊 " + tr("Аналоговые порты"))
@@ -150,6 +178,16 @@ class SettingsWindow(QMainWindow):
     def retranslate_ui(self) -> None:
         """Обновляет статические строки окна настроек и всех вкладок."""
         self.setWindowTitle(tr("Настройки — Код Мастер"))
+        self._device_label.setText(tr("Устройство"))
+        current_type = self._device_combo.currentData()
+        self._device_combo.clear()
+        self._device_combo.addItem(tr("2 CAN"), DEVICE_TYPE_BASIC)
+        self._device_combo.addItem(tr("2 CAN +"), DEVICE_TYPE_ANALOG)
+        self._device_combo.addItem(tr("2 CAN FD"), DEVICE_TYPE_CAN_FD)
+        if current_type is not None:
+            index = self._device_combo.findData(current_type)
+            if index >= 0:
+                self._device_combo.setCurrentIndex(index)
         self._search_edit.setPlaceholderText(tr("Поиск по разделам..."))
         titles = {
             self._trigger_tab: "⚡ " + tr("Триггеры"),
