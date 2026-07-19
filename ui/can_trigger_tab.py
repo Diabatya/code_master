@@ -244,8 +244,10 @@ class CanTriggerTab(QWidget):
         dlc = self._make_dlc_spin(font)
         data, data_widget = self._make_data_edits(font)
 
-        delay = self._make_delay_spin(font)
-        delay.setFixedWidth(80)
+        delay_before_send = self._make_delay_spin(font)
+        delay_before_send.setFixedWidth(80)
+        delay_between = self._make_delay_spin(font)
+        delay_between.setFixedWidth(80)
         count = self._make_count_spin(font, 999)
         count.setFixedWidth(60)
 
@@ -257,6 +259,9 @@ class CanTriggerTab(QWidget):
             "QPushButton:hover { background-color: #5A5A7A; }"
         )
         remove_button.setToolTip(tr("Удалить фрейм"))
+
+        delay_before_label = QLabel(tr("Задержка перед отправкой"))
+        delay_between_label = QLabel(tr("Задержка между пакетами"))
 
         row_layout.addWidget(QLabel(tr("Канал")))
         row_layout.addWidget(channel)
@@ -272,8 +277,10 @@ class CanTriggerTab(QWidget):
         row_layout.addWidget(copy_paste)
 
         row_layout.addStretch()
-        row_layout.addWidget(QLabel(tr("Задержка")))
-        row_layout.addWidget(delay)
+        row_layout.addWidget(delay_before_label)
+        row_layout.addWidget(delay_before_send)
+        row_layout.addWidget(delay_between_label)
+        row_layout.addWidget(delay_between)
         row_layout.addWidget(QLabel(tr("Кол-во")))
         row_layout.addWidget(count)
         row_layout.addWidget(remove_button)
@@ -295,7 +302,10 @@ class CanTriggerTab(QWidget):
             "data": data,
             "data_widget": data_widget,
             "copy_paste": copy_paste,
-            "delay": delay,
+            "delay_before_send": delay_before_send,
+            "delay_between": delay_between,
+            "delay_before_label": delay_before_label,
+            "delay_between_label": delay_between_label,
             "count": count,
             "next_delay": next_delay,
             "pause_widget": pause_widget,
@@ -401,13 +411,22 @@ class CanTriggerTab(QWidget):
         row1.addWidget(QLabel(tr("DLC")))
         dlc = self._make_dlc_spin(font)
         row1.addWidget(dlc)
-        row1.addWidget(QLabel(tr("Задержка мс")))
-        delay = self._make_delay_spin(font)
-        delay.setSuffix("")
-        row1.addWidget(delay)
+        delay_before_label = QLabel(tr("Задержка перед отправкой"))
+        delay_between_label = QLabel(tr("Задержка между пакетами"))
+        row1.addWidget(delay_before_label)
+        delay_before_send = self._make_delay_spin(font)
+        delay_before_send.setSuffix("")
+        delay_before_send.setFixedWidth(80)
+        row1.addWidget(delay_before_send)
+        row1.addWidget(delay_between_label)
+        delay_between = self._make_delay_spin(font)
+        delay_between.setSuffix("")
+        delay_between.setFixedWidth(80)
+        row1.addWidget(delay_between)
         row1.addWidget(QLabel(tr("Кол-во отправок")))
         count = self._make_count_spin(font, 999)
         count.setSuffix("")
+        count.setFixedWidth(60)
         row1.addWidget(count)
         row1.addStretch()
 
@@ -450,7 +469,10 @@ class CanTriggerTab(QWidget):
             "to_data": to_data,
             "to_data_widget": to_data_widget,
             "to_copy_paste": to_copy_paste,
-            "delay": delay,
+            "delay_before_send": delay_before_send,
+            "delay_between": delay_between,
+            "delay_before_label": delay_before_label,
+            "delay_between_label": delay_between_label,
             "count": count,
         }
         can_id.set_fill_callback(lambda parsed, c=cache: self._fill_cache_from_packet(c, parsed))
@@ -597,6 +619,10 @@ class CanTriggerTab(QWidget):
             block["response"]["add_button"].setToolTip(tr("Добавить фрейм"))
             for row in block["response"]["rows"]:
                 row["remove_button"].setToolTip(tr("Удалить фрейм"))
+                row["delay_before_label"].setText(tr("Задержка перед отправкой"))
+                row["delay_between_label"].setText(tr("Задержка между пакетами"))
+            block["cache"]["delay_before_label"].setText(tr("Задержка перед отправкой"))
+            block["cache"]["delay_between_label"].setText(tr("Задержка между пакетами"))
             block["cache"]["group"].setTitle(tr("Кэш"))
 
     def _parse_id(self, text: str) -> Optional[int]:
@@ -643,7 +669,8 @@ class CanTriggerTab(QWidget):
                 "channel": row["channel"].currentIndex(),
                 "id": can_id,
                 "data": self._parse_data(row["data"]),
-                "delay": row["delay"].value(),
+                "delay_before_send": row["delay_before_send"].value(),
+                "delay_between": row["delay_between"].value(),
                 "count": row["count"].value(),
                 "next_delay": row["next_delay"].value(),
             })
@@ -657,7 +684,8 @@ class CanTriggerTab(QWidget):
             "data_from": self._parse_data(cache["from_data"]),
             "data_to": self._parse_data(cache["to_data"]),
             "dlc": cache["dlc"].value(),
-            "delay": cache["delay"].value(),
+            "delay_before_send": cache["delay_before_send"].value(),
+            "delay_between": cache["delay_between"].value(),
             "count": cache["count"].value(),
         }
 
@@ -681,7 +709,8 @@ class CanTriggerTab(QWidget):
                     "id": row["id"].text(),
                     "dlc": row["dlc"].value(),
                     "data": " ".join(e.text() for e in row["data"] if e.text()),
-                    "delay": row["delay"].value(),
+                    "delay_before_send": row["delay_before_send"].value(),
+                    "delay_between": row["delay_between"].value(),
                     "count": row["count"].value(),
                     "next_delay": row["next_delay"].value(),
                 })
@@ -701,7 +730,8 @@ class CanTriggerTab(QWidget):
                 "cache_dlc": cache["dlc"].value(),
                 "cache_from_data": " ".join(e.text() for e in cache["from_data"] if e.text()),
                 "cache_to_data": " ".join(e.text() for e in cache["to_data"] if e.text()),
-                "cache_delay": cache["delay"].value(),
+                "cache_delay_before_send": cache["delay_before_send"].value(),
+                "cache_delay_between": cache["delay_between"].value(),
                 "cache_count": cache["count"].value(),
             })
         return config
@@ -750,7 +780,8 @@ class CanTriggerTab(QWidget):
         for d, edit in enumerate(response["data"]):
             edit.setText(f"{bytes_data[d]:02X}" if d < len(bytes_data) else "")
         self._set_data_enabled(response["data"], response["dlc"].value())
-        response["delay"].setValue(int(data.get("delay", 0)))
+        response["delay_before_send"].setValue(int(data.get("delay_before_send", 0)))
+        response["delay_between"].setValue(int(data.get("delay_between", data.get("delay", 0))))
         response["count"].setValue(int(data.get("count", 1)))
         response["next_delay"].setValue(int(data.get("next_delay", 0)))
 
@@ -759,7 +790,8 @@ class CanTriggerTab(QWidget):
         cache["bit"].setCurrentIndex(int(data.get("cache_bit", 0)))
         cache["id"].setText(str(data.get("cache_id", "")))
         cache["dlc"].setValue(int(data.get("cache_dlc", 8)))
-        cache["delay"].setValue(int(data.get("cache_delay", 0)))
+        cache["delay_before_send"].setValue(int(data.get("cache_delay_before_send", 0)))
+        cache["delay_between"].setValue(int(data.get("cache_delay_between", data.get("cache_delay", 0))))
         cache["count"].setValue(int(data.get("cache_count", 1)))
         from_bytes = parse_data_bytes(str(data.get("cache_from_data", "")).split())
         to_bytes = parse_data_bytes(str(data.get("cache_to_data", "")).split())
@@ -780,18 +812,17 @@ class CanTriggerTab(QWidget):
                 data[i] = parsed[i] & 0xFF
         return bytes(data)
 
-    def _send_frame(self, can_id: int, data: bytes, channel_index: int, count: int = 1) -> None:
-        """Отправляет один или несколько CAN-кадров в указанный канал."""
+    def _send_frame(self, can_id: int, data: bytes, channel_index: int) -> None:
+        """Отправляет один CAN-кадр в указанный канал."""
         if not self._serial_manager.is_open():
             return
-        for _ in range(max(1, count)):
-            if channel_index == 0:
-                self._serial_manager.send_data(pack_can_frame(1, can_id, data))
-            elif channel_index == 1:
-                self._serial_manager.send_data(pack_can_frame(2, can_id, data))
-            else:
-                self._serial_manager.send_data(pack_can_frame(1, can_id, data))
-                self._serial_manager.send_data(pack_can_frame(2, can_id, data))
+        if channel_index == 0:
+            self._serial_manager.send_data(pack_can_frame(1, can_id, data))
+        elif channel_index == 1:
+            self._serial_manager.send_data(pack_can_frame(2, can_id, data))
+        else:
+            self._serial_manager.send_data(pack_can_frame(1, can_id, data))
+            self._serial_manager.send_data(pack_can_frame(2, can_id, data))
 
     def process_frame(self, frame: Dict[str, Any]) -> None:
         frame_id = int(frame["id"])
@@ -831,35 +862,45 @@ class CanTriggerTab(QWidget):
         """Последовательно отправляет фреймы ответа с задержками и паузами."""
         cumulative = 0
         for i, response in enumerate(trigger["responses"]):
-            cumulative += response["delay"]
+            cumulative += response["delay_before_send"]
             data = self._data_from_response(response)
-            count = response["count"]
-            if cumulative == 0:
-                self._send_frame(response["id"], data, response["channel"], count)
-            else:
-                QTimer.singleShot(
-                    cumulative,
-                    lambda cid=response["id"], d=data, ch=response["channel"], cnt=count: self._send_frame(cid, d, ch, cnt),
-                )
+            count = max(1, response["count"])
+            can_id = response["id"]
+            channel = response["channel"]
+            for j in range(count):
+                if cumulative == 0:
+                    self._send_frame(can_id, data, channel)
+                else:
+                    QTimer.singleShot(
+                        cumulative,
+                        lambda cid=can_id, d=data, ch=channel: self._send_frame(cid, d, ch),
+                    )
+                if j < count - 1:
+                    cumulative += response["delay_between"]
             if i < len(trigger["responses"]) - 1:
                 cumulative += response["next_delay"]
 
     def _send_cached_frame(self, trigger: Dict[str, Any]) -> None:
-        """Отправляет последний сохранённый кадр из кэша с задержкой и повторами."""
+        """Отправляет последний сохранённый кадр из кэша с задержками и повторами."""
         cached = trigger.get("cached_frame")
         if cached is None:
             return
         cache = trigger["cache_data"]
         channel = cache["channel"]
-        delay = cache["delay"]
-        count = cache["count"]
-        if delay == 0:
-            self._send_frame(cached["id"], cached["data"], channel, count)
-        else:
-            QTimer.singleShot(
-                delay,
-                lambda cid=cached["id"], d=cached["data"], ch=channel, cnt=count: self._send_frame(cid, d, ch, cnt),
-            )
+        delay_before = cache["delay_before_send"]
+        delay_between = cache["delay_between"]
+        count = max(1, cache["count"])
+        cumulative = delay_before
+        for j in range(count):
+            if cumulative == 0:
+                self._send_frame(cached["id"], cached["data"], channel)
+            else:
+                QTimer.singleShot(
+                    cumulative,
+                    lambda cid=cached["id"], d=cached["data"], ch=channel: self._send_frame(cid, d, ch),
+                )
+            if j < count - 1:
+                cumulative += delay_between
 
     def _update_cache(self, trigger: Dict[str, Any], frame_id: int, frame_channel: int, data: bytes) -> None:
         """Сохраняет кадр в кэш, если он попадает в заданный диапазон."""

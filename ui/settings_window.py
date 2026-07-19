@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QGroupBox,
+    QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,

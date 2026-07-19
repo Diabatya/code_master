@@ -40,6 +40,8 @@ class Config:
         "jlink_path": "",
         "dfu_util_path": "",
         "programmer_method": "stlink",
+        "sleep_time": 0,
+        "sleep_mode": 0,
     }
 
     def max_data_bytes(self) -> int:

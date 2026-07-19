@@ -828,6 +828,27 @@ class CanMonitorTab(QWidget):
         self._can2_terminator_check.setChecked(self._config.get("can2_terminator", False))
         self._can2_terminator_check.toggled.connect(lambda checked: self._config.set("can2_terminator", checked))
 
+        self._sleep_mode_label = QLabel(tr("Переход в режим сна"))
+        self._sleep_mode_label.setFont(compact_font)
+        self._sleep_time_spin = QSpinBox()
+        self._sleep_time_spin.setRange(0, 9999)
+        self._sleep_time_spin.setSuffix(tr(" с"))
+        self._sleep_time_spin.setFont(compact_font)
+        self._sleep_time_spin.setFixedWidth(80)
+        self._sleep_time_spin.setValue(self._config.get("sleep_time", 0))
+        self._sleep_time_spin.valueChanged.connect(self._on_sleep_time_changed)
+
+        self._sleep_mode_combo = QComboBox()
+        self._sleep_mode_combo.setFont(compact_font)
+        self._sleep_mode_combo.setFixedWidth(140)
+        self._sleep_mode_combo.addItems([
+            tr("Не переходить в сон"),
+            tr("Слип мод"),
+            tr("Стоп мод"),
+        ])
+        self._sleep_mode_combo.setCurrentIndex(self._config.get("sleep_mode", 0))
+        self._sleep_mode_combo.currentIndexChanged.connect(self._on_sleep_mode_changed)
+
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._monitor1 = CanChannelMonitor(1, self._serial_manager, self)
@@ -862,6 +883,10 @@ class CanMonitorTab(QWidget):
         buttons_layout.addWidget(self._can2_speed_label)
         buttons_layout.addWidget(self._can2_speed_combo)
         buttons_layout.addWidget(self._can2_terminator_check)
+        buttons_layout.addSpacing(16)
+        buttons_layout.addWidget(self._sleep_mode_label)
+        buttons_layout.addWidget(self._sleep_time_spin)
+        buttons_layout.addWidget(self._sleep_mode_combo)
         buttons_layout.addStretch()
         layout.addLayout(buttons_layout)
         layout.addWidget(self._splitter)
@@ -914,6 +939,12 @@ class CanMonitorTab(QWidget):
             speed_kbps = 500.0
         self._config.set("can2_speed", max(1000, int(round(speed_kbps * 1000))))
 
+    def _on_sleep_time_changed(self, value: int) -> None:
+        self._config.set("sleep_time", value)
+
+    def _on_sleep_mode_changed(self, index: int) -> None:
+        self._config.set("sleep_mode", index)
+
     def process_frame(self, frame: Dict[str, object]) -> None:
         channel = int(frame["channel"])
         if channel == 1:
@@ -934,6 +965,16 @@ class CanMonitorTab(QWidget):
         self._can1_terminator_check.setText(tr("Включить терминатный резистор 120 Ом"))
         self._can2_speed_label.setText(tr("Скорость CAN2"))
         self._can2_terminator_check.setText(tr("Включить терминатный резистор 120 Ом"))
+        self._sleep_mode_label.setText(tr("Переход в режим сна"))
+        self._sleep_time_spin.setSuffix(tr(" с"))
+        index = self._sleep_mode_combo.currentIndex()
+        self._sleep_mode_combo.clear()
+        self._sleep_mode_combo.addItems([
+            tr("Не переходить в сон"),
+            tr("Слип мод"),
+            tr("Стоп мод"),
+        ])
+        self._sleep_mode_combo.setCurrentIndex(index)
         self._monitor1.retranslate_ui()
         self._monitor2.retranslate_ui()
 

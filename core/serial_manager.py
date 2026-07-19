@@ -225,6 +225,10 @@ class SerialManager(QObject):
         self._closing = True
         self._stop_reconnect_timer()
         if self._reader is not None:
+            try:
+                self._reader.finished.disconnect(self._on_reader_finished)
+            except RuntimeError:
+                pass
             self._reader.stop()
             self._reader = None
 
@@ -272,6 +276,10 @@ class SerialManager(QObject):
         self._closing = True
         try:
             if self._reader is not None:
+                try:
+                    self._reader.finished.disconnect(self._on_reader_finished)
+                except RuntimeError:
+                    pass
                 self._reader.stop()
                 self._reader = None
         except Exception:  # noqa: S110
@@ -374,6 +382,10 @@ class SerialManager(QObject):
     def _stop_reader(self) -> None:
         """Останавливает поток чтения и ждёт его завершения."""
         if self._reader is not None:
+            try:
+                self._reader.finished.disconnect(self._on_reader_finished)
+            except RuntimeError:
+                pass
             self._reader.stop()
             self._reader = None
 
@@ -397,8 +409,10 @@ class SerialManager(QObject):
 
     def _on_reader_finished(self) -> None:
         """Вызывается при завершении потока чтения; планирует переподключение."""
-        if self._reader is not None:
-            self._reader = None
+        reader = self.sender()
+        if reader is None or reader is not self._reader:
+            return
+        self._reader = None
         if self._port is not None:
             try:
                 self._port.close()
