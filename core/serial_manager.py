@@ -271,6 +271,31 @@ class SerialManager(QObject):
                 self.error_occurred.emit(f"Ошибка отправки: {exc}")
                 return False
 
+    def ping_device(self) -> bool:
+        """Отправляет устройству запрос ID и возвращает True, если есть ответ."""
+        if self._port is None or not self.is_open():
+            return False
+        self._closing = True
+        self._stop_reader()
+        try:
+            self._port.reset_input_buffer()
+            self._port.write(bytes([CMD_DEVICE_ID]))
+            deadline = time.time() + 0.5
+            buffer = bytearray()
+            while time.time() < deadline:
+                available = self._port_in_waiting()
+                if available:
+                    buffer.extend(self._port.read(available))
+                    if CMD_DEVICE_ID_RESP in buffer:
+                        return True
+                time.sleep(0.01)
+            return False
+        except Exception:  # noqa: BLE001
+            return False
+        finally:
+            self._start_reader()
+            self._closing = False
+
     def __del__(self) -> None:
         """Гарантирует закрытие порта при удалении менеджера."""
         self._closing = True

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
@@ -46,7 +47,7 @@ from ui.hex_edit import HexDataEdit, create_data_field_widget
 from ui.id_edit import IdPasteEdit
 from ui.memory_indicator import MemoryIndicator
 from ui.packet_clipboard import create_clipboard_buttons
-from ui.ui_utils import setup_button
+from ui.ui_utils import setCheckableWithIndicator, setup_button
 
 logger = get_logger(__name__)
 
@@ -206,8 +207,9 @@ class CanChannelMonitor(QWidget):
         self._channel_byte = channel
         self._serial_manager = serial_manager
         self._config = Config()
-        self._running = True
+        self._running = False
         self._received_count = 0
+        self._sent_count = 0
         self._packet_times: deque[float] = deque()
         self._last_packet_time: Optional[float] = None
         self._cyclic_frame: Optional[bytes] = None
@@ -222,7 +224,6 @@ class CanChannelMonitor(QWidget):
         self._create_widgets()
         self._layout_widgets()
         self._setup_timers()
-        self._start()
 
     def _create_widgets(self) -> None:
         font = QFont("Segoe UI", 9)
@@ -236,12 +237,13 @@ class CanChannelMonitor(QWidget):
         self._start_button.clicked.connect(self._start)
 
         self._stop_button = QPushButton(tr("Остановить"))
-        self._stop_button.setFixedSize(80, 28)
+        setup_button(self._stop_button, height=28)
+        self._stop_button.setMinimumWidth(90)
         self._stop_button.setFont(compact_font)
         self._stop_button.clicked.connect(self._stop)
 
         self._clear_button = QPushButton(tr("Очистить"))
-        self._clear_button.setFixedSize(80, 28)
+        setup_button(self._clear_button, height=28)
         self._clear_button.setFont(compact_font)
         self._clear_button.clicked.connect(self._clear)
 
@@ -316,14 +318,14 @@ class CanChannelMonitor(QWidget):
         self._send_button.clicked.connect(self._send_manual)
 
         self._cyclic_button = QPushButton("∞")
-        self._cyclic_button.setFixedSize(44, 36)
+        self._cyclic_button.setFixedSize(56, 36)
         self._cyclic_button.setFont(QFont("Arial", 20, QFont.Weight.Bold))
         self._cyclic_button.setStyleSheet(
             "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
             "QPushButton:hover { background-color: #4A4A6A; }"
         )
         self._cyclic_button.setToolTip(tr("Циклически"))
-        self._cyclic_button.setCheckable(True)
+        setCheckableWithIndicator(self._cyclic_button)
         self._cyclic_button.toggled.connect(self._on_cyclic_toggled)
 
         self._cyclic_timer = QTimer(self)
@@ -377,8 +379,12 @@ class CanChannelMonitor(QWidget):
         send_bottom.addWidget(self._cyclic_button)
         send_bottom.addStretch()
 
+        self._sent_label = QLabel(tr("Отправлено: 0"))
+        self._sent_label.setFont(self._font)
+
         send_layout.addLayout(send_top)
         send_layout.addLayout(send_bottom)
+        send_layout.addWidget(self._sent_label)
         layout.addLayout(send_layout)
 
         layout.addWidget(self._stats_label)
@@ -419,6 +425,16 @@ class CanChannelMonitor(QWidget):
             self._stop_cyclic_timer()
 
     def _start(self) -> None:
+        if not self._serial_manager.is_open():
+            port = self._config.get("port", "")
+            baudrate = self._config.get("baudrate", 115200)
+            emulation = self._config.get("emulation", False)
+            if not port:
+                QMessageBox.warning(self, tr("Внимание"), tr("Устройство не подключено"))
+                return
+            if not self._serial_manager.open_port(port, baudrate, emulation):
+                QMessageBox.warning(self, tr("Внимание"), tr("Устройство не подключено"))
+                return
         self._running = True
         logger.info("Мониторинг CAN%d запущен", self._channel)
 
@@ -437,9 +453,11 @@ class CanChannelMonitor(QWidget):
             timer.stop()
         self._highlight_timers.clear()
         self._received_count = 0
+        self._sent_count = 0
         self._packet_times.clear()
         self._last_packet_time = None
         self._stats_label.setText(tr("Принято: 0 | Скорость: 0 пак/с"))
+        self._update_sent_label()
 
     def _apply_search(self, text: str = "") -> None:
         query = text.strip().lower()
@@ -453,6 +471,9 @@ class CanChannelMonitor(QWidget):
                         break
             self._table.setRowHidden(row, hidden)
 
+    def _update_sent_label(self) -> None:
+        self._sent_label.setText(tr("Отправлено: {0}").format(self._sent_count))
+
     def _send_manual(self) -> None:
         can_id = hex_to_int(self._send_id_edit.text())
         if can_id is None:
@@ -461,6 +482,8 @@ class CanChannelMonitor(QWidget):
         data = self._data_from_send_edits(dlc)
         self._cyclic_frame = pack_can_frame(self._channel_byte, can_id, data)
         if self._send_cyclic_frame():
+            self._sent_count += 1
+            self._update_sent_label()
             if self._cyclic_button.isChecked():
                 self._start_cyclic_timer()
 
@@ -480,7 +503,11 @@ class CanChannelMonitor(QWidget):
     def _send_cyclic_frame(self) -> bool:
         if self._cyclic_frame is None:
             return False
-        return self._serial_manager.send_data(self._cyclic_frame)
+        result = self._serial_manager.send_data(self._cyclic_frame)
+        if result:
+            self._sent_count += 1
+            self._update_sent_label()
+        return result
 
     def _update_stats(self) -> None:
         now = time.time()
@@ -761,6 +788,7 @@ class CanChannelMonitor(QWidget):
         self._send_button.setText(tr("Отправить"))
         self._cyclic_button.setToolTip(tr("Циклически"))
         self._stats_label.setText(tr("Принято: 0 | Скорость: 0 пак/с"))
+        self._sent_label.setText(tr("Отправлено: 0"))
 
 
 class CanMonitorTab(QWidget):
@@ -807,7 +835,8 @@ class CanMonitorTab(QWidget):
         self._can1_speed_combo.lineEdit().setValidator(QDoubleValidator(0.1, 10000.0, 1, self))
         self._can1_speed_combo.lineEdit().setPlaceholderText(tr("кбит/с"))
 
-        self._can1_terminator_check = QCheckBox(tr("Включить терминатный резистор 120 Ом"))
+        self._can1_terminator_check = QCheckBox(tr("120 Ом"))
+        self._can1_terminator_check.setToolTip(tr("Включить терминатный резистор 120 Ом"))
         self._can1_terminator_check.setFont(compact_font)
         self._can1_terminator_check.setChecked(self._config.get("can1_terminator", False))
         self._can1_terminator_check.toggled.connect(lambda checked: self._config.set("can1_terminator", checked))
@@ -823,7 +852,8 @@ class CanMonitorTab(QWidget):
         self._can2_speed_combo.lineEdit().setValidator(QDoubleValidator(0.1, 10000.0, 1, self))
         self._can2_speed_combo.lineEdit().setPlaceholderText(tr("кбит/с"))
 
-        self._can2_terminator_check = QCheckBox(tr("Включить терминатный резистор 120 Ом"))
+        self._can2_terminator_check = QCheckBox(tr("120 Ом"))
+        self._can2_terminator_check.setToolTip(tr("Включить терминатный резистор 120 Ом"))
         self._can2_terminator_check.setFont(compact_font)
         self._can2_terminator_check.setChecked(self._config.get("can2_terminator", False))
         self._can2_terminator_check.toggled.connect(lambda checked: self._config.set("can2_terminator", checked))
@@ -848,6 +878,7 @@ class CanMonitorTab(QWidget):
         ])
         self._sleep_mode_combo.setCurrentIndex(self._config.get("sleep_mode", 0))
         self._sleep_mode_combo.currentIndexChanged.connect(self._on_sleep_mode_changed)
+        self._update_sleep_time_state(self._sleep_mode_combo.currentIndex())
 
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -944,6 +975,23 @@ class CanMonitorTab(QWidget):
 
     def _on_sleep_mode_changed(self, index: int) -> None:
         self._config.set("sleep_mode", index)
+        self._update_sleep_time_state(index)
+
+    def _update_sleep_time_state(self, index: int) -> None:
+        """Активирует/деактивирует поле времени сна в зависимости от режима."""
+        enabled = index != 0
+        self._sleep_time_spin.setEnabled(enabled)
+        effect = self._sleep_time_spin.graphicsEffect()
+        if enabled:
+            if isinstance(effect, QGraphicsOpacityEffect):
+                effect.setOpacity(1.0)
+            self._sleep_time_spin.setStyleSheet("")
+        else:
+            if not isinstance(effect, QGraphicsOpacityEffect):
+                effect = QGraphicsOpacityEffect(self._sleep_time_spin)
+                self._sleep_time_spin.setGraphicsEffect(effect)
+            effect.setOpacity(0.5)
+            self._sleep_time_spin.setStyleSheet("QSpinBox { color: #888888; }")
 
     def process_frame(self, frame: Dict[str, object]) -> None:
         channel = int(frame["channel"])
@@ -962,9 +1010,11 @@ class CanMonitorTab(QWidget):
         """Обновляет статические строки вкладки мониторинга."""
         self._filter_button.setText(tr("Фильтр"))
         self._can1_speed_label.setText(tr("Скорость CAN1"))
-        self._can1_terminator_check.setText(tr("Включить терминатный резистор 120 Ом"))
+        self._can1_terminator_check.setText(tr("120 Ом"))
+        self._can1_terminator_check.setToolTip(tr("Включить терминатный резистор 120 Ом"))
         self._can2_speed_label.setText(tr("Скорость CAN2"))
-        self._can2_terminator_check.setText(tr("Включить терминатный резистор 120 Ом"))
+        self._can2_terminator_check.setText(tr("120 Ом"))
+        self._can2_terminator_check.setToolTip(tr("Включить терминатный резистор 120 Ом"))
         self._sleep_mode_label.setText(tr("Переход в режим сна"))
         self._sleep_time_spin.setSuffix(tr(" с"))
         index = self._sleep_mode_combo.currentIndex()

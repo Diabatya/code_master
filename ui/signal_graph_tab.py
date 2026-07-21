@@ -22,7 +22,7 @@ from core.dbc_parser import decode_frame
 from core.serial_manager import SerialManager
 from models.logger import get_logger
 from models.translations import _ as tr
-from ui.ui_utils import setup_button
+from ui.ui_utils import setCheckableWithIndicator, setup_button
 
 logger = get_logger(__name__)
 
@@ -75,7 +75,7 @@ class SignalGraphTab(QWidget):
 
         self._pause_button = QPushButton(tr("Пауза"))
         setup_button(self._pause_button, height=30)
-        self._pause_button.setCheckable(True)
+        setCheckableWithIndicator(self._pause_button)
         self._pause_button.clicked.connect(self._on_pause)
 
         self._clear_button = QPushButton(tr("Очистить"))

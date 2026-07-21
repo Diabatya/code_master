@@ -200,20 +200,12 @@ class ComSettingsDialog(QDialog):
             QMessageBox.warning(self, tr("Внимание"), tr("Выберите COM-порт"))
             return
 
-        if self._serial_manager.open_port(port_name, baudrate, emulation):
-            self._config.set_bulk({
-                "port": port_name,
-                "baudrate": baudrate,
-                "emulation": emulation,
-            })
-            self._set_status(tr("Подключено к {0}").format(port_name), error=False)
-            logger.info("Подключение через диалог: %s", port_name)
-            self.connected.emit()
-            self.accept()
-        else:
-            self._set_status(tr("Не удалось подключиться к {0}").format(port_name), error=True)
-            QMessageBox.critical(
-                self,
-                tr("Ошибка"),
-                tr("Не удалось подключиться к {0}").format(port_name),
-            )
+        self._config.set_bulk({
+            "port": port_name,
+            "baudrate": baudrate,
+            "emulation": emulation,
+        })
+        self._set_status(tr("Выбран {0}").format(port_name), error=False)
+        logger.info("Выбран порт через диалог: %s", port_name)
+        self.connected.emit()
+        self.accept()

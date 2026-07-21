@@ -249,12 +249,12 @@ class MainWindow(QMainWindow):
 
     def _ensure_port_selected(self) -> bool:
         """Если порт не выбран, открывает диалог подключения."""
-        if self._serial_manager.is_open():
+        if self._serial_manager.is_open() or self._config.get("port"):
             return True
         dialog = ComSettingsDialog(self._serial_manager, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._update_port_indicator()
-            return self._serial_manager.is_open()
+            return self._serial_manager.is_open() or bool(self._config.get("port"))
         return False
 
     def _on_update_clicked(self) -> None:

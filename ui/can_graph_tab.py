@@ -23,6 +23,7 @@ from core.serial_manager import SerialManager
 from models.logger import get_logger
 from models.translations import _ as tr
 from models.utils import format_data_bytes, int_to_hex
+from ui.ui_utils import setCheckableWithIndicator
 
 logger = get_logger(__name__)
 
@@ -75,9 +76,9 @@ class CanGraphTab(QWidget):
         self._mode_combo.currentIndexChanged.connect(self._update_chart)
 
         self._pause_button = QPushButton(tr("Пауза"))
-        self._pause_button.setFixedSize(80, 28)
+        self._pause_button.setFixedSize(100, 28)
         self._pause_button.setFont(font)
-        self._pause_button.setCheckable(True)
+        setCheckableWithIndicator(self._pause_button)
         self._pause_button.clicked.connect(self._on_pause_clicked)
 
         self._clear_button = QPushButton(tr("Очистить"))

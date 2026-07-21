@@ -462,11 +462,20 @@ class SettingsWindow(QMainWindow):
     def _on_serial_error(self, message: str) -> None:
         logger.error("Ошибка COM-порта: %s", message)
 
+    def _device_name_for_filename(self) -> str:
+        device_type = self._config.get("device_type", DEVICE_TYPE_BASIC)
+        if device_type == DEVICE_TYPE_ANALOG:
+            return "2CAN_Plus"
+        if device_type == DEVICE_TYPE_CAN_FD:
+            return "2CAN_FD"
+        return "2CAN"
+
     def _save_config(self) -> None:
+        default_name = f"{self._device_name_for_filename()}_config.cfg"
         path, _ = QFileDialog.getSaveFileName(
             self,
             tr("Сохранить конфигурацию"),
-            "",
+            default_name,
             "JSON files (*.json)",
         )
         if not path:
@@ -496,6 +505,9 @@ class SettingsWindow(QMainWindow):
 
     def _save_current_config(self) -> None:
         """Сохраняет текущую конфигурацию в файл по умолчанию."""
+        if not self._serial_manager.is_open() or not self._serial_manager.ping_device():
+            QMessageBox.warning(self, tr("Внимание"), tr("Нет связи с устройством. Переподключите USB"))
+            return
         try:
             self._config.save()
             self._trigger_tab._save_config()

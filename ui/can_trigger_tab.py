@@ -260,8 +260,8 @@ class CanTriggerTab(QWidget):
         )
         remove_button.setToolTip(tr("Удалить фрейм"))
 
-        delay_before_label = QLabel(tr("Задержка перед отправкой"))
-        delay_between_label = QLabel(tr("Задержка между пакетами"))
+        delay_before_label = QLabel(tr("Пауза перед отправкой"))
+        delay_between_label = QLabel(tr("Пауза между пакетами"))
 
         row_layout.addWidget(QLabel(tr("Канал")))
         row_layout.addWidget(channel)
@@ -369,6 +369,9 @@ class CanTriggerTab(QWidget):
         for i, row in enumerate(block["rows"]):
             block["rows_layout"].addWidget(row["widget"])
             row["widget"].show()
+            first = i == 0
+            row["delay_before_label"].setVisible(first)
+            row["delay_before_send"].setVisible(first)
             if i < len(block["rows"]) - 1:
                 block["rows_layout"].addWidget(row["pause_widget"])
                 row["pause_widget"].show()
@@ -411,8 +414,8 @@ class CanTriggerTab(QWidget):
         row1.addWidget(QLabel(tr("DLC")))
         dlc = self._make_dlc_spin(font)
         row1.addWidget(dlc)
-        delay_before_label = QLabel(tr("Задержка перед отправкой"))
-        delay_between_label = QLabel(tr("Задержка между пакетами"))
+        delay_before_label = QLabel(tr("Пауза перед отправкой"))
+        delay_between_label = QLabel(tr("Пауза между пакетами"))
         row1.addWidget(delay_before_label)
         delay_before_send = self._make_delay_spin(font)
         delay_before_send.setSuffix("")
@@ -527,7 +530,7 @@ class CanTriggerTab(QWidget):
             group = QGroupBox(tr("Триггер {0}").format(i + 1))
             group.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
             group.setCheckable(True)
-            group.setChecked(True)
+            group.setChecked(False)
 
             recv = self._create_receive_row(font, tr("Приём"))
             response = self._create_response_block(font)
@@ -619,10 +622,10 @@ class CanTriggerTab(QWidget):
             block["response"]["add_button"].setToolTip(tr("Добавить фрейм"))
             for row in block["response"]["rows"]:
                 row["remove_button"].setToolTip(tr("Удалить фрейм"))
-                row["delay_before_label"].setText(tr("Задержка перед отправкой"))
-                row["delay_between_label"].setText(tr("Задержка между пакетами"))
-            block["cache"]["delay_before_label"].setText(tr("Задержка перед отправкой"))
-            block["cache"]["delay_between_label"].setText(tr("Задержка между пакетами"))
+                row["delay_before_label"].setText(tr("Пауза перед отправкой"))
+                row["delay_between_label"].setText(tr("Пауза между пакетами"))
+            block["cache"]["delay_before_label"].setText(tr("Пауза перед отправкой"))
+            block["cache"]["delay_between_label"].setText(tr("Пауза между пакетами"))
             block["cache"]["group"].setTitle(tr("Кэш"))
 
     def _parse_id(self, text: str) -> Optional[int]:
@@ -740,7 +743,7 @@ class CanTriggerTab(QWidget):
         """Загружает конфигурацию триггеров из списка."""
         for i, block in enumerate(self._blocks):
             trigger = triggers[i] if i < len(triggers) else {}
-            block["group"].setChecked(bool(trigger.get("active", True)))
+            block["group"].setChecked(bool(trigger.get("active", False)))
             cache_active = bool(trigger.get("cache", False))
             block["cache"]["cache_check"].setChecked(cache_active)
             self._on_cache_active_changed(i, Qt.CheckState.Checked.value if cache_active else Qt.CheckState.Unchecked.value)
