@@ -1,11 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
-import libusb_package
-libusb_dll = libusb_package.get_library_path()
+try:
+    import libusb_package
+    libusb_dll = libusb_package.get_library_path()
+    extra_binaries = [(libusb_dll, '.')]
+    extra_hiddenimports = ['usb', 'usb.backend.libusb1', 'libusb_package']
+except Exception:
+    extra_binaries = []
+    extra_hiddenimports = []
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[(libusb_dll, '.')],
+    binaries=extra_binaries,
     datas=[('library', 'library')],
     hiddenimports=[
         'PySide6.QtCore',
@@ -60,10 +66,8 @@ a = Analysis(
         'pyocd.probe.stlink_probe',
         'pyocd.target',
         'pyocd.target.family',
-        'usb',
-        'usb.backend.libusb1',
-        'libusb_package',
         'intelhex',
+        *extra_hiddenimports,
     ],
     hookspath=[],
     hooksconfig={},
