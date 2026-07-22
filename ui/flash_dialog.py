@@ -53,6 +53,7 @@ from core.can_protocol import (
     DEVICE_TYPE_CAN_FD,
 )
 from models.config import Config
+from ui.com_settings_dialog import ComSettingsDialog
 from models.logger import get_logger
 from models.translations import _ as tr
 
@@ -201,7 +202,11 @@ def _load_firmware_bytes(file_path: str) -> Tuple[bytes, int]:
     if ext == ".bin":
         return path.read_bytes(), 0
     if ext == ".hex":
-        return _parse_intel_hex(path.read_text(encoding="utf-8", errors="ignore"))
+        from intelhex import IntelHex
+
+        ih = IntelHex(str(path))
+        data = bytes(ih.tobinarray())
+        return data, ih.minaddr()
     if ext == ".elf":
         return _load_elf(path)
     return path.read_bytes(), 0
@@ -223,17 +228,21 @@ def _prepare_bin_file(file_path: str, default_base: int = 0x08000000) -> Tuple[O
 
 
 class HexHighlighter(QSyntaxHighlighter):
-    """Подсветка изменённых байт в HEX и ASCII представлениях."""
+    """Подсветка изменённых и занятых (не 0xFF) байт в HEX и ASCII представлениях."""
 
-    def __init__(self, document: Any, changed_offsets: Set[int], bytes_per_line: int, ascii_mode: bool = False):
+    def __init__(self, document: Any, changed_offsets: Set[int], occupied_offsets: Set[int], bytes_per_line: int, ascii_mode: bool = False):
         super().__init__(document)
         self._changed_offsets = changed_offsets
+        self._occupied_offsets = occupied_offsets
         self._bytes_per_line = bytes_per_line
         self._ascii_mode = ascii_mode
-        fmt = QTextCharFormat()
-        fmt.setForeground(QColor("#F44336"))
-        fmt.setFontWeight(QFont.Weight.Bold)
-        self._fmt = fmt
+        changed_fmt = QTextCharFormat()
+        changed_fmt.setForeground(QColor("#F44336"))
+        changed_fmt.setFontWeight(QFont.Weight.Bold)
+        self._changed_fmt = changed_fmt
+        occupied_fmt = QTextCharFormat()
+        occupied_fmt.setBackground(QColor("#D0D0D0"))
+        self._occupied_fmt = occupied_fmt
 
     def highlightBlock(self, text: str) -> None:
         block = self.currentBlock()
@@ -241,15 +250,33 @@ class HexHighlighter(QSyntaxHighlighter):
         start_offset = block_no * self._bytes_per_line
         if self._ascii_mode:
             for i in range(min(len(text), self._bytes_per_line)):
-                if start_offset + i in self._changed_offsets:
-                    self.setFormat(i, 1, self._fmt)
+                offset = start_offset + i
+                changed = offset in self._changed_offsets
+                occupied = offset in self._occupied_offsets
+                if changed or occupied:
+                    fmt = QTextCharFormat()
+                    if changed:
+                        fmt.setForeground(QColor("#F44336"))
+                        fmt.setFontWeight(QFont.Weight.Bold)
+                    if occupied:
+                        fmt.setBackground(QColor("#D0D0D0"))
+                    self.setFormat(i, 1, fmt)
         else:
             for i in range(self._bytes_per_line):
                 offset = start_offset + i
-                if offset in self._changed_offsets:
-                    pos = i * 3
-                    if pos + 2 <= len(text):
-                        self.setFormat(pos, 2, self._fmt)
+                pos = i * 3
+                if pos + 2 > len(text):
+                    continue
+                changed = offset in self._changed_offsets
+                occupied = offset in self._occupied_offsets
+                if changed or occupied:
+                    fmt = QTextCharFormat()
+                    if changed:
+                        fmt.setForeground(QColor("#F44336"))
+                        fmt.setFontWeight(QFont.Weight.Bold)
+                    if occupied:
+                        fmt.setBackground(QColor("#D0D0D0"))
+                    self.setFormat(pos, 2, fmt)
 
 
 class HexEditorDialog(QDialog):
@@ -266,6 +293,7 @@ class HexEditorDialog(QDialog):
         self._base_address = 0
         self._data = bytearray()
         self._changed_offsets: Set[int] = set()
+        self._occupied_offsets: Set[int] = set()
         self._saved_path: Optional[str] = None
         self._ignore_text_changes = False
         self._create_widgets()
@@ -287,12 +315,12 @@ class HexEditorDialog(QDialog):
         self._hex_edit = QPlainTextEdit(self)
         self._hex_edit.setFont(font)
         self._hex_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        HexHighlighter(self._hex_edit.document(), self._changed_offsets, self.BYTES_PER_LINE, ascii_mode=False)
+        HexHighlighter(self._hex_edit.document(), self._changed_offsets, self._occupied_offsets, self.BYTES_PER_LINE, ascii_mode=False)
 
         self._ascii_edit = QPlainTextEdit(self)
         self._ascii_edit.setFont(font)
         self._ascii_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        HexHighlighter(self._ascii_edit.document(), self._changed_offsets, self.BYTES_PER_LINE, ascii_mode=True)
+        HexHighlighter(self._ascii_edit.document(), self._changed_offsets, self._occupied_offsets, self.BYTES_PER_LINE, ascii_mode=True)
 
         for edit in (self._offset_edit, self._hex_edit, self._ascii_edit):
             sb = edit.verticalScrollBar()
@@ -389,9 +417,11 @@ class HexEditorDialog(QDialog):
             self._data = bytearray()
             self._base_address = 0
             self._changed_offsets.clear()
+            self._occupied_offsets.clear()
             data, base = _load_firmware_bytes(file_path)
             self._data = bytearray(data)
             self._base_address = base
+            self._occupied_offsets.update(i for i, b in enumerate(self._data) if b != 0xFF)
             self._current_path = Path(file_path)
             self._saved_path = file_path
             self._refresh_all()
@@ -805,6 +835,123 @@ class FlashWorker(QThread):
             return False, str(exc)
 
 
+class ReadWorker(QThread):
+    """Фоновое чтение флеш-памяти микроконтроллера."""
+
+    log_line = Signal(str)
+    finished = Signal(bool, str, object, int)
+
+    def __init__(
+        self,
+        method: str,
+        config: Config,
+        size: int = 0x10000,
+        parent: Optional[QObject] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._method = method
+        self._config = config
+        self._size = size
+
+    def run(self) -> None:
+        try:
+            data, base = self._read_one()
+            self.finished.emit(True, tr("Чтение завершено: {0} байт").format(len(data)), data, base)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Ошибка чтения прошивки")
+            self.finished.emit(False, str(exc), b"", 0)
+
+    def _read_one(self) -> Tuple[bytes, int]:
+        if self._method == "stlink":
+            return self._read_stlink()
+        if self._method == "jlink":
+            return self._read_jlink()
+        if self._method == "uart":
+            return self._read_uart()
+        if self._method == "usb":
+            return self._read_usb()
+        raise RuntimeError(tr("Чтение не поддерживается для {0}").format(self._method))
+
+    def _read_stlink(self) -> Tuple[bytes, int]:
+        if not _PYOCD:
+            raise RuntimeError(tr("pyocd не установлен"))
+        target = self._config.get("target_mcu", "")
+        if not target:
+            raise RuntimeError(tr("Не указана целевая МК (target_mcu)"))
+        with ConnectHelper.session_with_chosen_probe(
+            return_first=True,
+            auto_open=True,
+            target_override=target,
+        ) as session:
+            target_obj = session.target
+            target_obj.reset_and_halt()
+            flash = next(
+                (r for r in target_obj.memory_map if r.is_flash),
+                None,
+            )
+            start = flash.start if flash else 0x08000000
+            size = min(self._size, flash.length) if flash else self._size
+            data = bytes(target_obj.read_memory_block8(start, size))
+            target_obj.reset()
+        return data, start
+
+    def _read_jlink(self) -> Tuple[bytes, int]:
+        if not _PYLINK:
+            raise RuntimeError(tr("pylink-square не установлен"))
+        target = self._config.get("target_mcu", "")
+        if not target:
+            raise RuntimeError(tr("Не указана целевая МК (target_mcu)"))
+        jlink = pylink.JLink()
+        jlink.open()
+        jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
+        jlink.connect(target=target, interface="SWD")
+        start = 0x08000000
+        data = bytes(jlink.memory_read(start, self._size))
+        jlink.close()
+        return data, start
+
+    def _read_uart(self) -> Tuple[bytes, int]:
+        port = self._config.get("port", "")
+        baud = self._config.get("baudrate", 115200)
+        if not port:
+            raise RuntimeError(tr("COM-порт не указан"))
+        import serial as serial_module
+        ser = serial_module.Serial(
+            port,
+            baud,
+            bytesize=serial_module.EIGHTBITS,
+            parity=serial_module.PARITY_EVEN,
+            stopbits=serial_module.STOPBITS_ONE,
+            timeout=1,
+        )
+        try:
+            bl = Bootloader(ser)
+            bl.reconfigure_for_bootloader()
+            bl.enter_bootloader()
+            bl.sync()
+            start = 0x08000000
+            size = min(self._size, 0x10000)
+            data = bl.read_memory(start, size)
+            return data, start
+        finally:
+            try:
+                ser.close()
+            except Exception:  # noqa: S110
+                pass
+
+    def _read_usb(self) -> Tuple[bytes, int]:
+        if not _PYUSB:
+            raise RuntimeError(tr("pyusb/libusb не установлен"))
+        dev = usb.core.find(idVendor=0x0483, idProduct=0xDF11)
+        if dev is None:
+            raise RuntimeError(tr("USB DFU устройство не найдено"))
+        from core.dfu import DfuDevice
+        with DfuDevice(dev) as dfu:
+            start = 0x08000000
+            data = dfu.upload(start, self._size)
+        return data, start
+
+
 class FlashDialog(QDialog):
     """Полноценный диалог прошивки микроконтроллера."""
 
@@ -816,6 +963,7 @@ class FlashDialog(QDialog):
         self.resize(900, 700)
         self._connect_worker: Optional[ConnectWorker] = None
         self._flash_worker: Optional[FlashWorker] = None
+        self._read_worker: Optional[ReadWorker] = None
         self._connected = False
         self._last_chip_info: Dict[str, Any] = {}
         self._log_file: Optional[Path] = None
@@ -847,7 +995,11 @@ class FlashDialog(QDialog):
         for value, label in PROGRAMMER_METHODS:
             self._method_combo.addItem(tr(label), value)
 
-        self._connect_button = QPushButton(tr("Connect"))
+        self._port_button = QPushButton(tr("Выбрать порт"))
+        self._port_button.setFont(font)
+        self._port_button.setVisible(False)
+
+        self._connect_button = QPushButton(tr("Подключиться"))
         self._connect_button.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
 
         self._chip_info_label = QLabel(tr("Информация о чипе: не подключено"))
@@ -880,6 +1032,8 @@ class FlashDialog(QDialog):
 
         self._flash_button = QPushButton(tr("Прошить"))
         self._flash_button.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._read_button = QPushButton(tr("Прочитать прошивку"))
+        self._read_button.setFont(font)
         self._hex_editor_button = QPushButton(tr("Открыть HEX-редактор"))
         self._close_button = QPushButton(tr("Закрыть"))
 
@@ -895,6 +1049,7 @@ class FlashDialog(QDialog):
         top_grid.addWidget(self._serial_edit, 1)
         top_grid.addWidget(self._method_label)
         top_grid.addWidget(self._method_combo)
+        top_grid.addWidget(self._port_button)
         top_grid.addWidget(self._connect_button)
         layout.addLayout(top_grid)
 
@@ -926,23 +1081,26 @@ class FlashDialog(QDialog):
         bottom = QHBoxLayout()
         bottom.addStretch()
         bottom.addWidget(self._flash_button)
+        bottom.addWidget(self._read_button)
         bottom.addWidget(self._hex_editor_button)
         bottom.addWidget(self._close_button)
         layout.addLayout(bottom)
 
     def _connect_signals(self) -> None:
         self._connect_button.clicked.connect(self._on_connect)
+        self._port_button.clicked.connect(self._on_select_port)
         self._method_combo.currentIndexChanged.connect(self._on_method_changed)
         self._browse_button.clicked.connect(self._on_browse)
         self._up_button.clicked.connect(self._on_move_up)
         self._down_button.clicked.connect(self._on_move_down)
         self._remove_button.clicked.connect(self._on_remove)
         self._flash_button.clicked.connect(self._on_flash)
+        self._read_button.clicked.connect(self._on_read_firmware)
         self._hex_editor_button.clicked.connect(self._on_hex_editor)
         self._close_button.clicked.connect(self.reject)
         self._power_button.clicked.connect(self._on_power_toggle)
         self._reset_button.clicked.connect(self._on_reset)
-        self._identify_button.clicked.connect(self._on_connect)
+        self._identify_button.clicked.connect(self._on_identify)
 
         self._target_mcu_edit.editingFinished.connect(
             lambda: self._config.set("target_mcu", self._target_mcu_edit.text().strip().upper())
@@ -976,9 +1134,11 @@ class FlashDialog(QDialog):
         if method:
             self._config.set("programmer_method", method)
         is_stlink = method == "stlink"
+        is_uart = method == "uart"
         self._power_button.setVisible(False)
         self._reset_button.setVisible(is_stlink)
         self._identify_button.setVisible(is_stlink)
+        self._port_button.setVisible(is_uart)
         self._set_connect_status(False, {})
 
     def _set_connect_status(self, connected: bool, info: Dict[str, Any]) -> None:
@@ -995,11 +1155,17 @@ class FlashDialog(QDialog):
                 self._connect_button.setText(tr("Ошибка подключения"))
                 self._connect_button.setStyleSheet("background-color: #F44336; color: #FFFFFF;")
             else:
-                self._connect_button.setText(tr("Connect"))
+                self._connect_button.setText(tr("Подключиться"))
                 self._connect_button.setStyleSheet("")
             self._chip_info_label.setText(tr("Информация о чипе: {0}").format(error or tr("не подключено")))
 
     def _on_connect(self) -> None:
+        if self._connected:
+            self._disconnect()
+        else:
+            self._start_connect()
+
+    def _start_connect(self) -> None:
         if self._connect_worker and self._connect_worker.isRunning():
             return
         method = self._method_combo.currentData()
@@ -1009,6 +1175,19 @@ class FlashDialog(QDialog):
         self._connect_worker.log_line.connect(self._log)
         self._connect_worker.finished.connect(self._on_connect_finished)
         self._connect_worker.start()
+
+    def _disconnect(self) -> None:
+        if self._connect_worker and self._connect_worker.isRunning():
+            self._connect_worker.terminate()
+            self._connect_worker.wait(1000)
+        self._connected = False
+        self._last_chip_info = {}
+        self._set_connect_status(False, {})
+        self._log(tr("Отключено"))
+
+    def _on_identify(self) -> None:
+        self._disconnect()
+        self._start_connect()
 
     def _on_connect_finished(self, success: bool, info: Dict[str, Any]) -> None:
         self._connect_button.setEnabled(True)
@@ -1075,6 +1254,33 @@ class FlashDialog(QDialog):
         else:
             QMessageBox.critical(self, tr("Ошибка"), message)
 
+    def _on_read_firmware(self) -> None:
+        method = self._method_combo.currentData()
+        if method == "auto":
+            QMessageBox.warning(self, tr("Внимание"), tr("Выберите конкретный способ программирования"))
+            return
+        self._read_button.setEnabled(False)
+        self._progress_bar.setValue(0)
+        self._read_worker = ReadWorker(method, self._config, parent=self)
+        self._read_worker.log_line.connect(self._log)
+        self._read_worker.finished.connect(self._on_read_finished)
+        self._read_worker.start()
+
+    def _on_read_finished(self, success: bool, message: str, data: object, base: int) -> None:
+        self._read_button.setEnabled(True)
+        if not success or not isinstance(data, bytes) or not data:
+            self._log(message)
+            QMessageBox.critical(self, tr("Ошибка"), message)
+            return
+        self._log(message)
+        try:
+            hex_path = Path(tempfile.gettempdir()) / "read_firmware.hex"
+            _save_intel_hex(data, base, hex_path)
+            dialog = HexEditorDialog(str(hex_path), self)
+            dialog.exec()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, tr("Ошибка"), str(exc))
+
     def _on_hex_editor(self) -> None:
         selected = self._files_list.currentItem()
         file_path = selected.text() if selected else None
@@ -1084,6 +1290,10 @@ class FlashDialog(QDialog):
         if saved and not self._files_list.findItems(saved, Qt.MatchFlag.MatchExactly):
             self._files_list.addItem(saved)
             self._update_log_file()
+
+    def _on_select_port(self) -> None:
+        dialog = ComSettingsDialog(self._serial_manager, self)
+        dialog.exec()
 
     def _on_power_toggle(self) -> None:
         self._log(tr("Управление питанием не реализовано в Python-режиме"))
@@ -1143,4 +1353,7 @@ class FlashDialog(QDialog):
         if self._flash_worker and self._flash_worker.isRunning():
             self._flash_worker.terminate()
             self._flash_worker.wait(1000)
+        if self._read_worker and self._read_worker.isRunning():
+            self._read_worker.terminate()
+            self._read_worker.wait(1000)
         event.accept()

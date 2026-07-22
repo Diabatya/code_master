@@ -67,6 +67,7 @@ a = Analysis(
         'usb',
         'usb.backend.libusb1',
         'libusb_package',
+        'intelhex',
     ],
     hookspath=[],
     hooksconfig={},

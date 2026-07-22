@@ -211,6 +211,22 @@ class Bootloader:
         Returns:
             True, если данные совпадают, иначе False.
         """
+        read_data = self.read_memory(address, len(data))
+        return read_data == data
+
+    def read_memory(self, address: int, length: int) -> bytes:
+        """Читает length байт из памяти STM32 по команде 0x11.
+
+        Args:
+            address: Начальный адрес.
+            length: Количество байт для чтения.
+
+        Returns:
+            Прочитанные байты.
+
+        Raises:
+            BootloaderError: при ошибке чтения.
+        """
         self._send_command(0x11)
         addr_bytes = address.to_bytes(4, "big")
         addr_checksum = 0
@@ -219,16 +235,17 @@ class Bootloader:
         self.port.write(addr_bytes)
         self.port.write(bytes([addr_checksum]))
         if self._read_byte() != ACK:
-            return False
+            raise BootloaderError(f"Адрес чтения 0x{address:08X} не подтверждён")
 
-        length = len(data)
         self.port.write(bytes([length - 1]))
         if self._read_byte() != ACK:
-            return False
+            raise BootloaderError("Команда чтения не подтверждена")
 
-        self.port.timeout = 2.0
+        self.port.timeout = 2.0 + length / 1000
         read_data = self.port.read(length)
-        return read_data == data
+        if len(read_data) < length:
+            raise BootloaderError(f"Прочитано {len(read_data)} из {length} байт")
+        return read_data
 
     def get_version(self) -> int:
         """Возвращает версию бутлоадера (команда 0x01)."""
