@@ -55,7 +55,7 @@ class CanTopologyWidget(QWidget):
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
         self._view = QGraphicsView(self._scene, self)
-        self._view.setRenderHints(self._view.renderHints() | Qt.RenderHint.Antialiasing)
+        self._view.setRenderHints(self._view.renderHints() | Qt.RenderHints.Antialiasing)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)

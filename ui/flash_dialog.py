@@ -1,5 +1,7 @@
 """Профессиональный диалог прошивки микроконтроллера и HEX-редактор."""
 
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -241,7 +243,7 @@ class HexHighlighter(QSyntaxHighlighter):
         changed_fmt.setFontWeight(QFont.Weight.Bold)
         self._changed_fmt = changed_fmt
         occupied_fmt = QTextCharFormat()
-        occupied_fmt.setBackground(QColor("#D0D0D0"))
+        occupied_fmt.setBackground(QColor("#3A3A4A"))
         self._occupied_fmt = occupied_fmt
 
     def highlightBlock(self, text: str) -> None:
@@ -259,7 +261,7 @@ class HexHighlighter(QSyntaxHighlighter):
                         fmt.setForeground(QColor("#F44336"))
                         fmt.setFontWeight(QFont.Weight.Bold)
                     if occupied:
-                        fmt.setBackground(QColor("#D0D0D0"))
+                        fmt.setBackground(QColor("#3A3A4A"))
                     self.setFormat(i, 1, fmt)
         else:
             for i in range(self._bytes_per_line):
@@ -275,7 +277,7 @@ class HexHighlighter(QSyntaxHighlighter):
                         fmt.setForeground(QColor("#F44336"))
                         fmt.setFontWeight(QFont.Weight.Bold)
                     if occupied:
-                        fmt.setBackground(QColor("#D0D0D0"))
+                        fmt.setBackground(QColor("#3A3A4A"))
                     self.setFormat(pos, 2, fmt)
 
 
@@ -298,6 +300,7 @@ class HexEditorDialog(QDialog):
         self._ignore_text_changes = False
         self._create_widgets()
         self._build_layout()
+        self._apply_editor_theme()
         if file_path:
             self._load_file(file_path)
 
@@ -362,6 +365,19 @@ class HexEditorDialog(QDialog):
         layout.addWidget(splitter, 1)
 
         layout.addWidget(self._status_label)
+
+    def _apply_editor_theme(self) -> None:
+        theme = """
+        QPlainTextEdit {
+            background-color: #1E1E2E;
+            color: #E0E0E0;
+            border: 1px solid #3A3A4A;
+            selection-background-color: #4A6CFF;
+            selection-color: #FFFFFF;
+        }
+        """
+        for edit in (self._offset_edit, self._hex_edit, self._ascii_edit):
+            edit.setStyleSheet(theme)
 
     def _sync_scroll(self, value: int) -> None:
         for edit in (self._offset_edit, self._hex_edit, self._ascii_edit):
@@ -813,18 +829,56 @@ class FlashWorker(QThread):
                 pass
 
     def _flash_usb(self, file_path: str) -> Tuple[bool, str]:
-        if not _PYUSB:
-            return False, tr("pyusb/libusb не установлен")
-        data, base = _load_firmware_bytes(file_path)
-        if not data:
-            return False, tr("Файл прошивки пуст")
+        bin_path, base = _prepare_bin_file(file_path)
+        if not bin_path:
+            return False, tr("Не удалось подготовить BIN-файл из прошивки")
         if not base:
             base = 0x08000000
+        dfu_util = shutil.which("dfu-util") or shutil.which("dfu-util.exe")
+        if dfu_util:
+            cmd = [
+                dfu_util,
+                "-d", "0483:df11",
+                "-a", "0",
+                "-s", f"0x{base:08X}:leave",
+                "-D", bin_path,
+            ]
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if result.returncode != 0:
+                    err = (result.stderr or result.stdout or "").strip()
+                    return False, tr("dfu-util ошибка: {0}").format(err)
+                return True, tr("USB DFU: прошивка dfu-util завершена")
+            except subprocess.TimeoutExpired:
+                return False, tr("dfu-util: превышено время ожидания")
+            except FileNotFoundError:
+                return False, tr("dfu-util не найден в PATH")
+            except Exception as exc:  # noqa: BLE001
+                return False, tr("dfu-util ошибка: {0}").format(exc)
+            finally:
+                if bin_path != file_path:
+                    try:
+                        Path(bin_path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        if not _PYUSB:
+            if bin_path != file_path:
+                try:
+                    Path(bin_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return False, tr("dfu-util не найден в PATH и pyusb/libusb не установлены")
         try:
-            from core.dfu import DfuDevice
             dev = usb.core.find(idVendor=0x0483, idProduct=0xDF11)
             if dev is None:
+                if bin_path != file_path:
+                    try:
+                        Path(bin_path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 return False, tr("USB DFU устройство не найдено")
+            from core.dfu import DfuDevice
+            data = Path(bin_path).read_bytes()
             with DfuDevice(dev) as dfu:
                 dfu.mass_erase()
                 dfu.download(base, data)
@@ -832,7 +886,13 @@ class FlashWorker(QThread):
                 dfu.leave()
             return ok, tr("USB DFU: прошивка завершена") if ok else tr("USB DFU: верификация не прошла")
         except Exception as exc:  # noqa: BLE001
-            return False, str(exc)
+            return False, tr("USB DFU ошибка: {0}").format(exc)
+        finally:
+            if bin_path != file_path:
+                try:
+                    Path(bin_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 class ReadWorker(QThread):

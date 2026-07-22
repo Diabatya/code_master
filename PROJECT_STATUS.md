@@ -308,6 +308,13 @@
 - ✅ `python3 -m py_compile` и `python3 main.py --help` проходят без ошибок.
 - ✅ Проект готов к публикации релиза `v1.0.0`.
 
+## 29. Срочные исправления v1.0.0 (22.07.2026)
+
+- ✅ `ui/can_topology.py`: исправлен `Qt.RenderHint` → `Qt.RenderHints.Antialiasing`, устраняющий падение при открытии окна настроек/топологии.
+- ✅ `ui/flash_dialog.py`: `HexEditorDialog` — принудительная тёмная тема для `QPlainTextEdit` (фон `#1E1E2E`, текст `#E0E0E0`) и отключение светло-серого фона занятых байт (`#3A3A4A`), редактор стал читаемым.
+- ✅ `ui/flash_dialog.py`: `_flash_usb` теперь использует внешний `dfu-util` с конвертацией HEX→BIN через `intelhex` и корректными аргументами `-d 0483:df11 -a 0 -s <base>:leave -D <bin>`; если `dfu-util` не найден, производится fallback на `pyusb`/`core.dfu` с понятным сообщением об ошибке.
+- ✅ `ui/flash_dialog.py`: добавлена обработка `FileNotFoundError` и `subprocess.TimeoutExpired` для `dfu-util`, исключающая падение при отсутствии утилиты.
+
 ## Итоговая оценка готовности
 
 **100 %**
