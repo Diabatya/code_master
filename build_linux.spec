@@ -1,10 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
 block_cipher = None
 
+try:
+    import libusb_package
+
+    libusb_dll = libusb_package.get_library_path()
+    extra_binaries = [(libusb_dll, '.')]
+except Exception:
+    extra_binaries = []
+
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=extra_binaries,
     datas=[('library', 'library')],
     hiddenimports=[
         'PySide6.QtCore',
@@ -50,6 +58,18 @@ a = Analysis(
         'cantools',
         'cantools.database',
         'carbus_async',
+        'core.dfu',
+        'pyocd.core.helpers',
+        'pyocd.flash.flash_builder',
+        'pyocd.probe.stlink_probe',
+        'pyocd.probe.jlink_probe',
+        'pyocd.target',
+        'pyocd.target.family',
+        'pylink',
+        'pylink.enums',
+        'usb',
+        'usb.backend.libusb1',
+        'libusb_package',
     ],
     hookspath=[],
     hooksconfig={},
