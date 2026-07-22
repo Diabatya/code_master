@@ -1,16 +1,4 @@
-"""Версионные метаданные Windows (version resource) для PyInstaller EXE."""
-
-from PyInstaller.utils.win32.versioninfo import (
-    FixedFileInfo,
-    StringFileInfo,
-    StringStruct,
-    StringTable,
-    VarFileInfo,
-    VarStruct,
-    VSVersionInfo,
-)
-
-version_info = VSVersionInfo(
+VSVersionInfo(
     ffi=FixedFileInfo(
         filevers=(1, 0, 0, 0),
         prodvers=(1, 0, 0, 0),
@@ -25,20 +13,20 @@ version_info = VSVersionInfo(
         StringFileInfo(
             [
                 StringTable(
-                    "040904B0",
+                    u'040904B0',
                     [
-                        StringStruct("CompanyName", "КОД МАСТЕР"),
-                        StringStruct("ProductName", "Код Мастер"),
-                        StringStruct("FileDescription", "Код Мастер — прошивка STM32 и работа с CAN"),
-                        StringStruct("InternalName", "CodeMaster"),
-                        StringStruct("OriginalFilename", "CodeMaster.exe"),
-                        StringStruct("FileVersion", "1.0.0.0"),
-                        StringStruct("ProductVersion", "1.0.0.0"),
-                        StringStruct("LegalCopyright", "© 2026 КОД МАСТЕР"),
+                        StringStruct(u'CompanyName', u'\u041a\u041e\u0414 \u041c\u0410\u0421\u0422\u0415\u0420'),
+                        StringStruct(u'ProductName', u'\u041a\u043e\u0434 \u041c\u0430\u0441\u0442\u0435\u0440'),
+                        StringStruct(u'FileDescription', u'Code Master - STM32 flashing and CAN tool'),
+                        StringStruct(u'InternalName', u'CodeMaster'),
+                        StringStruct(u'OriginalFilename', u'CodeMaster.exe'),
+                        StringStruct(u'FileVersion', u'1.0.0.0'),
+                        StringStruct(u'ProductVersion', u'1.0.0.0'),
+                        StringStruct(u'LegalCopyright', u'Copyright (C) 2026 KOD MASTER'),
                     ],
                 )
             ]
         ),
-        VarFileInfo([VarStruct("Translation", 0x409, 1200)]),
+        VarFileInfo([VarStruct(u'Translation', [0x409, 1200])]),
     ],
 )
