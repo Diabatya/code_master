@@ -292,6 +292,22 @@
 - ✅ Все новые пользовательские строки UI обёрнуты в `tr()`.
 - ✅ `python3 -m py_compile` и `python3 main.py --help` проходят без ошибок.
 
+## 28. Финальная сборка v1.0 (22.07.2026)
+
+- ✅ `README.md`: добавлена шапка с брендингом «Разработано «КОД МАСТЕР»» и раздел «Благодарности» со ссылкой на `NOTICE.md`.
+- ✅ `ui/main_window.py`: в верхней панели добавлен слоган «Разработано «КОД МАСТЕР»» под названием приложения.
+- ✅ `ui/help_widget.py`: добавлена вкладка «О программе» с версией, автором, лицензией MIT и годом © 2026.
+- ✅ `assets/version_info.py`: создан файл версионных метаданных Windows с `CompanyName='КОД МАСТЕР'` и `ProductName='Код Мастер'`.
+- ✅ `build_win.spec`: указан `version='assets/version_info.py'` для встраивания метаданных EXE.
+- ✅ `build_mac.spec`: добавлен `info_plist` с `CFBundleName`, `CFBundleDisplayName` и `NSHumanReadableCopyright`.
+- ✅ `build_win.spec`, `build_mac.spec`, `build_linux.spec`: добавлены `ui.setup_wizard`, `ui.help_widget`, `ui.can_topology` в `hiddenimports`.
+- ✅ `library/dbc/opendbc/`: скопированы DBC-файлы Toyota, Honda, Volkswagen, Hyundai из commaai/opendbc (MIT) с лицензионными комментариями в начале каждого файла.
+- ✅ `ui/library_browser.py`: добавлена кнопка «Загрузить DBC из OpenDBC» — диалог выбора марки, загрузка DBC через `cantools`, отображение ID с описанием, создание триггера по двойному клику; выводится информация о лицензии MIT.
+- ✅ `NOTICE.md`: создан список используемых открытых библиотек, их лицензий и ссылок.
+- ✅ Все новые строки UI обёрнуты в `tr()`.
+- ✅ `python3 -m py_compile` и `python3 main.py --help` проходят без ошибок.
+- ✅ Проект готов к публикации релиза `v1.0.0`.
+
 ## Итоговая оценка готовности
 
 **100 %**

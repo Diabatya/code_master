@@ -1,5 +1,11 @@
 # 🛠️ Код Мастер (Code Master)
 
+<p align="center">
+  <img src="assets/icon.png" width="64" alt="Код Мастер">
+</p>
+
+<p align="center"><strong>Разработано «КОД МАСТЕР»</strong></p>
+
 Десктопное приложение для прошивки микроконтроллеров **STM32** через UART-загрузчик и работы с **CAN-шиной** через UART-мост. Построено на **PySide6**, работает на Windows, macOS и Linux.
 
 [![Build and Release](https://github.com/GrafKD/code_master/actions/workflows/build.yml/badge.svg)](https://github.com/GrafKD/code_master/actions/workflows/build.yml)
@@ -99,6 +105,10 @@ pyinstaller build_win.spec
 Проект распространяется под лицензией **MIT**. Подробнее — см. файл [`LICENSE`](LICENSE).
 
 ---
+
+## 🙏 Благодарности
+
+Проект использует открытые библиотеки, инструменты и CAN-данные, включая [OpenDBC](https://github.com/commaai/opendbc). Полный список с лицензиями — в файле [NOTICE.md](NOTICE.md).
 
 ## 🤝 Контакты
 

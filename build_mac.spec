@@ -50,6 +50,9 @@ a = Analysis(
         'ui.library_browser',
         'ui.logic_tab',
         'ui.script_editor',
+        'ui.setup_wizard',
+        'ui.help_widget',
+        'ui.can_topology',
         'ui.settings_window',
         'ui.signal_graph_tab',
         'ui.ui_utils',
@@ -113,4 +116,11 @@ app = BUNDLE(
     name='CodeMaster.app',
     icon='assets/icon.icns',
     bundle_identifier='com.codemaster.app',
+    info_plist={
+        'CFBundleName': 'Код Мастер',
+        'CFBundleDisplayName': 'Код Мастер',
+        'CFBundleShortVersionString': '1.0.0',
+        'CFBundleVersion': '1.0.0',
+        'NSHumanReadableCopyright': '© 2026 КОД МАСТЕР',
+    },
 )

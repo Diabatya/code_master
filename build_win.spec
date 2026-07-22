@@ -45,6 +45,9 @@ a = Analysis(
         'ui.library_browser',
         'ui.logic_tab',
         'ui.script_editor',
+        'ui.setup_wizard',
+        'ui.help_widget',
+        'ui.can_topology',
         'ui.settings_window',
         'ui.signal_graph_tab',
         'ui.ui_utils',
@@ -85,4 +88,5 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,
     icon='assets/icon.ico',
+    version='assets/version_info.py',
 )

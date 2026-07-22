@@ -31,6 +31,7 @@ class HelpWidget(QWidget):
         self._gateway_edit = QPlainTextEdit(self._gateway_text())
         self._firmware_edit = QPlainTextEdit(self._firmware_text())
         self._faq_edit = QPlainTextEdit(self._faq_text())
+        self._about_edit = QPlainTextEdit(self._about_text())
 
         for edit in (
             self._hotkeys_edit,
@@ -39,6 +40,7 @@ class HelpWidget(QWidget):
             self._gateway_edit,
             self._firmware_edit,
             self._faq_edit,
+            self._about_edit,
         ):
             edit.setReadOnly(True)
 
@@ -48,6 +50,7 @@ class HelpWidget(QWidget):
         self._tabs.addTab(self._gateway_edit, tr("Шлюз"))
         self._tabs.addTab(self._firmware_edit, tr("Прошивка"))
         self._tabs.addTab(self._faq_edit, tr("FAQ"))
+        self._tabs.addTab(self._about_edit, tr("О программе"))
 
     def _build_layout(self) -> None:
         layout = QVBoxLayout(self)
@@ -122,6 +125,16 @@ class HelpWidget(QWidget):
             "О: Нажмите кнопку «Логи» в главном окне."
         )
 
+    def _about_text(self) -> str:
+        return tr(
+            "Код Мастер (Code Master)\n"
+            "Версия: 1.0.0\n"
+            "Разработано: КОД МАСТЕР\n"
+            "Лицензия: MIT\n"
+            "© 2026 КОД МАСТЕР\n\n"
+            "Приложение для прошивки STM32 и работы с CAN-шиной."
+        )
+
     def retranslate_ui(self) -> None:
         """Обновляет тексты вкладок справки."""
         self._tabs.setTabText(0, tr("Горячие клавиши"))
@@ -130,12 +143,14 @@ class HelpWidget(QWidget):
         self._tabs.setTabText(3, tr("Шлюз"))
         self._tabs.setTabText(4, tr("Прошивка"))
         self._tabs.setTabText(5, tr("FAQ"))
+        self._tabs.setTabText(6, tr("О программе"))
         self._hotkeys_edit.setPlainText(self._hotkeys_text())
         self._monitoring_edit.setPlainText(self._monitoring_text())
         self._triggers_edit.setPlainText(self._triggers_text())
         self._gateway_edit.setPlainText(self._gateway_text())
         self._firmware_edit.setPlainText(self._firmware_text())
         self._faq_edit.setPlainText(self._faq_text())
+        self._about_edit.setPlainText(self._about_text())
 
 
 def show_help(parent: Optional[QWidget] = None) -> None:

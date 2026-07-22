@@ -80,11 +80,14 @@ class MainWindow(QMainWindow):
         # Верхняя панель
         self._top_panel = QWidget()
         self._top_panel.setObjectName("topPanel")
-        self._top_panel.setFixedHeight(48)
+        self._top_panel.setFixedHeight(60)
 
         self._logo_label = QLabel("🛠️ " + tr("Код Мастер"))
         self._logo_label.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         self._logo_label.setProperty("title", True)
+
+        self._slogan_label = QLabel(tr("Разработано «КОД МАСТЕР»"))
+        self._slogan_label.setFont(QFont("Segoe UI", 8))
 
         self._port_indicator = QLabel("●")
         self._port_indicator.setFixedSize(20, 20)
@@ -185,7 +188,15 @@ class MainWindow(QMainWindow):
         top_layout = QHBoxLayout(self._top_panel)
         top_layout.setContentsMargins(12, 0, 20, 0)
         top_layout.setSpacing(10)
-        top_layout.addWidget(self._logo_label)
+
+        self._brand_widget = QWidget()
+        brand_layout = QVBoxLayout(self._brand_widget)
+        brand_layout.setContentsMargins(0, 0, 0, 0)
+        brand_layout.setSpacing(0)
+        brand_layout.addWidget(self._logo_label)
+        brand_layout.addWidget(self._slogan_label)
+        top_layout.addWidget(self._brand_widget)
+
         top_layout.addWidget(self._language_combo)
         top_layout.addStretch()
         top_layout.addWidget(self._port_indicator)
@@ -412,6 +423,7 @@ class MainWindow(QMainWindow):
         """Обновляет все статические строки главного окна."""
         self.setWindowTitle(tr("Код Мастер"))
         self._logo_label.setText("🛠️ " + tr("Код Мастер"))
+        self._slogan_label.setText(tr("Разработано «КОД МАСТЕР»"))
         self._port_indicator.setToolTip(tr("Индикатор подключения COM-порта"))
         if not self._serial_manager.is_open() and not self._config.get("port"):
             self._port_label.setText(tr("Нет подключения"))

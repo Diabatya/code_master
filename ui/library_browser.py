@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMessageBox,
     QPushButton,
     QSplitter,
@@ -179,6 +180,7 @@ class LibraryBrowser(QWidget):
         self._use_button.setText(tr("Использовать в триггере"))
         self._add_button.setText(tr("Добавить ID"))
         self._refresh_button.setText(tr("Обновить"))
+        self._open_dbc_button.setText(tr("Загрузить DBC из OpenDBC"))
         self._table.setHorizontalHeaderLabels([tr("ID (HEX)"), tr("DLC"), tr("Описание"), tr("Данные (пример)")])
 
     def _create_widgets(self) -> None:
@@ -218,6 +220,10 @@ class LibraryBrowser(QWidget):
         setup_button(self._refresh_button, height=28)
         self._refresh_button.clicked.connect(self._refresh)
 
+        self._open_dbc_button = QPushButton(tr("Загрузить DBC из OpenDBC"))
+        setup_button(self._open_dbc_button, height=28)
+        self._open_dbc_button.clicked.connect(self._on_open_dbc)
+
     def _build_layout(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -235,6 +241,7 @@ class LibraryBrowser(QWidget):
 
         buttons_layout = QHBoxLayout()
         buttons_layout.setSpacing(8)
+        buttons_layout.addWidget(self._open_dbc_button)
         buttons_layout.addWidget(self._add_button)
         buttons_layout.addWidget(self._refresh_button)
         buttons_layout.addStretch()
@@ -301,6 +308,113 @@ class LibraryBrowser(QWidget):
         _save_user_data(records)
         self._refresh()
 
+    def _on_open_dbc(self) -> None:
+        """Открывает диалог выбора DBC из локальной копии OpenDBC."""
+        dialog = _OpenDbcDialog(self._trigger_tab, self)
+        dialog.exec()
+
     def _refresh(self) -> None:
         self._loader.load()
         self._build_tree()
+
+
+class _OpenDbcDialog(QDialog):
+    """Диалог выбора DBC из локальной копии OpenDBC и создания триггера."""
+
+    def __init__(self, trigger_tab: CanTriggerTab, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._trigger_tab = trigger_tab
+        self.setWindowTitle(tr("OpenDBC"))
+        self.resize(700, 500)
+        self._messages: list = []
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        license_label = QLabel(
+            tr("Данные OpenDBC предоставлены comma.ai под лицензией MIT.\n"
+               "Источник: https://github.com/commaai/opendbc")
+        )
+        license_label.setWordWrap(True)
+        license_label.setStyleSheet("color: #A0A0A0; font-size: 9pt;")
+        layout.addWidget(license_label)
+
+        content = QHBoxLayout()
+        self._make_list = QListWidget()
+        self._make_list.setMaximumWidth(220)
+        self._make_list.currentItemChanged.connect(self._on_make_changed)
+        content.addWidget(self._make_list)
+
+        right = QVBoxLayout()
+        self._table = QTableWidget()
+        self._table.setColumnCount(4)
+        self._table.setHorizontalHeaderLabels([tr("ID (HEX)"), tr("DLC"), tr("Название"), tr("Описание")])
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._table.doubleClicked.connect(self._on_id_double_clicked)
+        right.addWidget(self._table)
+        content.addLayout(right)
+        layout.addLayout(content)
+
+        close_button = QPushButton(tr("Закрыть"))
+        close_button.clicked.connect(self.reject)
+        layout.addWidget(close_button)
+
+        self._dbc_root = get_library_root() / "dbc" / "opendbc"
+        self._load_makes()
+
+    def _load_makes(self) -> None:
+        """Заполняет список доступных марок по файлам DBC."""
+        if not self._dbc_root.exists():
+            QMessageBox.warning(
+                self,
+                tr("Внимание"),
+                tr("Папка OpenDBC не найдена: {0}").format(self._dbc_root),
+            )
+            return
+        for path in sorted(self._dbc_root.glob("*.dbc")):
+            self._make_list.addItem(path.stem)
+
+    def _on_make_changed(self, current) -> None:
+        """Загружает выбранный DBC и отображает список сообщений."""
+        self._table.setRowCount(0)
+        self._messages = []
+        if current is None:
+            return
+        path = self._dbc_root / f"{current.text()}.dbc"
+        try:
+            import cantools.database as cantools_database
+            db = cantools_database.load_file(str(path), strict=False)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self,
+                tr("Ошибка"),
+                tr("Не удалось загрузить DBC: {0}").format(exc),
+            )
+            return
+        self._messages = list(db.messages)
+        self._table.setRowCount(len(self._messages))
+        for row, msg in enumerate(self._messages):
+            self._table.setItem(row, 0, QTableWidgetItem(int_to_hex(msg.frame_id, 8)))
+            self._table.setItem(row, 1, QTableWidgetItem(str(msg.length)))
+            self._table.setItem(row, 2, QTableWidgetItem(msg.name))
+            self._table.setItem(row, 3, QTableWidgetItem(msg.comment or ""))
+            for col in range(4):
+                self._table.item(row, col).setData(Qt.ItemDataRole.UserRole, msg)
+
+    def _on_id_double_clicked(self) -> None:
+        """Создаёт триггер из выбранного CAN ID."""
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._messages):
+            return
+        msg = self._messages[row]
+        dlc = max(1, min(8, msg.length))
+        self._trigger_tab.create_trigger_from_packet({"id": msg.frame_id, "data": [0] * dlc, "dlc": dlc})
+        QMessageBox.information(
+            self,
+            tr("Готово"),
+            tr("Триггер создан из ID {0}").format(int_to_hex(msg.frame_id, 8)),
+        )
+        self.accept()
