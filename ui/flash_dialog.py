@@ -1,5 +1,6 @@
 """Профессиональный диалог прошивки микроконтроллера и HEX-редактор."""
 
+import re
 import shutil
 import subprocess
 import tempfile
@@ -31,6 +32,7 @@ except Exception:
 from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -74,6 +76,35 @@ DEVICE_TYPES: List[Tuple[int, str]] = [
     (DEVICE_TYPE_ANALOG, "2 CAN +"),
     (DEVICE_TYPE_CAN_FD, "2 CAN FD"),
 ]
+
+STM32_FLASH_SIZES: Dict[str, int] = {
+    "STM32F103C8T6": 64,
+    "STM32F103RBT6": 128,
+    "STM32F105RCT6": 256,
+    "STM32F105VCT6": 256,
+    "STM32F107VCT6": 256,
+    "STM32F205RGT6": 1024,
+    "STM32F303CCT6": 256,
+    "STM32F407VGT6": 1024,
+    "STM32F429ZIT6": 2048,
+    "STM32F446RET6": 512,
+    "STM32F746ZGT6": 1024,
+}
+
+# ST-LINK Device ID (например, 0x418) → модель по datasheet
+DEVICE_ID_TO_MODEL: Dict[str, str] = {
+    "0x410": "STM32F103RBT6",
+    "0x412": "STM32F103C8T6",
+    "0x413": "STM32F407VGT6",
+    "0x414": "STM32F105RCT6",
+    "0x418": "STM32F105VCT6",
+    "0x421": "STM32F446RET6",
+    "0x422": "STM32F303CCT6",
+    "0x434": "STM32F429ZIT6",
+    "0x440": "STM32F107VCT6",
+    "0x449": "STM32F746ZGT6",
+    "0x411": "STM32F205RGT6",
+}
 
 CHIP_FLASH_SIZE_KB: Dict[int, str] = {
     0x412: "64/128",
@@ -593,6 +624,35 @@ class ConnectWorker(QThread):
         return False, {"error": tr("Неизвестный метод")}
 
     def _try_stlink(self) -> Tuple[bool, Dict[str, Any]]:
+        stlink_cli = shutil.which("ST-LINK_CLI.exe")
+        if stlink_cli:
+            try:
+                result = subprocess.run(
+                    [stlink_cli, "-c"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                output = result.stdout + result.stderr
+                match = re.search(
+                    r"Device\s+ID\s*[:=]\s*(0x[0-9A-Fa-f]{3,4})",
+                    output,
+                    re.IGNORECASE,
+                )
+                if match:
+                    chip_id = match.group(1).upper()
+                    model = DEVICE_ID_TO_MODEL.get(chip_id)
+                    if model:
+                        size_kb = STM32_FLASH_SIZES.get(model)
+                        return True, {
+                            "chip_id": chip_id,
+                            "model": model,
+                            "flash_size": f"{size_kb} KB" if size_kb else tr("Неизвестно"),
+                            "flash_size_kb": size_kb,
+                        }
+                    return True, {"chip_id": chip_id, "flash_size": tr("Неизвестно")}
+            except Exception as exc:  # noqa: BLE001
+                self.log_line.emit(tr("ST-LINK_CLI.exe не удалось запустить: {0}").format(exc))
         if not _PYOCD:
             return False, {"error": tr("pyocd не установлен")}
         try:
@@ -601,7 +661,6 @@ class ConnectWorker(QThread):
                 return False, {"error": tr("ST-Link не найден")}
             return True, {
                 "chip_id": tr("Неизвестно"),
-                "chip_id_int": None,
                 "flash_size": tr("Неизвестно"),
             }
         except Exception as exc:  # noqa: BLE001
@@ -1067,15 +1126,29 @@ class FlashDialog(QDialog):
         self._chip_info_label = QLabel(tr("Информация о чипе: не подключено"))
         self._chip_info_label.setFont(font)
 
+        # Модель чипа
+        self._chip_label = QLabel(tr("Модель чипа"))
+        self._chip_label.setFont(font)
+        self._chip_combo = QComboBox()
+        self._chip_combo.setFont(font)
+        self._chip_combo.setMinimumWidth(160)
+        self._chip_combo.addItem(tr("Вручную"), "")
+        for model in sorted(STM32_FLASH_SIZES):
+            self._chip_combo.addItem(model, model)
+
         # Целевая МК (для pyocd/pylink)
         self._target_mcu_label = QLabel(tr("Целевая МК"))
         self._target_mcu_edit = QLineEdit()
         self._target_mcu_edit.setPlaceholderText(tr("Например: STM32F103RC"))
 
-        # Размер читаемой flash-памяти (KB)
-        self._read_size_label = QLabel(tr("Размер чтения (KB)"))
+        # Размер flash-памяти (KB)
+        self._read_size_label = QLabel(tr("Размер памяти (КБ)"))
         self._read_size_edit = QLineEdit("64")
         self._read_size_edit.setMaximumWidth(80)
+
+        self._config_check = QCheckBox(tr("Записать конфигурацию устройства"))
+        self._config_check.setFont(font)
+        self._config_check.setToolTip(tr("Записать имя и серийный номер в последнюю страницу Flash"))
 
         # Файлы прошивки
         self._files_group = QGroupBox(tr("Файлы прошивки"))
@@ -1123,11 +1196,18 @@ class FlashDialog(QDialog):
         layout.addWidget(self._chip_info_label)
 
         target_mcu_layout = QHBoxLayout()
+        target_mcu_layout.addWidget(self._chip_label)
+        target_mcu_layout.addWidget(self._chip_combo)
         target_mcu_layout.addWidget(self._target_mcu_label)
         target_mcu_layout.addWidget(self._target_mcu_edit, 1)
         target_mcu_layout.addWidget(self._read_size_label)
         target_mcu_layout.addWidget(self._read_size_edit)
         layout.addLayout(target_mcu_layout)
+
+        config_layout = QHBoxLayout()
+        config_layout.addWidget(self._config_check)
+        config_layout.addStretch()
+        layout.addLayout(config_layout)
 
         files_main = QHBoxLayout()
         files_main.addWidget(self._files_list, 1)
@@ -1181,20 +1261,36 @@ class FlashDialog(QDialog):
             )
         )
         self._serial_edit.editingFinished.connect(
-            lambda: self._config.set("serial_number", self._serial_edit.text().strip())
+            lambda: self._config.set_bulk({
+                "serial_number": self._serial_edit.text().strip(),
+                "device_serial": self._serial_edit.text().strip(),
+            })
         )
+
+        self._chip_combo.currentIndexChanged.connect(self._on_chip_changed)
 
     def _load_defaults(self) -> None:
         device_type = self._config.get("device_type", DEVICE_TYPE_BASIC)
         index = self._device_type_combo.findData(device_type)
         if index >= 0:
             self._device_type_combo.setCurrentIndex(index)
-        self._serial_edit.setText(self._config.get("serial_number", ""))
+        serial = self._config.get("device_serial", "")
+        if not serial:
+            serial = self._config.get("serial_number", "")
+        self._serial_edit.setText(serial)
         method = self._config.get("programmer_method", "stlink")
         index = self._method_combo.findData(method)
         if index >= 0:
             self._method_combo.setCurrentIndex(index)
-        self._target_mcu_edit.setText(self._config.get("target_mcu", ""))
+        target_mcu = self._config.get("target_mcu", "")
+        self._target_mcu_edit.setText(target_mcu)
+        if target_mcu in STM32_FLASH_SIZES:
+            idx = self._chip_combo.findData(target_mcu)
+            if idx >= 0:
+                self._chip_combo.setCurrentIndex(idx)
+        total_kb = self._config.get("total_memory", 65536) // 1024
+        if total_kb > 0:
+            self._read_size_edit.setText(str(total_kb))
         self._update_power_button()
         self._on_method_changed(self._method_combo.currentIndex())
 
@@ -1209,6 +1305,16 @@ class FlashDialog(QDialog):
         self._identify_button.setVisible(is_stlink)
         self._port_button.setVisible(is_uart)
         self._set_connect_status(False, {})
+
+    def _on_chip_changed(self, index: int) -> None:
+        model = self._chip_combo.itemData(index)
+        if model and model in STM32_FLASH_SIZES:
+            self._read_size_edit.setText(str(STM32_FLASH_SIZES[model]))
+            self._read_size_edit.setReadOnly(True)
+            self._target_mcu_edit.setText(model)
+            self._config.set("target_mcu", model)
+        else:
+            self._read_size_edit.setReadOnly(False)
 
     def _set_connect_status(self, connected: bool, info: Dict[str, Any]) -> None:
         self._connected = connected
@@ -1264,6 +1370,15 @@ class FlashDialog(QDialog):
             index = self._method_combo.findData(info["method"])
             if index >= 0:
                 self._method_combo.setCurrentIndex(index)
+        if success:
+            model = info.get("model", "")
+            if model:
+                idx = self._chip_combo.findData(model)
+                if idx >= 0:
+                    self._chip_combo.setCurrentIndex(idx)
+            flash_size_kb = info.get("flash_size_kb")
+            if flash_size_kb:
+                self._read_size_edit.setText(str(flash_size_kb))
         self._last_chip_info = info
         self._set_connect_status(success, info)
 
@@ -1298,6 +1413,46 @@ class FlashDialog(QDialog):
         for item in self._files_list.selectedItems():
             self._files_list.takeItem(self._files_list.row(item))
 
+    def _prepare_firmware_with_config(self, file_path: str) -> str:
+        """Дополняет бинарник до размера Flash и записывает конфиг в последнюю страницу."""
+        if not self._config_check.isChecked():
+            return file_path
+        name = self._device_type_combo.currentText().strip()
+        serial = self._serial_edit.text().strip()
+        if not name:
+            raise ValueError(tr("Выберите тип устройства"))
+        if not serial:
+            raise ValueError(tr("Введите серийный номер"))
+        try:
+            flash_size_kb = int(self._read_size_edit.text().strip() or "64")
+        except ValueError as exc:
+            raise ValueError(tr("Некорректный размер памяти")) from exc
+        if flash_size_kb <= 0:
+            raise ValueError(tr("Размер памяти должен быть больше 0"))
+
+        data, base = _load_firmware_bytes(file_path)
+        if base == 0:
+            base = 0x08000000
+        flash_size = flash_size_kb * 1024
+        firmware_offset = base - 0x08000000
+        if firmware_offset < 0 or firmware_offset + len(data) > flash_size:
+            raise ValueError(tr("Прошивка не помещается в выбранный размер Flash"))
+
+        image = bytearray(b"\xFF") * flash_size
+        image[firmware_offset:firmware_offset + len(data)] = data
+
+        page_size = 2048
+        last_page_offset = flash_size - page_size
+        name_bytes = name.encode("ascii", errors="ignore")[:10].ljust(10)
+        serial_bytes = serial.encode("ascii", errors="ignore")[:11].ljust(11)
+        image[last_page_offset + 8 : last_page_offset + 18] = name_bytes
+        image[last_page_offset + 18 : last_page_offset + 29] = serial_bytes
+
+        src = Path(file_path)
+        tmp = Path(tempfile.gettempdir()) / f"{src.stem}_конфиг.bin"
+        tmp.write_bytes(bytes(image))
+        return str(tmp)
+
     def _on_flash(self) -> None:
         files = [self._files_list.item(i).text() for i in range(self._files_list.count())]
         if not files:
@@ -1307,9 +1462,14 @@ class FlashDialog(QDialog):
         if method == "auto":
             QMessageBox.warning(self, tr("Внимание"), tr("Выберите конкретный способ программирования"))
             return
+        try:
+            prepared = [self._prepare_firmware_with_config(f) for f in files]
+        except ValueError as exc:
+            QMessageBox.warning(self, tr("Внимание"), str(exc))
+            return
         self._flash_button.setEnabled(False)
         self._progress_bar.setValue(0)
-        self._flash_worker = FlashWorker(files, method, self._config, self)
+        self._flash_worker = FlashWorker(prepared, method, self._config, self)
         self._flash_worker.log_line.connect(self._log)
         self._flash_worker.progress.connect(self._progress_bar.setValue)
         self._flash_worker.finished.connect(self._on_flash_finished)
