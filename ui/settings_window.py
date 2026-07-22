@@ -33,6 +33,7 @@ from ui.analog_ports_tab import AnalogPortsTab
 from ui.can_analyzer import CanAnalyzer
 from ui.can_gateway_tab import CanGatewayTab
 from ui.can_monitor_tab import CanMonitorTab
+from ui.can_topology import CanTopologyWidget
 from ui.can_trigger_tab import CanTriggerTab
 from ui.flexible_logic_tab import FlexibleLogicTab
 from ui.hex_edit import HexDataEdit
@@ -85,6 +86,7 @@ class SettingsWindow(QMainWindow):
         self._flexible_tab = FlexibleLogicTab(self._serial_manager, self)
         self._library_tab = LibraryBrowser(self._trigger_tab, self._flexible_tab, self)
         self._analyzer_tab = CanAnalyzer(self._serial_manager, self)
+        self._topology_tab = CanTopologyWidget(self)
         self._analog_tab: Optional[AnalogPortsTab] = None
 
         self._tabs.addTab(self._trigger_tab, "⚡ " + tr("Триггеры"))
@@ -93,6 +95,7 @@ class SettingsWindow(QMainWindow):
         self._tabs.addTab(self._flexible_tab, "🧩 " + tr("Гибкая логика"))
         self._tabs.addTab(self._library_tab, "📚 " + tr("Библиотека"))
         self._tabs.addTab(self._analyzer_tab, "🔬 " + tr("Трэйс"))
+        self._tabs.addTab(self._topology_tab, "🌐 " + tr("Топология"))
         self._update_analog_tab()
         self._serial_manager.device_identified.connect(self._update_analog_tab)
 
@@ -197,6 +200,7 @@ class SettingsWindow(QMainWindow):
             self._flexible_tab: "🧩 " + tr("Гибкая логика"),
             self._library_tab: "📚 " + tr("Библиотека"),
             self._analyzer_tab: "🔬 " + tr("Трэйс"),
+            self._topology_tab: "🌐 " + tr("Топология"),
         }
         if self._analog_tab is not None:
             titles[self._analog_tab] = "🌊 " + tr("Аналоговые порты")
@@ -216,6 +220,7 @@ class SettingsWindow(QMainWindow):
             self._flexible_tab,
             self._library_tab,
             self._analyzer_tab,
+            self._topology_tab,
         ):
             if hasattr(tab, "retranslate_ui"):
                 tab.retranslate_ui()
@@ -226,6 +231,7 @@ class SettingsWindow(QMainWindow):
         self._serial_manager.new_can_frame.connect(self._monitor_tab.process_frame)
         self._serial_manager.new_can_frame.connect(self._flexible_tab.process_frame)
         self._serial_manager.new_can_frame.connect(self._analyzer_tab.process_frame)
+        self._serial_manager.new_can_frame.connect(self._topology_tab.add_frame)
         self._serial_manager.error_occurred.connect(self._on_serial_error)
         self._monitor_tab.create_trigger_requested.connect(self._on_create_trigger)
 
@@ -549,6 +555,7 @@ class SettingsWindow(QMainWindow):
             self._monitor_tab,
             self._flexible_tab,
             self._analyzer_tab,
+            self._topology_tab,
         ):
             if hasattr(tab, "set_dbc"):
                 tab.set_dbc(dbc_manager)

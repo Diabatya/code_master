@@ -40,6 +40,8 @@ class Config:
         "programmer_method": "stlink",
         "sleep_time": 0,
         "sleep_mode": 0,
+        "setup_completed": False,
+        "theme": "dark",
     }
 
     def max_data_bytes(self) -> int:

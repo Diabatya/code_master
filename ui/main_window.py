@@ -36,6 +36,7 @@ from ui.com_settings_dialog import ComSettingsDialog
 from ui.dark_theme import apply_theme
 from ui.firmware_page import FirmwarePage
 from ui.flash_dialog import FlashDialog
+from ui.help_widget import show_help
 from ui.settings_window import SettingsWindow
 
 logger = get_logger(__name__)
@@ -102,6 +103,7 @@ class MainWindow(QMainWindow):
         self._theme_menu = QMenu(self._theme_button)
         self._dark_theme_action = self._theme_menu.addAction(tr("Тёмный"), self._set_dark_theme)
         self._light_theme_action = self._theme_menu.addAction(tr("Светлый"), self._set_light_theme)
+        self._starline_theme_action = self._theme_menu.addAction(tr("StarLine"), self._set_starline_theme)
         self._theme_button.setMenu(self._theme_menu)
 
         self._language_combo = QComboBox()
@@ -116,6 +118,13 @@ class MainWindow(QMainWindow):
         self._logs_button.setFont(font)
         self._logs_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._logs_button.clicked.connect(self._open_logs)
+
+        self._help_button = QPushButton("?")
+        self._help_button.setFixedSize(36, 28)
+        self._help_button.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        self._help_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._help_button.setToolTip(tr("Помощь"))
+        self._help_button.clicked.connect(self._on_help_clicked)
 
         self._update_check_button = QPushButton("🔄")
         self._update_check_button.setFixedSize(36, 28)
@@ -184,6 +193,7 @@ class MainWindow(QMainWindow):
         top_layout.addSpacing(10)
         top_layout.addWidget(self._theme_button)
         top_layout.addWidget(self._logs_button)
+        top_layout.addWidget(self._help_button)
         top_layout.addWidget(self._update_check_button)
         root.addWidget(self._top_panel)
 
@@ -246,6 +256,53 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(modifier | Qt.Key.Key_O), self, activated=self._on_update_clicked)
         QShortcut(QKeySequence(modifier | Qt.Key.Key_M), self, activated=self._on_configure_clicked)
         QShortcut(QKeySequence("Esc"), self, activated=self.setFocus)
+        QShortcut(QKeySequence("Ctrl+S"), self, activated=self._on_save_settings)
+        QShortcut(QKeySequence("Ctrl+Shift+P"), self, activated=self._on_flash_clicked)
+        QShortcut(QKeySequence("F5"), self, activated=self._on_toggle_monitoring)
+        QShortcut(QKeySequence("Ctrl+Shift+T"), self, activated=self._on_add_trigger_hotkey)
+
+    def _on_save_settings(self) -> None:
+        """Сохраняет текущие настройки."""
+        try:
+            self._config.save()
+            self._status_label.setText(tr("Настройки сохранены"))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить настройки: {0}").format(exc))
+
+    def _on_toggle_monitoring(self) -> None:
+        """Запускает или останавливает CAN-мониторинг."""
+        if self._settings_window is None or not self._settings_window.isVisible():
+            self._on_configure_clicked()
+            if self._settings_window is None:
+                return
+        monitor_tab = self._settings_window._monitor_tab
+        if not hasattr(monitor_tab, "_monitor1") or not hasattr(monitor_tab, "_monitor2"):
+            return
+        any_running = monitor_tab._monitor1._running or monitor_tab._monitor2._running
+        if any_running:
+            monitor_tab._monitor1._stop()
+            monitor_tab._monitor2._stop()
+            self._status_label.setText(tr("Мониторинг остановлен"))
+        else:
+            monitor_tab._monitor1._start()
+            monitor_tab._monitor2._start()
+            self._status_label.setText(tr("Мониторинг запущен"))
+
+    def _on_add_trigger_hotkey(self) -> None:
+        """Открывает вкладку триггеров и активирует первый свободный блок."""
+        if self._settings_window is None or not self._settings_window.isVisible():
+            self._on_configure_clicked()
+            if self._settings_window is None:
+                return
+        tabs = self._settings_window._tabs
+        trigger_tab = self._settings_window._trigger_tab
+        tabs.setCurrentWidget(trigger_tab)
+        if hasattr(trigger_tab, "_blocks"):
+            for block in trigger_tab._blocks:
+                if not block["group"].isChecked():
+                    block["group"].setChecked(True)
+                    block["recv"]["id"].setFocus()
+                    break
 
     def _ensure_port_selected(self) -> bool:
         """Если порт не выбран, открывает диалог подключения."""
@@ -308,6 +365,7 @@ class MainWindow(QMainWindow):
         if app is None:
             return
         self._config.set("light_theme", False)
+        self._config.set("theme", "dark")
         apply_theme(app, False)
 
     def _set_light_theme(self) -> None:
@@ -316,7 +374,18 @@ class MainWindow(QMainWindow):
         if app is None:
             return
         self._config.set("light_theme", True)
+        self._config.set("theme", "light")
         apply_theme(app, True)
+
+    def _set_starline_theme(self) -> None:
+        """Устанавливает тему «StarLine»."""
+        from ui.dark_theme import apply_starline_theme
+        app = QApplication.instance()
+        if app is None:
+            return
+        self._config.set("light_theme", False)
+        self._config.set("theme", "starline")
+        apply_starline_theme(app)
 
     def _on_language_changed(self, index: int) -> None:
         """Переключает язык через выпадающий список и обновляет открытые окна."""
@@ -350,7 +419,9 @@ class MainWindow(QMainWindow):
         self._theme_button.setToolTip(tr("Выбор темы оформления"))
         self._dark_theme_action.setText(tr("Тёмный"))
         self._light_theme_action.setText(tr("Светлый"))
+        self._starline_theme_action.setText(tr("StarLine"))
         self._logs_button.setText("📄 " + tr("Логи"))
+        self._help_button.setToolTip(tr("Помощь"))
         self._update_check_button.setToolTip(tr("Проверка обновлений"))
         self._update_button.setText("🔄 " + tr("Обновить"))
         self._configure_button.setText("⚙️ " + tr("Настроить"))
@@ -387,6 +458,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, tr("Доступно обновление"), message)
         else:
             QMessageBox.information(self, tr("Последняя версия"), message)
+
+    def _on_help_clicked(self) -> None:
+        """Открывает встроенную справку."""
+        show_help(self)
 
     def _on_heartbeat(self) -> None:
         """Индикатор порта становится зелёным при активности."""

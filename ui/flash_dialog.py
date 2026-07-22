@@ -890,7 +890,7 @@ class ReadWorker(QThread):
                 None,
             )
             start = flash.start if flash else 0x08000000
-            size = min(self._size, flash.length) if flash else self._size
+            size = flash.length if flash else self._size
             data = bytes(target_obj.read_memory_block8(start, size))
             target_obj.reset()
         return data, start
@@ -930,8 +930,7 @@ class ReadWorker(QThread):
             bl.enter_bootloader()
             bl.sync()
             start = 0x08000000
-            size = min(self._size, 0x10000)
-            data = bl.read_memory(start, size)
+            data = bl.read_memory(start, self._size)
             return data, start
         finally:
             try:
@@ -1010,6 +1009,11 @@ class FlashDialog(QDialog):
         self._target_mcu_edit = QLineEdit()
         self._target_mcu_edit.setPlaceholderText(tr("Например: STM32F103RC"))
 
+        # Размер читаемой flash-памяти (KB)
+        self._read_size_label = QLabel(tr("Размер чтения (KB)"))
+        self._read_size_edit = QLineEdit("64")
+        self._read_size_edit.setMaximumWidth(80)
+
         # Файлы прошивки
         self._files_group = QGroupBox(tr("Файлы прошивки"))
         self._files_list = QListWidget()
@@ -1058,6 +1062,8 @@ class FlashDialog(QDialog):
         target_mcu_layout = QHBoxLayout()
         target_mcu_layout.addWidget(self._target_mcu_label)
         target_mcu_layout.addWidget(self._target_mcu_edit, 1)
+        target_mcu_layout.addWidget(self._read_size_label)
+        target_mcu_layout.addWidget(self._read_size_edit)
         layout.addLayout(target_mcu_layout)
 
         files_main = QHBoxLayout()
@@ -1259,9 +1265,17 @@ class FlashDialog(QDialog):
         if method == "auto":
             QMessageBox.warning(self, tr("Внимание"), tr("Выберите конкретный способ программирования"))
             return
+        try:
+            size_kb = int(self._read_size_edit.text().strip() or "64")
+        except ValueError:
+            QMessageBox.warning(self, tr("Внимание"), tr("Некорректный размер чтения"))
+            return
+        if size_kb <= 0:
+            QMessageBox.warning(self, tr("Внимание"), tr("Размер чтения должен быть больше 0"))
+            return
         self._read_button.setEnabled(False)
         self._progress_bar.setValue(0)
-        self._read_worker = ReadWorker(method, self._config, parent=self)
+        self._read_worker = ReadWorker(method, self._config, size=size_kb * 1024, parent=self)
         self._read_worker.log_line.connect(self._log)
         self._read_worker.finished.connect(self._on_read_finished)
         self._read_worker.start()

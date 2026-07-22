@@ -389,3 +389,29 @@ def apply_light_theme(app: QApplication) -> None:
         "text_title": "#000000",
         "text_disabled": "#8A8A9A",
     })
+
+
+def apply_starline_theme(app: QApplication) -> None:
+    """Применяет профессиональную тему «StarLine»."""
+    _apply_theme(app, {
+        "bg_window": "#0D1B2A",
+        "bg_panel": "#1B2838",
+        "bg_widget": "#1B2838",
+        "bg_alternate": "#1B2838",
+        "bg_button": "#1B2838",
+        "bg_button_hover": "#FF8C00",
+        "bg_button_pressed": "#CC7000",
+        "bg_card": "#1B2838",
+        "bg_card_hover": "#FF8C00",
+        "bg_card_checked": "#2A3A4A",
+        "bg_disabled": "#2B3A4A",
+        "bg_selected": "#2A3A4A",
+        "accent": "#FF8C00",
+        "border": "#3A4A5A",
+        "text": "#FFFFFF",
+        "text_secondary": "#E0E0E0",
+        "text_selected": "#FFFFFF",
+        "text_title": "#FFFFFF",
+        "text_disabled": "#6C6C6C",
+    })
+    app.setStyleSheet(app.styleSheet() + "\nQPushButton { border-radius: 4px; }")

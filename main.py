@@ -15,9 +15,10 @@ from core.bootloader import Bootloader, BootloaderError
 from core.serial_manager import SerialManager
 from models.config import Config
 from models.logger import setup_logging
-from ui.dark_theme import apply_dark_theme, apply_light_theme
+from ui.dark_theme import apply_dark_theme, apply_light_theme, apply_starline_theme
 from ui.disclaimer_dialog import DisclaimerDialog
 from ui.main_window import MainWindow
+from ui.setup_wizard import SetupWizard
 
 
 def _parse_args() -> argparse.Namespace:
@@ -88,7 +89,10 @@ def main() -> int:
     app.setApplicationVersion("1.0.0")
 
     config = Config()
-    if config.get("light_theme", False):
+    theme = config.get("theme", "dark")
+    if theme == "starline":
+        apply_starline_theme(app)
+    elif config.get("light_theme", False):
         apply_light_theme(app)
     else:
         apply_dark_theme(app)
@@ -98,6 +102,13 @@ def main() -> int:
     disclaimer = DisclaimerDialog()
     if disclaimer.exec() != QDialog.DialogCode.Accepted:
         return 0
+
+    if not config.get("setup_completed", False):
+        wizard = SetupWizard()
+        if wizard.exec() == QDialog.DialogCode.Accepted:
+            config.set("setup_completed", True)
+        else:
+            return 0
 
     main_window = MainWindow(serial_manager)
     main_window.show()
