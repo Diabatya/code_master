@@ -50,6 +50,7 @@ class Bootloader:
             self.port.parity = serial.PARITY_EVEN
             self.port.stopbits = serial.STOPBITS_ONE
             self.port.bytesize = serial.EIGHTBITS
+            self.port.baudrate = 115200
             self.port.open()
             logger.info("Порт перенастроен для bootloader: Even, 1 стоп-бит")
         except Exception as exc:  # noqa: BLE001
@@ -247,8 +248,6 @@ class Bootloader:
         device_id = 0
         for _ in range(length + 1):
             device_id = (device_id << 8) | self._read_byte()
-        if self._read_byte() != ACK:
-            raise BootloaderError("Ошибка получения идентификатора устройства")
         return device_id
 
     def diagnostics(self) -> Dict[str, int]:
