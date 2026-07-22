@@ -1,12 +1,30 @@
 """Профессиональный диалог прошивки микроконтроллера и HEX-редактор."""
 
-import platform
-import re
-import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+try:
+    from pyocd.core.helpers import ConnectHelper
+    from pyocd.flash.flash_builder import FlashBuilder
+
+    _PYOCD = True
+except Exception:
+    _PYOCD = False
+
+try:
+    import pylink
+
+    _PYLINK = True
+except Exception:
+    _PYLINK = False
+
+try:
+    import usb.core
+
+    _PYUSB = True
+except Exception:
+    _PYUSB = False
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
@@ -88,59 +106,6 @@ def _format_chip_id(value: Optional[int]) -> str:
     if value is None:
         return tr("Неизвестно")
     return f"0x{value:08X}"
-
-
-def _resolve_tool(config_key: str, default_names: List[str]) -> Optional[str]:
-    """Возвращает путь к утилите: из Config или из PATH."""
-    config_path = Config().get(config_key, "")
-    if config_path:
-        path = Path(config_path)
-        if path.is_file():
-            return str(path)
-    for name in default_names:
-        found = shutil.which(name)
-        if found:
-            return found
-    return None
-
-
-def _run_command(cmd: List[str], timeout: int = 30) -> Tuple[int, str]:
-    """Запускает внешнюю команду и возвращает код и вывод."""
-    logger.info("Запуск команды: %s", " ".join(cmd))
-    try:
-        proc = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=timeout,
-            errors="replace",
-        )
-        return proc.returncode, proc.stdout or ""
-    except FileNotFoundError:
-        return -1, tr("Утилита не найдена: {0}").format(cmd[0])
-    except subprocess.TimeoutExpired:
-        return -1, tr("Превышен таймаут выполнения")
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Ошибка запуска команды")
-        return -1, f"{exc}"
-
-
-def _parse_chip_id_from_output(output: str) -> Optional[int]:
-    """Пытается извлечь 32-битный chip ID из вывода утилиты."""
-    for pattern in (
-        r"chipid\s*[:=]\s*(0x[0-9A-Fa-f]+)",
-        r"device\s*id\s*[:=]\s*(0x[0-9A-Fa-f]+)",
-        r"id\s*[:=]\s*(0x[0-9A-Fa-f]{4,8})",
-        r"(0x[0-9A-Fa-f]{8})",
-    ):
-        match = re.search(pattern, output, re.IGNORECASE)
-        if match:
-            try:
-                return int(match.group(1), 16)
-            except ValueError:
-                continue
-    return None
 
 
 def _parse_intel_hex(text: str) -> Tuple[bytes, int]:
@@ -582,51 +547,31 @@ class ConnectWorker(QThread):
         return False, {"error": tr("Неизвестный метод")}
 
     def _try_stlink(self) -> Tuple[bool, Dict[str, Any]]:
-        is_win = platform.system() == "Windows"
-        if is_win:
-            tool = _resolve_tool("stlink_path", ["ST-LINK_CLI.exe", "ST-LINK_CLI"])
-            if not tool:
-                return False, {"error": tr("ST-Link CLI не найден. Укажите путь в настройках.")}
-            code, out = _run_command([tool, "-c"], timeout=30)
-        else:
-            tool = _resolve_tool("stlink_path", ["st-info", "st-flash"])
-            if not tool:
-                return False, {"error": tr("st-info / st-flash не найден. Укажите путь в настройках.")}
-            code, out = _run_command([tool, "--probe"], timeout=30)
-        self.log_line.emit(out)
-        if code != 0:
-            return False, {"error": out or tr("Ошибка подключения ST-Link")}
-        chip_id = _parse_chip_id_from_output(out)
-        return True, {
-            "chip_id": _format_chip_id(chip_id),
-            "chip_id_int": chip_id,
-            "flash_size": _flash_size_for_chip_id(chip_id),
-        }
+        if not _PYOCD:
+            return False, {"error": tr("pyocd не установлен")}
+        try:
+            probes = ConnectHelper.list_connected_probes()
+            if not probes:
+                return False, {"error": tr("ST-Link не найден")}
+            return True, {
+                "chip_id": tr("Неизвестно"),
+                "chip_id_int": None,
+                "flash_size": tr("Неизвестно"),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return False, {"error": str(exc)}
 
     def _try_jlink(self) -> Tuple[bool, Dict[str, Any]]:
-        tool = _resolve_tool("jlink_path", ["JLinkExe", "JLink"])
-        if not tool:
-            return False, {"error": tr("JLinkExe не найден. Укажите путь в настройках.")}
-        script_content = "connect\nqc\n"
-        with tempfile.NamedTemporaryFile("w", suffix=".jlink", delete=False) as f:
-            f.write(script_content)
-            script = f.name
+        if not _PYLINK:
+            return False, {"error": tr("pylink-square не установлен")}
         try:
-            code, out = _run_command([tool, "-CommanderScript", script], timeout=30)
-        finally:
-            try:
-                Path(script).unlink()
-            except OSError:
-                pass
-        self.log_line.emit(out)
-        if code != 0 or "error" in out.lower():
-            return False, {"error": out or tr("Ошибка подключения J-Link")}
-        chip_id = _parse_chip_id_from_output(out)
-        return True, {
-            "chip_id": _format_chip_id(chip_id),
-            "chip_id_int": chip_id,
-            "flash_size": _flash_size_for_chip_id(chip_id),
-        }
+            jlink = pylink.JLink()
+            jlink.open()
+            jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
+            jlink.close()
+            return True, {"chip_id": tr("Неизвестно"), "flash_size": tr("Неизвестно")}
+        except Exception as exc:  # noqa: BLE001
+            return False, {"error": str(exc)}
 
     def _try_uart(self) -> Tuple[bool, Dict[str, Any]]:
         port = self._config.get("port", "")
@@ -668,14 +613,15 @@ class ConnectWorker(QThread):
                 pass
 
     def _try_usb(self) -> Tuple[bool, Dict[str, Any]]:
-        tool = _resolve_tool("dfu_util_path", ["dfu-util"])
-        if not tool:
-            return False, {"error": tr("dfu-util не найден. Укажите путь в настройках.")}
-        code, out = _run_command([tool, "-d", "0483:df11", "-l"], timeout=30)
-        self.log_line.emit(out)
-        if code != 0 or "Found" not in out:
-            return False, {"error": out or tr("USB DFU устройство не найдено")}
-        return True, {"chip_id": tr("Неизвестно"), "flash_size": tr("Неизвестно")}
+        if not _PYUSB:
+            return False, {"error": tr("pyusb/libusb не установлен")}
+        try:
+            dev = usb.core.find(idVendor=0x0483, idProduct=0xDF11)
+            if dev is None:
+                return False, {"error": tr("USB DFU устройство не найдено")}
+            return True, {"chip_id": tr("Неизвестно"), "flash_size": tr("Неизвестно")}
+        except Exception as exc:  # noqa: BLE001
+            return False, {"error": str(exc)}
 
 
 class FlashWorker(QThread):
@@ -731,70 +677,63 @@ class FlashWorker(QThread):
         return False, tr("Неизвестный способ программирования")
 
     def _flash_stlink(self, file_path: str) -> Tuple[bool, str]:
-        is_win = platform.system() == "Windows"
-        if is_win:
-            tool = _resolve_tool("stlink_path", ["ST-LINK_CLI.exe", "ST-LINK_CLI"])
-            if not tool:
-                return False, tr("ST-Link CLI не найден")
-            code, out = _run_command(
-                [tool, "-P", file_path, "-V", "after_programming", "-Rst"],
-                timeout=300,
-            )
-            return code == 0, out
-
-        tool = _resolve_tool("stlink_path", ["st-flash"])
-        if not tool:
-            return False, tr("st-flash не найден")
-        bin_path, base = _prepare_bin_file(file_path)
-        if not bin_path:
-            return False, tr("Не удалось подготовить бинарный файл")
+        if not _PYOCD:
+            return False, tr("pyocd не установлен")
+        target = self._config.get("target_mcu", "")
+        if not target:
+            return False, tr("Не указана целевая МК (target_mcu)")
+        data, base = _load_firmware_bytes(file_path)
+        if not data:
+            return False, tr("Файл прошивки пуст")
+        if not base:
+            base = 0x08000000
         try:
-            code, out = _run_command(
-                [tool, "write", bin_path, hex(base)],
-                timeout=300,
-            )
-            if code == 0:
-                c2, o2 = _run_command([tool, "reset"], timeout=30)
-                out += "\n" + o2
-            return code == 0, out
-        finally:
-            if bin_path != file_path:
-                try:
-                    Path(bin_path).unlink(missing_ok=True)
-                except OSError:
-                    pass
+            with ConnectHelper.session_with_chosen_probe(
+                return_first=True,
+                auto_open=True,
+                target_override=target,
+            ) as session:
+                target_obj = session.target
+                target_obj.reset_and_halt()
+                flash = next(
+                    (r for r in target_obj.memory_map if r.is_flash and r.start <= base < r.end),
+                    None,
+                )
+                if flash is None:
+                    return False, tr("Адрес 0x%08X вне flash") % base
+                builder = FlashBuilder(flash)
+                builder.add_data(base, data)
+                builder.program(chip_erase="sector")
+                target_obj.reset()
+            return True, tr("ST-Link: прошивка завершена")
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
 
     def _flash_jlink(self, file_path: str) -> Tuple[bool, str]:
-        tool = _resolve_tool("jlink_path", ["JLinkExe", "JLink"])
-        if not tool:
-            return False, tr("JLinkExe не найден")
-        suffix = Path(file_path).suffix.lower()
-        if suffix == ".bin":
-            data, base = _load_firmware_bytes(file_path)
-            if not base:
-                base = 0x08000000
-            load_cmd = f'loadbin "{file_path}" {hex(base)}'
-        else:
-            load_cmd = f'loadfile "{file_path}"'
-        script = [
-            "connect",
-            load_cmd,
-            "verify",
-            "r",
-            "go",
-            "qc",
-        ]
-        with tempfile.NamedTemporaryFile("w", suffix=".jlink", delete=False) as f:
-            f.write("\n".join(script) + "\n")
-            script_path = f.name
+        if not _PYLINK:
+            return False, tr("pylink-square не установлен")
+        target = self._config.get("target_mcu", "")
+        if not target:
+            return False, tr("Не указана целевая МК (target_mcu)")
+        data, base = _load_firmware_bytes(file_path)
+        if not data:
+            return False, tr("Файл прошивки пуст")
+        if not base:
+            base = 0x08000000
         try:
-            code, out = _run_command([tool, "-CommanderScript", script_path], timeout=300)
-            return code == 0, out
-        finally:
-            try:
-                Path(script_path).unlink()
-            except OSError:
-                pass
+            jlink = pylink.JLink()
+            jlink.open()
+            jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
+            jlink.connect(target=target, interface="SWD")
+            jlink.erase()
+            jlink.flash(base, data)
+            read = bytes(jlink.memory_read(base, len(data)))
+            ok = read == data
+            jlink.reset()
+            jlink.close()
+            return ok, tr("J-Link: прошивка завершена") if ok else tr("J-Link: верификация не прошла")
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
 
     def _flash_uart(self, file_path: str) -> Tuple[bool, str]:
         port = self._config.get("port", "")
@@ -844,24 +783,26 @@ class FlashWorker(QThread):
                 pass
 
     def _flash_usb(self, file_path: str) -> Tuple[bool, str]:
-        tool = _resolve_tool("dfu_util_path", ["dfu-util"])
-        if not tool:
-            return False, tr("dfu-util не найден")
-        bin_path, _ = _prepare_bin_file(file_path)
-        if not bin_path:
-            return False, tr("Не удалось подготовить бинарный файл")
+        if not _PYUSB:
+            return False, tr("pyusb/libusb не установлен")
+        data, base = _load_firmware_bytes(file_path)
+        if not data:
+            return False, tr("Файл прошивки пуст")
+        if not base:
+            base = 0x08000000
         try:
-            code, out = _run_command(
-                [tool, "-d", "0483:df11", "-a", "0", "-s", "0x08000000:leave", "-D", bin_path],
-                timeout=300,
-            )
-            return code == 0, out
-        finally:
-            if bin_path != file_path:
-                try:
-                    Path(bin_path).unlink(missing_ok=True)
-                except OSError:
-                    pass
+            from core.dfu import DfuDevice
+            dev = usb.core.find(idVendor=0x0483, idProduct=0xDF11)
+            if dev is None:
+                return False, tr("USB DFU устройство не найдено")
+            with DfuDevice(dev) as dfu:
+                dfu.mass_erase()
+                dfu.download(base, data)
+                ok = dfu.upload(base, len(data)) == data
+                dfu.leave()
+            return ok, tr("USB DFU: прошивка завершена") if ok else tr("USB DFU: верификация не прошла")
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
 
 
 class FlashDialog(QDialog):
@@ -912,14 +853,10 @@ class FlashDialog(QDialog):
         self._chip_info_label = QLabel(tr("Информация о чипе: не подключено"))
         self._chip_info_label.setFont(font)
 
-        # Пути к утилитам
-        self._tool_group = QGroupBox(tr("Пути к утилитам"))
-        self._stlink_path_edit = QLineEdit()
-        self._stlink_path_edit.setPlaceholderText(tr("ST-Link CLI / st-flash"))
-        self._jlink_path_edit = QLineEdit()
-        self._jlink_path_edit.setPlaceholderText(tr("JLinkExe / JLink"))
-        self._dfu_path_edit = QLineEdit()
-        self._dfu_path_edit.setPlaceholderText(tr("dfu-util"))
+        # Целевая МК (для pyocd/pylink)
+        self._target_mcu_label = QLabel(tr("Целевая МК"))
+        self._target_mcu_edit = QLineEdit()
+        self._target_mcu_edit.setPlaceholderText(tr("Например: STM32F103RC"))
 
         # Файлы прошивки
         self._files_group = QGroupBox(tr("Файлы прошивки"))
@@ -963,15 +900,10 @@ class FlashDialog(QDialog):
 
         layout.addWidget(self._chip_info_label)
 
-        tool_layout = QHBoxLayout()
-        tool_layout.addWidget(QLabel(tr("ST-Link")))
-        tool_layout.addWidget(self._stlink_path_edit, 1)
-        tool_layout.addWidget(QLabel(tr("J-Link")))
-        tool_layout.addWidget(self._jlink_path_edit, 1)
-        tool_layout.addWidget(QLabel(tr("DFU")))
-        tool_layout.addWidget(self._dfu_path_edit, 1)
-        self._tool_group.setLayout(tool_layout)
-        layout.addWidget(self._tool_group)
+        target_mcu_layout = QHBoxLayout()
+        target_mcu_layout.addWidget(self._target_mcu_label)
+        target_mcu_layout.addWidget(self._target_mcu_edit, 1)
+        layout.addLayout(target_mcu_layout)
 
         files_main = QHBoxLayout()
         files_main.addWidget(self._files_list, 1)
@@ -1012,14 +944,8 @@ class FlashDialog(QDialog):
         self._reset_button.clicked.connect(self._on_reset)
         self._identify_button.clicked.connect(self._on_connect)
 
-        self._stlink_path_edit.editingFinished.connect(
-            lambda: self._config.set("stlink_path", self._stlink_path_edit.text().strip())
-        )
-        self._jlink_path_edit.editingFinished.connect(
-            lambda: self._config.set("jlink_path", self._jlink_path_edit.text().strip())
-        )
-        self._dfu_path_edit.editingFinished.connect(
-            lambda: self._config.set("dfu_util_path", self._dfu_path_edit.text().strip())
+        self._target_mcu_edit.editingFinished.connect(
+            lambda: self._config.set("target_mcu", self._target_mcu_edit.text().strip().upper())
         )
 
         self._device_type_combo.currentIndexChanged.connect(
@@ -1041,9 +967,7 @@ class FlashDialog(QDialog):
         index = self._method_combo.findData(method)
         if index >= 0:
             self._method_combo.setCurrentIndex(index)
-        self._stlink_path_edit.setText(self._config.get("stlink_path", ""))
-        self._jlink_path_edit.setText(self._config.get("jlink_path", ""))
-        self._dfu_path_edit.setText(self._config.get("dfu_util_path", ""))
+        self._target_mcu_edit.setText(self._config.get("target_mcu", ""))
         self._update_power_button()
         self._on_method_changed(self._method_combo.currentIndex())
 
@@ -1052,7 +976,7 @@ class FlashDialog(QDialog):
         if method:
             self._config.set("programmer_method", method)
         is_stlink = method == "stlink"
-        self._power_button.setVisible(is_stlink)
+        self._power_button.setVisible(False)
         self._reset_button.setVisible(is_stlink)
         self._identify_button.setVisible(is_stlink)
         self._set_connect_status(False, {})
@@ -1162,21 +1086,7 @@ class FlashDialog(QDialog):
             self._update_log_file()
 
     def _on_power_toggle(self) -> None:
-        is_win = platform.system() == "Windows"
-        if is_win:
-            tool = _resolve_tool("stlink_path", ["ST-LINK_CLI.exe", "ST-LINK_CLI"])
-            if not tool:
-                self._log(tr("ST-Link CLI не найден"))
-                return
-            current = self._power_button.property("power_on") or False
-            state = "ON" if not current else "OFF"
-            code, out = _run_command([tool, "-Power", state], timeout=30)
-            self._log(out)
-            if code == 0:
-                self._power_button.setProperty("power_on", not current)
-                self._update_power_button()
-        else:
-            self._log(tr("Управление питанием доступно только через ST-Link CLI на Windows"))
+        self._log(tr("Управление питанием не реализовано в Python-режиме"))
 
     def _update_power_button(self) -> None:
         if self._power_button.property("power_on"):
@@ -1185,22 +1095,28 @@ class FlashDialog(QDialog):
             self._power_button.setText(tr("Питание 3.3V ВКЛ"))
 
     def _on_reset(self) -> None:
-        is_win = platform.system() == "Windows"
-        if is_win:
-            tool = _resolve_tool("stlink_path", ["ST-LINK_CLI.exe", "ST-LINK_CLI"])
-            if not tool:
-                self._log(tr("ST-Link CLI не найден"))
+        method = self._method_combo.currentData()
+        try:
+            if method == "stlink" and _PYOCD:
+                with ConnectHelper.session_with_chosen_probe(
+                    return_first=True,
+                    auto_open=True,
+                    target_override=self._config.get("target_mcu", "cortex_m"),
+                ) as session:
+                    session.target.reset()
+            elif method == "jlink" and _PYLINK:
+                jlink = pylink.JLink()
+                jlink.open()
+                jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
+                jlink.connect(target=self._config.get("target_mcu", ""), interface="SWD")
+                jlink.reset()
+                jlink.close()
+            else:
+                self._log(tr("Сброс не поддерживается для текущего способа программирования"))
                 return
-            code, out = _run_command([tool, "-Rst"], timeout=30)
-        else:
-            tool = _resolve_tool("stlink_path", ["st-flash"])
-            if not tool:
-                self._log(tr("ST-Link / st-flash не найден"))
-                return
-            code, out = _run_command([tool, "reset"], timeout=30)
-        self._log(out)
-        if code != 0:
-            self._log(tr("Ошибка сброса"))
+            self._log(tr("Сброс выполнен"))
+        except Exception as exc:  # noqa: BLE001
+            self._log(tr("Ошибка сброса: {0}").format(exc))
 
     def _log(self, text: str) -> None:
         if not text:

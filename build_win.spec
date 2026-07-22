@@ -1,8 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
+import libusb_package
+libusb_dll = libusb_package.get_library_path()
+
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=[(libusb_dll, '.')],
     datas=[('library', 'library')],
     hiddenimports=[
         'PySide6.QtCore',
@@ -17,6 +20,7 @@ a = Analysis(
         'core.bootloader',
         'core.can_id_loader',
         'core.can_protocol',
+        'core.dfu',
         'core.dbc_manager',
         'core.dbc_parser',
         'core.fake_serial',
@@ -48,6 +52,17 @@ a = Analysis(
         'cantools',
         'cantools.database',
         'carbus_async',
+        'pyocd.core.helpers',
+        'pyocd.flash.flash_builder',
+        'pyocd.probe.stlink_probe',
+        'pyocd.probe.jlink_probe',
+        'pyocd.target',
+        'pyocd.target.family',
+        'pylink',
+        'pylink.enums',
+        'usb',
+        'usb.backend.libusb1',
+        'libusb_package',
     ],
     hookspath=[],
     hooksconfig={},
