@@ -39,7 +39,9 @@ class MemoryIndicator(QWidget):
         layout.addStretch()
 
     def update_usage(self, estimated_bytes: int) -> None:
-        total = self._config.get("total_memory", 1024)
+        total = self._config.get("total_memory", 65536)
+        if not total:
+            total = 65536
         percent = min(100, max(0, int(estimated_bytes * 100 / total)))
         self._progress.setValue(percent)
         self._progress.setFormat(f"{percent}%")

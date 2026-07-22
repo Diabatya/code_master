@@ -315,6 +315,18 @@
 - ✅ `ui/flash_dialog.py`: `_flash_usb` теперь использует внешний `dfu-util` с конвертацией HEX→BIN через `intelhex` и корректными аргументами `-d 0483:df11 -a 0 -s <base>:leave -D <bin>`; если `dfu-util` не найден, производится fallback на `pyusb`/`core.dfu` с понятным сообщением об ошибке.
 - ✅ `ui/flash_dialog.py`: добавлена обработка `FileNotFoundError` и `subprocess.TimeoutExpired` для `dfu-util`, исключающая падение при отсутствии утилиты.
 
+## 30. Финальные исправления и автоопределение устройства (22.07.2026)
+
+- ✅ `core/can_protocol.py`: добавлены команды `CMD_DEVICE_INFO = 0x92` и `CMD_DEVICE_INFO_RESP = 0x93` для расширенной информации об устройстве.
+- ✅ `core/serial_manager.py`: после подключения сначала запрашивается `0x90`, затем `0x92`; парсится серийный номер, тип устройства и объём памяти (KB → байты), сохраняется в `Config`.
+- ✅ `core/fake_serial.py`: эмулятор разделил ответы на `CMD_DEVICE_ID` (тип/версия) и `CMD_DEVICE_INFO` (серийный номер, 64 КБ памяти).
+- ✅ `models/config.py`: добавлен `device_serial` и `total_memory` по умолчанию 65536 байт (64 КБ).
+- ✅ `ui/memory_indicator.py`: индикатор памяти использует `Config.total_memory` с fallback 64 КБ, если значение равно 0.
+- ✅ `ui/settings_window.py`: добавлено поле `QLineEdit` «Серийный номер» рядом с выбором устройства; обновляется при `device_identified` и сохраняет `device_type` при ручном выборе.
+- ✅ `ui/flash_dialog.py`: при прошивке/чтении через ST-Link размер flash-памяти (`flash.length`) сохраняется в `Config.total_memory`.
+- ✅ `ui/can_topology.py`: `Qt.RenderHint` исправлен на `Qt.RenderHints`.
+- ✅ `ui/flash_dialog.py`: HEX-редактор принудительно тёмный; `_flash_usb` использует `dfu-util` с HEX→BIN конвертацией и корректными аргументами.
+
 ## Итоговая оценка готовности
 
 **100 %**

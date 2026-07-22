@@ -70,10 +70,21 @@ class SettingsWindow(QMainWindow):
         self._device_combo.addItem(tr("2 CAN +"), DEVICE_TYPE_ANALOG)
         self._device_combo.addItem(tr("2 CAN FD"), DEVICE_TYPE_CAN_FD)
         self._device_combo.currentIndexChanged.connect(self._on_device_type_changed)
+
+        self._serial_label = QLabel(tr("Серийный номер"))
+        self._serial_label.setFont(font)
+        self._serial_edit = QLineEdit()
+        self._serial_edit.setFont(font)
+        self._serial_edit.setReadOnly(True)
+        self._serial_edit.setMinimumWidth(200)
+        self._serial_edit.setPlaceholderText(tr("Неизвестно"))
+
         device_layout = QHBoxLayout()
         device_layout.setSpacing(8)
         device_layout.addWidget(self._device_label)
         device_layout.addWidget(self._device_combo)
+        device_layout.addWidget(self._serial_label)
+        device_layout.addWidget(self._serial_edit)
         device_layout.addStretch()
         self._device_layout = device_layout
 
@@ -98,6 +109,8 @@ class SettingsWindow(QMainWindow):
         self._tabs.addTab(self._topology_tab, "🌐 " + tr("Топология"))
         self._update_analog_tab()
         self._serial_manager.device_identified.connect(self._update_analog_tab)
+        self._serial_manager.device_identified.connect(self._update_device_info)
+        self._update_device_info(0, 0)
 
         search_layout = QHBoxLayout()
         search_layout.setSpacing(8)
@@ -179,10 +192,25 @@ class SettingsWindow(QMainWindow):
                 self._analog_tab = None
                 self._build_search_index()
 
+    def _update_device_info(self, device_type: int = 0, device_version: int = 0) -> None:
+        """Обновляет выпадающий список типа и поле серийного номера."""
+        _ = device_version
+        device_type = self._config.get("device_type", device_type)
+        serial = self._config.get("device_serial", "")
+        if not serial:
+            serial = self._config.get("serial_number", "")
+        index = self._device_combo.findData(device_type)
+        if index >= 0:
+            self._device_combo.blockSignals(True)
+            self._device_combo.setCurrentIndex(index)
+            self._device_combo.blockSignals(False)
+        self._serial_edit.setText(serial)
+
     def retranslate_ui(self) -> None:
         """Обновляет статические строки окна настроек и всех вкладок."""
         self.setWindowTitle(tr("Настройки — Код Мастер"))
         self._device_label.setText(tr("Устройство"))
+        self._serial_label.setText(tr("Серийный номер"))
         current_type = self._device_combo.currentData()
         self._device_combo.clear()
         self._device_combo.addItem(tr("2 CAN"), DEVICE_TYPE_BASIC)

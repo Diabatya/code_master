@@ -747,6 +747,7 @@ class FlashWorker(QThread):
                 )
                 if flash is None:
                     return False, tr("Адрес 0x%08X вне flash") % base
+                self._config.set("total_memory", int(flash.length))
                 builder = FlashBuilder(flash)
                 builder.add_data(base, data)
                 builder.program(chip_erase="sector")
@@ -949,6 +950,8 @@ class ReadWorker(QThread):
                 (r for r in target_obj.memory_map if r.is_flash),
                 None,
             )
+            if flash is not None:
+                self._config.set("total_memory", int(flash.length))
             start = flash.start if flash else 0x08000000
             size = flash.length if flash else self._size
             data = bytes(target_obj.read_memory_block8(start, size))

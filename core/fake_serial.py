@@ -19,6 +19,8 @@ from core.can_protocol import (
     CMD_AUTO_SPEED_RESP,
     CMD_DEVICE_ID,
     CMD_DEVICE_ID_RESP,
+    CMD_DEVICE_INFO,
+    CMD_DEVICE_INFO_RESP,
     DEVICE_TYPE_BASIC,
     MARKER_RX,
     MARKER_RX_EXT,
@@ -272,11 +274,16 @@ class FakeSerial:
 
         # Эмуляция команд идентификации и автоопределения скорости моста
         if data[0] == CMD_DEVICE_ID:
+            response = bytes([CMD_DEVICE_ID_RESP, DEVICE_TYPE_BASIC, 0x00])
+            self._append_response(response)
+            return len(data)
+
+        if data[0] == CMD_DEVICE_INFO:
             serial = b"DEMO"
-            total_memory = 1024
-            response = bytes([CMD_DEVICE_ID_RESP, DEVICE_TYPE_BASIC, 0x00, len(serial)])
+            memory_kb = 64
+            response = bytes([CMD_DEVICE_INFO_RESP, len(serial)])
             response += serial
-            response += bytes([(total_memory >> 8) & 0xFF, total_memory & 0xFF])
+            response += bytes([DEVICE_TYPE_BASIC, memory_kb])
             self._append_response(response)
             return len(data)
 

@@ -15,6 +15,8 @@ from core.can_protocol import (
     CMD_AUTO_SPEED_RESP,
     CMD_DEVICE_ID,
     CMD_DEVICE_ID_RESP,
+    CMD_DEVICE_INFO,
+    CMD_DEVICE_INFO_RESP,
     DEVICE_TYPE_BASIC,
     parse_all_frames,
 )
@@ -317,12 +319,18 @@ class SerialManager(QObject):
             pass
 
     def _detect_device_id(self) -> None:
-        """Отправляет запрос ID устройства, ждёт 0.5 с и сохраняет результат в Config."""
+        """Определяет тип, версию, серийный номер и объём памяти устройства."""
         if self._port is None:
             return
         self._closing = True
         self._stop_reader()
         try:
+            device_type = DEVICE_TYPE_BASIC
+            device_version = 0
+            device_serial = ""
+            memory_kb = 0
+
+            # 1. Запрос типа/версии
             self._port.reset_input_buffer()
             self._port.write(bytes([CMD_DEVICE_ID]))
             deadline = time.time() + 0.5
@@ -333,35 +341,47 @@ class SerialManager(QObject):
                     buffer.extend(self._port.read(available))
                     if CMD_DEVICE_ID_RESP in buffer:
                         idx = buffer.index(CMD_DEVICE_ID_RESP)
-                        if idx + 3 < len(buffer):
+                        if idx + 3 <= len(buffer):
                             device_type = buffer[idx + 1]
                             device_version = buffer[idx + 2]
-                            serial_len = buffer[idx + 3]
-                            end_idx = idx + 4 + serial_len
-                            if end_idx <= len(buffer):
-                                serial_number = bytes(buffer[idx + 4 : end_idx]).decode("utf-8", errors="ignore").strip()
-                            else:
-                                serial_number = ""
-                            # Если устройство передаёт total_memory сразу за serial, ожидаем 2 байта
-                            total_memory = 1024
-                            if end_idx + 2 <= len(buffer):
-                                total_memory = (buffer[end_idx] << 8) | buffer[end_idx + 1]
-                            self._config.set_bulk({
-                                "device_type": device_type,
-                                "device_version": device_version,
-                                "serial_number": serial_number,
-                                "total_memory": total_memory if total_memory > 0 else 1024,
-                            })
-                            self.device_identified.emit(device_type, device_version)
-                            logger.info("Устройство идентифицировано: type=0x%02X version=%d serial=%s mem=%d", device_type, device_version, serial_number or "-", total_memory)
-                            return
+                            break
                 time.sleep(0.01)
-            self._config.set_bulk({"device_type": DEVICE_TYPE_BASIC, "device_version": 0})
-            self.device_identified.emit(DEVICE_TYPE_BASIC, 0)
-            logger.info("Устройство не ответило на запрос ID, используем базовый CAN 2.0")
+
+            # 2. Запрос серийного номера и объёма памяти
+            self._port.reset_input_buffer()
+            self._port.write(bytes([CMD_DEVICE_INFO]))
+            deadline = time.time() + 0.5
+            buffer = bytearray()
+            while time.time() < deadline:
+                available = self._port_in_waiting()
+                if available:
+                    buffer.extend(self._port.read(available))
+                    if CMD_DEVICE_INFO_RESP in buffer:
+                        idx = buffer.index(CMD_DEVICE_INFO_RESP)
+                        if idx + 2 < len(buffer):
+                            serial_len = buffer[idx + 1]
+                            expected = idx + 2 + serial_len + 2
+                            if expected <= len(buffer):
+                                serial_bytes = bytes(buffer[idx + 2 : idx + 2 + serial_len])
+                                device_serial = serial_bytes.decode("utf-8", errors="ignore").strip()
+                                device_type = buffer[idx + 2 + serial_len]
+                                memory_kb = buffer[idx + 2 + serial_len + 1]
+                                break
+                time.sleep(0.01)
+
+            total_memory = memory_kb * 1024 if memory_kb else 65536
+            self._config.set_bulk({
+                "device_type": device_type,
+                "device_version": device_version,
+                "device_serial": device_serial,
+                "serial_number": device_serial,
+                "total_memory": total_memory,
+            })
+            self.device_identified.emit(device_type, device_version)
+            logger.info("Устройство идентифицировано: type=0x%02X version=%d serial=%s mem=%d", device_type, device_version, device_serial or "-", total_memory)
         except Exception as exc:  # noqa: BLE001
             logger.error("Ошибка определения устройства: %s", exc)
-            self._config.set_bulk({"device_type": DEVICE_TYPE_BASIC, "device_version": 0})
+            self._config.set_bulk({"device_type": DEVICE_TYPE_BASIC, "device_version": 0, "device_serial": "", "total_memory": 65536})
             self.device_identified.emit(DEVICE_TYPE_BASIC, 0)
         finally:
             self._start_reader()
