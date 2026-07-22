@@ -7,6 +7,6 @@ pyqtgraph>=0.14
 matplotlib>=3.7
 platformdirs>=4.0
 pyocd>=0.36.0
-pylink-square>=1.2.0
 pyusb>=1.2.1
 libusb-package>=1.0.0
+# pylink-square>=1.2.0  # опционально: только для J-Link, требует SEGGER J-Link Software
