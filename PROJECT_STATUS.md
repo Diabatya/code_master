@@ -345,6 +345,14 @@
 - ✅ `ui/flash_dialog.py`: `ReadWorker._read_stlink` при наличии `ST-LINK_CLI.exe` использует `ST-LINK_CLI.exe -r <bin>`; `_read_usb` использует `dfu-util -U <bin>`.
 - ✅ `ui/flash_dialog.py`: после успешного чтения автоматически открывается `HexEditorDialog` с `.hex`-файлом.
 
+## 33. Критические правки flash-диалога (23.07.2026 v2)
+
+- ✅ `Qt.RenderHint` перепроверен по всему проекту; `Qt.RenderHints` уже корректно.
+- ✅ `ui/flash_dialog.py`: `_load_firmware_bytes` и `_prepare_bin_file` теперь определяют Intel HEX по сигнатуре (`:`) независимо от расширения; HEX всегда конвертируется в `.bin` перед передачей `dfu-util`.
+- ✅ `ui/flash_dialog.py`: `_flash_usb` использует строгую команду `dfu-util -d 0483:df11 -a 0 -s 0x08000000:leave -D <file.bin>` и проверяет наличие `dfu-util` до запуска.
+- ✅ `ui/flash_dialog.py`: `_on_read_finished` сохраняет дамп во временный `.bin` и сразу открывает `open_hex_editor(temp.bin)`; добавлен метод `open_hex_editor()`.
+- ✅ `ui/flash_dialog.py`: выпадающий список типа устройства удалён; оставлено поле `QLineEdit` «Устройство» с `setMaxLength(10)` и placeholder `2CAN`, значение сохраняется/читается из `Config.device_type_name`.
+
 ## Итоговая оценка готовности
 
 **100 %**

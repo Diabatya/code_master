@@ -228,32 +228,43 @@ def _load_elf(path: Path) -> Tuple[bytes, int]:
         return path.read_bytes(), 0
 
 
+def _is_intel_hex(path: Path) -> bool:
+    """Проверяет, что файл по содержимому является Intel HEX."""
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            for line in fp:
+                line = line.strip()
+                if not line:
+                    continue
+                return line.startswith(":")
+    except Exception:
+        pass
+    return False
+
+
 def _load_firmware_bytes(file_path: str) -> Tuple[bytes, int]:
     """Загружает прошивку (.bin/.hex/.elf) и возвращает (данные, базовый адрес)."""
     path = Path(file_path)
-    ext = path.suffix.lower()
-    if ext == ".bin":
-        return path.read_bytes(), 0
-    if ext == ".hex":
+    if path.suffix.lower() == ".elf":
+        return _load_elf(path)
+    if path.suffix.lower() == ".hex" or _is_intel_hex(path):
         from intelhex import IntelHex
 
         ih = IntelHex(str(path))
         data = bytes(ih.tobinarray())
-        return data, ih.minaddr()
-    if ext == ".elf":
-        return _load_elf(path)
+        return data, ih.minaddr() if ih.minaddr() is not None else 0
     return path.read_bytes(), 0
 
 
 def _prepare_bin_file(file_path: str, default_base: int = 0x08000000) -> Tuple[Optional[str], int]:
     """Подготавливает временный .bin для утилит, которым нужен бинарный файл."""
+    path = Path(file_path)
     data, base = _load_firmware_bytes(file_path)
     if not data:
         return None, 0
     if base == 0:
         base = default_base
-    suffix = Path(file_path).suffix
-    if suffix.lower() == ".bin":
+    if path.suffix.lower() == ".bin" and not _is_intel_hex(path):
         return file_path, base
     with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
         tmp.write(data)
@@ -889,53 +900,30 @@ class FlashWorker(QThread):
                 pass
 
     def _flash_usb(self, file_path: str) -> Tuple[bool, str]:
+        dfu_util = shutil.which("dfu-util") or shutil.which("dfu-util.exe")
         bin_path, base = _prepare_bin_file(file_path)
         if not bin_path:
             return False, tr("Не удалось подготовить BIN-файл из прошивки")
         if not base:
             base = 0x08000000
-        dfu_util = shutil.which("dfu-util") or shutil.which("dfu-util.exe")
-        if dfu_util:
-            cmd = [
-                dfu_util,
-                "-d", "0483:df11",
-                "-a", "0",
-                "-s", f"0x{base:08X}:leave",
-                "-D", bin_path,
-            ]
-            try:
+        try:
+            if dfu_util:
+                cmd = [
+                    dfu_util,
+                    "-d", "0483:df11",
+                    "-a", "0",
+                    "-s", "0x08000000:leave",
+                    "-D", bin_path,
+                ]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
                 if result.returncode != 0:
                     err = (result.stderr or result.stdout or "").strip()
                     return False, tr("dfu-util ошибка: {0}").format(err)
                 return True, tr("USB DFU: прошивка dfu-util завершена")
-            except subprocess.TimeoutExpired:
-                return False, tr("dfu-util: превышено время ожидания")
-            except FileNotFoundError:
-                return False, tr("dfu-util не найден в PATH")
-            except Exception as exc:  # noqa: BLE001
-                return False, tr("dfu-util ошибка: {0}").format(exc)
-            finally:
-                if bin_path != file_path:
-                    try:
-                        Path(bin_path).unlink(missing_ok=True)
-                    except OSError:
-                        pass
-        if not _PYUSB:
-            if bin_path != file_path:
-                try:
-                    Path(bin_path).unlink(missing_ok=True)
-                except OSError:
-                    pass
-            return False, tr("dfu-util не найден в PATH и pyusb/libusb не установлены")
-        try:
+            if not _PYUSB:
+                return False, tr("dfu-util не найден в PATH и pyusb/libusb не установлены")
             dev = usb.core.find(idVendor=0x0483, idProduct=0xDF11)
             if dev is None:
-                if bin_path != file_path:
-                    try:
-                        Path(bin_path).unlink(missing_ok=True)
-                    except OSError:
-                        pass
                 return False, tr("USB DFU устройство не найдено")
             from core.dfu import DfuDevice
             data = Path(bin_path).read_bytes()
@@ -945,6 +933,10 @@ class FlashWorker(QThread):
                 ok = dfu.upload(base, len(data)) == data
                 dfu.leave()
             return ok, tr("USB DFU: прошивка завершена") if ok else tr("USB DFU: верификация не прошла")
+        except subprocess.TimeoutExpired:
+            return False, tr("dfu-util: превышено время ожидания")
+        except FileNotFoundError:
+            return False, tr("dfu-util не найден в PATH")
         except Exception as exc:  # noqa: BLE001
             return False, tr("USB DFU ошибка: {0}").format(exc)
         finally:
@@ -1150,18 +1142,12 @@ class FlashDialog(QDialog):
         font = QFont("Segoe UI", 10)
 
         # Устройство и программатор
-        self._device_type_label = QLabel(tr("Тип устройства"))
-        self._device_type_label.setFont(font)
-        self._device_type_combo = QComboBox()
-        self._device_type_combo.setFont(font)
-        for value, label in DEVICE_TYPES:
-            self._device_type_combo.addItem(tr(label), value)
-
         self._device_name_label = QLabel(tr("Устройство"))
         self._device_name_label.setFont(font)
         self._device_name_edit = QLineEdit()
         self._device_name_edit.setFont(font)
         self._device_name_edit.setMaxLength(10)
+        self._device_name_edit.setPlaceholderText("2CAN")
 
         self._serial_label = QLabel(tr("Серийный номер"))
         self._serial_label.setFont(font)
@@ -1244,8 +1230,6 @@ class FlashDialog(QDialog):
         layout.setContentsMargins(12, 12, 12, 12)
 
         top_grid = QHBoxLayout()
-        top_grid.addWidget(self._device_type_label)
-        top_grid.addWidget(self._device_type_combo)
         top_grid.addWidget(self._device_name_label)
         top_grid.addWidget(self._device_name_edit, 1)
         top_grid.addWidget(self._serial_label)
@@ -1308,7 +1292,7 @@ class FlashDialog(QDialog):
         self._remove_button.clicked.connect(self._on_remove)
         self._flash_button.clicked.connect(self._on_flash)
         self._read_button.clicked.connect(self._on_read_firmware)
-        self._hex_editor_button.clicked.connect(self._on_hex_editor)
+        self._hex_editor_button.clicked.connect(lambda: self.open_hex_editor())
         self._close_button.clicked.connect(self.reject)
         self._power_button.clicked.connect(self._on_power_toggle)
         self._reset_button.clicked.connect(self._on_reset)
@@ -1318,11 +1302,6 @@ class FlashDialog(QDialog):
             lambda: self._config.set("target_mcu", self._target_mcu_edit.text().strip().upper())
         )
 
-        self._device_type_combo.currentIndexChanged.connect(
-            lambda idx: self._config.set(
-                "device_type", self._device_type_combo.itemData(idx)
-            )
-        )
         self._device_name_edit.editingFinished.connect(
             lambda: self._config.set("device_type_name", self._device_name_edit.text().strip())
         )
@@ -1337,10 +1316,6 @@ class FlashDialog(QDialog):
         self._config_button.toggled.connect(self._on_config_button_toggled)
 
     def _load_defaults(self) -> None:
-        device_type = self._config.get("device_type", DEVICE_TYPE_BASIC)
-        index = self._device_type_combo.findData(device_type)
-        if index >= 0:
-            self._device_type_combo.setCurrentIndex(index)
         serial = self._config.get("device_serial", "")
         if not serial:
             serial = self._config.get("serial_number", "")
@@ -1359,9 +1334,6 @@ class FlashDialog(QDialog):
         if total_kb > 0:
             self._read_size_edit.setText(str(total_kb))
         self._device_name_edit.setText(self._config.get("device_type_name", ""))
-        if not self._device_name_edit.text().strip():
-            idx = self._device_type_combo.currentIndex()
-            self._device_name_edit.setText(self._device_type_combo.currentText().replace(" ", ""))
         self._update_power_button()
         self._on_method_changed(self._method_combo.currentIndex())
 
@@ -1600,16 +1572,17 @@ class FlashDialog(QDialog):
             return
         self._log(message)
         try:
-            hex_path = Path(tempfile.gettempdir()) / "read_firmware.hex"
-            _save_intel_hex(data, base, hex_path)
-            dialog = HexEditorDialog(str(hex_path), self)
-            dialog.exec()
+            with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
+                tmp.write(data)
+                bin_path = tmp.name
+            self.open_hex_editor(bin_path)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), str(exc))
 
-    def _on_hex_editor(self) -> None:
-        selected = self._files_list.currentItem()
-        file_path = selected.text() if selected else None
+    def open_hex_editor(self, file_path: Optional[str] = None) -> None:
+        if not file_path:
+            selected = self._files_list.currentItem()
+            file_path = selected.text() if selected else None
         dialog = HexEditorDialog(file_path, self)
         dialog.exec()
         saved = dialog.current_path
