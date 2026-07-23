@@ -38,7 +38,7 @@ class Config:
         "can1_terminator": False,
         "can2_terminator": False,
         "target_mcu": "",
-        "programmer_method": "stlink",
+        "programmer_method": "uart",
         "sleep_time": 0,
         "sleep_mode": 0,
         "setup_completed": False,

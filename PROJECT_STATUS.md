@@ -375,6 +375,12 @@
 - ✅ `ui/flash_dialog.py`: `_flash_usb` и `_read_usb` используют `core.dfu.find_dfu_device()` с backend; добавлена обработка `usb.core.NoBackendError`.
 - ✅ `core/dfu.py` и `ui/flash_dialog.py` при ошибках `Operation not supported` сообщают: на Windows требуется WinUSB-драйвер, установленный через Zadig для устройства `STM32 BOOTLOADER (VID 0483 PID DF11)`.
 
+## 37. UART по умолчанию для прошивки (23.07.2026 v6)
+
+- ✅ `models/config.py`: `programmer_method` по умолчанию изменён с `stlink` на `uart`.
+- ✅ `ui/flash_dialog.py`: при первом открытии flash-диалога выбран встроенный STM32 UART-bootloader; не требует драйверов, достаточно системного USB-CDC COM-порта.
+- ✅ ST-Link, J-Link и USB DFU остаются доступны вручную для продвинутых пользователей.
+
 ## Итоговая оценка готовности
 
 **100 %**
