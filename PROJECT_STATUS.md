@@ -353,6 +353,13 @@
 - ✅ `ui/flash_dialog.py`: `_on_read_finished` сохраняет дамп во временный `.bin` и сразу открывает `open_hex_editor(temp.bin)`; добавлен метод `open_hex_editor()`.
 - ✅ `ui/flash_dialog.py`: выпадающий список типа устройства удалён; оставлено поле `QLineEdit` «Устройство» с `setMaxLength(10)` и placeholder `2CAN`, значение сохраняется/читается из `Config.device_type_name`.
 
+## 34. Финальная проверка критических ошибок (23.07.2026 v3)
+
+- ✅ `Qt.RenderHint` (единственное число) не обнаружен в `.py` файлах `ui/flash_dialog.py`, `ui/can_topology.py`, `ui/setup_wizard.py`, `ui/help_widget.py`, `ui/dark_theme.py`, `ui/main_window.py`, `ui/settings_window.py`; везде используется корректное `Qt.RenderHints`.
+- ✅ `ui/flash_dialog.py`: `_flash_usb` через `_prepare_bin_file` распознаёт HEX по сигнатуре `:` и передаёт `dfu-util` строго бинарный файл с командой `dfu-util -d 0483:df11 -a 0 -s 0x08000000:leave -D <bin>`.
+- ✅ `ui/flash_dialog.py`: `_read_usb` читает дамп через `dfu-util -U <temp.bin>`, а `_on_read_finished` сохраняет его в `.bin` и открывает в `HexEditorDialog`.
+- ✅ `ui/flash_dialog.py`: `_prepare_firmware_with_config` формирует файл `{stem}_конфиг.bin` как валидный бинарник (не HEX).
+
 ## Итоговая оценка готовности
 
 **100 %**
