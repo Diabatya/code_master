@@ -877,10 +877,8 @@ class FlashWorker(QThread):
         if not base:
             base = 0x08000000
         try:
-            dev = usb.core.find(idVendor=0x0483, idProduct=0xDF11)
-            if dev is None:
-                return False, tr("USB DFU устройство не найдено")
-            from core.dfu import DfuDevice
+            from core.dfu import DfuDevice, find_dfu_device
+            dev = find_dfu_device()
             data = Path(bin_path).read_bytes()
             with DfuDevice(dev) as dfu:
                 dfu.mass_erase()
@@ -888,6 +886,8 @@ class FlashWorker(QThread):
                 ok = dfu.upload(base, len(data)) == data
                 dfu.leave()
             return ok, tr("USB DFU: прошивка завершена") if ok else tr("USB DFU: верификация не прошла")
+        except usb.core.NoBackendError:
+            return False, tr("USB backend не найден. Установите libusb-package или WinUSB-драйвер через Zadig.")
         except Exception as exc:  # noqa: BLE001
             return False, tr("USB DFU ошибка: {0}").format(exc)
         finally:
@@ -1006,10 +1006,11 @@ class ReadWorker(QThread):
     def _read_usb(self) -> Tuple[bytes, int]:
         if not _PYUSB:
             raise RuntimeError(tr("pyusb/libusb не установлены"))
-        dev = usb.core.find(idVendor=0x0483, idProduct=0xDF11)
-        if dev is None:
-            raise RuntimeError(tr("USB DFU устройство не найдено"))
-        from core.dfu import DfuDevice
+        from core.dfu import DfuDevice, find_dfu_device
+        try:
+            dev = find_dfu_device()
+        except usb.core.NoBackendError:
+            raise RuntimeError(tr("USB backend не найден. Установите libusb-package или WinUSB-драйвер через Zadig."))
         with DfuDevice(dev) as dfu:
             start = 0x08000000
             data = dfu.upload(start, self._size)

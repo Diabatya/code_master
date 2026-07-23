@@ -369,6 +369,12 @@
 - ✅ `ui/flash_dialog.py`: `_flash_jlink` и `_read_jlink` уже используют `pylink-square`.
 - ✅ `models/config.py` и интерфейс: настроек путей к утилитам `stlink_path`, `jlink_path`, `dfu_util_path` не обнаружено.
 
+## 36. Улучшение USB DFU для Windows (23.07.2026 v5)
+
+- ✅ `core/dfu.py`: автоматический выбор backend из `libusb-package`, устойчивая `DfuDevice.open` с graceful `set_configuration`, `is_kernel_driver_active`/`detach_kernel_driver`, `claim_interface`.
+- ✅ `ui/flash_dialog.py`: `_flash_usb` и `_read_usb` используют `core.dfu.find_dfu_device()` с backend; добавлена обработка `usb.core.NoBackendError`.
+- ✅ `core/dfu.py` и `ui/flash_dialog.py` при ошибках `Operation not supported` сообщают: на Windows требуется WinUSB-драйвер, установленный через Zadig для устройства `STM32 BOOTLOADER (VID 0483 PID DF11)`.
+
 ## Итоговая оценка готовности
 
 **100 %**

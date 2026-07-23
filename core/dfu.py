@@ -8,6 +8,14 @@ from typing import Optional
 import usb.core
 import usb.util
 
+try:
+    import usb.backend.libusb1 as libusb1
+    import libusb_package
+
+    _USB_BACKEND = libusb1.get_backend(find_library=libusb_package.find_library)
+except Exception:
+    _USB_BACKEND = None
+
 DFU_REQUEST_SEND = 0x21
 DFU_REQUEST_RECEIVE = 0xA1
 
@@ -22,6 +30,18 @@ STATE_DFU_DNBUSY = 4
 STATE_DFU_ERROR = 10
 
 
+def find_dfu_device() -> usb.core.Device:
+    """Находит STM32 DFU устройство, используя libusb-package backend если доступен."""
+    dev = usb.core.find(
+        idVendor=0x0483,
+        idProduct=0xDF11,
+        backend=_USB_BACKEND,
+    )
+    if dev is None:
+        raise RuntimeError("USB DFU устройство 0483:DF11 не найдено")
+    return dev
+
+
 class DfuDevice:
     """Обёртка для USB DFU устройства."""
 
@@ -31,8 +51,17 @@ class DfuDevice:
 
     def open(self) -> None:
         """Инициализирует устройство, отключает kernel driver и занимает интерфейс."""
-        self.dev.set_configuration()
-        cfg = self.dev.get_active_configuration()
+        try:
+            self.dev.set_configuration()
+        except usb.core.USBError:
+            pass
+        try:
+            cfg = self.dev.get_active_configuration()
+        except usb.core.USBError as exc:
+            raise RuntimeError(
+                "Не удалось получить активную USB-конфигурацию. "
+                "На Windows установите WinUSB-драйвер через Zadig (STM32 BOOTLOADER 0483:DF11)."
+            ) from exc
         self.intf = usb.util.find_descriptor(
             cfg,
             bInterfaceClass=0xFE,
@@ -41,9 +70,18 @@ class DfuDevice:
         if self.intf is None:
             raise RuntimeError("DFU интерфейс не найден")
         ifn = self.intf.bInterfaceNumber
-        if self.dev.is_kernel_driver_active(ifn):
-            self.dev.detach_kernel_driver(ifn)
-        usb.util.claim_interface(self.dev, ifn)
+        try:
+            if self.dev.is_kernel_driver_active(ifn):
+                self.dev.detach_kernel_driver(ifn)
+        except (NotImplementedError, usb.core.USBError, ValueError):
+            pass
+        try:
+            usb.util.claim_interface(self.dev, ifn)
+        except usb.core.USBError as exc:
+            raise RuntimeError(
+                "Не удалось захватить DFU интерфейс. "
+                "На Windows установите WinUSB-драйвер через Zadig (STM32 BOOTLOADER 0483:DF11)."
+            ) from exc
 
     def _ctrl(self, request_type: int, request: int, value: int = 0, data_or_wlength=0, timeout: int = 5000):
         return self.dev.ctrl_transfer(
