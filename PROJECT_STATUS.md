@@ -335,6 +335,16 @@
 - ✅ `ui/flash_dialog.py`: `ConnectWorker._try_stlink` теперь при наличии `ST-LINK_CLI.exe` запускает `-c`, парсит `Device ID`, определяет модель чипа через `DEVICE_ID_TO_MODEL` и размер Flash через `STM32_FLASH_SIZES`.
 - ✅ `ui/flash_dialog.py`: после успешного Connect выбранная модель и размер памяти автоматически подставляются в диалог.
 
+## 32. Срочные правки flash-диалога (23.07.2026)
+
+- ✅ `Qt.RenderHint` перепроверен по всему проекту; `Qt.RenderHints` уже используется корректно.
+- ✅ `ui/flash_dialog.py`: кнопка «Записать конфигурацию устройства» заменена на `QPushButton` (`setCheckable(True)`, `setEnabled(True)`), меняет текст и цвет при активации.
+- ✅ `ui/flash_dialog.py`: добавлено поле `QLineEdit` «Устройство» с `setMaxLength(10)`, заполняемое из `Config.device_type_name` или из типа устройства без пробелов.
+- ✅ `ui/flash_dialog.py`: поле «Размер памяти (КБ)» оставлено редактируемым; добавлен метод `_get_flash_size_kb()` с fallback 256 КБ для STM32F105.
+- ✅ `ui/flash_dialog.py`: метод `_prepare_firmware_with_config()` дополняет бинарник до размера Flash значением `0xFF` и пишет имя/серийник в последнюю страницу по смещениям +8 (10 байт) и +18 (10 байт).
+- ✅ `ui/flash_dialog.py`: `ReadWorker._read_stlink` при наличии `ST-LINK_CLI.exe` использует `ST-LINK_CLI.exe -r <bin>`; `_read_usb` использует `dfu-util -U <bin>`.
+- ✅ `ui/flash_dialog.py`: после успешного чтения автоматически открывается `HexEditorDialog` с `.hex`-файлом.
+
 ## Итоговая оценка готовности
 
 **100 %**
