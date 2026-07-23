@@ -1,8 +1,6 @@
 """Профессиональный диалог прошивки микроконтроллера и HEX-редактор."""
 
 import re
-import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -635,35 +633,6 @@ class ConnectWorker(QThread):
         return False, {"error": tr("Неизвестный метод")}
 
     def _try_stlink(self) -> Tuple[bool, Dict[str, Any]]:
-        stlink_cli = shutil.which("ST-LINK_CLI.exe")
-        if stlink_cli:
-            try:
-                result = subprocess.run(
-                    [stlink_cli, "-c"],
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
-                output = result.stdout + result.stderr
-                match = re.search(
-                    r"Device\s+ID\s*[:=]\s*(0x[0-9A-Fa-f]{3,4})",
-                    output,
-                    re.IGNORECASE,
-                )
-                if match:
-                    chip_id = match.group(1).upper()
-                    model = DEVICE_ID_TO_MODEL.get(chip_id)
-                    if model:
-                        size_kb = STM32_FLASH_SIZES.get(model)
-                        return True, {
-                            "chip_id": chip_id,
-                            "model": model,
-                            "flash_size": f"{size_kb} KB" if size_kb else tr("Неизвестно"),
-                            "flash_size_kb": size_kb,
-                        }
-                    return True, {"chip_id": chip_id, "flash_size": tr("Неизвестно")}
-            except Exception as exc:  # noqa: BLE001
-                self.log_line.emit(tr("ST-LINK_CLI.exe не удалось запустить: {0}").format(exc))
         if not _PYOCD:
             return False, {"error": tr("pyocd не установлен")}
         try:
@@ -900,28 +869,14 @@ class FlashWorker(QThread):
                 pass
 
     def _flash_usb(self, file_path: str) -> Tuple[bool, str]:
-        dfu_util = shutil.which("dfu-util") or shutil.which("dfu-util.exe")
+        if not _PYUSB:
+            return False, tr("pyusb/libusb не установлены")
         bin_path, base = _prepare_bin_file(file_path)
         if not bin_path:
             return False, tr("Не удалось подготовить BIN-файл из прошивки")
         if not base:
             base = 0x08000000
         try:
-            if dfu_util:
-                cmd = [
-                    dfu_util,
-                    "-d", "0483:df11",
-                    "-a", "0",
-                    "-s", "0x08000000:leave",
-                    "-D", bin_path,
-                ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-                if result.returncode != 0:
-                    err = (result.stderr or result.stdout or "").strip()
-                    return False, tr("dfu-util ошибка: {0}").format(err)
-                return True, tr("USB DFU: прошивка dfu-util завершена")
-            if not _PYUSB:
-                return False, tr("dfu-util не найден в PATH и pyusb/libusb не установлены")
             dev = usb.core.find(idVendor=0x0483, idProduct=0xDF11)
             if dev is None:
                 return False, tr("USB DFU устройство не найдено")
@@ -933,10 +888,6 @@ class FlashWorker(QThread):
                 ok = dfu.upload(base, len(data)) == data
                 dfu.leave()
             return ok, tr("USB DFU: прошивка завершена") if ok else tr("USB DFU: верификация не прошла")
-        except subprocess.TimeoutExpired:
-            return False, tr("dfu-util: превышено время ожидания")
-        except FileNotFoundError:
-            return False, tr("dfu-util не найден в PATH")
         except Exception as exc:  # noqa: BLE001
             return False, tr("USB DFU ошибка: {0}").format(exc)
         finally:
@@ -985,31 +936,6 @@ class ReadWorker(QThread):
         raise RuntimeError(tr("Чтение не поддерживается для {0}").format(self._method))
 
     def _read_stlink(self) -> Tuple[bytes, int]:
-        stlink_cli = shutil.which("ST-LINK_CLI.exe")
-        if stlink_cli:
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
-                    bin_path = tmp.name
-                result = subprocess.run(
-                    [stlink_cli, "-r", bin_path],
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-                if result.returncode != 0:
-                    err = (result.stderr or result.stdout or "").strip()
-                    raise RuntimeError(tr("ST-LINK_CLI ошибка: {0}").format(err))
-                data = Path(bin_path).read_bytes()
-                Path(bin_path).unlink(missing_ok=True)
-                return data, 0x08000000
-            except subprocess.TimeoutExpired:
-                raise RuntimeError(tr("ST-LINK_CLI: превышено время ожидания"))
-            except FileNotFoundError:
-                pass
-            except Exception as exc:  # noqa: BLE001
-                if not isinstance(exc, RuntimeError):
-                    raise RuntimeError(tr("ST-LINK_CLI ошибка: {0}").format(exc))
-                raise
         if not _PYOCD:
             raise RuntimeError(tr("pyocd не установлен"))
         target = self._config.get("target_mcu", "")
@@ -1078,36 +1004,8 @@ class ReadWorker(QThread):
                 pass
 
     def _read_usb(self) -> Tuple[bytes, int]:
-        dfu_util = shutil.which("dfu-util") or shutil.which("dfu-util.exe")
-        if dfu_util:
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
-                    bin_path = tmp.name
-                size = self._size
-                cmd = [
-                    dfu_util,
-                    "-d", "0483:df11",
-                    "-a", "0",
-                    "-s", f"0x08000000:0x{size:X}",
-                    "-U", bin_path,
-                ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-                if result.returncode != 0:
-                    err = (result.stderr or result.stdout or "").strip()
-                    raise RuntimeError(tr("dfu-util ошибка: {0}").format(err))
-                data = Path(bin_path).read_bytes()
-                Path(bin_path).unlink(missing_ok=True)
-                return data, 0x08000000
-            except subprocess.TimeoutExpired:
-                raise RuntimeError(tr("dfu-util: превышено время ожидания"))
-            except FileNotFoundError:
-                pass
-            except Exception as exc:  # noqa: BLE001
-                if not isinstance(exc, RuntimeError):
-                    raise RuntimeError(tr("dfu-util ошибка: {0}").format(exc))
-                raise
         if not _PYUSB:
-            raise RuntimeError(tr("dfu-util не найден в PATH и pyusb/libusb не установлены"))
+            raise RuntimeError(tr("pyusb/libusb не установлены"))
         dev = usb.core.find(idVendor=0x0483, idProduct=0xDF11)
         if dev is None:
             raise RuntimeError(tr("USB DFU устройство не найдено"))

@@ -10,11 +10,4 @@ pyocd>=0.36.0
 pyusb>=1.2.1
 libusb-package>=1.0.0
 intelhex>=2.3.0
-# pylink-square>=1.2.0  # опционально: только для J-Link
-# Инструкция по установке J-Link:
-# 1. Скачайте и установите SEGGER J-Link Software:
-#    Windows: https://www.segger.com/downloads/jlink/JLink_Windows.exe
-#    macOS:   https://www.segger.com/downloads/jlink/JLink_MacOSX.pkg
-#    Linux:   https://www.segger.com/downloads/jlink/JLink_Linux_x86_64.deb
-# 2. Убедитесь, что J-Link подключен и драйвер/библиотека найдена.
-# 3. Установите pylink-square: pip install pylink-square>=1.2.0
+pylink-square>=1.2.0

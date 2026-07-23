@@ -360,6 +360,15 @@
 - ✅ `ui/flash_dialog.py`: `_read_usb` читает дамп через `dfu-util -U <temp.bin>`, а `_on_read_finished` сохраняет его в `.bin` и открывает в `HexEditorDialog`.
 - ✅ `ui/flash_dialog.py`: `_prepare_firmware_with_config` формирует файл `{stem}_конфиг.bin` как валидный бинарник (не HEX).
 
+## 35. Переход на Python-библиотеки, удаление внешних EXE (23.07.2026 v4)
+
+- ✅ `requirements.txt`: `pylink-square` включён как обязательная зависимость; `pyocd`, `pyusb`, `libusb-package`, `intelhex` уже присутствуют.
+- ✅ `ui/flash_dialog.py`: удалены импорты `subprocess` и `shutil`; удалены все вызовы `ST-LINK_CLI.exe`, `dfu-util`, `JLink.exe`.
+- ✅ `ui/flash_dialog.py`: `_try_stlink` и `_read_stlink` работают только через `pyocd`/`ConnectHelper`.
+- ✅ `ui/flash_dialog.py`: `_flash_usb` и `_read_usb` работают только через `pyusb` и `core.dfu.DfuDevice`.
+- ✅ `ui/flash_dialog.py`: `_flash_jlink` и `_read_jlink` уже используют `pylink-square`.
+- ✅ `models/config.py` и интерфейс: настроек путей к утилитам `stlink_path`, `jlink_path`, `dfu_util_path` не обнаружено.
+
 ## Итоговая оценка готовности
 
 **100 %**
