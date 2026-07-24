@@ -93,23 +93,31 @@ class DfuDevice:
             timeout=timeout,
         )
 
-    def _status(self) -> bytes:
-        return bytes(self._ctrl(DFU_REQUEST_RECEIVE, DFU_GETSTATUS, 0, 6, timeout=1000))
+    def _status(self, timeout: int = 5000) -> bytes:
+        return bytes(self._ctrl(DFU_REQUEST_RECEIVE, DFU_GETSTATUS, 0, 6, timeout=timeout))
 
-    def _wait(self) -> None:
+    def _wait(self, status_timeout: int = 5000) -> None:
         while True:
-            status = self._status()
+            try:
+                status = self._status(timeout=status_timeout)
+            except usb.core.USBError:
+                return
+            if len(status) < 6:
+                return
             state = status[4]
             if state not in (STATE_DFU_DNLOAD_SYNC, STATE_DFU_DNBUSY):
                 if state == STATE_DFU_ERROR:
-                    self._ctrl(DFU_REQUEST_SEND, DFU_CLRSTATUS)
+                    try:
+                        self._ctrl(DFU_REQUEST_SEND, DFU_CLRSTATUS, timeout=5000)
+                    except usb.core.USBError:
+                        pass
                 return
             time.sleep(0.001 * (status[1] | (status[2] << 8) | (status[3] << 16)))
 
     def mass_erase(self) -> None:
         """Полное стирание flash (STM32)."""
-        self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, bytes([0x41, 0xFF, 0xFF]))
-        self._wait()
+        self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, bytes([0x41, 0xFF, 0xFF]), timeout=30000)
+        self._wait(status_timeout=10000)
 
     def _set_address(self, address: int) -> None:
         payload = bytes([
@@ -119,8 +127,8 @@ class DfuDevice:
             (address >> 8) & 0xFF,
             address & 0xFF,
         ])
-        self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, payload)
-        self._wait()
+        self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, payload, timeout=10000)
+        self._wait(status_timeout=5000)
 
     def download(self, address: int, data: bytes, block_size: int = 1024) -> None:
         """Записывает данные по указанному адресу."""
@@ -128,12 +136,12 @@ class DfuDevice:
         block = 2
         for i in range(0, len(data), block_size):
             chunk = data[i:i + block_size]
-            self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, block, chunk)
-            self._wait()
+            self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, block, chunk, timeout=10000)
+            self._wait(status_timeout=5000)
             block += 1
         # zero-length DNLOAD для завершения программирования
-        self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, block, b"")
-        self._wait()
+        self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, block, b"", timeout=10000)
+        self._wait(status_timeout=5000)
 
     def upload(self, address: int, length: int, block_size: int = 1024) -> bytes:
         """Читает length байт с address."""
@@ -143,7 +151,7 @@ class DfuDevice:
         remaining = length
         while remaining > 0:
             chunk_len = min(block_size, remaining)
-            chunk = bytes(self._ctrl(DFU_REQUEST_RECEIVE, DFU_UPLOAD, block, chunk_len, timeout=5000))
+            chunk = bytes(self._ctrl(DFU_REQUEST_RECEIVE, DFU_UPLOAD, block, chunk_len, timeout=10000))
             if not chunk:
                 break
             result.extend(chunk)
@@ -154,7 +162,7 @@ class DfuDevice:
     def leave(self) -> None:
         """Выход из DFU (reset)."""
         try:
-            self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, b"")
+            self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, b"", timeout=1000)
         except usb.core.USBError:
             pass  # устройство перезагружается и отваливается
 
