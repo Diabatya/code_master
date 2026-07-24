@@ -10,8 +10,8 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Install dependencies
@@ -21,7 +21,7 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller build_win.spec
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: CodeMaster-windows
           path: dist/CodeMaster.exe
@@ -29,8 +29,8 @@ jobs:
   build-macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Install dependencies
@@ -42,7 +42,7 @@ jobs:
       - name: Create DMG
         run: hdiutil create -volname "CodeMaster" -srcfolder dist/CodeMaster.app -ov -format UDZO dist/CodeMaster.dmg
       - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: CodeMaster-macos
           path: dist/CodeMaster.dmg
@@ -50,8 +50,8 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Install system dependencies
@@ -65,7 +65,7 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller build_linux.spec
       - name: Upload Linux artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: CodeMaster-linux
           path: dist/CodeMaster
@@ -92,7 +92,7 @@ jobs:
             echo "is_tag=false" >> $GITHUB_OUTPUT
           fi
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
       - name: Rename artifacts for release
