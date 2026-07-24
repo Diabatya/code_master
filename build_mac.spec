@@ -1,4 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
+sys.path.insert(0, '.')
+from models.version import VERSION
 
 try:
     import libusb_package
@@ -36,6 +39,7 @@ a = Analysis(
         'models.logger',
         'models.translations',
         'models.utils',
+        'models.version',
         'ui.can_analyzer',
         'ui.can_gateway_tab',
         'ui.can_graph_tab',
@@ -59,8 +63,8 @@ a = Analysis(
         'pyqtgraph',
         'cantools',
         'cantools.database',
-        'carbus_async',
         'core.dfu',
+        'core.firmware_utils',
         'pyocd.core.helpers',
         'pyocd.flash.flash_builder',
         'pyocd.probe.stlink_probe',
@@ -119,8 +123,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'Код Мастер',
         'CFBundleDisplayName': 'Код Мастер',
-        'CFBundleShortVersionString': '1.0.0',
-        'CFBundleVersion': '1.0.0',
+        'CFBundleShortVersionString': VERSION,
+        'CFBundleVersion': VERSION,
         'NSHumanReadableCopyright': '© 2026 КОД МАСТЕР',
     },
 )

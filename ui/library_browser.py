@@ -1,7 +1,6 @@
 """Встроенная автономная библиотека CAN ID."""
 
 import json
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt

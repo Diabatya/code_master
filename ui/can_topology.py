@@ -3,7 +3,7 @@
 from typing import Dict, Optional, Tuple
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QFont, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsLineItem,
@@ -55,7 +55,7 @@ class CanTopologyWidget(QWidget):
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
         self._view = QGraphicsView(self._scene, self)
-        self._view.setRenderHints(self._view.renderHints() | Qt.RenderHints.Antialiasing)
+        self._view.setRenderHints(self._view.renderHints() | QPainter.RenderHint.Antialiasing)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)

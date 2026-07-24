@@ -15,6 +15,7 @@ from core.bootloader import Bootloader, BootloaderError
 from core.serial_manager import SerialManager
 from models.config import Config
 from models.logger import setup_logging
+from models.version import VERSION
 from ui.dark_theme import apply_dark_theme, apply_light_theme, apply_starline_theme
 from ui.disclaimer_dialog import DisclaimerDialog
 from ui.main_window import MainWindow
@@ -43,18 +44,27 @@ def _cli_flash(args: argparse.Namespace) -> int:
         print("Ошибка: не указан COM-порт. Используйте --port или сохраните порт в GUI.", file=sys.stderr)
         return 1
 
+    # SerialManager запускает SerialReader, который будет конкурировать с bootloader
+    # за COM-порт. Поэтому открываем порт напрямую и закрываем SerialManager.
     serial_manager = SerialManager()
     if not serial_manager.open_port(port_name, args.baudrate, args.emulation):
         print(f"Ошибка: не удалось открыть порт {port_name}", file=sys.stderr)
         return 1
+    serial_manager.close_port()
 
     try:
-        port = serial_manager._port
-        if port is None:
-            raise BootloaderError("COM-порт не открыт")
-        import serial
-        if not isinstance(port, serial.Serial):
-            raise BootloaderError("Прошивка требует реальный COM-порт")
+        import serial as serial_module
+
+        if args.emulation:
+            raise BootloaderError("Режим эмуляции не поддерживает прошивку через CLI")
+        port = serial_module.Serial(
+            port_name,
+            args.baudrate,
+            bytesize=serial_module.EIGHTBITS,
+            parity=serial_module.PARITY_EVEN,
+            stopbits=serial_module.STOPBITS_ONE,
+            timeout=1,
+        )
         bootloader = Bootloader(port)
         bootloader.flash_firmware(args.firmware)
         print("Прошивка завершена успешно")
@@ -63,7 +73,10 @@ def _cli_flash(args: argparse.Namespace) -> int:
         print(f"Ошибка прошивки: {exc}", file=sys.stderr)
         return 1
     finally:
-        serial_manager.close_port()
+        try:
+            port.close()
+        except Exception:  # noqa: S110
+            pass
 
 
 def main() -> int:
@@ -86,7 +99,7 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("Код Мастер")
-    app.setApplicationVersion("1.0.0")
+    app.setApplicationVersion(VERSION)
 
     config = Config()
     theme = config.get("theme", "dark")

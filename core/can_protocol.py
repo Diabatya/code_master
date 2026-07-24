@@ -89,8 +89,6 @@ def unpack_can_frame(raw: bytes) -> Optional[Dict[str, object]]:
     else:
         extended = False
 
-    marker = raw[marker_index]
-
     if extended:
         # Минимальная длина: маркер + канал + 4 байта ID + длина + 1 байт контрольной суммы
         if len(raw) - marker_index < 8:
@@ -103,6 +101,10 @@ def unpack_can_frame(raw: bytes) -> Optional[Dict[str, object]]:
             return None
         length = raw[marker_index + 4]
         id_length = 2
+
+    if length > 8:
+        # Некорректная длина данных — возможно, повреждённый кадр
+        return None
 
     # Общая длина: маркер + канал + id + dlc + данные + checksum
     total_length = 4 + id_length + length

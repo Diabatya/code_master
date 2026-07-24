@@ -2,7 +2,7 @@
 
 from typing import Any, Callable, Dict, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QMimeData
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication, QLineEdit
 
@@ -35,3 +35,12 @@ class IdPasteEdit(QLineEdit):
                 self._fill_callback(parsed)
                 return
         super().keyPressEvent(event)
+
+    def insertFromMimeData(self, source: QMimeData) -> None:
+        """Обрабатывает вставку из контекстного меню и drag-and-drop."""
+        if self._fill_callback is not None and source.hasText():
+            parsed = parse_packet_string(source.text())
+            if parsed is not None:
+                self._fill_callback(parsed)
+                return
+        super().insertFromMimeData(source)

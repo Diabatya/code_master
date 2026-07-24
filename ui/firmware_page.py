@@ -1,23 +1,14 @@
 """Страница «Прошивка» с тремя столбцами: ПО блока, Автомобиль, Конфигурация."""
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
-from PySide6.QtCore import QThread, Signal, Qt, QSize, QTimer
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
-    QFileDialog,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
-    QMessageBox,
-    QProgressBar,
-    QPushButton,
-    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -32,7 +23,6 @@ from core.serial_manager import SerialManager
 from models.config import Config
 from models.logger import get_logger
 from models.translations import _ as tr
-from ui.ui_utils import setup_button
 
 # Новые типы устройств для выбора в окне прошивки
 # 2 CAN = 0x00, 2 CAN+ (с аналоговыми портами) = 0x01, 2 CAN FD = 0x02
@@ -81,18 +71,56 @@ class BootloaderWorker(QThread):
         self._serial_manager = serial_manager
         self._mode = mode
         self._firmware_path = firmware_path
-        self._port = None
+        self._config = Config()
+        self._port: Optional[Any] = None
+        self._bootloader: Optional[Bootloader] = None
+        self._was_open = False
+        self._port_name = ""
+        self._baudrate = 115200
+
+    def _open_bootloader_port(self) -> Any:
+        """Открывает COM-порт напрямую, освобождая его от SerialManager."""
+        import serial as serial_module
+
+        self._port_name = self._serial_manager.current_port_name() or self._config.get("port", "")
+        self._baudrate = self._config.get("baudrate", 115200)
+        if not self._port_name:
+            raise BootloaderError(tr("COM-порт не указан"))
+
+        # Освобождаем порт от SerialManager/SerialReader
+        self._was_open = self._serial_manager.is_open()
+        if self._was_open:
+            self._serial_manager.close_port()
+
+        return serial_module.Serial(
+            self._port_name,
+            self._baudrate,
+            bytesize=serial_module.EIGHTBITS,
+            parity=serial_module.PARITY_EVEN,
+            stopbits=serial_module.STOPBITS_ONE,
+            timeout=1,
+        )
+
+    def _close_and_restore(self) -> None:
+        """Закрывает bootloader-порт и восстанавливает SerialManager."""
+        try:
+            if self._port is not None:
+                self._port.close()
+        except Exception:  # noqa: S110
+            pass
+        if self._was_open and self._port_name:
+            try:
+                self._serial_manager.open_port(self._port_name, self._baudrate)
+            except Exception:  # noqa: S110
+                pass
 
     def run(self) -> None:
         try:
-            self._port = self._serial_manager._port
-            if self._port is None:
-                raise BootloaderError(tr("COM-порт не открыт"))
-
-            bootloader = Bootloader(self._port, progress_callback=self.progress.emit)
+            self._port = self._open_bootloader_port()
+            self._bootloader = Bootloader(self._port, progress_callback=self.progress.emit)
 
             if self._mode == "diagnostics":
-                info = bootloader.diagnostics()
+                info = self._bootloader.diagnostics()
                 version = info.get("version", 0)
                 device_id = info.get("device_id", 0)
                 self.info_ready.emit(
@@ -101,16 +129,20 @@ class BootloaderWorker(QThread):
             elif self._mode == "flash":
                 if not self._firmware_path or not Path(self._firmware_path).exists():
                     raise BootloaderError(tr("Файл прошивки не выбран или не существует"))
-                bootloader.flash_firmware(self._firmware_path)
+                self._bootloader.flash_firmware(self._firmware_path)
                 self.finished_success.emit(tr("Прошивка завершена успешно"))
             else:
                 raise BootloaderError(tr("Неизвестный режим: {0}").format(self._mode))
         except Exception as exc:  # noqa: BLE001
             logger.exception("Ошибка bootloader")
             self.finished_error.emit(str(exc))
+        finally:
+            self._close_and_restore()
 
     def stop(self) -> None:
         self.requestInterruption()
+        if self._bootloader is not None:
+            self._bootloader.request_stop()
         self.wait(2000)
 
 

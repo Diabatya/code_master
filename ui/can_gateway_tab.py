@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -27,7 +26,7 @@ from core.serial_manager import SerialManager
 from models.config import Config
 from models.logger import get_logger
 from models.translations import _ as tr
-from models.utils import hex_to_int, int_to_hex, parse_data_bytes
+from models.utils import hex_to_int, parse_data_bytes
 from ui.packet_clipboard import create_clipboard_buttons
 from ui.ui_utils import setup_button
 from ui.memory_indicator import MemoryIndicator
@@ -50,6 +49,8 @@ class CanGatewayTab(QWidget):
         self._running = False
         self._ignore_edits: List[QLineEdit] = []
         self._rule_blocks: List[Dict[str, Any]] = []
+        self._internal_rules: List[Dict[str, Any]] = []
+        self._ignore_set: set[int] = set()
         self._memory_indicator = MemoryIndicator(self)
         self._create_widgets()
         self._build_layout()
@@ -234,8 +235,13 @@ class CanGatewayTab(QWidget):
         if not has_value:
             self._ignore_check.setChecked(False)
 
-    def _load_config(self) -> None:
-        rules = self._config.get("gateway_rules", [])
+    def _load_config(
+        self,
+        rules: Optional[List[Dict[str, Any]]] = None,
+        ignore_ids: Optional[List[Any]] = None,
+    ) -> None:
+        if rules is None:
+            rules = self._config.get("gateway_rules", [])
         if not isinstance(rules, list):
             rules = []
         for i in range(RULE_COUNT):
@@ -253,12 +259,17 @@ class CanGatewayTab(QWidget):
             direction = int(rule.get("direction", 0))
             block["direction"].setCurrentIndex(direction if 0 <= direction < len(DIRECTIONS) else 0)
 
-        ignore_ids = self._config.get("gateway_ignore", [])
+        if ignore_ids is None:
+            ignore_ids = self._config.get("gateway_ignore", [])
         if not isinstance(ignore_ids, list):
             ignore_ids = []
         for i in range(IGNORE_COUNT):
             self._ignore_edits[i].setText(str(ignore_ids[i]) if i < len(ignore_ids) else "")
         self._on_ignore_changed()
+
+    def set_config(self, rules: List[Dict[str, Any]], ignore_ids: Optional[List[Any]] = None) -> None:
+        """Устанавливает правила шлюза из внешней конфигурации."""
+        self._load_config(rules, ignore_ids)
 
     def _save_config(self) -> None:
         rules = []

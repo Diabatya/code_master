@@ -1,6 +1,4 @@
 # -*- mode: python ; coding: utf-8 -*-
-block_cipher = None
-
 try:
     import libusb_package
 
@@ -37,6 +35,7 @@ a = Analysis(
         'models.logger',
         'models.translations',
         'models.utils',
+        'models.version',
         'ui.can_analyzer',
         'ui.can_gateway_tab',
         'ui.can_graph_tab',
@@ -60,8 +59,8 @@ a = Analysis(
         'pyqtgraph',
         'cantools',
         'cantools.database',
-        'carbus_async',
         'core.dfu',
+        'core.firmware_utils',
         'pyocd.core.helpers',
         'pyocd.flash.flash_builder',
         'pyocd.probe.stlink_probe',
@@ -78,10 +77,9 @@ a = Analysis(
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,

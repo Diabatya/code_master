@@ -3,7 +3,6 @@
 import subprocess
 import sys
 import traceback
-from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
@@ -18,7 +17,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QStackedWidget,
     QStatusBar,
@@ -32,6 +30,7 @@ from core.update_checker import check_for_updates
 from models.config import Config
 from models.logger import get_logger, get_log_dir
 from models.translations import _ as tr, set_language
+from models.version import VERSION
 from ui.com_settings_dialog import ComSettingsDialog
 from ui.dark_theme import apply_theme
 from ui.firmware_page import FirmwarePage
@@ -48,6 +47,7 @@ class MainWindow(QMainWindow):
     def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
         """Создаёт главное окно."""
         super().__init__(parent)
+        install_exception_hook()
         self._serial_manager = serial_manager
         self._config = Config()
         set_language(self._config.get("language", "ru"))
@@ -172,7 +172,7 @@ class MainWindow(QMainWindow):
         self._status_label = QLabel(tr("Готов"))
         self._status_label.setFont(font)
         self._status_bar.addWidget(self._status_label)
-        self._status_bar.showMessage("v1.0.0")
+        self._status_bar.showMessage(f"v{VERSION}")
 
         # Таймер heartbeat
         self._heartbeat_timer = QTimer(self)
@@ -523,4 +523,6 @@ def show_exception_box(exc_type, exc_value, exc_tb) -> None:
     print(message, file=sys.stderr)
 
 
-sys.excepthook = show_exception_box
+def install_exception_hook() -> None:
+    """Устанавливает глобальный обработчик необработанных исключений."""
+    sys.excepthook = show_exception_box

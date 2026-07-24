@@ -1,6 +1,5 @@
 """Скриптовый редактор для пользовательской обработки CAN-кадров."""
 
-import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -14,7 +13,6 @@ from PySide6.QtGui import (
     QTextDocument,
 )
 from PySide6.QtWidgets import (
-    QDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -197,6 +195,7 @@ class ScriptEditor(QWidget):
         self._engine = ScriptEngine()
         self._scripts: List[Dict[str, Any]] = []
         self._current_index = -1
+        self._script_cache: Dict[str, str] = {}
 
         self._ensure_scripts_dir()
         self._create_widgets()
@@ -335,6 +334,7 @@ class ScriptEditor(QWidget):
         else:
             code = DEFAULT_SCRIPT
             self._save_code_to_file(code)
+        self._script_cache[script.get("filename", "")] = code
         self._code_editor.setPlainText(code)
         self._output.clear()
 
@@ -354,9 +354,12 @@ class ScriptEditor(QWidget):
         path.write_text(code, encoding="utf-8")
 
     def _on_code_changed(self) -> None:
-        """Автосохранение кода при изменении."""
+        """Автосохранение кода при изменении и обновление кэша."""
         if self._current_index >= 0:
             self._save_current_code()
+            script = self._current_script()
+            if script is not None:
+                self._script_cache[script.get("filename", "")] = self._code_editor.toPlainText()
 
     def _on_item_changed(self, item: QListWidgetItem) -> None:
         """Обрабатывает изменение чекбокса активности."""
@@ -469,11 +472,15 @@ class ScriptEditor(QWidget):
         for script in self._scripts:
             if not script.get("active", False):
                 continue
-            path = SCRIPTS_DIR / script.get("filename", "")
-            if not path.exists():
-                continue
+            filename = script.get("filename", "")
             try:
-                code = path.read_text(encoding="utf-8")
+                code = self._script_cache.get(filename)
+                if code is None:
+                    path = SCRIPTS_DIR / filename
+                    if not path.exists():
+                        continue
+                    code = path.read_text(encoding="utf-8")
+                    self._script_cache[filename] = code
                 result = self._engine.run(code, script_frame)
                 if result["error"]:
                     logger.warning("Ошибка в скрипте %s: %s", script.get("filename"), result["error"])

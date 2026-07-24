@@ -4,7 +4,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QClipboard, QFont
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QPushButton, QSizePolicy, QStyle, QWidget
 
 from models.logger import get_logger

@@ -82,7 +82,7 @@ def _extract_value_enum(line: str) -> Optional[Tuple[int, str, Dict[int, str]]]:
             values[key] = value
         except (ValueError, IndexError):
             continue
-    return (_parse_int(can_id) or int(can_id), signal_name, values)
+    return (_parse_int(can_id) or int(can_id, 0), signal_name, values)
 
 
 def parse_dbc(filepath: str) -> Dict[int, Dict[str, object]]:

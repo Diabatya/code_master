@@ -43,7 +43,7 @@ from models.logger import get_logger
 from models.translations import _ as tr
 from models.utils import bytes_to_hex_string, format_data_bytes, hex_to_int, int_to_hex, parse_data_bytes
 from ui.filter_dialog import FilterDialog
-from ui.hex_edit import HexDataEdit, create_data_field_widget
+from ui.hex_edit import create_data_field_widget
 from ui.id_edit import IdPasteEdit
 from ui.memory_indicator import MemoryIndicator
 from ui.packet_clipboard import create_clipboard_buttons
@@ -429,10 +429,11 @@ class CanChannelMonitor(QWidget):
             port = self._config.get("port", "")
             baudrate = self._config.get("baudrate", 115200)
             emulation = self._config.get("emulation", False)
+            error_probability = self._config.get("error_probability", 0)
             if not port:
                 QMessageBox.warning(self, tr("Внимание"), tr("Устройство не подключено"))
                 return
-            if not self._serial_manager.open_port(port, baudrate, emulation):
+            if not self._serial_manager.open_port(port, baudrate, emulation, error_probability=error_probability):
                 QMessageBox.warning(self, tr("Внимание"), tr("Устройство не подключено"))
                 return
         self._running = True

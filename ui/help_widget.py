@@ -2,7 +2,6 @@
 
 from typing import Optional
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QPlainTextEdit,
@@ -13,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from models.translations import _ as tr
+from models.version import VERSION
 
 
 class HelpWidget(QWidget):
@@ -127,8 +127,8 @@ class HelpWidget(QWidget):
 
     def _about_text(self) -> str:
         return tr(
-            "Код Мастер (Code Master)\n"
-            "Версия: 1.0.0\n"
+            f"Код Мастер (Code Master)\n"
+            f"Версия: {VERSION}\n"
             "Разработано: КОД МАСТЕР\n"
             "Лицензия: MIT\n"
             "© 2026 КОД МАСТЕР\n\n"

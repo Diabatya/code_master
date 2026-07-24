@@ -127,19 +127,28 @@ def parse_packet_string(text: str) -> Optional[Dict[str, Any]]:
 def get_library_root() -> Path:
     """Возвращает путь к папке библиотеки в доступном пользовательском месте.
 
-    При первом запуске копирует bundled библиотеку из папки рядом с кодом,
-    если она есть и пользовательская папка пуста.
+    При запуске копирует недостающие bundled-ресурсы из папки рядом с кодом.
     """
     bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
     source = bundle_root / "library"
     target = Path(user_data_dir("CodeMaster", appauthor=False, ensure_exists=True)) / "library"
     target.mkdir(parents=True, exist_ok=True)
-    if source.exists() and source.is_dir() and not any(target.iterdir()):
+    if source.exists() and source.is_dir():
         try:
             for item in source.iterdir():
+                dest = target / item.name
                 if item.is_dir():
-                    shutil.copytree(item, target / item.name, dirs_exist_ok=True)
-                else:
+                    if not dest.exists():
+                        shutil.copytree(item, dest)
+                    else:
+                        for sub in item.iterdir():
+                            sub_dest = dest / sub.name
+                            if not sub_dest.exists():
+                                if sub.is_dir():
+                                    shutil.copytree(sub, sub_dest)
+                                else:
+                                    shutil.copy2(sub, dest)
+                elif not dest.exists():
                     shutil.copy2(item, target)
         except (OSError, shutil.Error):
             pass

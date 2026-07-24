@@ -2,8 +2,7 @@
 
 import csv
 import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -25,9 +24,11 @@ from core.dbc_manager import DBCManager
 from core.serial_manager import SerialManager
 from models.logger import get_logger
 from models.translations import _ as tr
-from models.utils import format_data_bytes, hex_to_int, int_to_hex, parse_packet_string
+from models.utils import format_data_bytes, int_to_hex, parse_packet_string
 
 logger = get_logger(__name__)
+
+MAX_TABLE_ROWS = 50_000
 
 
 def _ascii_from_data(data: bytes) -> str:
@@ -175,6 +176,8 @@ class CanAnalyzer(QWidget):
         if self._dbc_manager.is_loaded():
             explanation = self._dbc_manager.describe_frame(can_id, data)
 
+        if table.rowCount() >= MAX_TABLE_ROWS:
+            table.removeRow(0)
         row = table.rowCount()
         table.insertRow(row)
         values = [elapsed_text, id_text, dlc_text, data_text, period_text, ascii_text, explanation]

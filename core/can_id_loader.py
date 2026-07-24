@@ -2,12 +2,10 @@
 
 import csv
 import json
-import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from models.logger import get_logger
-from models.utils import hex_to_int, int_to_hex
 
 logger = get_logger(__name__)
 
@@ -240,7 +238,6 @@ class CanIdLoader:
         model = path.stem
         year = 0
         headers: List[str] = []
-        in_table = False
         for line in text.splitlines():
             if "|" in line:
                 parts = [p.strip().lower() for p in line.split("|") if p.strip()]
@@ -253,7 +250,6 @@ class CanIdLoader:
                 if set(parts) <= {"-", ":"}:
                     continue
                 if headers:
-                    in_table = True
                     row = dict(zip(headers, parts))
                     make = row.get("make") or row.get("brand") or make
                     model = row.get("model") or model
@@ -266,7 +262,6 @@ class CanIdLoader:
                         self._add(make, model, year, msg)
             else:
                 headers = []
-                in_table = False
 
     def demo_fallback(self) -> None:
         """Добавляет демо-записи, если библиотека пуста."""

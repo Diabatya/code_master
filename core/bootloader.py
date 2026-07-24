@@ -6,11 +6,11 @@
 """
 
 import time
-from pathlib import Path
 from typing import Callable, Dict, Optional
 
 import serial
 
+from core.firmware_utils import load_firmware_bytes
 from models.logger import get_logger
 
 logger = get_logger(__name__)
@@ -38,6 +38,11 @@ class Bootloader:
         """
         self.port = port
         self._progress_callback = progress_callback
+        self._stop_requested = False
+
+    def request_stop(self) -> None:
+        """Запрашивает остановку текущей операции прошивки."""
+        self._stop_requested = True
 
     def reconfigure_for_bootloader(self) -> None:
         """Переключает порт на параметры, требуемые bootloader STM32.
@@ -283,16 +288,20 @@ class Bootloader:
     def flash_firmware(self, firmware_path: str, base_address: int = 0x08000000) -> None:
         """Записывает файл прошивки в память STM32.
 
+        Поддерживает .bin, .hex (Intel HEX) и .elf.
+
         Args:
-            firmware_path: Путь к .bin файлу.
+            firmware_path: Путь к файлу прошивки.
             base_address: Начальный адрес записи (по умолчанию 0x08000000).
 
         Raises:
             BootloaderError: при ошибке прошивки.
         """
-        firmware = Path(firmware_path).read_bytes()
+        firmware, file_base = load_firmware_bytes(firmware_path)
         if not firmware:
             raise BootloaderError("Файл прошивки пуст")
+        if file_base:
+            base_address = file_base
 
         logger.info("Начинаю прошивку: %s, размер %d байт", firmware_path, len(firmware))
         self.reconfigure_for_bootloader()
@@ -302,6 +311,8 @@ class Bootloader:
 
         total = len(firmware)
         for offset in range(0, total, self.BLOCK_SIZE):
+            if self._stop_requested:
+                raise BootloaderError("Операция отменена")
             block = firmware[offset : offset + self.BLOCK_SIZE]
             # Дополняем блок до 256 байт нулями
             if len(block) < self.BLOCK_SIZE:

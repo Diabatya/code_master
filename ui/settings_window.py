@@ -533,20 +533,26 @@ class SettingsWindow(QMainWindow):
             self._config.load_from_file(path)
             self._trigger_tab.set_config(self._config.get("triggers", []))
             self._flexible_tab.set_config(self._config.get("flexible_rules", []))
+            if hasattr(self._gateway_tab, "set_config"):
+                self._gateway_tab.set_config(
+                    self._config.get("gateway_rules", []),
+                    self._config.get("gateway_ignore", []),
+                )
             QMessageBox.information(self, tr("Готово"), tr("Конфигурация загружена"))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось загрузить: {0}").format(exc))
 
     def _save_current_config(self) -> None:
         """Сохраняет текущую конфигурацию в файл по умолчанию."""
-        if not self._serial_manager.is_open() or not self._serial_manager.ping_device():
-            QMessageBox.warning(self, tr("Внимание"), tr("Нет связи с устройством. Переподключите USB"))
-            return
+        # Сохранение настроек не должно требовать физического устройства
+        if not self._serial_manager.is_open():
+            logger.warning("Сохранение настроек без открытого COM-порта")
         try:
             self._config.save()
             self._trigger_tab._save_config()
             self._flexible_tab._save_config()
-            self._gateway_tab._save_config() if hasattr(self._gateway_tab, "_save_config") else None
+            if hasattr(self._gateway_tab, "_save_config"):
+                self._gateway_tab._save_config()
             QMessageBox.information(self, tr("Готово"), tr("Настройки сохранены"))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить: {0}").format(exc))
@@ -567,6 +573,11 @@ class SettingsWindow(QMainWindow):
             self._config.save()
             self._trigger_tab.set_config(self._config.get("triggers", []))
             self._flexible_tab.set_config(self._config.get("flexible_rules", []))
+            if hasattr(self._gateway_tab, "set_config"):
+                self._gateway_tab.set_config(
+                    self._config.get("gateway_rules", []),
+                    self._config.get("gateway_ignore", []),
+                )
             QMessageBox.information(self, tr("Готово"), tr("Настройки сброшены"))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сбросить: {0}").format(exc))

@@ -13,6 +13,10 @@ from typing import Any
 
 from platformdirs import user_data_dir
 
+from models.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 class Config:
     """Синглтон для хранения и автоматического сохранения настроек."""
@@ -24,8 +28,10 @@ class Config:
         "port": "",
         "baudrate": 115200,
         "emulation": False,
+        "error_probability": 0,
         "triggers": [],
         "gateway_rules": [],
+        "gateway_ignore": [],
         "ignore_list": [],
         "device_type": 0x00,
         "device_version": 0,
@@ -75,7 +81,7 @@ class Config:
                     loaded = json.load(file)
                     self._data.update(loaded)
             except (json.JSONDecodeError, OSError, TypeError) as exc:
-                print(f"Ошибка загрузки конфигурации: {exc}")
+                logger.error("Ошибка загрузки конфигурации: %s", exc)
 
     def save(self) -> None:
         """Сохраняет текущие настройки в config.json."""
@@ -83,7 +89,7 @@ class Config:
             with self._file_path.open("w", encoding="utf-8") as file:
                 json.dump(self._data, file, ensure_ascii=False, indent=2)
         except OSError as exc:
-            print(f"Ошибка сохранения конфигурации: {exc}")
+            logger.error("Ошибка сохранения конфигурации: %s", exc)
 
     def get(self, key: str, default: Any = None) -> Any:
         """Возвращает значение настройки по ключу."""
@@ -115,5 +121,6 @@ class Config:
         self.save()
 
     def reset_to_defaults(self) -> None:
-        """Сбрасывает настройки к значениям по умолчанию."""
+        """Сбрасывает настройки к значениям по умолчанию и сохраняет."""
         self._data = deepcopy(self.DEFAULT_CONFIG)
+        self.save()

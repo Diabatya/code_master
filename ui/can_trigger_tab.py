@@ -1,7 +1,5 @@
 """Страница «Триггеры» с 10 расширенными блоками условий и ответов."""
 
-import json
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QRegularExpression, Qt, QTimer
@@ -11,7 +9,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QGraphicsOpacityEffect,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -30,7 +27,7 @@ from models.config import Config
 from models.logger import get_logger
 from models.translations import _ as tr
 from models.utils import hex_to_int, int_to_hex, parse_data_bytes
-from ui.hex_edit import HexDataEdit, create_data_field_widget
+from ui.hex_edit import create_data_field_widget
 from ui.id_edit import IdPasteEdit
 from ui.memory_indicator import MemoryIndicator
 from ui.packet_clipboard import create_clipboard_buttons
@@ -545,8 +542,6 @@ class CanTriggerTab(QWidget):
             self._blocks.append(block)
 
     def _build_layout(self) -> None:
-        font = QFont("Segoe UI", 9)
-
         container = QWidget()
         container_layout = QVBoxLayout(container)
         container_layout.setSpacing(10)
@@ -934,10 +929,9 @@ class CanTriggerTab(QWidget):
         for i in range(dlc):
             from_val = data_from[i]
             to_val = data_to[i]
-            if from_val is None or to_val is None:
-                return False
-            from_bytes[i] = from_val & 0xFF
-            to_bytes[i] = to_val & 0xFF
+            # Пустое поле означает «любое значение» для этого байта
+            from_bytes[i] = (from_val & 0xFF) if from_val is not None else 0x00
+            to_bytes[i] = (to_val & 0xFF) if to_val is not None else 0xFF
         from_int = int.from_bytes(from_bytes, "big")
         to_int = int.from_bytes(to_bytes, "big")
         value = int.from_bytes(bytes(data[:dlc]).ljust(dlc, b"\x00"), "big")

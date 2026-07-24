@@ -1,6 +1,6 @@
 """Вкладка «Логика»: цепочки Событие → Условия → Действия."""
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from PySide6.QtCore import QRegularExpression, Qt
 from PySide6.QtGui import QFont, QRegularExpressionValidator
@@ -25,7 +25,7 @@ from models.config import Config
 from models.logger import get_logger
 from models.translations import _ as tr
 from models.utils import hex_to_int, int_to_hex, parse_data_bytes
-from ui.hex_edit import HexDataEdit, create_data_field_widget
+from ui.hex_edit import create_data_field_widget
 from ui.id_edit import IdPasteEdit
 
 logger = get_logger(__name__)

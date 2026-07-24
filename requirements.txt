@@ -1,7 +1,5 @@
 PySide6>=6.5
 pyserial>=3.5
-pyserial-asyncio>=0.6
-carbus-lib>=0.1.9
 cantools>=42.0
 pyqtgraph>=0.14
 matplotlib>=3.7

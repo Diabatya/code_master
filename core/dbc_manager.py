@@ -6,7 +6,7 @@ from typing import Dict, Optional
 
 import cantools.database
 
-from core.dbc_parser import dbc_to_dict, load_dbc, parse_dbc
+from core.dbc_parser import load_dbc, parse_dbc
 from models.config import Config
 from models.logger import get_logger
 from models.utils import get_library_root
