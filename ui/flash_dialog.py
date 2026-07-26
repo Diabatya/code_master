@@ -888,11 +888,33 @@ class FlashWorker(QThread):
             dev = find_dfu_device()
             data = Path(bin_path).read_bytes()
             logger.info("USB DFU прошивка: файл=%s, base=0x%08X, размер=%d, page_size=%d, МК=%s", file_path, base, len(data), page_size, target or "не указан")
+
+            def _make_progress(start_pct: int, end_pct: int, stage: str):
+                last_pct = -1
+
+                def _progress(current: int, total: int) -> None:
+                    nonlocal last_pct
+                    if not total:
+                        return
+                    pct = int(start_pct + (current / total) * (end_pct - start_pct))
+                    if pct != last_pct:
+                        last_pct = pct
+                        self.progress.emit(pct)
+                        if pct and pct % 10 == 0:
+                            self.log_line.emit(f"{stage}: {pct}%")
+
+                return _progress
+
             with DfuDevice(dev) as dfu:
-                dfu.erase_pages(base, data, page_size=page_size, skip_blank=True)
-                dfu.download(base, data)
-                ok = dfu.upload(base, len(data)) == data
+                self.log_line.emit(tr("USB DFU: стирание Flash..."))
+                dfu.erase_pages(base, data, page_size=page_size, skip_blank=True, progress=_make_progress(0, 15, tr("Стирание Flash")))
+                self.log_line.emit(tr("USB DFU: запись {0} байт...").format(len(data)))
+                dfu.download(base, data, progress=_make_progress(15, 50, tr("Запись Flash")))
+                self.log_line.emit(tr("USB DFU: верификация..."))
+                ok = dfu.upload(base, len(data), progress=_make_progress(50, 90, tr("Верификация Flash"))) == data
+                self.log_line.emit(tr("USB DFU: завершение..."))
                 dfu.leave()
+            self.progress.emit(100)
             return ok, tr("USB DFU: прошивка завершена") if ok else tr("USB DFU: верификация не прошла")
         except usb.core.NoBackendError:
             return False, tr("USB backend не найден. Установите libusb-package или WinUSB-драйвер через Zadig.")
@@ -1076,6 +1098,12 @@ class FlashDialog(QDialog):
         self._build_layout()
         self._connect_signals()
         self._load_defaults()
+
+    def _is_any_worker_running(self) -> bool:
+        return any(
+            worker is not None and worker.isRunning()
+            for worker in (self._connect_worker, self._flash_worker, self._read_worker)
+        )
 
     def _create_widgets(self) -> None:
         font = QFont("Segoe UI", 10)
@@ -1345,6 +1373,12 @@ class FlashDialog(QDialog):
     def _start_connect(self) -> None:
         if self._connect_worker and self._connect_worker.isRunning():
             return
+        if self._flash_worker and self._flash_worker.isRunning():
+            self._log(tr("Невозможно подключиться: выполняется прошивка"))
+            return
+        if self._read_worker and self._read_worker.isRunning():
+            self._log(tr("Невозможно подключиться: выполняется чтение"))
+            return
         method = self._method_combo.currentData()
         logger.info("Начало подключения: метод=%s", method)
         self._log(tr("Подключение через {0}...").format(method))
@@ -1464,6 +1498,13 @@ class FlashDialog(QDialog):
         if method == "auto":
             QMessageBox.warning(self, tr("Внимание"), tr("Выберите конкретный способ программирования"))
             return
+        if self._is_any_worker_running():
+            QMessageBox.warning(
+                self,
+                tr("Внимание"),
+                tr("Выполняется другая операция с устройством. Дождитесь её завершения."),
+            )
+            return
         logger.info("Старт прошивки: метод=%s, файлы=%s", method, files)
         try:
             prepared = [self._prepare_firmware_with_config(f) for f in files]
@@ -1517,6 +1558,13 @@ class FlashDialog(QDialog):
             return
         if size_kb <= 0:
             QMessageBox.warning(self, tr("Внимание"), tr("Размер чтения должен быть больше 0"))
+            return
+        if self._is_any_worker_running():
+            QMessageBox.warning(
+                self,
+                tr("Внимание"),
+                tr("Выполняется другая операция с устройством. Дождитесь её завершения."),
+            )
             return
         self._read_button.setEnabled(False)
         self._progress_bar.setValue(0)
