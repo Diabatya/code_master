@@ -596,6 +596,10 @@ class Translator:
                 "Нечётное количество HEX-символов": "Odd number of HEX characters",
                 "RX": "RX",
                 "TX": "TX",
+                "Мониторинг": "Monitoring",
+                "Не удалось открыть порт для отправки": "Could not open port for sending",
+                "Внимание": "Attention",
+                "-- выберите порт --": "-- select port --",
             },
         }
 

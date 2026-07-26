@@ -90,6 +90,21 @@ STM32_FLASH_SIZES: Dict[str, int] = {
     "STM32F746ZGT6": 1024,
 }
 
+# Размер страницы flash в байтах. Для F1 — 1/2 КБ, F2/F4 — сектора 16+ КБ.
+STM32_PAGE_SIZES: Dict[str, int] = {
+    "STM32F103C8T6": 1024,
+    "STM32F103RBT6": 1024,
+    "STM32F105RCT6": 2048,
+    "STM32F105VCT6": 2048,
+    "STM32F107VCT6": 2048,
+    "STM32F205RGT6": 16384,
+    "STM32F303CCT6": 2048,
+    "STM32F407VGT6": 16384,
+    "STM32F429ZIT6": 16384,
+    "STM32F446RET6": 16384,
+    "STM32F746ZGT6": 16384,
+}
+
 # ST-LINK Device ID (например, 0x418) → модель по datasheet
 DEVICE_ID_TO_MODEL: Dict[str, str] = {
     "0x410": "STM32F103RBT6",
@@ -768,7 +783,9 @@ class FlashWorker(QThread):
                 bin_path = tmp.name
             try:
                 bl = Bootloader(ser, progress_callback=lambda p: self.progress.emit(self._scaled_progress(p)))
-                bl.flash_firmware(bin_path, base)
+                page_size = STM32_PAGE_SIZES.get(self._config.get("target_mcu", ""), 2048)
+                logger.info("UART прошивка: %s, base=0x%08X, размер=%d, page_size=%d", file_path, base, len(data), page_size)
+                bl.flash_firmware(bin_path, base, page_size=page_size)
                 ok = bl.verify(base, data)
                 return ok, tr("UART прошивка завершена: {0}").format(file_path)
             finally:
@@ -777,6 +794,7 @@ class FlashWorker(QThread):
                 except OSError:
                     pass
         except Exception as exc:  # noqa: BLE001
+            logger.exception("UART прошивка ошибка: %s", file_path)
             return False, str(exc)
         finally:
             try:
@@ -816,7 +834,9 @@ class FlashWorker(QThread):
                 bin_path = tmp.name
             try:
                 bl = Bootloader(ser, progress_callback=lambda p: self.progress.emit(self._scaled_progress(p)))
-                bl.flash_firmware(bin_path, base)
+                page_size = STM32_PAGE_SIZES.get(self._config.get("target_mcu", ""), 2048)
+                logger.info("USB CDC прошивка: %s, base=0x%08X, размер=%d, page_size=%d", file_path, base, len(data), page_size)
+                bl.flash_firmware(bin_path, base, page_size=page_size)
                 ok = bl.verify(base, data)
                 return ok, tr("USB CDC прошивка завершена: {0}").format(file_path)
             finally:
@@ -825,6 +845,7 @@ class FlashWorker(QThread):
                 except OSError:
                     pass
         except Exception as exc:  # noqa: BLE001
+            logger.exception("USB CDC прошивка ошибка: %s", file_path)
             return False, str(exc)
         finally:
             try:
@@ -840,12 +861,15 @@ class FlashWorker(QThread):
             return False, tr("Не удалось подготовить BIN-файл из прошивки")
         if not base:
             base = 0x08000000
+        target = self._config.get("target_mcu", "")
+        page_size = STM32_PAGE_SIZES.get(target, 2048)
         try:
             from core.dfu import DfuDevice, find_dfu_device
             dev = find_dfu_device()
             data = Path(bin_path).read_bytes()
+            logger.info("USB DFU прошивка: файл=%s, base=0x%08X, размер=%d, page_size=%d, МК=%s", file_path, base, len(data), page_size, target or "не указан")
             with DfuDevice(dev) as dfu:
-                dfu.mass_erase()
+                dfu.erase_pages(base, data, page_size=page_size, skip_blank=True)
                 dfu.download(base, data)
                 ok = dfu.upload(base, len(data)) == data
                 dfu.leave()
@@ -853,6 +877,7 @@ class FlashWorker(QThread):
         except usb.core.NoBackendError:
             return False, tr("USB backend не найден. Установите libusb-package или WinUSB-драйвер через Zadig.")
         except Exception as exc:  # noqa: BLE001
+            logger.exception("USB DFU ошибка при прошивке %s", file_path)
             return False, tr("USB DFU ошибка: {0}").format(exc)
         finally:
             if bin_path != file_path:
@@ -1301,6 +1326,7 @@ class FlashDialog(QDialog):
         if self._connect_worker and self._connect_worker.isRunning():
             return
         method = self._method_combo.currentData()
+        logger.info("Начало подключения: метод=%s", method)
         self._log(tr("Подключение через {0}...").format(method))
         self._connect_button.setEnabled(False)
         self._connect_worker = ConnectWorker(method, self._config, self)
@@ -1322,6 +1348,7 @@ class FlashDialog(QDialog):
         self._start_connect()
 
     def _on_connect_finished(self, success: bool, info: Dict[str, Any]) -> None:
+        logger.info("Подключение завершено: success=%s, info=%s", success, info)
         self._connect_button.setEnabled(True)
         if success and info.get("method") and info["method"] != self._method_combo.currentData():
             index = self._method_combo.findData(info["method"])
@@ -1417,14 +1444,17 @@ class FlashDialog(QDialog):
         if method == "auto":
             QMessageBox.warning(self, tr("Внимание"), tr("Выберите конкретный способ программирования"))
             return
+        logger.info("Старт прошивки: метод=%s, файлы=%s", method, files)
         try:
             prepared = [self._prepare_firmware_with_config(f) for f in files]
         except ValueError as exc:
             QMessageBox.warning(self, tr("Внимание"), str(exc))
             return
+        logger.info("Подготовленные файлы для прошивки: %s", prepared)
         # Для COM-портов (UART/USB CDC) порт может быть занят SerialManager — освобождаем
         self._port_was_open = self._serial_manager.is_open() if self._serial_manager else False
         if method in ("uart", "usb_cdc") and self._port_was_open:
+            logger.info("Закрываю SerialManager перед прошивкой через %s", method)
             self._serial_manager.close_port()
         self._flash_button.setEnabled(False)
         self._progress_bar.setValue(0)
@@ -1435,12 +1465,14 @@ class FlashDialog(QDialog):
         self._flash_worker.start()
 
     def _on_flash_finished(self, success: bool, message: str) -> None:
+        logger.info("Прошивка завершена: success=%s, message=%s", success, message)
         self._flash_button.setEnabled(True)
         self._log(message)
         # Восстанавливаем COM-порт, если он был открыт до прошивки
         method = self._method_combo.currentData()
         if method in ("uart", "usb_cdc") and getattr(self, "_port_was_open", False) and self._serial_manager:
             try:
+                logger.info("Восстановление SerialManager после прошивки")
                 self._serial_manager.open_port(
                     self._config.get("port", ""),
                     self._config.get("baudrate", 115200),

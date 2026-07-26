@@ -86,6 +86,7 @@ class SerialReader(QThread):
                 if available > 0:
                     chunk = self._port.read(min(available, 256))
                     if chunk:
+                        logger.debug("SerialReader: прочитано %d байт", len(chunk))
                         self._buffer.extend(chunk)
                         self._error_count = 0
                         # Парсим все полные кадры из буфера и сдвигаем буфер
@@ -200,7 +201,7 @@ class SerialManager(QObject):
                     timeout=0.1,
                     write_timeout=1,
                 )
-                logger.info("Открыт реальный порт %s на скорости %d", port_name, baudrate)
+                logger.info("Открыт реальный порт %s на скорости %d (dtr=%s, rts=%s)", port_name, baudrate, self._port.dtr, self._port.rts)
 
             self._reader = SerialReader(self._port, self)
             self._reader.new_frame.connect(self.new_can_frame)
@@ -265,11 +266,12 @@ class SerialManager(QObject):
 
         with self._lock:
             try:
+                preview = data[:16].hex(" ")
                 self._port.write(data)
-                logger.debug("Отправлено в порт %d байт", len(data))
+                logger.info("Отправлено в порт %s: %d байт, preview=%s", self.current_port_name(), len(data), preview)
                 return True
             except Exception as exc:  # noqa: BLE001
-                logger.error("Ошибка отправки в порт: %s", exc)
+                logger.error("Ошибка отправки в порт %s: %s", self.current_port_name(), exc)
                 self.error_occurred.emit(f"Ошибка отправки: {exc}")
                 return False
 

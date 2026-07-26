@@ -6,7 +6,7 @@
 """
 
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import serial
 
@@ -103,9 +103,11 @@ class Bootloader:
         Raises:
             BootloaderError: при получении NACK или таймауте.
         """
+        logger.debug("BL TX: команда 0x%02X", command)
         self.port.write(bytes([command, command ^ 0xFF]))
         if wait_ack:
             response = self._read_byte()
+            logger.debug("BL RX: команда 0x%02X -> ответ 0x%02X", command, response)
             if response != ACK:
                 raise BootloaderError(f"Команда 0x{command:02X} не подтверждена (ответ 0x{response:02X})")
 
@@ -124,14 +126,17 @@ class Bootloader:
         start = time.time()
         while True:
             for p in comports():
+                logger.debug("find_device_port: проверка %s vid=0x%04X pid=0x%04X", p.device, p.vid or 0, p.pid or 0)
                 if vid and p.vid != vid:
                     continue
                 if pid and p.pid != pid:
                     continue
                 if p.vid is None and p.pid is None:
                     continue
+                logger.info("Найден порт %s (VID=0x%04X, PID=0x%04X)", p.device, p.vid or 0, p.pid or 0)
                 return p.device
             if timeout <= 0 or time.time() - start >= timeout:
+                logger.warning("Порт VID=0x%04X PID=0x%04X не найден (timeout=%.1f)", vid, pid, timeout)
                 return None
             time.sleep(0.2)
 
@@ -139,7 +144,9 @@ class Bootloader:
         """Возвращает информацию о текущем COM-порте."""
         for p in comports():
             if p.device == self.port.port:
+                logger.info("Информация о порте: %s (VID=0x%04X PID=0x%04X)", p.device, p.vid or 0, p.pid or 0)
                 return p
+        logger.warning("Информация о порте %s не найдена", self.port.port)
         return None
 
     def request_app_reboot(self) -> None:
@@ -237,30 +244,68 @@ class Bootloader:
         raise BootloaderError("Не удалось синхронизироваться с бутлоадером")
 
     def erase(self, extended: bool = True) -> None:
-        """Выполняет стирание памяти.
-
-        Args:
-            extended: Если True, используется команда 0x44 (Extended Erase),
-                      иначе 0x43 (Mass Erase).
-
-        Raises:
-            BootloaderError: при ошибке стирания.
-        """
-        logger.info("Начинаю стирание памяти STM32")
+        """Выполняет массовое стирание памяти (осторожно — сносит bootloader!)."""
+        logger.warning("Выполняется массовое стирание памяти STM32 (bootloader будет стёрт)")
         if extended:
-            # Extended Erase: 0x44, затем количество страниц, затем номера и контрольная сумма
             self._send_command(0x44)
-            # Массовое стирание: 0xFF 0xFF + checksum
             self.port.write(bytes([0xFF, 0xFF, 0x00]))
         else:
             self._send_command(0x43)
-            # Массовое стирание
             self.port.write(bytes([0xFF, 0x00]))
 
         response = self._read_byte(5.0)
         if response != ACK:
             raise BootloaderError(f"Ошибка стирания (ответ 0x{response:02X})")
-        logger.info("Стирание памяти завершено")
+        logger.info("Массовое стирание завершено")
+
+    def erase_pages(self, start: int, data: bytes, page_size: int = 2048, flash_base: int = 0x08000000) -> None:
+        """Стирает только страницы, в которых есть непустые данные.
+
+        Args:
+            start: Начальный адрес записи.
+            data: Данные для записи (для определения пустых страниц).
+            page_size: Размер страницы flash.
+            flash_base: Базовый адрес flash.
+        """
+        if not data:
+            return
+        end = start + len(data)
+        page = (start // page_size) * page_size
+        pages_to_erase: List[int] = []
+        while page < end:
+            seg_start = max(start, page)
+            seg_end = min(end, page + page_size)
+            page_data = data[seg_start - start : seg_end - start]
+            if page_data and not all(b == 0xFF for b in page_data):
+                pages_to_erase.append((page - flash_base) // page_size)
+            page += page_size
+
+        if not pages_to_erase:
+            logger.info("Нет страниц для стирания (все данные 0xFF)")
+            return
+
+        logger.info("Стирание %d страниц: %s", len(pages_to_erase), pages_to_erase[:10])
+        if len(pages_to_erase) > 10:
+            logger.info("... и ещё %d страниц", len(pages_to_erase) - 10)
+
+        n = len(pages_to_erase) - 1
+        payload = bytearray()
+        payload.append((n >> 8) & 0xFF)
+        payload.append(n & 0xFF)
+        for p in pages_to_erase:
+            payload.append((p >> 8) & 0xFF)
+            payload.append(p & 0xFF)
+        checksum = 0
+        for b in payload:
+            checksum ^= b
+        payload.append(checksum)
+
+        self._send_command(0x44)
+        self.port.write(bytes(payload))
+        response = self._read_byte(30.0)
+        if response != ACK:
+            raise BootloaderError(f"Ошибка стирания страниц (ответ 0x{response:02X})")
+        logger.info("Стирание страниц завершено")
 
     def write_memory(self, address: int, data: bytes) -> None:
         """Записывает блок данных по указанному адресу.
@@ -276,6 +321,7 @@ class Bootloader:
         if length > self.BLOCK_SIZE:
             raise BootloaderError(f"Блок данных слишком большой: {length} байт")
 
+        logger.debug("BL write_memory: адрес 0x%08X, %d байт", address, length)
         # Формируем команду Write Memory 0x31
         self._send_command(0x31)
 
@@ -314,14 +360,18 @@ class Bootloader:
         Returns:
             True, если данные совпадают, иначе False.
         """
+        logger.info("BL verify: адрес 0x%08X, %d байт", address, len(data))
         read_data = self.read_memory(address, len(data))
-        return read_data == data
+        ok = read_data == data
+        logger.info("BL verify: %s", "OK" if ok else "FAIL")
+        return ok
 
     def _read_memory_chunk(self, address: int, length: int) -> bytes:
         """Читает один блок памяти длиной до 256 байт."""
         if length < 1 or length > self.BLOCK_SIZE:
             raise BootloaderError(f"Недопустимый размер блока чтения: {length}")
 
+        logger.debug("BL read chunk: 0x%08X, %d байт", address, length)
         self._send_command(0x11)
         addr_bytes = address.to_bytes(4, "big")
         addr_checksum = 0
@@ -355,12 +405,14 @@ class Bootloader:
         Raises:
             BootloaderError: при ошибке чтения.
         """
+        logger.info("BL read_memory: 0x%08X, %d байт", address, length)
         result = bytearray()
         offset = 0
         while offset < length:
             chunk_len = min(self.BLOCK_SIZE, length - offset)
             result.extend(self._read_memory_chunk(address + offset, chunk_len))
             offset += chunk_len
+        logger.info("BL read_memory завершено: 0x%08X, прочитано %d байт", address, len(result))
         return bytes(result)
 
     def get_version(self) -> int:
@@ -372,6 +424,7 @@ class Bootloader:
             byte = self._read_byte()
             if byte == ACK:
                 break
+        logger.info("BL version: 0x%02X", version)
         return version
 
     def get_id(self) -> int:
@@ -381,6 +434,7 @@ class Bootloader:
         device_id = 0
         for _ in range(length + 1):
             device_id = (device_id << 8) | self._read_byte()
+        logger.info("BL device ID: 0x%08X", device_id)
         return device_id
 
     def diagnostics(self) -> Dict[str, int]:
@@ -389,14 +443,16 @@ class Bootloader:
         Returns:
             Словарь с ключами 'version' и 'device_id'.
         """
+        logger.info("BL diagnostics: старт")
         self.reconfigure_for_bootloader()
         self.enter_bootloader()
         self.sync()
         version = self.get_version()
         device_id = self.get_id()
+        logger.info("BL diagnostics: версия=0x%02X, ID=0x%08X", version, device_id)
         return {"version": version, "device_id": device_id}
 
-    def flash_firmware(self, firmware_path: str, base_address: int = 0x08008000) -> None:
+    def flash_firmware(self, firmware_path: str, base_address: int = 0x08008000, page_size: int = 2048) -> None:
         """Записывает файл прошивки в память STM32.
 
         Поддерживает .bin, .hex (Intel HEX) и .elf.
@@ -404,6 +460,7 @@ class Bootloader:
         Args:
             firmware_path: Путь к файлу прошивки.
             base_address: Начальный адрес записи (по умолчанию 0x08008000).
+            page_size: Размер страницы flash (для F105 — 2048 байт).
 
         Raises:
             BootloaderError: при ошибке прошивки.
@@ -414,25 +471,22 @@ class Bootloader:
         if file_base:
             base_address = file_base
 
-        logger.info("Начинаю прошивку: %s, размер %d байт", firmware_path, len(firmware))
+        logger.info("Начинаю прошивку: %s, base=0x%08X, размер %d байт, page_size=%d", firmware_path, base_address, len(firmware), page_size)
         self.reconfigure_for_bootloader()
         self.enter_bootloader()
         self.sync()
-        self.erase()
+        self.erase_pages(base_address, firmware, page_size=page_size)
 
         total = len(firmware)
         for offset in range(0, total, self.BLOCK_SIZE):
             if self._stop_requested:
                 raise BootloaderError("Операция отменена")
             block = firmware[offset : offset + self.BLOCK_SIZE]
-            # Дополняем блок до 256 байт нулями
-            if len(block) < self.BLOCK_SIZE:
-                block = block + bytes(self.BLOCK_SIZE - len(block))
             address = base_address + offset
             for attempt in range(self.MAX_RETRIES):
                 try:
                     self.write_memory(address, block)
-                    logger.debug("Записан блок по адресу 0x%08X", address)
+                    logger.debug("Записан блок 0x%08X, %d байт", address, len(block))
                     break
                 except BootloaderError as exc:
                     logger.warning("Повтор записи блока 0x%08X: %s", address, exc)

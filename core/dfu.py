@@ -8,6 +8,10 @@ from typing import List, Optional, Tuple
 import usb.core
 import usb.util
 
+from models.logger import get_logger
+
+logger = get_logger(__name__)
+
 try:
     import usb.backend.libusb1 as libusb1
     import libusb_package
@@ -159,10 +163,48 @@ class DfuDevice:
 
     def mass_erase(self) -> None:
         """Полное стирание flash (STM32)."""
-        payload = bytes([0x41, 0xFF, 0xFF])
-        payload += bytes([_xor_checksum(payload)])
+        logger.warning("Выполняется mass erase — будет стёрта вся flash включая bootloader")
+        payload = bytes([0x41])
         self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, payload, timeout=30000)
         self._wait(status_timeout=60000)
+
+    def page_erase(self, address: int, timeout_ms: int = 5000) -> None:
+        """Стирает одну страницу flash по адресу (DfuSe/STM32)."""
+        payload = bytes([
+            0x41,
+            address & 0xFF,
+            (address >> 8) & 0xFF,
+            (address >> 16) & 0xFF,
+            (address >> 24) & 0xFF,
+        ])
+        logger.debug("DFU page erase: 0x%08X", address)
+        self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, payload, timeout=max(timeout_ms, 5000))
+        self._wait(status_timeout=timeout_ms)
+
+    def erase_pages(self, start: int, data: bytes, page_size: int = 2048, skip_blank: bool = True) -> None:
+        """Стирает только страницы, которые будут перезаписаны.
+
+        Args:
+            start: Начальный адрес записи.
+            data: Данные для записи.
+            page_size: Размер страницы flash (для F105 — 2048 байт).
+            skip_blank: Не стирать страницы, полностью состоящие из 0xFF.
+        """
+        if not data:
+            return
+        end = start + len(data)
+        page = (start // page_size) * page_size
+        logger.info("DFU: стирание страниц от 0x%08X до 0x%08X (page_size=%d, skip_blank=%s)", start, end - 1, page_size, skip_blank)
+        while page < end:
+            seg_start = max(start, page)
+            seg_end = min(end, page + page_size)
+            page_data = data[seg_start - start : seg_end - start]
+            if skip_blank and page_data and all(b == 0xFF for b in page_data):
+                logger.debug("DFU: пропуск пустой страницы 0x%08X", page)
+            else:
+                logger.info("DFU: стирание страницы 0x%08X (%d байт данных)", page, len(page_data))
+                self.page_erase(page)
+            page += page_size
 
     def _set_address(self, address: int) -> None:
         payload = bytes([
@@ -178,23 +220,30 @@ class DfuDevice:
 
     def download(self, address: int, data: bytes, block_size: Optional[int] = None) -> None:
         """Записывает данные по указанному адресу."""
+        if not data:
+            return
         if block_size is None:
             block_size = self._get_transfer_size()
+        logger.info("DFU download: адрес 0x%08X, размер %d байт, block_size %d", address, len(data), block_size)
         self._set_address(address)
         block = 2
         for i in range(0, len(data), block_size):
             chunk = data[i:i + block_size]
+            logger.debug("DFU download block %d: %d байт", block, len(chunk))
             self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, block, chunk, timeout=10000)
             self._wait(status_timeout=5000)
             block += 1
         # zero-length DNLOAD для завершения программирования
+        logger.debug("DFU download: завершение (zero-length DNLOAD)")
         self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, block, b"", timeout=10000)
         self._wait(status_timeout=5000)
+        logger.info("DFU download завершён: 0x%08X (%d байт)", address, len(data))
 
     def upload(self, address: int, length: int, block_size: Optional[int] = None) -> bytes:
         """Читает length байт с address."""
         if block_size is None:
             block_size = self._get_transfer_size()
+        logger.info("DFU upload: адрес 0x%08X, %d байт", address, length)
         self._set_address(address)
         result = bytearray()
         block = 2
@@ -207,6 +256,7 @@ class DfuDevice:
             result.extend(chunk)
             remaining -= len(chunk)
             block += 1
+        logger.info("DFU upload завершён: 0x%08X, прочитано %d байт", address, len(result))
         return bytes(result)
 
     def leave(self) -> None:
