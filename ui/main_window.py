@@ -33,6 +33,7 @@ from models.translations import _ as tr, set_language
 from models.version import VERSION
 from ui.com_settings_dialog import ComSettingsDialog
 from ui.dark_theme import apply_theme
+from ui.com_logger import ComLoggerWindow
 from ui.firmware_page import FirmwarePage
 from ui.flash_dialog import FlashDialog
 from ui.help_widget import show_help
@@ -156,6 +157,15 @@ class MainWindow(QMainWindow):
         self._flash_button.setToolTip(tr("Открыть окно прошивки"))
         self._flash_button.clicked.connect(self._on_flash_clicked)
 
+        self._com_logger_button = QPushButton(tr("Comlogger\n(COM-порт)"))
+        self._com_logger_button.setFixedSize(260, 110)
+        self._com_logger_button.setFont(QFont("Segoe UI", 13))
+        self._com_logger_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._com_logger_button.setToolTip(tr("Открыть COM-логгер"))
+        self._com_logger_button.clicked.connect(self._on_com_logger_clicked)
+
+        self._com_logger_window: Optional[ComLoggerWindow] = None
+
         # Главное меню
         self._central_stack = QStackedWidget()
 
@@ -224,6 +234,14 @@ class MainWindow(QMainWindow):
         flash_layout.addWidget(self._flash_button)
         flash_layout.addStretch()
         root.addLayout(flash_layout)
+
+        logger_layout = QHBoxLayout()
+        logger_layout.setContentsMargins(20, 16, 20, 20)
+        logger_layout.setSpacing(16)
+        logger_layout.addStretch()
+        logger_layout.addWidget(self._com_logger_button)
+        logger_layout.addStretch()
+        root.addLayout(logger_layout)
 
         startup_layout = QVBoxLayout(self._startup_page)
         startup_layout.setContentsMargins(40, 40, 40, 40)
@@ -337,6 +355,15 @@ class MainWindow(QMainWindow):
         dialog = FlashDialog(self._serial_manager, self)
         dialog.exec()
 
+    def _on_com_logger_clicked(self) -> None:
+        """Открывает отдельное окно COM-логгера."""
+        if self._com_logger_window is None:
+            self._com_logger_window = ComLoggerWindow(self)
+        self._com_logger_window.show()
+        self._com_logger_window.raise_()
+        self._com_logger_window.activateWindow()
+        self._status_label.setText(tr("Открыт COM-логгер"))
+
     def _on_configure_clicked(self) -> None:
         """Открывает окно настроек CAN, скрывая главное окно."""
         if not self._ensure_port_selected():
@@ -439,6 +466,8 @@ class MainWindow(QMainWindow):
         self._configure_button.setText("⚙️ " + tr("Настроить"))
         self._flash_button.setText(tr("Прошить\nмикроконтроллер"))
         self._flash_button.setToolTip(tr("Открыть окно прошивки"))
+        self._com_logger_button.setText(tr("Comlogger\n(COM-порт)"))
+        self._com_logger_button.setToolTip(tr("Открыть COM-логгер"))
         self._firmware_page_back_button.setText(tr("← Назад"))
         self._startup_title.setText(tr("Код Мастер"))
         self._startup_subtitle.setText(tr("Выберите режим работы"))
@@ -507,6 +536,8 @@ class MainWindow(QMainWindow):
         self._heartbeat_timer.stop()
         if self._settings_window is not None:
             self._settings_window.close()
+        if self._com_logger_window is not None:
+            self._com_logger_window.close()
         self._serial_manager.close_port()
         event.accept()
 
