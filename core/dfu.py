@@ -31,7 +31,10 @@ DFU_CLRSTATUS = 4
 
 STATE_DFU_DNLOAD_SYNC = 3
 STATE_DFU_DNBUSY = 4
+STATE_DFU_DNLOAD_IDLE = 5
 STATE_DFU_ERROR = 10
+
+DFU_STATUS_OK = 0x00
 
 
 def _xor_checksum(data: bytes) -> int:
@@ -94,6 +97,12 @@ class DfuDevice:
                 "Не удалось захватить DFU интерфейс. "
                 "На Windows установите WinUSB-драйвер через Zadig (STM32 BOOTLOADER 0483:DF11)."
             ) from exc
+        # Сбрасываем возможное состояние dfuERROR от предыдущих попыток
+        try:
+            self._ctrl(DFU_REQUEST_SEND, DFU_CLRSTATUS, timeout=5000)
+            time.sleep(0.01)
+        except Exception:  # noqa: S110
+            pass
 
     def _get_transfer_size(self) -> int:
         """Возвращает wTransferSize из DFU functional descriptor, если возможно."""
@@ -135,31 +144,34 @@ class DfuDevice:
         return bytes(self._ctrl(DFU_REQUEST_RECEIVE, DFU_GETSTATUS, 0, 6, timeout=timeout))
 
     def _wait(self, status_timeout: int = 60000) -> None:
-        """Ждёт завершения операции DFU, сбрасывает DFU_ERROR при необходимости."""
+        """Ждёт завершения операции DFU и проверяет, что статус OK."""
+        deadline = time.time() + status_timeout / 1000.0
         while True:
+            if time.time() > deadline:
+                raise RuntimeError("Таймаут ожидания статуса DFU")
             try:
-                status = self._status(timeout=status_timeout)
-            except usb.core.USBError:
-                return
+                status = self._status(timeout=5000)
+            except usb.core.USBError as exc:
+                raise RuntimeError(f"Ошибка чтения статуса DFU: {exc}") from exc
             if len(status) < 6:
-                return
+                raise RuntimeError("Некорректный ответ DFU_GETSTATUS")
             state = status[4]
-            if state not in (STATE_DFU_DNLOAD_SYNC, STATE_DFU_DNBUSY):
-                if state == STATE_DFU_ERROR:
-                    try:
-                        self._ctrl(DFU_REQUEST_SEND, DFU_CLRSTATUS, timeout=5000)
-                    except usb.core.USBError:
-                        pass
-                    # Повторяем статус после сброса ошибки
-                    try:
-                        status = self._status(timeout=5000)
-                    except usb.core.USBError:
-                        return
-                    if len(status) < 6:
-                        return
-                    state = status[4]
-                return
-            time.sleep(0.001 * (status[1] | (status[2] << 8) | (status[3] << 16)))
+            bstatus = status[0]
+            if state in (STATE_DFU_DNLOAD_SYNC, STATE_DFU_DNBUSY):
+                poll_timeout = 0.001 * (status[1] | (status[2] << 8) | (status[3] << 16))
+                time.sleep(max(poll_timeout, 0.001))
+                continue
+            if state == STATE_DFU_ERROR:
+                error_code = bstatus
+                try:
+                    self._ctrl(DFU_REQUEST_SEND, DFU_CLRSTATUS, timeout=5000)
+                except usb.core.USBError:
+                    pass
+                raise RuntimeError(f"DFU ошибка: state=dfuERROR, bStatus=0x{error_code:02X}")
+            if bstatus != DFU_STATUS_OK:
+                raise RuntimeError(f"DFU статус ошибки: 0x{bstatus:02X}, state=0x{state:02X}")
+            logger.debug("DFU статус OK: state=0x%02X, bStatus=0x%02X", state, bstatus)
+            return
 
     def mass_erase(self) -> None:
         """Полное стирание flash (STM32)."""
@@ -207,36 +219,30 @@ class DfuDevice:
             page += page_size
 
     def _set_address(self, address: int) -> None:
-        payload = bytes([
-            0x21,
-            (address >> 24) & 0xFF,
-            (address >> 16) & 0xFF,
-            (address >> 8) & 0xFF,
-            address & 0xFF,
-        ])
-        payload += bytes([_xor_checksum(payload)])
+        """Устанавливает Address Pointer (LSB first, 5 байт, без checksum)."""
+        payload = bytes([0x21]) + address.to_bytes(4, "little")
+        logger.debug("DFU set address: 0x%08X -> %s", address, payload.hex())
         self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, payload, timeout=10000)
         self._wait(status_timeout=5000)
 
     def download(self, address: int, data: bytes, block_size: Optional[int] = None) -> None:
-        """Записывает данные по указанному адресу."""
+        """Записывает данные по указанному адресу.
+
+        Для каждого блока устанавливается абсолютный адрес (как в micropython/pydfu.py),
+        а DFU_DNLOAD передаётся с wBlockNum=2.
+        """
         if not data:
             return
         if block_size is None:
             block_size = self._get_transfer_size()
         logger.info("DFU download: адрес 0x%08X, размер %d байт, block_size %d", address, len(data), block_size)
-        self._set_address(address)
-        block = 2
         for i in range(0, len(data), block_size):
             chunk = data[i:i + block_size]
-            logger.debug("DFU download block %d: %d байт", block, len(chunk))
-            self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, block, chunk, timeout=10000)
+            chunk_addr = address + i
+            self._set_address(chunk_addr)
+            logger.debug("DFU download: адрес 0x%08X, chunk %d байт", chunk_addr, len(chunk))
+            self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 2, chunk, timeout=10000)
             self._wait(status_timeout=5000)
-            block += 1
-        # zero-length DNLOAD для завершения программирования
-        logger.debug("DFU download: завершение (zero-length DNLOAD)")
-        self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, block, b"", timeout=10000)
-        self._wait(status_timeout=5000)
         logger.info("DFU download завершён: 0x%08X (%d байт)", address, len(data))
 
     def upload(self, address: int, length: int, block_size: Optional[int] = None) -> bytes:
@@ -244,18 +250,19 @@ class DfuDevice:
         if block_size is None:
             block_size = self._get_transfer_size()
         logger.info("DFU upload: адрес 0x%08X, %d байт", address, length)
-        self._set_address(address)
         result = bytearray()
-        block = 2
         remaining = length
+        offset = 0
         while remaining > 0:
             chunk_len = min(block_size, remaining)
-            chunk = bytes(self._ctrl(DFU_REQUEST_RECEIVE, DFU_UPLOAD, block, chunk_len, timeout=10000))
+            self._set_address(address + offset)
+            logger.debug("DFU upload: адрес 0x%08X, запрошено %d байт", address + offset, chunk_len)
+            chunk = bytes(self._ctrl(DFU_REQUEST_RECEIVE, DFU_UPLOAD, 2, chunk_len, timeout=10000))
             if not chunk:
                 break
             result.extend(chunk)
             remaining -= len(chunk)
-            block += 1
+            offset += len(chunk)
         logger.info("DFU upload завершён: 0x%08X, прочитано %d байт", address, len(result))
         return bytes(result)
 
@@ -263,11 +270,11 @@ class DfuDevice:
         """Выход из DFU (reset).
 
         Для STM32 нужно установить Address Pointer на вектор сброса,
-        затем выполнить zero-length DNLOAD.
+        затем выполнить zero-length DNLOAD с wValue=0.
         """
         try:
             self._set_address(0x08000000)
-        except usb.core.USBError:
+        except Exception:  # noqa: BLE001
             pass
         try:
             self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, b"", timeout=1000)
@@ -275,12 +282,17 @@ class DfuDevice:
             pass  # устройство перезагружается и отваливается
 
     def close(self) -> None:
-        """Освобождает USB интерфейс."""
+        """Освобождает USB интерфейс и закрывает дескриптор устройства."""
         if self.intf is not None:
             try:
                 usb.util.release_interface(self.dev, self.intf.bInterfaceNumber)
             except usb.core.USBError:
                 pass
+            self.intf = None
+        try:
+            usb.util.dispose_resources(self.dev)
+        except Exception:  # noqa: S110
+            pass
 
     def __enter__(self):
         self.open()

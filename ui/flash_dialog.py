@@ -630,11 +630,16 @@ class ConnectWorker(QThread):
         if not _PYUSB:
             return False, {"error": tr("pyusb/libusb не установлен")}
         try:
-            dev = usb.core.find(idVendor=0x0483, idProduct=0xDF11)
-            if dev is None:
-                return False, {"error": tr("USB DFU устройство не найдено")}
+            from core.dfu import DfuDevice, find_dfu_device
+            dev = find_dfu_device()
+            # Проверяем, что устройство реально можно открыть и не занято другой программой
+            with DfuDevice(dev) as dfu:
+                # Пробный set_address по базовому адресу flash (без стирания/записи)
+                dfu._set_address(0x08000000)
+            logger.info("USB DFU устройство доступно и свободно")
             return True, {"chip_id": tr("Неизвестно"), "flash_size": tr("Неизвестно")}
         except Exception as exc:  # noqa: BLE001
+            logger.warning("USB DFU не доступен: %s", exc)
             return False, {"error": str(exc)}
 
 
