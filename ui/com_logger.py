@@ -91,7 +91,7 @@ class ComLoggerReader(QThread):
             self.connection_changed.emit(False)
             return
         self.connection_changed.emit(True)
-        self.state_changed.emit(tr("Мониторинг"))
+        self.state_changed.emit(tr("Мониторинг (порт занят)"))
         try:
             while self._running:
                 try:

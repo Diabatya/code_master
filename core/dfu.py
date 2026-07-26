@@ -28,10 +28,14 @@ DFU_DNLOAD = 1
 DFU_UPLOAD = 2
 DFU_GETSTATUS = 3
 DFU_CLRSTATUS = 4
+DFU_ABORT = 6
 
+STATE_DFU_IDLE = 2
 STATE_DFU_DNLOAD_SYNC = 3
 STATE_DFU_DNBUSY = 4
 STATE_DFU_DNLOAD_IDLE = 5
+STATE_DFU_MANIFEST = 7
+STATE_DFU_MANIFEST_WAIT_RESET = 8
 STATE_DFU_ERROR = 10
 
 DFU_STATUS_OK = 0x00
@@ -97,12 +101,44 @@ class DfuDevice:
                 "Не удалось захватить DFU интерфейс. "
                 "На Windows установите WinUSB-драйвер через Zadig (STM32 BOOTLOADER 0483:DF11)."
             ) from exc
-        # Сбрасываем возможное состояние dfuERROR от предыдущих попыток
-        try:
-            self._ctrl(DFU_REQUEST_SEND, DFU_CLRSTATUS, timeout=5000)
-            time.sleep(0.01)
-        except Exception:  # noqa: S110
-            pass
+        # Переводим DFU-конечный автомат в известное состояние (IDLE).
+        self._reset_to_idle()
+
+    def _reset_to_idle(self) -> None:
+        """Сбрасывает dfuERROR/прочие состояния и возвращает устройство в dfuIDLE."""
+        for attempt in range(3):
+            try:
+                status = self._status(timeout=5000)
+            except usb.core.USBError as exc:
+                logger.warning("DFU: не удалось прочитать статус: %s", exc)
+                break
+            if len(status) < 6:
+                break
+            state = status[4]
+            bstatus = status[0]
+            logger.debug("DFU статус (сброс %d): state=0x%02X bStatus=0x%02X", attempt, state, bstatus)
+            if state in (STATE_DFU_IDLE, STATE_DFU_DNLOAD_IDLE):
+                return
+            if state in (STATE_DFU_MANIFEST, STATE_DFU_MANIFEST_WAIT_RESET):
+                # Устройство завершает прошивку/перезагружается; подождём, не мешаем
+                time.sleep(0.2)
+                continue
+            if state == STATE_DFU_ERROR:
+                try:
+                    self._ctrl(DFU_REQUEST_SEND, DFU_CLRSTATUS, timeout=5000)
+                    time.sleep(0.01)
+                    continue
+                except usb.core.USBError as exc:
+                    logger.debug("DFU CLRSTATUS не удался: %s", exc)
+                    break
+            # В остальных состояниях пробуем ABORT, который переводит в IDLE
+            try:
+                self._ctrl(DFU_REQUEST_SEND, DFU_ABORT, timeout=5000)
+                time.sleep(0.01)
+                continue
+            except usb.core.USBError as exc:
+                logger.debug("DFU ABORT не удался: %s", exc)
+                break
 
     def _get_transfer_size(self) -> int:
         """Возвращает wTransferSize из DFU functional descriptor, если возможно."""

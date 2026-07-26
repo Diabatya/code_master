@@ -630,12 +630,27 @@ class ConnectWorker(QThread):
         if not _PYUSB:
             return False, {"error": tr("pyusb/libusb не установлен")}
         try:
-            from core.dfu import DfuDevice, find_dfu_device
+            from core.dfu import (
+                DFU_STATUS_OK,
+                DfuDevice,
+                STATE_DFU_ERROR,
+                STATE_DFU_MANIFEST,
+                STATE_DFU_MANIFEST_WAIT_RESET,
+                find_dfu_device,
+            )
             dev = find_dfu_device()
-            # Проверяем, что устройство реально можно открыть и не занято другой программой
+            # Проверяем, что устройство реально можно открыть и не занято другой программой.
+            # Не шлём set_address — это могло переводить bootloader в dfuERROR.
             with DfuDevice(dev) as dfu:
-                # Пробный set_address по базовому адресу flash (без стирания/записи)
-                dfu._set_address(0x08000000)
+                status = dfu._status(timeout=5000)
+                if len(status) < 6:
+                    raise RuntimeError("Некорректный DFU статус")
+                state = status[4]
+                bstatus = status[0]
+                if state in (STATE_DFU_MANIFEST, STATE_DFU_MANIFEST_WAIT_RESET):
+                    raise RuntimeError("Устройство перезагружается после DFU, подождите")
+                if state == STATE_DFU_ERROR or bstatus != DFU_STATUS_OK:
+                    raise RuntimeError(f"DFU статус: state=0x{state:02X}, bStatus=0x{bstatus:02X}")
             logger.info("USB DFU устройство доступно и свободно")
             return True, {"chip_id": tr("Неизвестно"), "flash_size": tr("Неизвестно")}
         except Exception as exc:  # noqa: BLE001
