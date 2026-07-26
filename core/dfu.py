@@ -229,6 +229,12 @@ class DfuDevice:
         self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, payload, timeout=max(timeout_ms, 5000))
         self._wait(status_timeout=timeout_ms)
 
+    def abort(self) -> None:
+        """Прерывает текущую DFU-операцию и возвращает устройство в dfuIDLE."""
+        logger.debug("DFU ABORT")
+        self._ctrl(DFU_REQUEST_SEND, DFU_ABORT, timeout=5000)
+        self._wait(status_timeout=5000)
+
     def erase_pages(
         self,
         start: int,

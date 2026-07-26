@@ -910,9 +910,11 @@ class FlashWorker(QThread):
                 dfu.erase_pages(base, data, page_size=page_size, skip_blank=True, progress=_make_progress(0, 15, tr("Стирание Flash")))
                 self.log_line.emit(tr("USB DFU: запись {0} байт...").format(len(data)))
                 dfu.download(base, data, progress=_make_progress(15, 50, tr("Запись Flash")))
+                dfu.abort()
                 self.log_line.emit(tr("USB DFU: верификация..."))
                 ok = dfu.upload(base, len(data), progress=_make_progress(50, 90, tr("Верификация Flash"))) == data
                 self.log_line.emit(tr("USB DFU: завершение..."))
+                dfu.abort()
                 dfu.leave()
             self.progress.emit(100)
             return ok, tr("USB DFU: прошивка завершена") if ok else tr("USB DFU: верификация не прошла")
