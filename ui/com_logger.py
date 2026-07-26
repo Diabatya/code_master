@@ -42,8 +42,9 @@ MAX_ROWS = 10000
 class ComLoggerReader(QThread):
     """Поток чтения/записи для COM-логгера.
 
-    Работает в режиме open-read-close: порт не держится постоянно открытым,
-    чтобы другие приложения тоже могли к нему подключаться.
+    Порт держится открытым только пока запущен мониторинг: это единственный
+    способ надёжно получать асинхронные данные. Для работы других программ
+    мониторинг нужно остановить кнопкой «Отключить».
     """
 
     data_received = Signal(bytes, float)
@@ -57,6 +58,7 @@ class ComLoggerReader(QThread):
         self._baudrate = baudrate
         self._running = True
         self._port_lock = threading.Lock()
+        self._ser: Optional[serial.Serial] = None
 
     def _open_port(self) -> Optional[serial.Serial]:
         """Открывает порт с минимальным воздействием на линии DTR/RTS."""
@@ -67,10 +69,9 @@ class ComLoggerReader(QThread):
                 bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
-                timeout=0,
+                timeout=0.05,
                 write_timeout=1,
             )
-            # Не трогаем DTR/RTS, чтобы не сбрасывать/перезагружать устройство
             try:
                 ser.dtr = False
                 ser.rts = False
@@ -78,40 +79,41 @@ class ComLoggerReader(QThread):
                 pass
             return ser
         except Exception as exc:  # noqa: BLE001
-            logger.debug("COM-логгер: не удалось открыть %s: %s", self._port_name, exc)
+            logger.warning("COM-логгер: не удалось открыть %s: %s", self._port_name, exc)
             return None
 
-    def _read_cycle(self) -> None:
+    def run(self) -> None:
+        logger.info("COM-логгер: запуск мониторинга %s @ %d", self._port_name, self._baudrate)
         with self._port_lock:
-            ser = self._open_port()
-            if ser is None:
-                return
-            try:
-                available = ser.in_waiting
-                if available > 0:
-                    chunk = ser.read(min(available, 1024))
+            self._ser = self._open_port()
+        if self._ser is None:
+            self.error.emit(tr("Не удалось открыть порт") + f" {self._port_name}")
+            self.connection_changed.emit(False)
+            return
+        self.connection_changed.emit(True)
+        self.state_changed.emit(tr("Мониторинг"))
+        try:
+            while self._running:
+                try:
+                    chunk = self._ser.read(self._ser.in_waiting or 1)
                     if chunk:
                         logger.debug("COM-логгер: прочитано %d байт из %s", len(chunk), self._port_name)
                         self.data_received.emit(chunk, time.time())
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("COM-логгер: ошибка чтения %s: %s", self._port_name, exc)
-            finally:
-                try:
-                    ser.close()
-                except Exception:  # noqa: S110
-                    pass
-
-    def run(self) -> None:
-        logger.info("COM-логгер: запуск мониторинга %s @ %d (open-read-close)", self._port_name, self._baudrate)
-        self.connection_changed.emit(True)
-        self.state_changed.emit(tr("Мониторинг"))
-        while self._running:
-            self._read_cycle()
-            # Пауза между опросами; порт закрыт, другие приложения могут его занять
-            self.msleep(100)
-        self.connection_changed.emit(False)
-        self.state_changed.emit(tr("Отключено"))
-        logger.info("COM-логгер: мониторинг %s остановлен", self._port_name)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("COM-логгер: ошибка чтения %s: %s", self._port_name, exc)
+                    self.error.emit(str(exc))
+                    self.msleep(100)
+        finally:
+            with self._port_lock:
+                if self._ser is not None:
+                    try:
+                        self._ser.close()
+                    except Exception:  # noqa: S110
+                        pass
+                    self._ser = None
+            self.connection_changed.emit(False)
+            self.state_changed.emit(tr("Отключено"))
+            logger.info("COM-логгер: мониторинг %s остановлен", self._port_name)
 
     def stop(self) -> None:
         self._running = False
@@ -119,24 +121,19 @@ class ComLoggerReader(QThread):
 
     def write(self, data: bytes) -> bool:
         with self._port_lock:
-            ser = self._open_port()
-            if ser is None:
-                self.error.emit(tr("Не удалось открыть порт для отправки"))
-                return False
-            try:
-                ser.write(data)
-                ser.flush()
-                logger.info("COM-логгер: отправлено %d байт в %s", len(data), self._port_name)
-                return True
-            except Exception as exc:  # noqa: BLE001
-                logger.error("COM-логгер: ошибка отправки в %s: %s", self._port_name, exc)
-                self.error.emit(str(exc))
-                return False
-            finally:
-                try:
-                    ser.close()
-                except Exception:  # noqa: S110
-                    pass
+            ser = self._ser
+        if ser is None or not ser.is_open:
+            self.error.emit(tr("Порт не подключен"))
+            return False
+        try:
+            ser.write(data)
+            ser.flush()
+            logger.info("COM-логгер: отправлено %d байт в %s", len(data), self._port_name)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error("COM-логгер: ошибка отправки в %s: %s", self._port_name, exc)
+            self.error.emit(str(exc))
+            return False
 
 
 class ComLoggerWindow(QDialog):
