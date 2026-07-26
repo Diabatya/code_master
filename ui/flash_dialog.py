@@ -65,6 +65,7 @@ PROGRAMMER_METHODS: List[Tuple[str, str]] = [
     ("stlink", "ST-Link"),
     ("jlink", "J-Link / Flasher"),
     ("uart", "UART (бутлоадер)"),
+    ("usb_cdc", "USB (CDC bootloader)"),
     ("usb", "USB (DFU)"),
     ("auto", "Авто"),
 ]
@@ -476,7 +477,7 @@ class ConnectWorker(QThread):
     def run(self) -> None:
         try:
             if self._method == "auto":
-                for m in ("stlink", "jlink", "uart", "usb"):
+                for m in ("stlink", "jlink", "uart", "usb_cdc", "usb"):
                     self.log_line.emit(tr("Автоопределение: проверка {0}...").format(m))
                     ok, info = self._try_method(m)
                     if ok:
@@ -499,6 +500,8 @@ class ConnectWorker(QThread):
             return self._try_jlink()
         if method == "uart":
             return self._try_uart()
+        if method == "usb_cdc":
+            return self._try_usb_cdc()
         if method == "usb":
             return self._try_usb()
         return False, {"error": tr("Неизвестный метод")}
@@ -542,6 +545,46 @@ class ConnectWorker(QThread):
             ser = serial_module.Serial(
                 port,
                 baud,
+                bytesize=serial_module.EIGHTBITS,
+                parity=serial_module.PARITY_EVEN,
+                stopbits=serial_module.STOPBITS_ONE,
+                timeout=1,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, {"error": str(exc)}
+        try:
+            bl = Bootloader(ser)
+            bl.reconfigure_for_bootloader()
+            bl.enter_bootloader()
+            bl.sync()
+            chip_id = bl.get_id()
+            return True, {
+                "chip_id": _format_chip_id(chip_id),
+                "chip_id_int": chip_id,
+                "flash_size": _flash_size_for_chip_id(chip_id),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return False, {"error": str(exc)}
+        finally:
+            try:
+                ser.close()
+            except Exception:  # noqa: S110
+                pass
+
+    def _try_usb_cdc(self) -> Tuple[bool, Dict[str, Any]]:
+        port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_BOOTLOADER_PID)
+        if not port:
+            port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_APPLICATION_PID)
+        if not port:
+            return False, {"error": tr("USB CDC устройство не найдено")}
+        try:
+            import serial as serial_module
+        except Exception as exc:  # noqa: BLE001
+            return False, {"error": tr("pyserial не установлен: {0}").format(exc)}
+        try:
+            ser = serial_module.Serial(
+                port,
+                115200,
                 bytesize=serial_module.EIGHTBITS,
                 parity=serial_module.PARITY_EVEN,
                 stopbits=serial_module.STOPBITS_ONE,
@@ -628,6 +671,8 @@ class FlashWorker(QThread):
             return self._flash_jlink(file_path)
         if self._method == "uart":
             return self._flash_uart(file_path)
+        if self._method == "usb_cdc":
+            return self._flash_usb_cdc(file_path)
         if self._method == "usb":
             return self._flash_usb(file_path)
         return False, tr("Неизвестный способ программирования")
@@ -739,6 +784,54 @@ class FlashWorker(QThread):
             except Exception:  # noqa: S110
                 pass
 
+    def _flash_usb_cdc(self, file_path: str) -> Tuple[bool, str]:
+        port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_BOOTLOADER_PID)
+        if not port:
+            port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_APPLICATION_PID)
+        if not port:
+            return False, tr("USB CDC устройство не найдено")
+        try:
+            import serial as serial_module
+        except Exception as exc:  # noqa: BLE001
+            return False, tr("pyserial не установлен: {0}").format(exc)
+        try:
+            ser = serial_module.Serial(
+                port,
+                115200,
+                bytesize=serial_module.EIGHTBITS,
+                parity=serial_module.PARITY_EVEN,
+                stopbits=serial_module.STOPBITS_ONE,
+                timeout=1,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+        try:
+            data, base = load_firmware_bytes(file_path)
+            if not base:
+                base = 0x08008000
+            if not data:
+                return False, tr("Файл прошивки пуст")
+            with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
+                tmp.write(data)
+                bin_path = tmp.name
+            try:
+                bl = Bootloader(ser, progress_callback=lambda p: self.progress.emit(self._scaled_progress(p)))
+                bl.flash_firmware(bin_path, base)
+                ok = bl.verify(base, data)
+                return ok, tr("USB CDC прошивка завершена: {0}").format(file_path)
+            finally:
+                try:
+                    Path(bin_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+        finally:
+            try:
+                ser.close()
+            except Exception:  # noqa: S110
+                pass
+
     def _flash_usb(self, file_path: str) -> Tuple[bool, str]:
         if not _PYUSB:
             return False, tr("pyusb/libusb не установлены")
@@ -802,6 +895,8 @@ class ReadWorker(QThread):
             return self._read_jlink()
         if self._method == "uart":
             return self._read_uart()
+        if self._method == "usb_cdc":
+            return self._read_usb_cdc()
         if self._method == "usb":
             return self._read_usb()
         raise RuntimeError(tr("Чтение не поддерживается для {0}").format(self._method))
@@ -855,6 +950,35 @@ class ReadWorker(QThread):
         ser = serial_module.Serial(
             port,
             baud,
+            bytesize=serial_module.EIGHTBITS,
+            parity=serial_module.PARITY_EVEN,
+            stopbits=serial_module.STOPBITS_ONE,
+            timeout=1,
+        )
+        try:
+            bl = Bootloader(ser)
+            bl.reconfigure_for_bootloader()
+            bl.enter_bootloader()
+            bl.sync()
+            start = 0x08000000
+            data = bl.read_memory(start, self._size)
+            return data, start
+        finally:
+            try:
+                ser.close()
+            except Exception:  # noqa: S110
+                pass
+
+    def _read_usb_cdc(self) -> Tuple[bytes, int]:
+        port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_BOOTLOADER_PID)
+        if not port:
+            port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_APPLICATION_PID)
+        if not port:
+            raise RuntimeError(tr("USB CDC устройство не найдено"))
+        import serial as serial_module
+        ser = serial_module.Serial(
+            port,
+            115200,
             bytesize=serial_module.EIGHTBITS,
             parity=serial_module.PARITY_EVEN,
             stopbits=serial_module.STOPBITS_ONE,
@@ -1112,11 +1236,11 @@ class FlashDialog(QDialog):
         if method:
             self._config.set("programmer_method", method)
         is_stlink = method == "stlink"
-        is_uart = method == "uart"
+        is_com = method in ("uart", "usb_cdc")
         self._power_button.setVisible(False)
         self._reset_button.setVisible(is_stlink)
         self._identify_button.setVisible(is_stlink)
-        self._port_button.setVisible(is_uart)
+        self._port_button.setVisible(is_com)
         self._set_connect_status(False, {})
 
     def _on_chip_changed(self, index: int) -> None:
@@ -1298,9 +1422,9 @@ class FlashDialog(QDialog):
         except ValueError as exc:
             QMessageBox.warning(self, tr("Внимание"), str(exc))
             return
-        # Для UART прошивки COM-порт может быть занят SerialManager — освобождаем
+        # Для COM-портов (UART/USB CDC) порт может быть занят SerialManager — освобождаем
         self._port_was_open = self._serial_manager.is_open() if self._serial_manager else False
-        if method == "uart" and self._port_was_open:
+        if method in ("uart", "usb_cdc") and self._port_was_open:
             self._serial_manager.close_port()
         self._flash_button.setEnabled(False)
         self._progress_bar.setValue(0)
@@ -1313,9 +1437,9 @@ class FlashDialog(QDialog):
     def _on_flash_finished(self, success: bool, message: str) -> None:
         self._flash_button.setEnabled(True)
         self._log(message)
-        # Восстанавливаем COM-порт, если он был открыт до прошивки UART
+        # Восстанавливаем COM-порт, если он был открыт до прошивки
         method = self._method_combo.currentData()
-        if method == "uart" and getattr(self, "_port_was_open", False) and self._serial_manager:
+        if method in ("uart", "usb_cdc") and getattr(self, "_port_was_open", False) and self._serial_manager:
             try:
                 self._serial_manager.open_port(
                     self._config.get("port", ""),

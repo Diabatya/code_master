@@ -109,6 +109,32 @@ class Bootloader:
             if response != ACK:
                 raise BootloaderError(f"Команда 0x{command:02X} не подтверждена (ответ 0x{response:02X})")
 
+    @classmethod
+    def find_device_port(cls, vid: int = 0, pid: int = 0, timeout: float = 0.0) -> Optional[str]:
+        """Ищет COM-порт устройства по VID/PID.
+
+        Args:
+            vid: USB Vendor ID (0 — любой).
+            pid: USB Product ID (0 — любой).
+            timeout: Время ожидания появления порта, секунд (0 — без ожидания).
+
+        Returns:
+            Имя COM-порта или None.
+        """
+        start = time.time()
+        while True:
+            for p in comports():
+                if vid and p.vid != vid:
+                    continue
+                if pid and p.pid != pid:
+                    continue
+                if p.vid is None and p.pid is None:
+                    continue
+                return p.device
+            if timeout <= 0 or time.time() - start >= timeout:
+                return None
+            time.sleep(0.2)
+
     def _port_info(self) -> Optional[Any]:
         """Возвращает информацию о текущем COM-порте."""
         for p in comports():
