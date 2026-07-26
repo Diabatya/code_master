@@ -6,9 +6,15 @@
 """
 
 import time
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import serial
+
+try:
+    from serial.tools.list_ports import comports
+except Exception:  # noqa: BLE001
+    def comports() -> list:
+        return []
 
 from core.firmware_utils import load_firmware_bytes
 from models.logger import get_logger
@@ -28,6 +34,14 @@ class Bootloader:
 
     BLOCK_SIZE = 256
     MAX_RETRIES = 3
+
+    # USB VID/PID для собственных CDC-устройств
+    USB_VID = 0x0483
+    USB_BOOTLOADER_PID = 0x5741
+    USB_APPLICATION_PID = 0x5740
+
+    # Команда перезагрузки из приложения в bootloader (принимается прошивкой приложения)
+    REBOOT_TO_BOOTLOADER_MAGIC = b"\x00REBOOT_TO_BOOTLOADER\n"
 
     def __init__(self, port: serial.Serial, progress_callback: Optional[Callable[[int], None]] = None) -> None:
         """Создаёт объект бутлоадера.
@@ -95,11 +109,69 @@ class Bootloader:
             if response != ACK:
                 raise BootloaderError(f"Команда 0x{command:02X} не подтверждена (ответ 0x{response:02X})")
 
-    def enter_bootloader(self) -> None:
-        """Устанавливает линии DTR/RTS для входа в режим bootloader.
+    def _port_info(self) -> Optional[Any]:
+        """Возвращает информацию о текущем COM-порте."""
+        for p in comports():
+            if p.device == self.port.port:
+                return p
+        return None
 
-        Для большинства плат: BOOT0=HIGH, RESET=LOW->HIGH.
+    def request_app_reboot(self) -> None:
+        """Отправляет запущенному приложению команду программной перезагрузки
+        в режим bootloader.
+
+        Прошивка приложения должна распознать REBOOT_TO_BOOTLOADER_MAGIC,
+        записать флаг 0xDEADBEEF по адресу 0x20004FF0 и выполнить NVIC_SystemReset().
         """
+        magic = self.REBOOT_TO_BOOTLOADER_MAGIC
+        self.port.reset_output_buffer()
+        self.port.write(magic)
+        self.port.flush()
+        logger.info("Команда перезагрузки в bootloader отправлена (%d байт)", len(magic))
+
+    def wait_for_bootloader_port(self, timeout: float = 10.0) -> None:
+        """Ждёт появления bootloader-порта (VID=0483, PID=5741) после reset."""
+        logger.info("Ожидание появления bootloader-порта...")
+        start = time.time()
+        while time.time() - start < timeout:
+            for p in comports():
+                if p.vid == self.USB_VID and p.pid == self.USB_BOOTLOADER_PID:
+                    logger.info("Bootloader-порт найден: %s", p.device)
+                    try:
+                        self.port.close()
+                    except Exception:  # noqa: S110
+                        pass
+                    self.port.port = p.device
+                    self.port.open()
+                    return
+            time.sleep(0.2)
+        raise BootloaderError("Bootloader-порт не появился после перезагрузки")
+
+    def reboot_to_bootloader(self, timeout: float = 10.0) -> None:
+        """Программно перезагружает устройство в режим bootloader."""
+        self.request_app_reboot()
+        # Даём приложению время записать флаг и сброситься
+        time.sleep(0.5)
+        self.wait_for_bootloader_port(timeout)
+
+    def enter_bootloader(self) -> None:
+        """Переводит STM32 в режим bootloader.
+
+        Для USB CDC сначала пытается программно перезагрузить запущенное
+        приложение в bootloader. Если устройство уже bootloader или используется
+        UART-адаптер, применяется управление DTR/RTS.
+        """
+        info = self._port_info()
+        if info is not None and info.vid == self.USB_VID:
+            if info.pid == self.USB_BOOTLOADER_PID:
+                logger.info("Порт уже в режиме bootloader (%s)", info.device)
+                return
+            if info.pid == self.USB_APPLICATION_PID:
+                logger.info("Обнаружено приложение (%s), перезагружаю в bootloader", info.device)
+                self.reboot_to_bootloader()
+                return
+
+        # Fallback: классическое управление BOOT0/RESET через DTR/RTS
         logger.info("Перевод STM32 в режим bootloader через DTR/RTS")
         try:
             self.port.setDTR(False)
@@ -219,19 +291,11 @@ class Bootloader:
         read_data = self.read_memory(address, len(data))
         return read_data == data
 
-    def read_memory(self, address: int, length: int) -> bytes:
-        """Читает length байт из памяти STM32 по команде 0x11.
+    def _read_memory_chunk(self, address: int, length: int) -> bytes:
+        """Читает один блок памяти длиной до 256 байт."""
+        if length < 1 or length > self.BLOCK_SIZE:
+            raise BootloaderError(f"Недопустимый размер блока чтения: {length}")
 
-        Args:
-            address: Начальный адрес.
-            length: Количество байт для чтения.
-
-        Returns:
-            Прочитанные байты.
-
-        Raises:
-            BootloaderError: при ошибке чтения.
-        """
         self._send_command(0x11)
         addr_bytes = address.to_bytes(4, "big")
         addr_checksum = 0
@@ -251,6 +315,27 @@ class Bootloader:
         if len(read_data) < length:
             raise BootloaderError(f"Прочитано {len(read_data)} из {length} байт")
         return read_data
+
+    def read_memory(self, address: int, length: int) -> bytes:
+        """Читает length байт из памяти STM32 по команде 0x11.
+
+        Args:
+            address: Начальный адрес.
+            length: Количество байт для чтения.
+
+        Returns:
+            Прочитанные байты.
+
+        Raises:
+            BootloaderError: при ошибке чтения.
+        """
+        result = bytearray()
+        offset = 0
+        while offset < length:
+            chunk_len = min(self.BLOCK_SIZE, length - offset)
+            result.extend(self._read_memory_chunk(address + offset, chunk_len))
+            offset += chunk_len
+        return bytes(result)
 
     def get_version(self) -> int:
         """Возвращает версию бутлоадера (команда 0x01)."""
@@ -285,14 +370,14 @@ class Bootloader:
         device_id = self.get_id()
         return {"version": version, "device_id": device_id}
 
-    def flash_firmware(self, firmware_path: str, base_address: int = 0x08000000) -> None:
+    def flash_firmware(self, firmware_path: str, base_address: int = 0x08008000) -> None:
         """Записывает файл прошивки в память STM32.
 
         Поддерживает .bin, .hex (Intel HEX) и .elf.
 
         Args:
             firmware_path: Путь к файлу прошивки.
-            base_address: Начальный адрес записи (по умолчанию 0x08000000).
+            base_address: Начальный адрес записи (по умолчанию 0x08008000).
 
         Raises:
             BootloaderError: при ошибке прошивки.

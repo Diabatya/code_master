@@ -715,7 +715,7 @@ class FlashWorker(QThread):
         try:
             data, base = load_firmware_bytes(file_path)
             if not base:
-                base = 0x08000000
+                base = 0x08008000
             if not data:
                 return False, tr("Файл прошивки пуст")
             with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:

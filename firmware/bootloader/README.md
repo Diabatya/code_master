@@ -24,6 +24,8 @@ USB CDC bootloader, совместимый с протоколом AN3155 и с 
 - `make`
 - Подмодуль `firmware/libs/STM32CubeF1` (уже добавлен)
 
+> **В окружении Devin отсутствует `arm-none-eabi-gcc`**, поэтому сборку firmware нужно выполнять на машине с установленным ARM GNU Toolchain (например, `xpack-arm-none-eabi-gcc` или `brew install arm-none-eabi-gcc`).
+
 ## Сборка
 
 ```bash
