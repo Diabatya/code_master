@@ -14,7 +14,7 @@ AR = arm-none-eabi-ar
 LD = arm-none-eabi-gcc
 
 MCU = -mcpu=cortex-m3 -mthumb
-DEFS = -DSTM32F105xC -DUSE_HAL_DRIVER -DHSE_VALUE=8000000
+DEFS = -DSTM32F105xC -DUSE_HAL_DRIVER
 
 INCLUDES = \
   -IInc \

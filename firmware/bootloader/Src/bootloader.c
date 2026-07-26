@@ -23,7 +23,6 @@
 #define BOOTLOADER_VERSION 0x31U
 #define STM32F105_PID      0x0418U
 
-#define FLASH_PAGE_SIZE    2048U
 #define FLASH_START        0x08000000U
 #define APP_START          0x08008000U
 #define APP_PAGES_START    16U

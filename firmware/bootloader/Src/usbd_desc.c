@@ -29,9 +29,6 @@
 
 /* Private typedef ----------------------------------------------------------- */
 /* Private define ------------------------------------------------------------ */
-#define USBD_VID                      0x0483
-#define USBD_PID                      0x5741
-#define USBD_LANGID_STRING            0x409
 #define USBD_MANUFACTURER_STRING      "KOD MASTER"
 #define USBD_PRODUCT_FS_STRING        "CodeMaster Bootloader"
 #define USBD_CONFIGURATION_FS_STRING  "CDC Bootloader Config"
@@ -78,8 +75,8 @@ __ALIGN_BEGIN uint8_t USBD_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END = {
   USB_MAX_EP0_SIZE,             /* bMaxPacketSize */
   LOBYTE(USBD_VID),             /* idVendor */
   HIBYTE(USBD_VID),             /* idVendor */
-  LOBYTE(USBD_PID),             /* idVendor */
-  HIBYTE(USBD_PID),             /* idVendor */
+  LOBYTE(USBD_PID_FS),          /* idProduct */
+  HIBYTE(USBD_PID_FS),          /* idProduct */
   0x00,                         /* bcdDevice rel. 2.00 */
   0x02,
   USBD_IDX_MFC_STR,             /* Index of manufacturer string */
