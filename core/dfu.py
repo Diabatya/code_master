@@ -291,8 +291,8 @@ class DfuDevice:
     ) -> None:
         """Записывает данные по указанному адресу.
 
-        Устанавливается Address Pointer один раз, затем DFU_DNLOAD с
-        нарастающим wBlockNum (2, 3, ...) — стандартный DfuSe.
+        Для каждого блока устанавливается абсолютный адрес и DFU_DNLOAD
+        передаётся с wBlockNum=2. Это не зависит от wTransferSize.
         """
         if not data:
             return
@@ -300,12 +300,12 @@ class DfuDevice:
             block_size = self._get_transfer_size()
         total = len(data)
         logger.info("DFU download: адрес 0x%08X, размер %d байт, block_size %d", address, total, block_size)
-        self._set_address(address)
         for i in range(0, total, block_size):
             chunk = data[i:i + block_size]
-            block_num = 2 + i // block_size
-            logger.debug("DFU download: адрес 0x%08X, блок %d, chunk %d байт", address + i, block_num, len(chunk))
-            self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, block_num, chunk, timeout=10000)
+            chunk_addr = address + i
+            self._set_address(chunk_addr)
+            logger.debug("DFU download: адрес 0x%08X, chunk %d байт", chunk_addr, len(chunk))
+            self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 2, chunk, timeout=10000)
             self._wait(status_timeout=5000)
             if progress:
                 progress(min(i + len(chunk), total), total)
@@ -323,27 +323,29 @@ class DfuDevice:
             return b""
         if block_size is None:
             block_size = self._get_transfer_size()
-        logger.info("DFU upload: адрес 0x%08X, %d байт", address, length)
-        # Устанавливаем Address Pointer и возвращаемся в dfuIDLE,
-        # потому что DFU_UPLOAD работает из dfuIDLE/dfuUPLOAD-IDLE.
-        self._set_address(address)
-        self.abort()
+        total = length
+        logger.info("DFU upload: адрес 0x%08X, %d байт", address, total)
         result = bytearray()
-        block_num = 2
-        while len(result) < length:
-            chunk_len = min(block_size, length - len(result))
-            logger.debug("DFU upload: блок %d, запрошено %d байт", block_num, chunk_len)
-            chunk = bytes(self._ctrl(DFU_REQUEST_RECEIVE, DFU_UPLOAD, block_num, chunk_len, timeout=10000))
+        offset = 0
+        while offset < total:
+            chunk_len = min(block_size, total - offset)
+            # Перед каждым чанком возвращаемся в dfuIDLE: set_address
+            # использует DFU_DNLOAD, который недопустим из dfuUPLOAD-IDLE.
+            self.abort()
+            self._set_address(address + offset)
+            self.abort()
+            logger.debug("DFU upload: адрес 0x%08X, запрошено %d байт", address + offset, chunk_len)
+            chunk = bytes(self._ctrl(DFU_REQUEST_RECEIVE, DFU_UPLOAD, 2, chunk_len, timeout=10000))
             if not chunk:
                 break
             result.extend(chunk)
+            offset += len(chunk)
             if progress:
-                progress(len(result), length)
+                progress(offset, total)
             if len(chunk) < chunk_len:
                 break
-            block_num += 1
         if progress:
-            progress(len(result), length)
+            progress(offset, total)
         logger.info("DFU upload завершён: 0x%08X, прочитано %d байт", address, len(result))
         return bytes(result)
 
