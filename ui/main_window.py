@@ -366,8 +366,6 @@ class MainWindow(QMainWindow):
 
     def _on_configure_clicked(self) -> None:
         """Открывает окно настроек CAN, скрывая главное окно."""
-        if not self._ensure_port_selected():
-            return
         if self._settings_window is None:
             self._settings_window = SettingsWindow(self._serial_manager, self)
             self._settings_window.setWindowModality(Qt.WindowModality.ApplicationModal)

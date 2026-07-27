@@ -2,7 +2,7 @@
 
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QStandardItemModel, QStandardItem
 from PySide6.QtWidgets import (
     QComboBox,
@@ -29,6 +29,7 @@ from models.config import Config
 from models.logger import get_logger
 from models.translations import _ as tr, get_all_translations
 from ui.ui_utils import setup_button
+from ui.com_settings_dialog import BaudRateDetector
 from ui.analog_ports_tab import AnalogPortsTab
 from ui.can_analyzer import CanAnalyzer
 from ui.can_gateway_tab import CanGatewayTab
@@ -40,7 +41,158 @@ from ui.hex_edit import HexDataEdit
 from ui.library_browser import LibraryBrowser
 from ui.memory_indicator import MemoryIndicator
 
+try:
+    from serial.tools.list_ports import comports
+except Exception:  # noqa: BLE001
+    def comports() -> list:
+        return []
+
 logger = get_logger(__name__)
+
+
+class ConnectionTab(QWidget):
+    """Вкладка выбора и подключения COM-порта."""
+
+    connected = Signal()  # type: ignore[var-defined]
+
+    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._serial_manager = serial_manager
+        self._config = Config()
+        self._baud_detector: Optional[BaudRateDetector] = None
+        self._init_ui()
+        self._load_defaults()
+        self._update_ui_state()
+        self._serial_manager.connection_changed.connect(self._update_ui_state)
+
+    def _init_ui(self) -> None:
+        font = QFont("Segoe UI", 10)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        self._port_label = QLabel(tr("COM-порт"))
+        self._port_label.setFont(font)
+        self._port_combo = QComboBox()
+        self._port_combo.setFont(font)
+        self._port_combo.setMinimumWidth(260)
+        self._refresh_button = QPushButton(tr("Обновить"))
+        self._refresh_button.setFont(font)
+        self._refresh_button.clicked.connect(self._refresh_ports)
+        port_layout = QHBoxLayout()
+        port_layout.addWidget(self._port_combo, 1)
+        port_layout.addWidget(self._refresh_button)
+        layout.addWidget(self._port_label)
+        layout.addLayout(port_layout)
+
+        self._baud_label = QLabel(tr("Скорость"))
+        self._baud_label.setFont(font)
+        self._baud_combo = QComboBox()
+        self._baud_combo.setFont(font)
+        self._baud_combo.addItems(["9600", "19200", "38400", "57600", "115200", "230400", "460800"])
+        self._auto_baud_button = QPushButton(tr("Автоопределить"))
+        self._auto_baud_button.setFont(font)
+        self._auto_baud_button.clicked.connect(self._on_auto_baud)
+        baud_layout = QHBoxLayout()
+        baud_layout.addWidget(self._baud_combo, 1)
+        baud_layout.addWidget(self._auto_baud_button)
+        layout.addWidget(self._baud_label)
+        layout.addLayout(baud_layout)
+
+        self._status_label = QLabel("")
+        self._status_label.setFont(font)
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._status_label)
+
+        self._connect_button = QPushButton(tr("Подключить"))
+        self._connect_button.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._connect_button.clicked.connect(self._on_connect)
+        layout.addWidget(self._connect_button)
+        layout.addStretch()
+
+    def _load_defaults(self) -> None:
+        self._refresh_ports()
+        saved_port = self._config.get("port", "")
+        if saved_port:
+            index = self._port_combo.findText(saved_port)
+            if index < 0:
+                self._port_combo.addItem(saved_port)
+                index = self._port_combo.count() - 1
+            self._port_combo.setCurrentIndex(index)
+        saved_baud = str(self._config.get("baudrate", 115200))
+        index = self._baud_combo.findText(saved_baud)
+        if index >= 0:
+            self._baud_combo.setCurrentIndex(index)
+
+    def _refresh_ports(self) -> None:
+        current = self._port_combo.currentText()
+        self._port_combo.clear()
+        self._port_combo.addItem(tr("FAKE (эмулятор)"))
+        for port_info in comports():
+            self._port_combo.addItem(port_info.device)
+        if current:
+            index = self._port_combo.findText(current)
+            if index >= 0:
+                self._port_combo.setCurrentIndex(index)
+            else:
+                self._port_combo.setCurrentIndex(0)
+
+    def _on_auto_baud(self) -> None:
+        port_text = self._port_combo.currentText()
+        if not port_text or port_text.startswith("FAKE"):
+            self._set_status(tr("Выберите реальный COM-порт"), error=True)
+            return
+        if self._serial_manager.is_open():
+            self._serial_manager.close_port()
+        self._auto_baud_button.setEnabled(False)
+        self._set_status(tr("Определение скорости..."), error=False)
+        self._baud_detector = BaudRateDetector(port_text, self)
+        self._baud_detector.baud_found.connect(self._on_baud_found)
+        self._baud_detector.finished_no_result.connect(self._on_baud_not_found)
+        self._baud_detector.start()
+
+    def _on_baud_found(self, baud: int) -> None:
+        self._auto_baud_button.setEnabled(True)
+        index = self._baud_combo.findText(str(baud))
+        if index >= 0:
+            self._baud_combo.setCurrentIndex(index)
+        self._set_status(tr("Скорость определена: {0}").format(baud), error=False)
+
+    def _on_baud_not_found(self) -> None:
+        self._auto_baud_button.setEnabled(True)
+        self._set_status(tr("Не удалось определить скорость"), error=True)
+
+    def _set_status(self, text: str, error: bool = False) -> None:
+        self._status_label.setText(text)
+        color = "#F44336" if error else "#4CAF50"
+        self._status_label.setStyleSheet(f"color: {color};")
+
+    def _on_connect(self) -> None:
+        if self._serial_manager.is_open():
+            self._serial_manager.close_port()
+            return
+        port_text = self._port_combo.currentText()
+        port_name = "FAKE" if port_text.startswith("FAKE") else port_text
+        if not port_name:
+            QMessageBox.warning(self, tr("Внимание"), tr("Выберите COM-порт"))
+            return
+        baudrate = int(self._baud_combo.currentText())
+        emulation = port_text.startswith("FAKE")
+        self._config.set_bulk({"port": port_name, "baudrate": baudrate, "emulation": emulation})
+        if self._serial_manager.open_port(port_name, baudrate, emulation=emulation):
+            self._set_status(tr("Подключено"), error=False)
+            self.connected.emit()
+        else:
+            self._set_status(tr("Ошибка подключения"), error=True)
+
+    def _update_ui_state(self, _connected: Optional[bool] = None) -> None:
+        is_open = self._serial_manager.is_open()
+        self._connect_button.setText(tr("Отключить") if is_open else tr("Подключить"))
+        self._port_combo.setEnabled(not is_open)
+        self._baud_combo.setEnabled(not is_open)
+        self._auto_baud_button.setEnabled(not is_open)
+        if is_open:
+            self._set_status(tr("Подключено"), error=False)
 
 
 class SettingsWindow(QMainWindow):
@@ -91,6 +243,9 @@ class SettingsWindow(QMainWindow):
         self._tabs = QTabWidget()
         self._tabs.setFont(QFont("Segoe UI", 10))
 
+        self._connection_tab = ConnectionTab(self._serial_manager, self)
+        self._tabs.addTab(self._connection_tab, "🔌 " + tr("Подключение"))
+
         self._trigger_tab = CanTriggerTab(self._serial_manager, self)
         self._monitor_tab = CanMonitorTab(self._serial_manager, self)
         self._gateway_tab = CanGatewayTab(self._serial_manager, self)
@@ -111,6 +266,10 @@ class SettingsWindow(QMainWindow):
         self._serial_manager.device_identified.connect(self._update_analog_tab)
         self._serial_manager.device_identified.connect(self._update_device_info)
         self._update_device_info(0, 0)
+
+        self._connection_tab.connected.connect(self._on_connection_established)
+        self._serial_manager.connection_changed.connect(self._update_tab_availability)
+        self._update_tab_availability()
 
         search_layout = QHBoxLayout()
         search_layout.setSpacing(8)
@@ -206,6 +365,20 @@ class SettingsWindow(QMainWindow):
             self._device_combo.blockSignals(False)
         self._serial_edit.setText(serial)
 
+    def _update_tab_availability(self, _connected: Optional[bool] = None) -> None:
+        """Блокирует остальные вкладки, пока COM-порт не подключён."""
+        is_open = self._serial_manager.is_open()
+        for i in range(self._tabs.count()):
+            if self._tabs.widget(i) is not self._connection_tab:
+                self._tabs.setTabEnabled(i, is_open)
+        if not is_open:
+            self._tabs.setCurrentIndex(1)
+
+    def _on_connection_established(self) -> None:
+        """После успешного подключения переключает на следующую вкладку."""
+        if self._tabs.count() > 1:
+            self._tabs.setCurrentIndex(1)
+
     def retranslate_ui(self) -> None:
         """Обновляет статические строки окна настроек и всех вкладок."""
         self.setWindowTitle(tr("Настройки — Код Мастер"))
@@ -222,6 +395,7 @@ class SettingsWindow(QMainWindow):
                 self._device_combo.setCurrentIndex(index)
         self._search_edit.setPlaceholderText(tr("Поиск по разделам..."))
         titles = {
+            self._connection_tab: "🔌 " + tr("Подключение"),
             self._trigger_tab: "⚡ " + tr("Триггеры"),
             self._monitor_tab: "🔍 " + tr("Мониторинг"),
             self._gateway_tab: "🚦 " + tr("Шлюз"),
