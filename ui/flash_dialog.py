@@ -906,8 +906,14 @@ class FlashWorker(QThread):
                 return _progress
 
             with DfuDevice(dev) as dfu:
+                # Если заливаем полный образ Flash (например, с конфигом),
+                # стираем все страницы, иначе старые данные на пустых страницах
+                # не совпадут с 0xFF из образа и верификация не пройдёт.
+                flash_size_kb = STM32_FLASH_SIZES.get(target, 256)
+                flash_size = flash_size_kb * 1024
+                skip_blank = len(data) < flash_size
                 self.log_line.emit(tr("USB DFU: стирание Flash..."))
-                dfu.erase_pages(base, data, page_size=page_size, skip_blank=True, progress=_make_progress(0, 15, tr("Стирание Flash")))
+                dfu.erase_pages(base, data, page_size=page_size, skip_blank=skip_blank, progress=_make_progress(0, 15, tr("Стирание Flash")))
                 self.log_line.emit(tr("USB DFU: запись {0} байт...").format(len(data)))
                 dfu.download(base, data, progress=_make_progress(15, 50, tr("Запись Flash")))
                 dfu.abort()
