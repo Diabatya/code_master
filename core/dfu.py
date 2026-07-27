@@ -291,8 +291,8 @@ class DfuDevice:
     ) -> None:
         """Записывает данные по указанному адресу.
 
-        Для каждого блока устанавливается абсолютный адрес (как в micropython/pydfu.py),
-        а DFU_DNLOAD передаётся с wBlockNum=2.
+        Устанавливается Address Pointer один раз, затем DFU_DNLOAD с
+        нарастающим wBlockNum (2, 3, ...) — стандартный DfuSe.
         """
         if not data:
             return
@@ -300,12 +300,12 @@ class DfuDevice:
             block_size = self._get_transfer_size()
         total = len(data)
         logger.info("DFU download: адрес 0x%08X, размер %d байт, block_size %d", address, total, block_size)
+        self._set_address(address)
         for i in range(0, total, block_size):
             chunk = data[i:i + block_size]
-            chunk_addr = address + i
-            self._set_address(chunk_addr)
-            logger.debug("DFU download: адрес 0x%08X, chunk %d байт", chunk_addr, len(chunk))
-            self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 2, chunk, timeout=10000)
+            block_num = 2 + i // block_size
+            logger.debug("DFU download: адрес 0x%08X, блок %d, chunk %d байт", address + i, block_num, len(chunk))
+            self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, block_num, chunk, timeout=10000)
             self._wait(status_timeout=5000)
             if progress:
                 progress(min(i + len(chunk), total), total)
