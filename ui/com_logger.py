@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.serial_manager import SerialManager
 from models.config import Config
 from models.logger import get_logger
 from models.translations import _ as tr
@@ -139,7 +140,7 @@ class ComLoggerReader(QThread):
 class ComLoggerWindow(QDialog):
     """Отдельное окно COM-логгера."""
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, serial_manager: Optional[SerialManager] = None, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("COM логгер"))
         self.resize(950, 700)
@@ -147,7 +148,9 @@ class ComLoggerWindow(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
 
         self._config = Config()
+        self._serial_manager = serial_manager
         self._reader: Optional[ComLoggerReader] = None
+        self._main_listener: bool = False
 
         self._create_widgets()
         self._build_layout()
@@ -178,6 +181,12 @@ class ComLoggerWindow(QDialog):
         self._open_button = QPushButton(tr("Подключить"))
         self._open_button.setFont(font)
         self._open_button.setFixedWidth(120)
+
+        self._main_checkbox = QCheckBox(tr("Слушать основной COM-порт"))
+        self._main_checkbox.setFont(font)
+        self._main_checkbox.setToolTip(tr("Не открывать отдельный порт, а отображать данные из SerialManager"))
+        if self._serial_manager is None:
+            self._main_checkbox.setEnabled(False)
 
         self._status_label = QLabel(tr("Отключено"))
         self._status_label.setFont(font)
@@ -222,6 +231,7 @@ class ComLoggerWindow(QDialog):
         top.addWidget(self._baud_label)
         top.addWidget(self._baud_combo)
         top.addWidget(self._open_button)
+        top.addWidget(self._main_checkbox)
         top.addWidget(self._status_label)
         top.addStretch()
         root.addLayout(top)
@@ -242,6 +252,10 @@ class ComLoggerWindow(QDialog):
         self._send_button.clicked.connect(self._on_send)
         self._clear_button.clicked.connect(self._clear_table)
         self._port_combo.currentIndexChanged.connect(self._on_port_changed)
+        self._main_checkbox.stateChanged.connect(self._on_main_toggled)
+        if self._serial_manager is not None:
+            self._serial_manager.connection_changed.connect(self._on_main_connection_changed)
+            self._serial_manager.raw_data.connect(self._on_data_received)
 
     def _load_defaults(self) -> None:
         baud = self._config.get("com_logger_baud", 115200)
@@ -274,12 +288,17 @@ class ComLoggerWindow(QDialog):
                 self._port_combo.setCurrentIndex(idx)
 
     def _on_open_close(self) -> None:
-        if self._reader is not None and self._reader.isRunning():
+        if self._main_listener:
+            self._disconnect_main()
+        elif self._reader is not None and self._reader.isRunning():
             self._disconnect()
         else:
             self._connect()
 
     def _connect(self) -> None:
+        if self._main_checkbox.isChecked():
+            self._connect_main()
+            return
         port = self._port_combo.currentData()
         if not port:
             QMessageBox.warning(self, tr("Внимание"), tr("Выберите COM-порт"))
@@ -297,22 +316,53 @@ class ComLoggerWindow(QDialog):
 
         self._config.set_bulk({"com_logger_port": port, "com_logger_baud": baud})
 
+    def _connect_main(self) -> None:
+        if self._serial_manager is None:
+            QMessageBox.warning(self, tr("Внимание"), tr("Основной SerialManager не доступен"))
+            return
+        if not self._serial_manager.is_open():
+            QMessageBox.warning(self, tr("Внимание"), tr("Сначала подключите основной COM-порт в настройках"))
+            return
+        self._main_listener = True
+        self._set_connected(True)
+        self._status_label.setText(tr("Слушаю основной порт"))
+
     def _disconnect(self) -> None:
         if self._reader is not None:
             self._reader.stop()
             self._reader = None
         self._set_connected(False)
 
+    def _disconnect_main(self) -> None:
+        self._main_listener = False
+        self._set_connected(False)
+        self._status_label.setText(tr("Отключено"))
+
     def _on_connection_changed(self, connected: bool) -> None:
         if not connected and self._reader is not None:
             self._reader = None
         self._set_connected(connected)
 
+    def _on_main_toggled(self, state: int) -> None:
+        if state == Qt.CheckState.Checked.value:
+            self._port_combo.setEnabled(False)
+            self._baud_combo.setEnabled(False)
+            self._refresh_button.setEnabled(False)
+        else:
+            self._port_combo.setEnabled(not self._main_listener)
+            self._baud_combo.setEnabled(not self._main_listener)
+            self._refresh_button.setEnabled(True)
+
+    def _on_main_connection_changed(self, connected: bool) -> None:
+        if not connected and self._main_listener:
+            self._disconnect_main()
+
     def _set_connected(self, connected: bool) -> None:
         self._open_button.setText(tr("Отключить") if connected else tr("Подключить"))
         self._send_button.setEnabled(connected)
-        self._port_combo.setEnabled(not connected)
-        self._baud_combo.setEnabled(not connected)
+        if not self._main_checkbox.isChecked():
+            self._port_combo.setEnabled(not connected)
+            self._baud_combo.setEnabled(not connected)
         if not connected:
             self._status_label.setText(tr("Отключено"))
 
@@ -320,7 +370,11 @@ class ComLoggerWindow(QDialog):
         self._add_row(tr("RX"), data, timestamp, self._rx_color())
 
     def _on_send(self) -> None:
-        if self._reader is None or not self._reader.isRunning():
+        if self._main_listener:
+            if self._serial_manager is None or not self._serial_manager.is_open():
+                QMessageBox.warning(self, tr("Внимание"), tr("Основной порт не подключён"))
+                return
+        elif self._reader is None or not self._reader.isRunning():
             QMessageBox.warning(self, tr("Внимание"), tr("Порт не подключен"))
             return
         raw = self._send_input.text().strip()
@@ -338,7 +392,11 @@ class ComLoggerWindow(QDialog):
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.warning(self, tr("Ошибка"), str(exc))
                 return
-        if self._reader.write(data):
+        if self._main_listener:
+            ok = self._serial_manager.send_data(data)
+        else:
+            ok = self._reader.write(data)
+        if ok:
             self._add_row(tr("TX"), data, time.time(), self._tx_color())
 
     @staticmethod

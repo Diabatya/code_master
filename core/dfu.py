@@ -140,31 +140,47 @@ class DfuDevice:
                 logger.debug("DFU ABORT не удался: %s", exc)
                 break
 
-    def _get_transfer_size(self) -> int:
+    def _parse_transfer_size(self, raw) -> Optional[int]:
+        """Парсит wTransferSize из сырого DFU functional descriptor."""
+        if not raw:
+            return None
+        if isinstance(raw, (list, tuple)):
+            for desc in raw:
+                if len(desc) >= 9 and desc[1] == 0x21:
+                    return int.from_bytes(bytes(desc[5:7]), "little")
+            return None
+        try:
+            data = bytes(raw)
+        except (TypeError, ValueError):
+            return None
+        i = 0
+        while i + 2 <= len(data):
+            length = data[i]
+            if length == 0:
+                break
+            dtype = data[i + 1]
+            if dtype == 0x21 and i + length <= len(data) and length >= 9:
+                return int.from_bytes(data[i + 5:i + 7], "little")
+            i += length
+        return None
+
+    def _get_transfer_size(self) -> Optional[int]:
         """Возвращает wTransferSize из DFU functional descriptor, если возможно."""
         try:
             cfg = self.dev.get_active_configuration()
+            for source in (getattr(cfg, "extra", b""), getattr(cfg, "extra_descriptors", [])):
+                size = self._parse_transfer_size(source)
+                if size is not None:
+                    return size
             for intf in cfg.interfaces():
                 for alt in intf.altsettings():
-                    # pyusb может экспонировать extra_descriptors как список tuple (bLength, bDescriptorType, ...)
-                    extras: List[Tuple[int, ...]] = getattr(alt, "extra_descriptors", []) or []
-                    for desc in extras:
-                        if len(desc) >= 9 and desc[1] == 0x21:  # DFU Functional Descriptor
-                            return int.from_bytes(bytes(desc[5:7]), "little")
-                    # Fallback: парсим сырой 'extra' байтовый массив
-                    raw = getattr(alt, "extra", b"") or b""
-                    i = 0
-                    while i + 2 <= len(raw):
-                        length = raw[i]
-                        dtype = raw[i + 1]
-                        if length == 0:
-                            break
-                        if dtype == 0x21 and i + length <= len(raw) and length >= 9:
-                            return int.from_bytes(raw[i + 5:i + 7], "little")
-                        i += length
+                    for source in (getattr(alt, "extra", b""), getattr(alt, "extra_descriptors", [])):
+                        size = self._parse_transfer_size(source)
+                        if size is not None:
+                            return size
         except Exception:
-            pass
-        return 64  # безопасный fallback для full-speed USB
+            logger.debug("Не удалось прочитать DFU descriptor wTransferSize", exc_info=True)
+        return None
 
     def _ctrl(self, request_type: int, request: int, value: int = 0, data_or_wlength=0, timeout: int = 5000):
         return self.dev.ctrl_transfer(
@@ -282,6 +298,48 @@ class DfuDevice:
         self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, payload, timeout=10000)
         self._wait(status_timeout=5000)
 
+    def _download_fast(
+        self,
+        address: int,
+        data: bytes,
+        block_size: int,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> None:
+        """Быстрая запись через один set_address и нарастающий wBlockNum."""
+        total = len(data)
+        logger.info("DFU download (fast): адрес 0x%08X, размер %d байт, wTransferSize %d", address, total, block_size)
+        self._set_address(address)
+        for offset in range(0, total, block_size):
+            chunk = data[offset:offset + block_size]
+            block_num = 2 + offset // block_size
+            logger.debug("DFU download fast: offset %d, блок %d, %d байт", offset, block_num, len(chunk))
+            self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, block_num, chunk, timeout=20000)
+            self._wait(status_timeout=10000)
+            if progress:
+                progress(min(offset + len(chunk), total), total)
+        logger.info("DFU download fast завершён: 0x%08X (%d байт)", address, total)
+
+    def _download_slow(
+        self,
+        address: int,
+        data: bytes,
+        block_size: int,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> None:
+        """Безопасная медленная запись: set_address на каждый чанк."""
+        total = len(data)
+        logger.info("DFU download (safe/slow): адрес 0x%08X, размер %d байт, block_size %d", address, total, block_size)
+        for i in range(0, total, block_size):
+            chunk = data[i:i + block_size]
+            chunk_addr = address + i
+            self._set_address(chunk_addr)
+            logger.debug("DFU download slow: адрес 0x%08X, chunk %d байт", chunk_addr, len(chunk))
+            self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 2, chunk, timeout=10000)
+            self._wait(status_timeout=5000)
+            if progress:
+                progress(min(i + len(chunk), total), total)
+        logger.info("DFU download slow завершён: 0x%08X (%d байт)", address, total)
+
     def download(
         self,
         address: int,
@@ -291,50 +349,68 @@ class DfuDevice:
     ) -> None:
         """Записывает данные по указанному адресу.
 
-        Для каждого блока устанавливается абсолютный адрес и DFU_DNLOAD
-        передаётся с wBlockNum=2. Это не зависит от wTransferSize.
+        Использует быстрый путь (один set_address + нарастающий wBlockNum),
+        если удалось определить wTransferSize из DFU descriptor.
+        Иначе падает на безопасный медленный путь.
         """
         if not data:
             return
-        if block_size is None:
-            block_size = self._get_transfer_size()
-        total = len(data)
-        logger.info("DFU download: адрес 0x%08X, размер %d байт, block_size %d", address, total, block_size)
-        for i in range(0, total, block_size):
-            chunk = data[i:i + block_size]
-            chunk_addr = address + i
-            self._set_address(chunk_addr)
-            logger.debug("DFU download: адрес 0x%08X, chunk %d байт", chunk_addr, len(chunk))
-            self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 2, chunk, timeout=10000)
-            self._wait(status_timeout=5000)
-            if progress:
-                progress(min(i + len(chunk), total), total)
-        logger.info("DFU download завершён: 0x%08X (%d байт)", address, total)
+        transfer_size = self._get_transfer_size() if block_size is None else None
+        if transfer_size is not None and transfer_size > 0:
+            self._download_fast(address, data, transfer_size, progress)
+        else:
+            self._download_slow(address, data, block_size or 64, progress)
 
-    def upload(
+    def _upload_fast(
         self,
         address: int,
         length: int,
-        block_size: Optional[int] = None,
+        block_size: int,
         progress: Optional[Callable[[int, int], None]] = None,
     ) -> bytes:
-        """Читает length байт с address."""
-        if length <= 0:
-            return b""
-        if block_size is None:
-            block_size = self._get_transfer_size()
+        """Быстрое чтение через один set_address и нарастающий wBlockNum."""
         total = length
-        logger.info("DFU upload: адрес 0x%08X, %d байт", address, total)
         result = bytearray()
+        logger.info("DFU upload (fast): адрес 0x%08X, %d байт, wTransferSize %d", address, total, block_size)
+        self._set_address(address)
+        self.abort()
         offset = 0
         while offset < total:
             chunk_len = min(block_size, total - offset)
-            # Перед каждым чанком возвращаемся в dfuIDLE: set_address
-            # использует DFU_DNLOAD, который недопустим из dfuUPLOAD-IDLE.
+            block_num = 2 + offset // block_size
+            logger.debug("DFU upload fast: offset %d, блок %d, запрошено %d байт", offset, block_num, chunk_len)
+            chunk = bytes(self._ctrl(DFU_REQUEST_RECEIVE, DFU_UPLOAD, block_num, chunk_len, timeout=10000))
+            if not chunk:
+                break
+            result.extend(chunk)
+            offset += len(chunk)
+            if progress:
+                progress(offset, total)
+            if len(chunk) < chunk_len:
+                break
+        if progress:
+            progress(offset, total)
+        logger.info("DFU upload fast завершён: 0x%08X, прочитано %d байт", address, len(result))
+        return bytes(result)
+
+    def _upload_slow(
+        self,
+        address: int,
+        length: int,
+        block_size: int,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> bytes:
+        """Безопасное медленное чтение: set_address + abort на каждый чанк."""
+        total = length
+        result = bytearray()
+        logger.info("DFU upload (safe/slow): адрес 0x%08X, %d байт, block_size %d", address, total, block_size)
+        offset = 0
+        while offset < total:
+            chunk_len = min(block_size, total - offset)
             self.abort()
             self._set_address(address + offset)
             self.abort()
-            logger.debug("DFU upload: адрес 0x%08X, запрошено %d байт", address + offset, chunk_len)
+            logger.debug("DFU upload slow: адрес 0x%08X, запрошено %d байт", address + offset, chunk_len)
             chunk = bytes(self._ctrl(DFU_REQUEST_RECEIVE, DFU_UPLOAD, 2, chunk_len, timeout=10000))
             if not chunk:
                 break
@@ -346,8 +422,23 @@ class DfuDevice:
                 break
         if progress:
             progress(offset, total)
-        logger.info("DFU upload завершён: 0x%08X, прочитано %d байт", address, len(result))
+        logger.info("DFU upload slow завершён: 0x%08X, прочитано %d байт", address, len(result))
         return bytes(result)
+
+    def upload(
+        self,
+        address: int,
+        length: int,
+        block_size: Optional[int] = None,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> bytes:
+        """Читает length байт с address."""
+        if length <= 0:
+            return b""
+        transfer_size = self._get_transfer_size() if block_size is None else None
+        if transfer_size is not None and transfer_size > 0:
+            return self._upload_fast(address, length, transfer_size, progress)
+        return self._upload_slow(address, length, block_size or 64, progress)
 
     def leave(self) -> None:
         """Выход из DFU (reset).

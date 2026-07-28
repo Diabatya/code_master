@@ -2,6 +2,7 @@
 
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -236,6 +237,12 @@ class HexEditorDialog(QDialog):
         if not QFont(font).exactMatch():
             font = QFont("Courier New", 10)
 
+        self._kb_edit = QPlainTextEdit(self)
+        self._kb_edit.setReadOnly(True)
+        self._kb_edit.setFont(font)
+        self._kb_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._kb_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
         self._offset_edit = QPlainTextEdit(self)
         self._offset_edit.setReadOnly(True)
         self._offset_edit.setFont(font)
@@ -252,7 +259,7 @@ class HexEditorDialog(QDialog):
         self._ascii_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         HexHighlighter(self._ascii_edit.document(), self._changed_offsets, self._occupied_offsets, self.BYTES_PER_LINE, ascii_mode=True)
 
-        for edit in (self._offset_edit, self._hex_edit, self._ascii_edit):
+        for edit in (self._kb_edit, self._offset_edit, self._hex_edit, self._ascii_edit):
             sb = edit.verticalScrollBar()
             if sb is not None:
                 sb.valueChanged.connect(self._sync_scroll)
@@ -282,13 +289,15 @@ class HexEditorDialog(QDialog):
         layout.addLayout(button_layout)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._kb_edit)
         splitter.addWidget(self._offset_edit)
         splitter.addWidget(self._hex_edit)
         splitter.addWidget(self._ascii_edit)
         splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(1, 0)
         splitter.setStretchFactor(2, 1)
-        splitter.setSizes([120, 450, 200])
+        splitter.setStretchFactor(3, 1)
+        splitter.setSizes([90, 120, 450, 200])
         layout.addWidget(splitter, 1)
 
         layout.addWidget(self._status_label)
@@ -303,11 +312,11 @@ class HexEditorDialog(QDialog):
             selection-color: #FFFFFF;
         }
         """
-        for edit in (self._offset_edit, self._hex_edit, self._ascii_edit):
+        for edit in (self._kb_edit, self._offset_edit, self._hex_edit, self._ascii_edit):
             edit.setStyleSheet(theme)
 
     def _sync_scroll(self, value: int) -> None:
-        for edit in (self._offset_edit, self._hex_edit, self._ascii_edit):
+        for edit in (self._kb_edit, self._offset_edit, self._hex_edit, self._ascii_edit):
             if edit.verticalScrollBar().value() != value:
                 edit.verticalScrollBar().setValue(value)
 
@@ -315,6 +324,12 @@ class HexEditorDialog(QDialog):
         lines = []
         for i in range(0, max(len(self._data), 1), self.BYTES_PER_LINE):
             lines.append(f"{self._base_address + i:08X}")
+        return "\n".join(lines)
+
+    def _format_kb_text(self) -> str:
+        lines = []
+        for i in range(0, max(len(self._data), 1), self.BYTES_PER_LINE):
+            lines.append(f"{(self._base_address + i) // 1024:08X}")
         return "\n".join(lines)
 
     def _format_hex_text(self) -> str:
@@ -335,6 +350,7 @@ class HexEditorDialog(QDialog):
         self._ignore_text_changes = True
         cursor_hex = self._hex_edit.textCursor().position()
         cursor_ascii = self._ascii_edit.textCursor().position()
+        self._kb_edit.setPlainText(self._format_kb_text())
         self._offset_edit.setPlainText(self._format_offset_text())
         self._hex_edit.setPlainText(self._format_hex_text())
         self._ascii_edit.setPlainText(self._format_ascii_text())
@@ -948,12 +964,14 @@ class ReadWorker(QThread):
         method: str,
         config: Config,
         size: int = 0x10000,
+        start: int = 0x08000000,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
         self._method = method
         self._config = config
         self._size = size
+        self._start = start
 
     def run(self) -> None:
         try:
@@ -995,8 +1013,8 @@ class ReadWorker(QThread):
             )
             if flash is not None:
                 self._config.set("total_memory", int(flash.length))
-            start = flash.start if flash else 0x08000000
-            size = flash.length if flash else self._size
+            start = self._start
+            size = self._size
             data = bytes(target_obj.read_memory_block8(start, size))
             target_obj.reset()
         return data, start
@@ -1011,7 +1029,7 @@ class ReadWorker(QThread):
         jlink.open()
         jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
         jlink.connect(target=target, interface="SWD")
-        start = 0x08000000
+        start = self._start
         data = bytes(jlink.memory_read(start, self._size))
         jlink.close()
         return data, start
@@ -1035,7 +1053,7 @@ class ReadWorker(QThread):
             bl.reconfigure_for_bootloader()
             bl.enter_bootloader()
             bl.sync()
-            start = 0x08000000
+            start = self._start
             data = bl.read_memory(start, self._size)
             return data, start
         finally:
@@ -1064,7 +1082,7 @@ class ReadWorker(QThread):
             bl.reconfigure_for_bootloader()
             bl.enter_bootloader()
             bl.sync()
-            start = 0x08000000
+            start = self._start
             data = bl.read_memory(start, self._size)
             return data, start
         finally:
@@ -1082,7 +1100,7 @@ class ReadWorker(QThread):
         except usb.core.NoBackendError:
             raise RuntimeError(tr("USB backend не найден. Установите libusb-package или WinUSB-драйвер через Zadig."))
         with DfuDevice(dev) as dfu:
-            start = 0x08000000
+            start = self._start
             data = dfu.upload(start, self._size)
         return data, start
 
@@ -1163,12 +1181,14 @@ class FlashDialog(QDialog):
 
         # Размер flash-памяти (KB)
         self._read_size_label = QLabel(tr("Размер памяти (КБ)"))
-        self._read_size_edit = QLineEdit("64")
-        self._read_size_edit.setMaximumWidth(80)
+        self._read_size_edit = QComboBox()
+        self._read_size_edit.setEditable(True)
+        self._read_size_edit.addItems(["16", "32", "64", "128", "256", "512", "1024", "2048", "4096", "8192", "16384", "32768"])
+        self._read_size_edit.setCurrentText("64")
+        self._read_size_edit.setMaximumWidth(90)
 
         self._config_button = QPushButton(tr("Записать конфигурацию устройства"))
         self._config_button.setFont(font)
-        self._config_button.setCheckable(True)
         self._config_button.setEnabled(True)
         self._config_button.setToolTip(tr("Записать имя и серийный номер в последнюю страницу Flash"))
 
@@ -1196,6 +1216,8 @@ class FlashDialog(QDialog):
         self._flash_button.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         self._read_button = QPushButton(tr("Прочитать прошивку"))
         self._read_button.setFont(font)
+        self._read_config_button = QPushButton(tr("Прочитать конфигурацию"))
+        self._read_config_button.setFont(font)
         self._hex_editor_button = QPushButton(tr("Открыть HEX-редактор"))
         self._close_button = QPushButton(tr("Закрыть"))
 
@@ -1253,6 +1275,7 @@ class FlashDialog(QDialog):
         bottom.addStretch()
         bottom.addWidget(self._flash_button)
         bottom.addWidget(self._read_button)
+        bottom.addWidget(self._read_config_button)
         bottom.addWidget(self._hex_editor_button)
         bottom.addWidget(self._close_button)
         layout.addLayout(bottom)
@@ -1267,6 +1290,7 @@ class FlashDialog(QDialog):
         self._remove_button.clicked.connect(self._on_remove)
         self._flash_button.clicked.connect(self._on_flash)
         self._read_button.clicked.connect(self._on_read_firmware)
+        self._read_config_button.clicked.connect(self._on_read_config)
         self._hex_editor_button.clicked.connect(lambda: self.open_hex_editor())
         self._close_button.clicked.connect(self.reject)
         self._power_button.clicked.connect(self._on_power_toggle)
@@ -1288,7 +1312,7 @@ class FlashDialog(QDialog):
         )
 
         self._chip_combo.currentIndexChanged.connect(self._on_chip_changed)
-        self._config_button.toggled.connect(self._on_config_button_toggled)
+        self._config_button.clicked.connect(self._on_write_config)
 
     def _load_defaults(self) -> None:
         serial = self._config.get("device_serial", "")
@@ -1307,7 +1331,7 @@ class FlashDialog(QDialog):
                 self._chip_combo.setCurrentIndex(idx)
         total_kb = self._config.get("total_memory", 65536) // 1024
         if total_kb > 0:
-            self._read_size_edit.setText(str(total_kb))
+            self._read_size_edit.setCurrentText(str(total_kb))
         self._device_name_edit.setText(self._config.get("device_type_name", ""))
         self._update_power_button()
         self._on_method_changed(self._method_combo.currentIndex())
@@ -1327,12 +1351,12 @@ class FlashDialog(QDialog):
     def _on_chip_changed(self, index: int) -> None:
         model = self._chip_combo.itemData(index)
         if model and model in STM32_FLASH_SIZES:
-            self._read_size_edit.setText(str(STM32_FLASH_SIZES[model]))
+            self._read_size_edit.setCurrentText(str(STM32_FLASH_SIZES[model]))
             self._target_mcu_edit.setText(model)
             self._config.set("target_mcu", model)
 
     def _get_flash_size_kb(self) -> int:
-        text = self._read_size_edit.text().strip()
+        text = self._read_size_edit.currentText().strip()
         if text:
             try:
                 return int(text)
@@ -1346,13 +1370,62 @@ class FlashDialog(QDialog):
             return STM32_FLASH_SIZES[model]
         return 256
 
-    def _on_config_button_toggled(self, checked: bool) -> None:
-        if checked:
-            self._config_button.setText(tr("✓ Записать конфигурацию"))
-            self._config_button.setStyleSheet("background-color: #4CAF50; color: #FFFFFF;")
-        else:
-            self._config_button.setText(tr("Записать конфигурацию устройства"))
-            self._config_button.setStyleSheet("")
+    def _prepare_config_only_hex(self) -> str:
+        """Создаёт временный HEX-файл с одной последней страницей конфигурации."""
+        name = self._device_name_edit.text().strip()
+        if not name:
+            raise ValueError(tr("Заполните поле «Устройство»"))
+        serial = self._serial_edit.text().strip()
+        if not serial:
+            raise ValueError(tr("Введите серийный номер"))
+        try:
+            flash_size_kb = self._get_flash_size_kb()
+        except ValueError:
+            raise
+
+        page_size = 2048
+        flash_size = flash_size_kb * 1024
+        last_page = flash_size - page_size
+        page = bytearray(b"\xFF") * page_size
+        name_bytes = name.encode("ascii", errors="ignore")[:10].ljust(10)
+        serial_bytes = serial.encode("ascii", errors="ignore")[:10].ljust(10)
+        page[8:18] = name_bytes
+        page[18:28] = serial_bytes
+
+        tmp = Path(tempfile.gettempdir()) / f"config_only_{int(time.time())}.hex"
+        ih = IntelHex()
+        ih.puts(last_page, bytes(page))
+        ih.write_hex_file(tmp)
+        return str(tmp)
+
+    def _on_write_config(self) -> None:
+        """Записывает только страницу конфигурации, не трогая основную прошивку."""
+        if self._is_any_worker_running():
+            QMessageBox.warning(
+                self,
+                tr("Внимание"),
+                tr("Выполняется другая операция с устройством. Дождитесь её завершения."),
+            )
+            return
+        method = self._method_combo.currentData()
+        if method == "auto":
+            QMessageBox.warning(self, tr("Внимание"), tr("Выберите конкретный способ программирования"))
+            return
+        try:
+            config_file = self._prepare_config_only_hex()
+        except ValueError as exc:
+            QMessageBox.warning(self, tr("Внимание"), str(exc))
+            return
+        logger.info("Запись только конфигурации: %s", config_file)
+        self._flash_worker = FlashWorker([config_file], method, self._config, self)
+        self._flash_worker.log_line.connect(self._log)
+        self._flash_worker.progress.connect(self._progress_bar.setValue)
+        self._flash_worker.finished.connect(self._on_flash_finished)
+        self._config_button.setEnabled(False)
+        self._flash_button.setEnabled(False)
+        self._read_button.setEnabled(False)
+        self._progress_bar.setValue(0)
+        self._flash_worker.start()
 
     def _set_connect_status(self, connected: bool, info: Dict[str, Any]) -> None:
         self._connected = connected
@@ -1424,7 +1497,7 @@ class FlashDialog(QDialog):
                     self._chip_combo.setCurrentIndex(idx)
             flash_size_kb = info.get("flash_size_kb")
             if flash_size_kb:
-                self._read_size_edit.setText(str(flash_size_kb))
+                self._read_size_edit.setCurrentText(str(flash_size_kb))
         self._last_chip_info = info
         self._set_connect_status(success, info)
 
@@ -1514,12 +1587,7 @@ class FlashDialog(QDialog):
             )
             return
         logger.info("Старт прошивки: метод=%s, файлы=%s", method, files)
-        try:
-            prepared = [self._prepare_firmware_with_config(f) for f in files]
-        except ValueError as exc:
-            QMessageBox.warning(self, tr("Внимание"), str(exc))
-            return
-        logger.info("Подготовленные файлы для прошивки: %s", prepared)
+        prepared = list(files)
         # Для COM-портов (UART/USB CDC) порт может быть занят SerialManager — освобождаем
         self._port_was_open = self._serial_manager.is_open() if self._serial_manager else False
         if method in ("uart", "usb_cdc") and self._port_was_open:
@@ -1536,6 +1604,8 @@ class FlashDialog(QDialog):
     def _on_flash_finished(self, success: bool, message: str) -> None:
         logger.info("Прошивка завершена: success=%s, message=%s", success, message)
         self._flash_button.setEnabled(True)
+        self._config_button.setEnabled(True)
+        self._read_button.setEnabled(True)
         self._log(message)
         # Восстанавливаем COM-порт, если он был открыт до прошивки
         method = self._method_combo.currentData()
@@ -1594,6 +1664,55 @@ class FlashDialog(QDialog):
                 bin_path = tmp.name
             self.open_hex_editor(bin_path)
         except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, tr("Ошибка"), str(exc))
+
+    def _on_read_config(self) -> None:
+        method = self._method_combo.currentData()
+        if method == "auto":
+            QMessageBox.warning(self, tr("Внимание"), tr("Выберите конкретный способ программирования"))
+            return
+        try:
+            flash_size_kb = self._get_flash_size_kb()
+        except ValueError as exc:
+            QMessageBox.warning(self, tr("Внимание"), str(exc))
+            return
+        if self._is_any_worker_running():
+            QMessageBox.warning(
+                self,
+                tr("Внимание"),
+                tr("Выполняется другая операция с устройством. Дождитесь её завершения."),
+            )
+            return
+        page_size = 2048
+        start = flash_size_kb * 1024 - page_size
+        self._read_config_button.setEnabled(False)
+        self._progress_bar.setValue(0)
+        self._read_worker = ReadWorker(method, self._config, size=page_size, start=start, parent=self)
+        self._read_worker.log_line.connect(self._log)
+        self._read_worker.finished.connect(self._on_config_read_finished)
+        self._read_worker.start()
+
+    def _on_config_read_finished(self, success: bool, message: str, data: object, base: int) -> None:
+        self._read_config_button.setEnabled(True)
+        if not success or not isinstance(data, bytes) or not data:
+            self._log(message)
+            QMessageBox.critical(self, tr("Ошибка"), message)
+            return
+        self._log(message)
+        try:
+            name = data[8:18].rstrip(b"\xFF\x00").decode("ascii", errors="ignore").strip()
+            serial = data[18:28].rstrip(b"\xFF\x00").decode("ascii", errors="ignore").strip()
+            self._device_name_edit.setText(name)
+            self._serial_edit.setText(serial)
+            self._config.set_bulk({
+                "device_type_name": name,
+                "device_serial": serial,
+                "serial_number": serial,
+            })
+            self._log(tr("Конфигурация из Flash: устройство={0}, серийный={1}").format(name, serial))
+            QMessageBox.information(self, tr("Готово"), tr("Прочитана конфигурация: {0} / {1}").format(name, serial))
+        except Exception as exc:  # noqa: BLE001
+            self._log(tr("Не удалось распарсить конфигурацию: {0}").format(exc))
             QMessageBox.critical(self, tr("Ошибка"), str(exc))
 
     def open_hex_editor(self, file_path: Optional[str] = None) -> None:

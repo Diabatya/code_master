@@ -358,7 +358,7 @@ class MainWindow(QMainWindow):
     def _on_com_logger_clicked(self) -> None:
         """Открывает отдельное окно COM-логгера."""
         if self._com_logger_window is None:
-            self._com_logger_window = ComLoggerWindow(self)
+            self._com_logger_window = ComLoggerWindow(self._serial_manager, self)
         self._com_logger_window.show()
         self._com_logger_window.raise_()
         self._com_logger_window.activateWindow()

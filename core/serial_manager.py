@@ -37,6 +37,7 @@ class SerialReader(QThread):
     """Поток непрерывного чтения данных из COM-порта."""
 
     new_frame = Signal(dict)
+    new_raw_data = Signal(bytes, float)
     error = Signal(str)
     heartbeat = Signal()
 
@@ -87,6 +88,7 @@ class SerialReader(QThread):
                     chunk = self._port.read(min(available, 256))
                     if chunk:
                         logger.debug("SerialReader: прочитано %d байт", len(chunk))
+                        self.new_raw_data.emit(chunk, time.time())
                         self._buffer.extend(chunk)
                         self._error_count = 0
                         # Парсим все полные кадры из буфера и сдвигаем буфер
@@ -128,6 +130,7 @@ class SerialManager(QObject):
     """
 
     new_can_frame = Signal(dict)
+    raw_data = Signal(bytes, float)
     error_occurred = Signal(str)
     connection_changed = Signal(bool)
     heartbeat = Signal()
@@ -205,6 +208,7 @@ class SerialManager(QObject):
 
             self._reader = SerialReader(self._port, self)
             self._reader.new_frame.connect(self.new_can_frame)
+            self._reader.new_raw_data.connect(self.raw_data)
             self._reader.error.connect(self.error_occurred)
             self._reader.heartbeat.connect(self.heartbeat)
             self._reader.finished.connect(self._on_reader_finished)
