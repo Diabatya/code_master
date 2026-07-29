@@ -329,7 +329,13 @@ class HexEditorDialog(QDialog):
     def _format_kb_text(self) -> str:
         lines = []
         for i in range(0, max(len(self._data), 1), self.BYTES_PER_LINE):
-            lines.append(f"{(self._base_address + i) // 1024:08X}")
+            kb = (self._base_address + i) // 1024
+            if kb >= 1024:
+                mb = kb / 1024
+                text = f"{mb:.2f}".rstrip("0").rstrip(".") + " MB"
+            else:
+                text = f"{kb} KB"
+            lines.append(text)
         return "\n".join(lines)
 
     def _format_hex_text(self) -> str:
@@ -1372,6 +1378,7 @@ class FlashDialog(QDialog):
 
     def _prepare_config_only_hex(self) -> str:
         """Создаёт временный HEX-файл с одной последней страницей конфигурации."""
+        from intelhex import IntelHex
         name = self._device_name_edit.text().strip()
         if not name:
             raise ValueError(tr("Заполните поле «Устройство»"))

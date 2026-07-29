@@ -165,19 +165,25 @@ class DfuDevice:
         return None
 
     def _get_transfer_size(self) -> Optional[int]:
-        """Возвращает wTransferSize из DFU functional descriptor, если возможно."""
+        """Возвращает wTransferSize из DFU functional descriptor, либо bMaxPacketSize0."""
         try:
             cfg = self.dev.get_active_configuration()
             for source in (getattr(cfg, "extra", b""), getattr(cfg, "extra_descriptors", [])):
                 size = self._parse_transfer_size(source)
                 if size is not None:
+                    logger.debug("DFU wTransferSize из дескриптора: %d", size)
                     return size
             for intf in cfg.interfaces():
                 for alt in intf.altsettings():
                     for source in (getattr(alt, "extra", b""), getattr(alt, "extra_descriptors", [])):
                         size = self._parse_transfer_size(source)
                         if size is not None:
+                            logger.debug("DFU wTransferSize из интерфейсного дескриптора: %d", size)
                             return size
+            mps = getattr(self.dev, "bMaxPacketSize0", 0)
+            if mps:
+                logger.debug("DFU wTransferSize fallback на bMaxPacketSize0: %d", mps)
+                return int(mps)
         except Exception:
             logger.debug("Не удалось прочитать DFU descriptor wTransferSize", exc_info=True)
         return None
@@ -349,17 +355,21 @@ class DfuDevice:
     ) -> None:
         """Записывает данные по указанному адресу.
 
-        Использует быстрый путь (один set_address + нарастающий wBlockNum),
-        если удалось определить wTransferSize из DFU descriptor.
-        Иначе падает на безопасный медленный путь.
+        Пробует быстрый путь (один set_address + нарастающий wBlockNum),
+        если удалось определить wTransferSize. При ошибке сбрасывается
+        в dfuIDLE и используется безопасный медленный путь.
         """
         if not data:
             return
         transfer_size = self._get_transfer_size() if block_size is None else None
         if transfer_size is not None and transfer_size > 0:
-            self._download_fast(address, data, transfer_size, progress)
-        else:
-            self._download_slow(address, data, block_size or 64, progress)
+            try:
+                self._download_fast(address, data, transfer_size, progress)
+                return
+            except Exception:
+                logger.warning("DFU download fast не удался, переключаюсь на slow")
+                self._reset_to_idle()
+        self._download_slow(address, data, transfer_size or block_size or 64, progress)
 
     def _upload_fast(
         self,
@@ -432,13 +442,21 @@ class DfuDevice:
         block_size: Optional[int] = None,
         progress: Optional[Callable[[int, int], None]] = None,
     ) -> bytes:
-        """Читает length байт с address."""
+        """Читает length байт с address.
+
+        Пробует быстрый путь; при сбое сбрасывается в dfuIDLE
+        и используется безопасный медленный путь.
+        """
         if length <= 0:
             return b""
         transfer_size = self._get_transfer_size() if block_size is None else None
         if transfer_size is not None and transfer_size > 0:
-            return self._upload_fast(address, length, transfer_size, progress)
-        return self._upload_slow(address, length, block_size or 64, progress)
+            try:
+                return self._upload_fast(address, length, transfer_size, progress)
+            except Exception:
+                logger.warning("DFU upload fast не удался, переключаюсь на slow")
+                self._reset_to_idle()
+        return self._upload_slow(address, length, transfer_size or block_size or 64, progress)
 
     def leave(self) -> None:
         """Выход из DFU (reset).

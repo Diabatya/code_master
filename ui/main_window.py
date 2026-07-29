@@ -37,7 +37,7 @@ from ui.com_logger import ComLoggerWindow
 from ui.firmware_page import FirmwarePage
 from ui.flash_dialog import FlashDialog
 from ui.help_widget import show_help
-from ui.settings_window import SettingsWindow
+from ui.settings_window import ConnectionTab, SettingsWindow
 
 logger = get_logger(__name__)
 
@@ -365,7 +365,21 @@ class MainWindow(QMainWindow):
         self._status_label.setText(tr("Открыт COM-логгер"))
 
     def _on_configure_clicked(self) -> None:
-        """Открывает окно настроек CAN, скрывая главное окно."""
+        """Сначала открывает диалог подключения, затем окно настроек CAN."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("Подключение"))
+        dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dialog.resize(450, 300)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        connection = ConnectionTab(self._serial_manager, dialog)
+        layout.addWidget(connection)
+        cancel_button = QPushButton(tr("Отмена"))
+        cancel_button.clicked.connect(dialog.reject)
+        layout.addWidget(cancel_button)
+        connection.connected.connect(dialog.accept)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
         if self._settings_window is None:
             self._settings_window = SettingsWindow(self._serial_manager, self)
             self._settings_window.setWindowModality(Qt.WindowModality.ApplicationModal)

@@ -243,9 +243,6 @@ class SettingsWindow(QMainWindow):
         self._tabs = QTabWidget()
         self._tabs.setFont(QFont("Segoe UI", 10))
 
-        self._connection_tab = ConnectionTab(self._serial_manager, self)
-        self._tabs.addTab(self._connection_tab, "🔌 " + tr("Подключение"))
-
         self._trigger_tab = CanTriggerTab(self._serial_manager, self)
         self._monitor_tab = CanMonitorTab(self._serial_manager, self)
         self._gateway_tab = CanGatewayTab(self._serial_manager, self)
@@ -266,10 +263,6 @@ class SettingsWindow(QMainWindow):
         self._serial_manager.device_identified.connect(self._update_analog_tab)
         self._serial_manager.device_identified.connect(self._update_device_info)
         self._update_device_info(0, 0)
-
-        self._connection_tab.connected.connect(self._on_connection_established)
-        self._serial_manager.connection_changed.connect(self._update_tab_availability)
-        self._update_tab_availability()
 
         search_layout = QHBoxLayout()
         search_layout.setSpacing(8)
@@ -364,20 +357,6 @@ class SettingsWindow(QMainWindow):
             self._device_combo.setCurrentIndex(index)
             self._device_combo.blockSignals(False)
         self._serial_edit.setText(serial)
-
-    def _update_tab_availability(self, _connected: Optional[bool] = None) -> None:
-        """Блокирует остальные вкладки, пока COM-порт не подключён."""
-        is_open = self._serial_manager.is_open()
-        for i in range(self._tabs.count()):
-            if self._tabs.widget(i) is not self._connection_tab:
-                self._tabs.setTabEnabled(i, is_open)
-        if not is_open:
-            self._tabs.setCurrentIndex(1)
-
-    def _on_connection_established(self) -> None:
-        """После успешного подключения переключает на следующую вкладку."""
-        if self._tabs.count() > 1:
-            self._tabs.setCurrentIndex(1)
 
     def retranslate_ui(self) -> None:
         """Обновляет статические строки окна настроек и всех вкладок."""

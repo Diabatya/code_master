@@ -344,11 +344,14 @@ class ComLoggerWindow(QDialog):
         self._set_connected(connected)
 
     def _on_main_toggled(self, state: int) -> None:
-        if state == Qt.CheckState.Checked.value:
+        checked = state == Qt.CheckState.Checked.value
+        if checked:
+            self._main_checkbox.setStyleSheet("QCheckBox { background-color: #4CAF50; color: #FFFFFF; padding: 4px 8px; border-radius: 4px; }")
             self._port_combo.setEnabled(False)
             self._baud_combo.setEnabled(False)
             self._refresh_button.setEnabled(False)
         else:
+            self._main_checkbox.setStyleSheet("")
             self._port_combo.setEnabled(not self._main_listener)
             self._baud_combo.setEnabled(not self._main_listener)
             self._refresh_button.setEnabled(True)
