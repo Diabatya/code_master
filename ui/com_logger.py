@@ -28,9 +28,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.listen_only import CanPacket, ListenOnlyMode
 from core.serial_manager import SerialManager
 from models.config import Config
-from models.logger import get_logger
+from models.logger import get_logger, get_log_dir
 from models.translations import _ as tr
 
 logger = get_logger(__name__)
@@ -151,6 +152,8 @@ class ComLoggerWindow(QDialog):
         self._serial_manager = serial_manager
         self._reader: Optional[ComLoggerReader] = None
         self._main_listener: bool = False
+        self._listen_mode = ListenOnlyMode(self)
+        self._listen_mode.packet_ready.connect(self._on_packet)
 
         self._create_widgets()
         self._build_layout()
@@ -255,7 +258,6 @@ class ComLoggerWindow(QDialog):
         self._main_checkbox.stateChanged.connect(self._on_main_toggled)
         if self._serial_manager is not None:
             self._serial_manager.connection_changed.connect(self._on_main_connection_changed)
-            self._serial_manager.raw_data.connect(self._on_data_received)
 
     def _load_defaults(self) -> None:
         baud = self._config.get("com_logger_baud", 115200)
@@ -323,9 +325,14 @@ class ComLoggerWindow(QDialog):
         if not self._serial_manager.is_open():
             QMessageBox.warning(self, tr("Внимание"), tr("Сначала подключите основной COM-порт в настройках"))
             return
+        device_name = self._config.get("device_type_name", "")
+        ok = self._listen_mode.enable(self._serial_manager, get_log_dir(), device_name)
+        if not ok:
+            QMessageBox.warning(self, tr("Внимание"), tr("Не удалось запустить режим 'Только слушать'"))
+            return
         self._main_listener = True
         self._set_connected(True)
-        self._status_label.setText(tr("Слушаю основной порт"))
+        self._status_label.setText(tr("Слушаю основной порт, CSV: {0}").format(self._listen_mode.log_path or "-"))
 
     def _disconnect(self) -> None:
         if self._reader is not None:
@@ -334,6 +341,7 @@ class ComLoggerWindow(QDialog):
         self._set_connected(False)
 
     def _disconnect_main(self) -> None:
+        self._listen_mode.disable()
         self._main_listener = False
         self._set_connected(False)
         self._status_label.setText(tr("Отключено"))
@@ -362,7 +370,7 @@ class ComLoggerWindow(QDialog):
 
     def _set_connected(self, connected: bool) -> None:
         self._open_button.setText(tr("Отключить") if connected else tr("Подключить"))
-        self._send_button.setEnabled(connected)
+        self._send_button.setEnabled(connected and not self._main_listener)
         if not self._main_checkbox.isChecked():
             self._port_combo.setEnabled(not connected)
             self._baud_combo.setEnabled(not connected)
@@ -371,6 +379,10 @@ class ComLoggerWindow(QDialog):
 
     def _on_data_received(self, data: bytes, timestamp: float) -> None:
         self._add_row(tr("RX"), data, timestamp, self._rx_color())
+
+    def _on_packet(self, pkt: CanPacket) -> None:
+        direction = f"{'←' if pkt.is_rx else '→'} 0x{pkt.can_id:04X} ({pkt.dlc})"
+        self._add_row(direction, pkt.data, time.time(), self._rx_color() if pkt.is_rx else self._tx_color())
 
     def _on_send(self) -> None:
         if self._main_listener:

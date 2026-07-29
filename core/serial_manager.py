@@ -131,6 +131,7 @@ class SerialManager(QObject):
 
     new_can_frame = Signal(dict)
     raw_data = Signal(bytes, float)
+    raw_tx = Signal(bytes, float)
     error_occurred = Signal(str)
     connection_changed = Signal(bool)
     heartbeat = Signal()
@@ -272,6 +273,7 @@ class SerialManager(QObject):
             try:
                 preview = data[:16].hex(" ")
                 self._port.write(data)
+                self.raw_tx.emit(data, time.time())
                 logger.info("Отправлено в порт %s: %d байт, preview=%s", self.current_port_name(), len(data), preview)
                 return True
             except Exception as exc:  # noqa: BLE001
