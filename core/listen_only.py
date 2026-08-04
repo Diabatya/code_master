@@ -1,4 +1,8 @@
-"""Режим «Только слушать» для COM-логгера (embedded).
+"""Режим «Только слушать» для COM-логгера.
+
+Поддерживает два режима:
+- embedded — перехват через SerialManager внутри приложения;
+- proxy — двунаправленный проброс двух COM-портов (com0com).
 
 Декодирует SLIP/CAN-поток, пишет CSV-лог и предоставляет готовые пакеты UI.
 """
@@ -7,12 +11,13 @@ import csv
 import struct
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Callable, List, Optional
 
+import serial
 from PySide6.QtCore import QObject, QThread, Signal
 
 from models.logger import get_logger
@@ -134,19 +139,61 @@ class _DecoderWorker(QThread):
         self.wait(2000)
 
 
-class ListenOnlyMode(QObject):
-    """Встроенный режим «Только слушать».
+class _ProxyWorker(QThread):
+    """Поток проброса из одного COM-порта в другой."""
 
-    Подписывается на сырые RX/TX данные SerialManager,
-    декодирует SLIP/CAN и пишет CSV-лог.
-    """
+    def __init__(
+        self,
+        src: serial.Serial,
+        dst: serial.Serial,
+        is_rx: bool,
+        raw_queue: Queue,
+        parent: Optional[QObject] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._src = src
+        self._dst = dst
+        self._is_rx = is_rx
+        self._raw_queue = raw_queue
+        self._running = True
+
+    def run(self) -> None:
+        direction = "RX" if self._is_rx else "TX"
+        logger.info("Поток проброса %s запущен", direction)
+        while self._running:
+            try:
+                chunk = self._src.read(self._src.in_waiting or 1)
+            except (serial.SerialException, OSError):
+                break
+            if chunk:
+                try:
+                    self._dst.write(chunk)
+                except (serial.SerialException, OSError):
+                    break
+                self._raw_queue.put((self._is_rx, chunk))
+            else:
+                self.msleep(5)
+        logger.info("Поток проброса %s остановлен", direction)
+
+    def stop(self) -> None:
+        self._running = False
+        self.wait(2000)
+
+
+class ListenOnlyMode(QObject):
+    """Режим «Только слушать» с поддержкой embedded и proxy."""
 
     packet_ready = Signal(object)
     is_active_changed = Signal(bool)
+    error = Signal(str)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
+        self._mode: str = ""
         self._serial_manager: Optional[Any] = None
+        self._real_ser: Optional[serial.Serial] = None
+        self._virtual_ser: Optional[serial.Serial] = None
+        self._proxy_workers: List[_ProxyWorker] = []
         self._raw_queue: Queue = Queue()
         self._decoder: Optional[_DecoderWorker] = None
         self._log_file: Optional[Any] = None
@@ -169,13 +216,11 @@ class ListenOnlyMode(QObject):
     def log_path(self) -> Optional[str]:
         return str(self._log_path) if self._log_path else None
 
-    def enable(self, serial_manager: Any, log_dir: Path, device_name: str = "") -> bool:
-        """Включает режим: открывает CSV, запускает декодер, подписывается на данные."""
-        if self._active:
-            return True
-        if not serial_manager.is_open():
-            return False
-        self._serial_manager = serial_manager
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    def _open_csv(self, log_dir: Path, device_name: str) -> bool:
         name = (device_name or "Device").replace(" ", "_").replace("/", "_")
         stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -184,29 +229,120 @@ class ListenOnlyMode(QObject):
             self._log_file = open(self._log_path, "w", newline="", encoding="utf-8")
             self._csv_writer = csv.writer(self._log_file)
             self._csv_writer.writerow(["Timestamp_us", "Bus", "Type", "ID", "DLC", "Data"])
+            return True
         except OSError as exc:
             logger.error("Не удалось создать CSV %s: %s", self._log_path, exc)
+            self._log_path = None
             return False
 
+    def _start_decoder(self) -> None:
         self._raw_queue = Queue()
         self._decoder = _DecoderWorker(self._raw_queue, self)
         self._decoder.packet_ready.connect(self._on_packet)
         self._decoder.start()
 
-        serial_manager.raw_data.connect(self._on_raw_data)
-        serial_manager.raw_tx.connect(self._on_raw_tx)
+    def _stop_decoder(self) -> None:
+        if self._decoder is not None:
+            self._decoder.stop()
+            self._decoder = None
+        while not self._raw_queue.empty():
+            try:
+                self._raw_queue.get_nowait()
+            except Empty:
+                break
+
+    def _close_csv(self) -> None:
+        if self._log_file is not None:
+            try:
+                self._log_file.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._log_file = None
+
+    def enable(
+        self,
+        log_dir: Path,
+        device_name: str = "",
+        mode: str = "embedded",
+        serial_manager: Optional[Any] = None,
+        real_port: Optional[str] = None,
+        virtual_port: Optional[str] = None,
+        baudrate: int = 115200,
+    ) -> bool:
+        """Включает режим 'Только слушать' в выбранном режиме."""
+        if self._active:
+            return True
+
+        if not self._open_csv(log_dir, device_name):
+            return False
+
+        self._start_decoder()
+
+        if mode == "embedded":
+            if serial_manager is None or not serial_manager.is_open():
+                self._stop_decoder()
+                self._close_csv()
+                return False
+            self._mode = "embedded"
+            self._serial_manager = serial_manager
+            serial_manager.raw_data.connect(self._on_raw_data)
+            serial_manager.raw_tx.connect(self._on_raw_tx)
+
+        elif mode == "proxy":
+            if not real_port or not virtual_port:
+                self._stop_decoder()
+                self._close_csv()
+                return False
+            try:
+                self._real_ser = serial.Serial(
+                    real_port,
+                    baudrate,
+                    bytesize=serial.EIGHTBITS,
+                    parity=serial.PARITY_NONE,
+                    stopbits=serial.STOPBITS_ONE,
+                    timeout=0.05,
+                    write_timeout=1,
+                )
+                self._virtual_ser = serial.Serial(
+                    virtual_port,
+                    baudrate,
+                    bytesize=serial.EIGHTBITS,
+                    parity=serial.PARITY_NONE,
+                    stopbits=serial.STOPBITS_ONE,
+                    timeout=0.05,
+                    write_timeout=1,
+                )
+            except (serial.SerialException, OSError) as exc:
+                self._stop_decoder()
+                self._close_csv()
+                self._close_proxy_ports()
+                self.error.emit(tr("Не удалось открыть COM-порт: {0}").format(exc))
+                return False
+
+            self._mode = "proxy"
+            self._proxy_workers = [
+                _ProxyWorker(self._real_ser, self._virtual_ser, True, self._raw_queue, self),
+                _ProxyWorker(self._virtual_ser, self._real_ser, False, self._raw_queue, self),
+            ]
+            for worker in self._proxy_workers:
+                worker.start()
+        else:
+            self._stop_decoder()
+            self._close_csv()
+            return False
 
         self._active = True
         self._packet_count = 0
         self.is_active_changed.emit(True)
-        logger.info("Режим 'Только слушать' включён, CSV: %s", self._log_path)
+        logger.info("Режим 'Только слушать' [%s] включён, CSV: %s", self._mode, self._log_path)
         return True
 
     def disable(self) -> None:
-        """Выключает режим и закрывает CSV."""
+        """Выключает режим и закрывает CSV/порты."""
         if not self._active:
             return
-        if self._serial_manager is not None:
+
+        if self._mode == "embedded" and self._serial_manager is not None:
             try:
                 self._serial_manager.raw_data.disconnect(self._on_raw_data)
             except Exception:  # noqa: BLE001
@@ -216,27 +352,28 @@ class ListenOnlyMode(QObject):
             except Exception:  # noqa: BLE001
                 pass
 
-        if self._decoder is not None:
-            self._decoder.stop()
-            self._decoder = None
+        for worker in self._proxy_workers:
+            worker.stop()
+        self._proxy_workers.clear()
+        self._close_proxy_ports()
 
-        # Опустошаем очередь
-        while not self._raw_queue.empty():
-            try:
-                self._raw_queue.get_nowait()
-            except Empty:
-                break
-
-        if self._log_file is not None:
-            try:
-                self._log_file.close()
-            except Exception:  # noqa: BLE001
-                pass
-            self._log_file = None
+        self._stop_decoder()
+        self._close_csv()
 
         self._active = False
+        self._mode = ""
         self.is_active_changed.emit(False)
         logger.info("Режим 'Только слушать' выключён")
+
+    def _close_proxy_ports(self) -> None:
+        for ser in (self._real_ser, self._virtual_ser):
+            if ser is not None and ser.is_open:
+                try:
+                    ser.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        self._real_ser = None
+        self._virtual_ser = None
 
     def _on_raw_data(self, data: bytes, _timestamp: float) -> None:
         self._raw_queue.put((True, data))
@@ -256,5 +393,5 @@ class ListenOnlyMode(QObject):
                 pkt.dlc,
                 pkt.data_hex(),
             ])
-        self._log_file.flush()
+            self._log_file.flush()
         self.packet_ready.emit(pkt)

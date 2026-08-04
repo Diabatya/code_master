@@ -170,6 +170,12 @@ class ComLoggerWindow(QDialog):
         self._port_combo.setFont(font)
         self._port_combo.setMinimumWidth(220)
 
+        self._virtual_port_label = QLabel(tr("Виртуальный порт"))
+        self._virtual_port_label.setFont(font)
+        self._virtual_port_combo = QComboBox()
+        self._virtual_port_combo.setFont(font)
+        self._virtual_port_combo.setMinimumWidth(220)
+
         self._refresh_button = QPushButton(tr("Обновить"))
         self._refresh_button.setFont(font)
         self._refresh_button.setFixedWidth(90)
@@ -185,11 +191,11 @@ class ComLoggerWindow(QDialog):
         self._open_button.setFont(font)
         self._open_button.setFixedWidth(120)
 
-        self._main_checkbox = QCheckBox(tr("Слушать основной COM-порт"))
+        self._main_checkbox = QCheckBox(tr("Режим прокси (com0com)"))
         self._main_checkbox.setFont(font)
-        self._main_checkbox.setToolTip(tr("Не открывать отдельный порт, а отображать данные из SerialManager"))
+        self._main_checkbox.setToolTip(tr("Логер встаёт между реальным портом и виртуальной парой"))
         if self._serial_manager is None:
-            self._main_checkbox.setEnabled(False)
+            pass
 
         self._status_label = QLabel(tr("Отключено"))
         self._status_label.setFont(font)
@@ -230,6 +236,8 @@ class ComLoggerWindow(QDialog):
         top.setSpacing(10)
         top.addWidget(self._port_label)
         top.addWidget(self._port_combo, 1)
+        top.addWidget(self._virtual_port_label)
+        top.addWidget(self._virtual_port_combo, 1)
         top.addWidget(self._refresh_button)
         top.addWidget(self._baud_label)
         top.addWidget(self._baud_combo)
@@ -255,9 +263,8 @@ class ComLoggerWindow(QDialog):
         self._send_button.clicked.connect(self._on_send)
         self._clear_button.clicked.connect(self._clear_table)
         self._port_combo.currentIndexChanged.connect(self._on_port_changed)
+        self._virtual_port_combo.currentIndexChanged.connect(self._on_virtual_port_changed)
         self._main_checkbox.stateChanged.connect(self._on_main_toggled)
-        if self._serial_manager is not None:
-            self._serial_manager.connection_changed.connect(self._on_main_connection_changed)
 
     def _load_defaults(self) -> None:
         baud = self._config.get("com_logger_baud", 115200)
@@ -269,25 +276,39 @@ class ComLoggerWindow(QDialog):
             idx = self._port_combo.findData(saved_port)
             if idx >= 0:
                 self._port_combo.setCurrentIndex(idx)
+        saved_virtual = self._config.get("com_logger_virtual_port", "")
+        if saved_virtual:
+            idx = self._virtual_port_combo.findData(saved_virtual)
+            if idx >= 0:
+                self._virtual_port_combo.setCurrentIndex(idx)
+        proxy_enabled = self._config.get("com_logger_proxy", False)
+        self._main_checkbox.setChecked(proxy_enabled)
+        self._on_main_toggled(self._main_checkbox.checkState().value)
 
     def _on_port_changed(self) -> None:
         port = self._port_combo.currentData()
         if port:
             self._config.set("com_logger_port", port)
 
+    def _on_virtual_port_changed(self) -> None:
+        port = self._virtual_port_combo.currentData()
+        if port:
+            self._config.set("com_logger_virtual_port", port)
+
     def _refresh_ports(self) -> None:
-        current = self._port_combo.currentData()
-        self._port_combo.clear()
-        self._port_combo.addItem(tr("-- выберите порт --"), "")
-        for p in comports():
-            text = f"{p.device}"
-            if p.description:
-                text += f" — {p.description}"
-            self._port_combo.addItem(text, p.device)
-        if current:
-            idx = self._port_combo.findData(current)
-            if idx >= 0:
-                self._port_combo.setCurrentIndex(idx)
+        for combo in (self._port_combo, self._virtual_port_combo):
+            current = combo.currentData()
+            combo.clear()
+            combo.addItem(tr("-- выберите порт --"), "")
+            for p in comports():
+                text = f"{p.device}"
+                if p.description:
+                    text += f" — {p.description}"
+                combo.addItem(text, p.device)
+            if current:
+                idx = combo.findData(current)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
 
     def _on_open_close(self) -> None:
         if self._main_listener:
@@ -299,7 +320,7 @@ class ComLoggerWindow(QDialog):
 
     def _connect(self) -> None:
         if self._main_checkbox.isChecked():
-            self._connect_main()
+            self._connect_proxy()
             return
         port = self._port_combo.currentData()
         if not port:
@@ -318,21 +339,37 @@ class ComLoggerWindow(QDialog):
 
         self._config.set_bulk({"com_logger_port": port, "com_logger_baud": baud})
 
-    def _connect_main(self) -> None:
-        if self._serial_manager is None:
-            QMessageBox.warning(self, tr("Внимание"), tr("Основной SerialManager не доступен"))
+    def _connect_proxy(self) -> None:
+        real = self._port_combo.currentData()
+        virtual = self._virtual_port_combo.currentData()
+        if not real:
+            QMessageBox.warning(self, tr("Внимание"), tr("Выберите реальный COM-порт"))
             return
-        if not self._serial_manager.is_open():
-            QMessageBox.warning(self, tr("Внимание"), tr("Сначала подключите основной COM-порт в настройках"))
+        if not virtual:
+            QMessageBox.warning(self, tr("Внимание"), tr("Выберите виртуальный COM-порт (com0com)"))
             return
+        if real == virtual:
+            QMessageBox.warning(self, tr("Внимание"), tr("Реальный и виртуальный порты должны различаться"))
+            return
+        baud = self._baud_combo.currentData()
+        if baud is None:
+            baud = 115200
+
         device_name = self._config.get("device_type_name", "")
-        ok = self._listen_mode.enable(self._serial_manager, get_log_dir(), device_name)
+        ok = self._listen_mode.enable(
+            log_dir=get_log_dir(),
+            device_name=device_name,
+            mode="proxy",
+            real_port=real,
+            virtual_port=virtual,
+            baudrate=baud,
+        )
         if not ok:
             QMessageBox.warning(self, tr("Внимание"), tr("Не удалось запустить режим 'Только слушать'"))
             return
         self._main_listener = True
         self._set_connected(True)
-        self._status_label.setText(tr("Слушаю основной порт, CSV: {0}").format(self._listen_mode.log_path or "-"))
+        self._status_label.setText(tr("Прокси-сниффер, CSV: {0}").format(self._listen_mode.log_path or "-"))
 
     def _disconnect(self) -> None:
         if self._reader is not None:
@@ -353,13 +390,21 @@ class ComLoggerWindow(QDialog):
 
     def _on_main_toggled(self, state: int) -> None:
         checked = state == Qt.CheckState.Checked.value
+        self._config.set("com_logger_proxy", checked)
         if checked:
             self._main_checkbox.setStyleSheet("QCheckBox { background-color: #4CAF50; color: #FFFFFF; padding: 4px 8px; border-radius: 4px; }")
-            self._port_combo.setEnabled(False)
-            self._baud_combo.setEnabled(False)
-            self._refresh_button.setEnabled(False)
+            self._port_label.setText(tr("Реальный порт"))
+            self._virtual_port_label.setVisible(True)
+            self._virtual_port_combo.setVisible(True)
+            self._port_combo.setEnabled(not self._main_listener)
+            self._virtual_port_combo.setEnabled(not self._main_listener)
+            self._baud_combo.setEnabled(not self._main_listener)
+            self._refresh_button.setEnabled(not self._main_listener)
         else:
             self._main_checkbox.setStyleSheet("")
+            self._port_label.setText(tr("Порт"))
+            self._virtual_port_label.setVisible(False)
+            self._virtual_port_combo.setVisible(False)
             self._port_combo.setEnabled(not self._main_listener)
             self._baud_combo.setEnabled(not self._main_listener)
             self._refresh_button.setEnabled(True)
@@ -374,6 +419,11 @@ class ComLoggerWindow(QDialog):
         if not self._main_checkbox.isChecked():
             self._port_combo.setEnabled(not connected)
             self._baud_combo.setEnabled(not connected)
+        else:
+            self._port_combo.setEnabled(not connected)
+            self._virtual_port_combo.setEnabled(not connected)
+            self._baud_combo.setEnabled(not connected)
+            self._refresh_button.setEnabled(not connected)
         if not connected:
             self._status_label.setText(tr("Отключено"))
 
