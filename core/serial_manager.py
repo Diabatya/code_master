@@ -53,6 +53,7 @@ class SerialReader(QThread):
         self._running = True
         self._buffer = bytearray()
         self._last_heartbeat = 0.0
+        self._last_data_time = time.time()
         self._error_count = 0
 
     def _is_open(self) -> bool:
@@ -88,6 +89,7 @@ class SerialReader(QThread):
                     chunk = self._port.read(min(available, 256))
                     if chunk:
                         logger.debug("SerialReader: прочитано %d байт", len(chunk))
+                        self._last_data_time = now
                         self.new_raw_data.emit(chunk, time.time())
                         self._buffer.extend(chunk)
                         self._error_count = 0
@@ -101,9 +103,23 @@ class SerialReader(QThread):
                                 len(bytes(frame["data"])),
                             )
                             self.new_frame.emit(frame)
+                elif now - self._last_data_time > 5.0:
+                    # Периодическая проверка жизни порта при долгом простое
+                    byte = self._port.read(1)
+                    if byte:
+                        self._last_data_time = now
+                        self.new_raw_data.emit(byte, time.time())
+                        self._buffer.extend(byte)
+                        self._error_count = 0
+                    else:
+                        self.msleep(5)
                 else:
                     self._error_count = 0
                     self.msleep(5)
+            except (serial.SerialException, OSError) as exc:
+                logger.error("Ошибка COM-порта, соединение разорвано: %s", exc)
+                self.error.emit(str(exc))
+                self._running = False
             except Exception as exc:  # noqa: BLE001
                 self._error_count += 1
                 logger.exception("Ошибка в потоке чтения COM-порта (подряд %d)", self._error_count)

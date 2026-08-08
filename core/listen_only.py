@@ -326,6 +326,7 @@ class ListenOnlyMode(QObject):
                 _ProxyWorker(self._virtual_ser, self._real_ser, False, self._on_proxy_chunk, self),
             ]
             for worker in self._proxy_workers:
+                worker.finished.connect(self._on_proxy_worker_finished)
                 worker.start()
         else:
             self._stop_decoder()
@@ -385,6 +386,11 @@ class ListenOnlyMode(QObject):
     def _on_proxy_chunk(self, is_rx: bool, chunk: bytes) -> None:
         self._raw_queue.put((is_rx, chunk))
         self.raw_chunk_ready.emit(is_rx, chunk)
+
+    def _on_proxy_worker_finished(self) -> None:
+        if self._active:
+            logger.warning("Поток proxy завершился, отключаю режим")
+            self.disable()
 
     def _on_packet(self, pkt: CanPacket) -> None:
         with self._lock:

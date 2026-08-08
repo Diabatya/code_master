@@ -358,7 +358,7 @@ class MainWindow(QMainWindow):
     def _on_com_logger_clicked(self) -> None:
         """Открывает отдельное окно COM-логгера."""
         if self._com_logger_window is None:
-            self._com_logger_window = ComLoggerWindow(self._serial_manager, self)
+            self._com_logger_window = ComLoggerWindow(self._serial_manager)
         self._com_logger_window.show()
         self._com_logger_window.raise_()
         self._com_logger_window.activateWindow()
@@ -517,8 +517,8 @@ class MainWindow(QMainWindow):
         show_help(self)
 
     def _on_heartbeat(self) -> None:
-        """Индикатор порта становится зелёным при активности."""
-        self._port_indicator.setStyleSheet("color: #4CAF50; font-size: 14px; background: transparent;")
+        """Пульс активности — обновляет индикатор по состоянию соединения."""
+        self._update_port_indicator()
 
     def _reset_port_indicator(self) -> None:
         """Сбрасывает индикатор порта в базовое состояние."""

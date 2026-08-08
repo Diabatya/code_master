@@ -146,6 +146,7 @@ class ComLoggerWindow(QDialog):
         self.setWindowTitle(tr("COM логгер"))
         self.resize(950, 700)
         self.setWindowFlag(Qt.WindowType.Window, True)
+        self.setSizeGripEnabled(True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
 
         self._config = Config()
@@ -155,6 +156,7 @@ class ComLoggerWindow(QDialog):
         self._listen_mode = ListenOnlyMode(self)
         self._listen_mode.packet_ready.connect(self._on_packet)
         self._listen_mode.raw_chunk_ready.connect(self._on_raw_chunk)
+        self._listen_mode.is_active_changed.connect(self._set_connected)
 
         self._create_widgets()
         self._build_layout()
@@ -169,17 +171,17 @@ class ComLoggerWindow(QDialog):
         self._port_label.setFont(font)
         self._port_combo = QComboBox()
         self._port_combo.setFont(font)
-        self._port_combo.setMinimumWidth(220)
+        self._port_combo.setMinimumWidth(160)
 
         self._virtual_port_label = QLabel(tr("Виртуальный порт"))
         self._virtual_port_label.setFont(font)
         self._virtual_port_combo = QComboBox()
         self._virtual_port_combo.setFont(font)
-        self._virtual_port_combo.setMinimumWidth(220)
+        self._virtual_port_combo.setMinimumWidth(160)
 
         self._refresh_button = QPushButton(tr("Обновить"))
         self._refresh_button.setFont(font)
-        self._refresh_button.setFixedWidth(90)
+        self._refresh_button.setMinimumWidth(80)
 
         self._baud_label = QLabel(tr("Скорость"))
         self._baud_label.setFont(font)
@@ -190,7 +192,7 @@ class ComLoggerWindow(QDialog):
 
         self._open_button = QPushButton(tr("Подключить"))
         self._open_button.setFont(font)
-        self._open_button.setFixedWidth(120)
+        self._open_button.setMinimumWidth(100)
 
         self._main_checkbox = QCheckBox(tr("Режим прокси (com0com)"))
         self._main_checkbox.setFont(font)
@@ -426,17 +428,20 @@ class ComLoggerWindow(QDialog):
             self._baud_combo.setEnabled(not connected)
             self._refresh_button.setEnabled(not connected)
         if not connected:
+            self._main_listener = False
+            self._reader = None
             self._status_label.setText(tr("Отключено"))
 
     def _on_data_received(self, data: bytes, timestamp: float) -> None:
         self._add_row(tr("RX"), data, timestamp, self._rx_color())
 
     def _on_packet(self, pkt: CanPacket) -> None:
-        direction = f"{'←' if pkt.is_rx else '→'} 0x{pkt.can_id:04X} ({pkt.dlc})"
+        prefix = tr("МК") if pkt.is_rx else tr("Конф")
+        direction = f"{prefix} 0x{pkt.can_id:04X} ({pkt.dlc})"
         self._add_row(direction, pkt.data, time.time(), self._rx_color() if pkt.is_rx else self._tx_color())
 
     def _on_raw_chunk(self, is_rx: bool, data: bytes) -> None:
-        direction = tr("←") if is_rx else tr("→")
+        direction = tr("МК") if is_rx else tr("Конф")
         self._add_row(direction, data, time.time(), self._rx_color() if is_rx else self._tx_color())
 
     def _on_send(self) -> None:
