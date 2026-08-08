@@ -147,14 +147,14 @@ class _ProxyWorker(QThread):
         src: serial.Serial,
         dst: serial.Serial,
         is_rx: bool,
-        raw_queue: Queue,
+        callback: Callable[[bool, bytes], None],
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
         self._src = src
         self._dst = dst
         self._is_rx = is_rx
-        self._raw_queue = raw_queue
+        self._callback = callback
         self._running = True
 
     def run(self) -> None:
@@ -170,7 +170,7 @@ class _ProxyWorker(QThread):
                     self._dst.write(chunk)
                 except (serial.SerialException, OSError):
                     break
-                self._raw_queue.put((self._is_rx, chunk))
+                self._callback(self._is_rx, chunk)
             else:
                 self.msleep(5)
         logger.info("Поток проброса %s остановлен", direction)
@@ -184,6 +184,7 @@ class ListenOnlyMode(QObject):
     """Режим «Только слушать» с поддержкой embedded и proxy."""
 
     packet_ready = Signal(object)
+    raw_chunk_ready = Signal(bool, bytes)
     is_active_changed = Signal(bool)
     error = Signal(str)
 
@@ -321,8 +322,8 @@ class ListenOnlyMode(QObject):
 
             self._mode = "proxy"
             self._proxy_workers = [
-                _ProxyWorker(self._real_ser, self._virtual_ser, True, self._raw_queue, self),
-                _ProxyWorker(self._virtual_ser, self._real_ser, False, self._raw_queue, self),
+                _ProxyWorker(self._real_ser, self._virtual_ser, True, self._on_proxy_chunk, self),
+                _ProxyWorker(self._virtual_ser, self._real_ser, False, self._on_proxy_chunk, self),
             ]
             for worker in self._proxy_workers:
                 worker.start()
@@ -380,6 +381,10 @@ class ListenOnlyMode(QObject):
 
     def _on_raw_tx(self, data: bytes, _timestamp: float) -> None:
         self._raw_queue.put((False, data))
+
+    def _on_proxy_chunk(self, is_rx: bool, chunk: bytes) -> None:
+        self._raw_queue.put((is_rx, chunk))
+        self.raw_chunk_ready.emit(is_rx, chunk)
 
     def _on_packet(self, pkt: CanPacket) -> None:
         with self._lock:

@@ -154,6 +154,7 @@ class ComLoggerWindow(QDialog):
         self._main_listener: bool = False
         self._listen_mode = ListenOnlyMode(self)
         self._listen_mode.packet_ready.connect(self._on_packet)
+        self._listen_mode.raw_chunk_ready.connect(self._on_raw_chunk)
 
         self._create_widgets()
         self._build_layout()
@@ -433,6 +434,10 @@ class ComLoggerWindow(QDialog):
     def _on_packet(self, pkt: CanPacket) -> None:
         direction = f"{'←' if pkt.is_rx else '→'} 0x{pkt.can_id:04X} ({pkt.dlc})"
         self._add_row(direction, pkt.data, time.time(), self._rx_color() if pkt.is_rx else self._tx_color())
+
+    def _on_raw_chunk(self, is_rx: bool, data: bytes) -> None:
+        direction = tr("←") if is_rx else tr("→")
+        self._add_row(direction, data, time.time(), self._rx_color() if is_rx else self._tx_color())
 
     def _on_send(self) -> None:
         if self._main_listener:
