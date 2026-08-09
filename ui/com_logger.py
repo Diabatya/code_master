@@ -4,6 +4,7 @@ import re
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
 import serial
@@ -146,6 +147,8 @@ class ComLoggerWindow(QDialog):
         self.setWindowTitle(tr("COM логгер"))
         self.resize(950, 700)
         self.setWindowFlag(Qt.WindowType.Window, True)
+        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
         self.setSizeGripEnabled(True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
 
@@ -372,7 +375,10 @@ class ComLoggerWindow(QDialog):
             return
         self._main_listener = True
         self._set_connected(True)
-        self._status_label.setText(tr("Прокси-сниффер, CSV: {0}").format(self._listen_mode.log_path or "-"))
+        log_path = self._listen_mode.log_path
+        short = Path(log_path).name if log_path else "-"
+        self._status_label.setText(tr("CSV: {0}").format(short))
+        self._status_label.setToolTip(log_path or "-")
 
     def _disconnect(self) -> None:
         if self._reader is not None:

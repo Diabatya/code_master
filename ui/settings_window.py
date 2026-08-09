@@ -193,6 +193,8 @@ class ConnectionTab(QWidget):
         self._auto_baud_button.setEnabled(not is_open)
         if is_open:
             self._set_status(tr("Подключено"), error=False)
+        else:
+            self._set_status(tr("Не подключено"), error=True)
 
 
 class SettingsWindow(QMainWindow):

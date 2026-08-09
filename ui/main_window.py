@@ -366,9 +366,9 @@ class MainWindow(QMainWindow):
 
     def _on_configure_clicked(self) -> None:
         """Сначала открывает диалог подключения, затем окно настроек CAN."""
-        dialog = QDialog(self)
+        dialog = QDialog()
         dialog.setWindowTitle(tr("Подключение"))
-        dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dialog.resize(450, 300)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -378,11 +378,15 @@ class MainWindow(QMainWindow):
         cancel_button.clicked.connect(dialog.reject)
         layout.addWidget(cancel_button)
         connection.connected.connect(dialog.accept)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
+        dialog.accepted.connect(self._open_settings_window)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _open_settings_window(self) -> None:
+        """Показывает окно настроек CAN."""
         if self._settings_window is None:
-            self._settings_window = SettingsWindow(self._serial_manager, self)
-            self._settings_window.setWindowModality(Qt.WindowModality.ApplicationModal)
+            self._settings_window = SettingsWindow(self._serial_manager)
         self._settings_window.show()
         self._settings_window.raise_()
         self._settings_window.activateWindow()
@@ -532,7 +536,7 @@ class MainWindow(QMainWindow):
             self._port_label.setText(self._serial_manager.current_port_name())
         elif self._config.get("port"):
             self._port_indicator.setStyleSheet(f"color: #F44336; {base_style}")
-            self._port_label.setText(tr("Порт не открыт"))
+            self._port_label.setText(tr("Не подключено"))
         else:
             self._port_indicator.setStyleSheet(f"color: #666666; {base_style}")
             self._port_label.setText(tr("Нет подключения"))
