@@ -140,10 +140,50 @@ def parse_all_frames(raw: bytes) -> tuple[List[Dict[str, object]], bytes]:
     while True:
         frame = unpack_can_frame(raw)
         if frame is None:
-            break
+            # Кадр не собрался. Возможны два случая:
+            #  1) данных ещё недостаточно — ждём следующую порцию;
+            #  2) маркер найден, но кадр битый (не сошлась контрольная сумма
+            #     или некорректный DLC) — тогда пропускаем этот байт-маркер,
+            #     иначе буфер навсегда застрянет на повреждённом байте и будет
+            #     расти без ограничений, а новые кадры перестанут разбираться.
+            marker_index = _find_marker(raw)
+            if marker_index < 0:
+                # Маркеров нет вовсе — хранить нечего, кроме возможного хвоста
+                raw = b""
+                break
+            if _is_incomplete(raw, marker_index):
+                # Ждём остаток кадра, но сначала отбрасываем мусор до маркера
+                raw = raw[marker_index:]
+                break
+            raw = raw[marker_index + 1 :]
+            continue
         frames.append(frame)
-        # Ищем маркер текущего кадра и сдвигаем буфер на его длину
-        marker_index = raw.find(bytes([MARKER_RX_EXT])) if frame["extended"] else raw.find(bytes([MARKER_RX]))
-        total_length = (8 if frame["extended"] else 6) + frame["data"].__len__()  # type: ignore[arg-type]
+        marker_index = _find_marker(raw)
+        total_length = (8 if frame["extended"] else 6) + len(frame["data"])  # type: ignore[arg-type]
         raw = raw[marker_index + total_length :]
     return frames, raw
+
+
+def _find_marker(raw: bytes) -> int:
+    """Возвращает индекс ближайшего RX-маркера или -1, если маркеров нет."""
+    std = raw.find(bytes([MARKER_RX]))
+    ext = raw.find(bytes([MARKER_RX_EXT]))
+    if std < 0:
+        return ext
+    if ext < 0:
+        return std
+    return min(std, ext)
+
+
+def _is_incomplete(raw: bytes, marker_index: int) -> bool:
+    """True, если от маркера ещё не пришло достаточно байт для полного кадра."""
+    extended = raw[marker_index] == MARKER_RX_EXT
+    header = 8 if extended else 6
+    available = len(raw) - marker_index
+    if available < header:
+        return True
+    length = raw[marker_index + (6 if extended else 4)]
+    if length > 8:
+        # Заведомо битый кадр — ждать бессмысленно
+        return False
+    return available < (4 + (4 if extended else 2) + length)

@@ -378,6 +378,8 @@ class MainWindow(QMainWindow):
         cancel_button.clicked.connect(dialog.reject)
         layout.addWidget(cancel_button)
         connection.connected.connect(dialog.accept)
+        # Диалог удаляется вместе с вкладкой, поэтому сначала гасим её поток
+        dialog.finished.connect(lambda _result: connection.shutdown())
         dialog.accepted.connect(self._open_settings_window)
         dialog.show()
         dialog.raise_()

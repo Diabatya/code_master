@@ -6,6 +6,7 @@
 """
 
 import json
+import os
 import threading
 from copy import deepcopy
 from pathlib import Path
@@ -84,12 +85,24 @@ class Config:
                 logger.error("Ошибка загрузки конфигурации: %s", exc)
 
     def save(self) -> None:
-        """Сохраняет текущие настройки в config.json."""
+        """Атомарно сохраняет текущие настройки в config.json.
+
+        Пишем во временный файл и подменяем целевой через os.replace: при сбое
+        посреди записи прежний config.json остаётся целым, а не обрезается.
+        """
+        tmp_path = self._file_path.with_name(self._file_path.name + ".tmp")
         try:
-            with self._file_path.open("w", encoding="utf-8") as file:
+            with tmp_path.open("w", encoding="utf-8") as file:
                 json.dump(self._data, file, ensure_ascii=False, indent=2)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(tmp_path, self._file_path)
         except OSError as exc:
             logger.error("Ошибка сохранения конфигурации: %s", exc)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def get(self, key: str, default: Any = None) -> Any:
         """Возвращает значение настройки по ключу."""

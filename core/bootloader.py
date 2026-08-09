@@ -73,7 +73,12 @@ class Bootloader:
             self.port.open()
             logger.info("Порт перенастроен для bootloader: Even, 1 стоп-бит")
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Не удалось перенастроить порт для bootloader: %s", exc)
+            # Раньше здесь был только warning: порт оставался закрытым, и
+            # следующая команда падала с невнятной SerialException.
+            logger.error("Не удалось перенастроить порт для bootloader: %s", exc)
+            raise BootloaderError(
+                f"Не удалось открыть порт {getattr(self.port, 'port', '?')} для бутлоадера: {exc}"
+            ) from exc
 
     def _read_byte(self, timeout: float = 1.0) -> int:
         """Считывает один байт из порта с таймаутом.
@@ -87,8 +92,12 @@ class Bootloader:
         Raises:
             BootloaderError: если таймаут или нет данных.
         """
+        previous_timeout = self.port.timeout
         self.port.timeout = timeout
-        byte = self.port.read(1)
+        try:
+            byte = self.port.read(1)
+        finally:
+            self.port.timeout = previous_timeout
         if not byte:
             raise BootloaderError("Таймаут ожидания ответа от бутлоадера")
         return byte[0]

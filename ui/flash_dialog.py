@@ -1424,6 +1424,7 @@ class FlashDialog(QDialog):
             QMessageBox.warning(self, tr("Внимание"), str(exc))
             return
         logger.info("Запись только конфигурации: %s", config_file)
+        self._release_serial_port(method)
         self._flash_worker = FlashWorker([config_file], method, self._config, self)
         self._flash_worker.log_line.connect(self._log)
         self._flash_worker.progress.connect(self._progress_bar.setValue)
@@ -1595,11 +1596,7 @@ class FlashDialog(QDialog):
             return
         logger.info("Старт прошивки: метод=%s, файлы=%s", method, files)
         prepared = list(files)
-        # Для COM-портов (UART/USB CDC) порт может быть занят SerialManager — освобождаем
-        self._port_was_open = self._serial_manager.is_open() if self._serial_manager else False
-        if method in ("uart", "usb_cdc") and self._port_was_open:
-            logger.info("Закрываю SerialManager перед прошивкой через %s", method)
-            self._serial_manager.close_port()
+        self._release_serial_port(method)
         self._flash_button.setEnabled(False)
         self._progress_bar.setValue(0)
         self._flash_worker = FlashWorker(prepared, method, self._config, self)
@@ -1608,24 +1605,43 @@ class FlashDialog(QDialog):
         self._flash_worker.finished.connect(self._on_flash_finished)
         self._flash_worker.start()
 
+    def _release_serial_port(self, method: str) -> None:
+        """Освобождает COM-порт перед операцией, если его держит SerialManager.
+
+        Для UART/USB CDC порт занят приложением, и программатор не сможет его
+        открыть. Запоминаем, был ли порт открыт, чтобы вернуть его обратно.
+        """
+        self._port_was_open = False
+        if method not in ("uart", "usb_cdc") or self._serial_manager is None:
+            return
+        if not self._serial_manager.is_open():
+            return
+        self._port_was_open = True
+        logger.info("Закрываю SerialManager перед операцией через %s", method)
+        self._serial_manager.close_port()
+
+    def _restore_serial_port(self) -> None:
+        """Возвращает COM-порт приложению, если он был закрыт перед операцией."""
+        if not getattr(self, "_port_was_open", False) or self._serial_manager is None:
+            return
+        self._port_was_open = False
+        try:
+            logger.info("Восстановление SerialManager после операции")
+            self._serial_manager.open_port(
+                self._config.get("port", ""),
+                self._config.get("baudrate", 115200),
+                emulation=self._config.get("emulation", False),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Не удалось восстановить COM-порт: %s", exc)
+
     def _on_flash_finished(self, success: bool, message: str) -> None:
         logger.info("Прошивка завершена: success=%s, message=%s", success, message)
         self._flash_button.setEnabled(True)
         self._config_button.setEnabled(True)
         self._read_button.setEnabled(True)
         self._log(message)
-        # Восстанавливаем COM-порт, если он был открыт до прошивки
-        method = self._method_combo.currentData()
-        if method in ("uart", "usb_cdc") and getattr(self, "_port_was_open", False) and self._serial_manager:
-            try:
-                logger.info("Восстановление SerialManager после прошивки")
-                self._serial_manager.open_port(
-                    self._config.get("port", ""),
-                    self._config.get("baudrate", 115200),
-                    emulation=self._config.get("emulation", False),
-                )
-            except Exception:  # noqa: BLE001
-                pass
+        self._restore_serial_port()
         if success:
             QMessageBox.information(self, tr("Готово"), message)
         else:
@@ -1653,6 +1669,7 @@ class FlashDialog(QDialog):
             return
         self._read_button.setEnabled(False)
         self._progress_bar.setValue(0)
+        self._release_serial_port(method)
         self._read_worker = ReadWorker(method, self._config, size=size_kb * 1024, parent=self)
         self._read_worker.log_line.connect(self._log)
         self._read_worker.finished.connect(self._on_read_finished)
@@ -1660,6 +1677,7 @@ class FlashDialog(QDialog):
 
     def _on_read_finished(self, success: bool, message: str, data: object, base: int) -> None:
         self._read_button.setEnabled(True)
+        self._restore_serial_port()
         if not success or not isinstance(data, bytes) or not data:
             self._log(message)
             QMessageBox.critical(self, tr("Ошибка"), message)
@@ -1694,6 +1712,7 @@ class FlashDialog(QDialog):
         start = flash_size_kb * 1024 - page_size
         self._read_config_button.setEnabled(False)
         self._progress_bar.setValue(0)
+        self._release_serial_port(method)
         self._read_worker = ReadWorker(method, self._config, size=page_size, start=start, parent=self)
         self._read_worker.log_line.connect(self._log)
         self._read_worker.finished.connect(self._on_config_read_finished)
@@ -1701,6 +1720,7 @@ class FlashDialog(QDialog):
 
     def _on_config_read_finished(self, success: bool, message: str, data: object, base: int) -> None:
         self._read_config_button.setEnabled(True)
+        self._restore_serial_port()
         if not success or not isinstance(data, bytes) or not data:
             self._log(message)
             QMessageBox.critical(self, tr("Ошибка"), message)

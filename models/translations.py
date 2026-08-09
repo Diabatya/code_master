@@ -575,8 +575,8 @@ class Translator:
                 "Открыт COM-логгер": "COM logger opened",
                 "COM логгер": "COM logger",
                 "Порт": "Port",
-                "Скорость": "Baudrate",
-                "Обновить": "Refresh",
+                "Обновить список": "Refresh",
+                "Скорость порта": "Baudrate",
                 "Подключить": "Connect",
                 "Отключить": "Disconnect",
                 "Подключено": "Connected",
@@ -598,7 +598,6 @@ class Translator:
                 "TX": "TX",
                 "Мониторинг": "Monitoring",
                 "Не удалось открыть порт для отправки": "Could not open port for sending",
-                "Внимание": "Attention",
                 "-- выберите порт --": "-- select port --",
             },
         }

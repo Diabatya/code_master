@@ -244,6 +244,10 @@ class ListenOnlyMode(QObject):
 
     def _stop_decoder(self) -> None:
         if self._decoder is not None:
+            try:
+                self._decoder.packet_ready.disconnect(self._on_packet)
+            except (RuntimeError, TypeError):
+                pass
             self._decoder.stop()
             self._decoder = None
         while not self._raw_queue.empty():

@@ -32,6 +32,9 @@ logger = get_logger(__name__)
 
 SerialPort = Union[serial.Serial, FakeSerial]
 
+# Предохранитель от бесконечного роста буфера при потоке мусора без валидных кадров
+MAX_BUFFER_SIZE = 65536
+
 
 class SerialReader(QThread):
     """Поток непрерывного чтения данных из COM-порта."""
@@ -94,7 +97,14 @@ class SerialReader(QThread):
                         self._buffer.extend(chunk)
                         self._error_count = 0
                         # Парсим все полные кадры из буфера и сдвигаем буфер
-                        frames, self._buffer = parse_all_frames(self._buffer)
+                        frames, remainder = parse_all_frames(self._buffer)
+                        if len(remainder) > MAX_BUFFER_SIZE:
+                            logger.warning(
+                                "Буфер приёма превысил %d байт, отбрасываю накопленный мусор",
+                                MAX_BUFFER_SIZE,
+                            )
+                            remainder = remainder[-MAX_BUFFER_SIZE:]
+                        self._buffer = bytearray(remainder)
                         for frame in frames:
                             logger.debug(
                                 "Принят CAN-кадр: ch=%s id=0x%08X dlc=%d",
@@ -223,13 +233,7 @@ class SerialManager(QObject):
                 )
                 logger.info("Открыт реальный порт %s на скорости %d (dtr=%s, rts=%s)", port_name, baudrate, self._port.dtr, self._port.rts)
 
-            self._reader = SerialReader(self._port, self)
-            self._reader.new_frame.connect(self.new_can_frame)
-            self._reader.new_raw_data.connect(self.raw_data)
-            self._reader.error.connect(self.error_occurred)
-            self._reader.heartbeat.connect(self.heartbeat)
-            self._reader.finished.connect(self._on_reader_finished)
-            self._reader.start()
+            self._start_reader()
             self._detect_device_id()
             self._config.set_bulk(
                 {"port": port_name, "baudrate": baudrate, "emulation": emulation, "auto_reconnect": auto_reconnect, "error_probability": error_probability}
@@ -459,11 +463,17 @@ class SerialManager(QObject):
             self._reader = None
 
     def _start_reader(self) -> None:
-        """Создаёт и запускает поток чтения повторно."""
+        """Создаёт и запускает поток чтения повторно.
+
+        Все сигналы читателя подключаются здесь, чтобы после перезапуска
+        (ping_device, _detect_device_id, auto_detect_can_speed) не терялся
+        ни один из них — в частности raw_data, на котором работает COM-логгер.
+        """
         if self._port is None or not self.is_open():
             return
         self._reader = SerialReader(self._port, self)
         self._reader.new_frame.connect(self.new_can_frame)
+        self._reader.new_raw_data.connect(self.raw_data)
         self._reader.error.connect(self.error_occurred)
         self._reader.heartbeat.connect(self.heartbeat)
         self._reader.finished.connect(self._on_reader_finished)

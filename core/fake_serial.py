@@ -145,26 +145,30 @@ class FakeSerial:
         self._emit_replay_frame()
 
     def _emit_replay_frame(self) -> None:
-        """Вставляет в буфер следующий кадр из дампа и планирует следующий."""
-        if not self._is_open or not self._replay_enabled:
-            return
-        if self._replay_index >= len(self._replay_data):
-            logger.info("Воспроизведение дампа завершено")
-            return
+        """Вставляет в буфер все просроченные кадры и планирует следующий.
 
-        rel_time, channel, can_id, data = self._replay_data[self._replay_index]
-        elapsed = time.time() - self._replay_start_time
-        delay = rel_time - elapsed
+        Цикл вместо рекурсии: на больших дампах рекурсия упиралась
+        в предел стека и падала с RecursionError.
+        """
+        while True:
+            if not self._is_open or not self._replay_enabled:
+                return
+            if self._replay_index >= len(self._replay_data):
+                logger.info("Воспроизведение дампа завершено")
+                return
 
-        if delay > 0.001:
-            self._replay_timer.start(int(delay * 1000))
-            return
+            rel_time, channel, can_id, data = self._replay_data[self._replay_index]
+            elapsed = time.time() - self._replay_start_time
+            delay = rel_time - elapsed
 
-        frame = self._build_rx_frame(channel, can_id, data)
-        with self._buffer_lock:
-            self._rx_buffer.extend(frame)
-        self._replay_index += 1
-        self._emit_replay_frame()
+            if delay > 0.001:
+                self._replay_timer.start(int(delay * 1000))
+                return
+
+            frame = self._build_rx_frame(channel, can_id, data)
+            with self._buffer_lock:
+                self._rx_buffer.extend(frame)
+            self._replay_index += 1
 
     def _schedule_frame(self) -> None:
         """Добавляет в буфер случайный CAN-кадр и планирует следующий."""

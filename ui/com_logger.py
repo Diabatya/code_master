@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -174,28 +175,27 @@ class ComLoggerWindow(QDialog):
         self._port_label.setFont(font)
         self._port_combo = QComboBox()
         self._port_combo.setFont(font)
-        self._port_combo.setMinimumWidth(160)
+        self._shrinkable(self._port_combo)
 
         self._virtual_port_label = QLabel(tr("Виртуальный порт"))
         self._virtual_port_label.setFont(font)
         self._virtual_port_combo = QComboBox()
         self._virtual_port_combo.setFont(font)
-        self._virtual_port_combo.setMinimumWidth(160)
+        self._shrinkable(self._virtual_port_combo)
 
-        self._refresh_button = QPushButton(tr("Обновить"))
+        self._refresh_button = QPushButton(tr("Обновить список"))
         self._refresh_button.setFont(font)
-        self._refresh_button.setMinimumWidth(80)
 
-        self._baud_label = QLabel(tr("Скорость"))
+        self._baud_label = QLabel(tr("Скорость порта"))
         self._baud_label.setFont(font)
         self._baud_combo = QComboBox()
         self._baud_combo.setFont(font)
         for b in BAUDRATES:
             self._baud_combo.addItem(str(b), b)
+        self._shrinkable(self._baud_combo)
 
         self._open_button = QPushButton(tr("Подключить"))
         self._open_button.setFont(font)
-        self._open_button.setMinimumWidth(100)
 
         self._main_checkbox = QCheckBox(tr("Режим прокси (com0com)"))
         self._main_checkbox.setFont(font)
@@ -205,6 +205,8 @@ class ComLoggerWindow(QDialog):
 
         self._status_label = QLabel(tr("Отключено"))
         self._status_label.setFont(font)
+        # Длинный статус (путь к CSV) не должен раздвигать окно по горизонтали
+        self._status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
         self._table = QTableWidget()
         self._table.setFont(QFont("Consolas", 10))
@@ -225,6 +227,7 @@ class ComLoggerWindow(QDialog):
         self._send_input.setFont(QFont("Consolas", 10))
         self._send_input.setPlaceholderText(tr("Введите HEX: 01 02 03 или текст"))
         self._send_input.returnPressed.connect(self._on_send)
+        self._send_input.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
 
         self._send_button = QPushButton(tr("Отправить"))
         self._send_button.setFont(font)
@@ -233,30 +236,42 @@ class ComLoggerWindow(QDialog):
         self._clear_button = QPushButton(tr("Очистить"))
         self._clear_button.setFont(font)
 
+    @staticmethod
+    def _shrinkable(widget: QWidget) -> None:
+        """Разрешает виджету сжиматься, чтобы окно можно было сузить."""
+        widget.setMinimumWidth(70)
+        widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+
     def _build_layout(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
-        top = QHBoxLayout()
-        top.setSpacing(10)
-        top.addWidget(self._port_label)
-        top.addWidget(self._port_combo, 1)
-        top.addWidget(self._virtual_port_label)
-        top.addWidget(self._virtual_port_combo, 1)
-        top.addWidget(self._refresh_button)
-        top.addWidget(self._baud_label)
-        top.addWidget(self._baud_combo)
-        top.addWidget(self._open_button)
-        top.addWidget(self._main_checkbox)
-        top.addWidget(self._status_label)
-        top.addStretch()
-        root.addLayout(top)
+        # Два ряда вместо одного: иначе суммарная минимальная ширина
+        # элементов управления не давала сузить окно.
+        ports = QHBoxLayout()
+        ports.setSpacing(8)
+        ports.addWidget(self._port_label)
+        ports.addWidget(self._port_combo, 1)
+        ports.addWidget(self._virtual_port_label)
+        ports.addWidget(self._virtual_port_combo, 1)
+        ports.addWidget(self._refresh_button)
+        root.addLayout(ports)
+
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        controls.addWidget(self._baud_label)
+        controls.addWidget(self._baud_combo)
+        controls.addWidget(self._open_button)
+        controls.addWidget(self._main_checkbox)
+        controls.addStretch()
+        root.addLayout(controls)
+        root.addWidget(self._status_label)
 
         root.addWidget(self._table, 1)
 
         bottom = QHBoxLayout()
-        bottom.setSpacing(10)
+        bottom.setSpacing(8)
         bottom.addWidget(self._hex_checkbox)
         bottom.addWidget(self._send_input, 1)
         bottom.addWidget(self._send_button)

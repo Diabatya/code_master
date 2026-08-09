@@ -1,6 +1,7 @@
 """Singleton-менеджер для загруженных DBC-файлов."""
 
 import shutil
+import threading
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -20,12 +21,16 @@ class DBCManager:
     """Хранит и управляет загруженными DBC-описаниями CAN-сообщений."""
 
     _instance: Optional["DBCManager"] = None
+    _new_lock = threading.Lock()
 
     def __new__(cls) -> "DBCManager":
         """Создаёт или возвращает единственный экземпляр."""
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
+            with cls._new_lock:
+                if cls._instance is None:
+                    instance = super().__new__(cls)
+                    instance._initialized = False
+                    cls._instance = instance
         return cls._instance
 
     def __init__(self) -> None:

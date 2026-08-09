@@ -169,10 +169,31 @@ class ComSettingsDialog(QDialog):
         self._auto_baud_button.setEnabled(False)
         self._set_status(tr("Определение скорости..."), error=False)
 
+        self._stop_baud_detector()
         self._baud_detector = BaudRateDetector(port_text, self)
         self._baud_detector.baud_found.connect(self._on_baud_found)
         self._baud_detector.finished_no_result.connect(self._on_baud_not_found)
         self._baud_detector.start()
+
+    def _stop_baud_detector(self) -> None:
+        """Останавливает предыдущий поток автоопределения, если он ещё жив."""
+        detector = getattr(self, "_baud_detector", None)
+        if detector is None:
+            return
+        try:
+            detector.baud_found.disconnect(self._on_baud_found)
+            detector.finished_no_result.disconnect(self._on_baud_not_found)
+        except (RuntimeError, TypeError):
+            pass
+        if detector.isRunning():
+            detector.requestInterruption()
+            detector.wait(2000)
+        self._baud_detector = None
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        """Гасит фоновый поток, чтобы он не обращался к закрытому диалогу."""
+        self._stop_baud_detector()
+        super().closeEvent(event)
 
     def _on_baud_found(self, baud: int) -> None:
         self._auto_baud_button.setEnabled(True)
