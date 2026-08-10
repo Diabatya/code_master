@@ -247,8 +247,7 @@ class ComLoggerWindow(QDialog):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
 
-        # Два ряда вместо одного: иначе суммарная минимальная ширина
-        # элементов управления не давала сузить окно.
+        # Порт и виртуальный порт — верхний ряд
         ports = QHBoxLayout()
         ports.setSpacing(8)
         ports.addWidget(self._port_label)
@@ -258,15 +257,23 @@ class ComLoggerWindow(QDialog):
         ports.addWidget(self._refresh_button)
         root.addLayout(ports)
 
-        controls = QHBoxLayout()
-        controls.setSpacing(8)
-        controls.addWidget(self._baud_label)
-        controls.addWidget(self._baud_combo)
-        controls.addWidget(self._open_button)
-        controls.addWidget(self._main_checkbox)
-        controls.addStretch()
-        root.addLayout(controls)
-        root.addWidget(self._status_label)
+        # Скорость + режим прокси — один ряд, без кнопки подключения,
+        # чтобы кнопка не "залезала" на строку выбора скорости.
+        speed = QHBoxLayout()
+        speed.setSpacing(8)
+        speed.addWidget(self._baud_label)
+        speed.addWidget(self._baud_combo)
+        speed.addSpacing(12)
+        speed.addWidget(self._main_checkbox)
+        speed.addStretch()
+        root.addLayout(speed)
+
+        # Кнопка подключения отдельно слева, статус справа
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addWidget(self._open_button)
+        actions.addWidget(self._status_label, 1)
+        root.addLayout(actions)
 
         root.addWidget(self._table, 1)
 

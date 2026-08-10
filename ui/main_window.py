@@ -66,6 +66,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self._settings_window: Optional[SettingsWindow] = None
+        self._connection_dialog: Optional[QDialog] = None
         self._create_widgets()
         self._build_layout()
         self._connect_signals()
@@ -366,6 +367,10 @@ class MainWindow(QMainWindow):
 
     def _on_configure_clicked(self) -> None:
         """Сначала открывает диалог подключения, затем окно настроек CAN."""
+        if self._connection_dialog is not None:
+            self._connection_dialog.raise_()
+            self._connection_dialog.activateWindow()
+            return
         dialog = QDialog()
         dialog.setWindowTitle(tr("Подключение"))
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
@@ -378,12 +383,20 @@ class MainWindow(QMainWindow):
         cancel_button.clicked.connect(dialog.reject)
         layout.addWidget(cancel_button)
         connection.connected.connect(dialog.accept)
-        # Диалог удаляется вместе с вкладкой, поэтому сначала гасим её поток
-        dialog.finished.connect(lambda _result: connection.shutdown())
+        # Храним ссылку, иначе диалог исчезнет сразу после return:
+        # локальная переменная удалится, и Qt-объект без родителя соберёт GC.
+        self._connection_dialog = dialog
+        # После закрытия чистим ссылку, иначе GC обернётся мёртвым объектом
+        dialog.finished.connect(lambda _result: self._on_connection_finished())
+        # Выключаем фоновый поток автоопределения перед удалением диалога
+        dialog.destroyed.connect(lambda: connection.shutdown())
         dialog.accepted.connect(self._open_settings_window)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _on_connection_finished(self) -> None:
+        self._connection_dialog = None
 
     def _open_settings_window(self) -> None:
         """Показывает окно настроек CAN."""
