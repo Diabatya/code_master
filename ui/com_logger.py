@@ -257,20 +257,20 @@ class ComLoggerWindow(QDialog):
         ports.addWidget(self._refresh_button)
         root.addLayout(ports)
 
-        # Скорость + режим прокси — один ряд, без кнопки подключения,
-        # чтобы кнопка не "залезала" на строку выбора скорости.
+        # Скорость — отдельный ряд, без чекбокса, чтобы чекбокс не
+        # перекрывал выбор скорости.
         speed = QHBoxLayout()
         speed.setSpacing(8)
         speed.addWidget(self._baud_label)
         speed.addWidget(self._baud_combo)
-        speed.addSpacing(12)
-        speed.addWidget(self._main_checkbox)
         speed.addStretch()
         root.addLayout(speed)
 
-        # Кнопка подключения отдельно слева, статус справа
+        # Режим прокси, кнопка подключения и статус — следующий ряд
         actions = QHBoxLayout()
         actions.setSpacing(8)
+        actions.addWidget(self._main_checkbox)
+        actions.addSpacing(12)
         actions.addWidget(self._open_button)
         actions.addWidget(self._status_label, 1)
         root.addLayout(actions)

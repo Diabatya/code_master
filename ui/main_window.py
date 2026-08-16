@@ -401,7 +401,7 @@ class MainWindow(QMainWindow):
     def _open_settings_window(self) -> None:
         """Показывает окно настроек CAN."""
         if self._settings_window is None:
-            self._settings_window = SettingsWindow(self._serial_manager)
+            self._settings_window = SettingsWindow(self._serial_manager, main_window=self)
         self._settings_window.show()
         self._settings_window.raise_()
         self._settings_window.activateWindow()

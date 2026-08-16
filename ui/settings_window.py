@@ -224,9 +224,15 @@ class ConnectionTab(QWidget):
 class SettingsWindow(QMainWindow):
     """Окно настроек с вкладками для работы с CAN."""
 
-    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        serial_manager: SerialManager,
+        main_window: Optional[QWidget] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
+        self._main_window = main_window
         self._config = Config()
         self.setWindowTitle(tr("Настройки — Код Мастер"))
         self.resize(1100, 700)
@@ -779,7 +785,10 @@ class SettingsWindow(QMainWindow):
                 tab.set_dbc(dbc_manager)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        """Закрывает окно настроек и обязательно показывает главное окно."""
         logger.info("Закрыто окно настроек")
-        if self.parent() is not None:
-            self.parent().show()
+        if self._main_window is not None:
+            self._main_window.show()
+            self._main_window.raise_()
+            self._main_window.activateWindow()
         event.accept()

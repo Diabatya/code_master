@@ -1195,8 +1195,9 @@ class FlashDialog(QDialog):
 
         self._config_button = QPushButton(tr("Записать конфигурацию устройства"))
         self._config_button.setFont(font)
+        self._config_button.setCheckable(True)
         self._config_button.setEnabled(True)
-        self._config_button.setToolTip(tr("Записать имя и серийный номер в последнюю страницу Flash"))
+        self._config_button.setToolTip(tr("Дописать имя и серийный номер в прошивку/конфиг при нажатии 'Прошить'"))
 
         # Файлы прошивки
         self._files_group = QGroupBox(tr("Файлы прошивки"))
@@ -1318,7 +1319,7 @@ class FlashDialog(QDialog):
         )
 
         self._chip_combo.currentIndexChanged.connect(self._on_chip_changed)
-        self._config_button.clicked.connect(self._on_write_config)
+        self._config_button.toggled.connect(self._on_config_toggled)
 
     def _load_defaults(self) -> None:
         serial = self._config.get("device_serial", "")
@@ -1405,35 +1406,34 @@ class FlashDialog(QDialog):
         ih.write_hex_file(tmp)
         return str(tmp)
 
-    def _on_write_config(self) -> None:
-        """Записывает только страницу конфигурации, не трогая основную прошивку."""
-        if self._is_any_worker_running():
+    def _on_config_toggled(self, checked: bool) -> None:
+        """Переключает режим встраивания конфигурации в прошивку.
+
+        При активации проверяются поля «Устройство» и «Серийный номер».
+        Сама запись начинается только по кнопке «Прошить».
+        """
+        if not checked:
+            self._config_button.setStyleSheet("")
+            return
+
+        name = self._device_name_edit.text().strip()
+        serial = self._serial_edit.text().strip()
+        if not name or not serial:
+            self._config_button.setChecked(False)
             QMessageBox.warning(
                 self,
                 tr("Внимание"),
-                tr("Выполняется другая операция с устройством. Дождитесь её завершения."),
+                tr("Заполните поля «Устройство» и «Серийный номер» для записи конфигурации"),
             )
             return
-        method = self._method_combo.currentData()
-        if method == "auto":
-            QMessageBox.warning(self, tr("Внимание"), tr("Выберите конкретный способ программирования"))
-            return
         try:
-            config_file = self._prepare_config_only_hex()
+            self._get_flash_size_kb()
         except ValueError as exc:
+            self._config_button.setChecked(False)
             QMessageBox.warning(self, tr("Внимание"), str(exc))
             return
-        logger.info("Запись только конфигурации: %s", config_file)
-        self._release_serial_port(method)
-        self._flash_worker = FlashWorker([config_file], method, self._config, self)
-        self._flash_worker.log_line.connect(self._log)
-        self._flash_worker.progress.connect(self._progress_bar.setValue)
-        self._flash_worker.finished.connect(self._on_flash_finished)
-        self._config_button.setEnabled(False)
-        self._flash_button.setEnabled(False)
-        self._read_button.setEnabled(False)
-        self._progress_bar.setValue(0)
-        self._flash_worker.start()
+
+        self._config_button.setStyleSheet("QPushButton { background-color: #4CAF50; color: #FFFFFF; }")
 
     def _set_connect_status(self, connected: bool, info: Dict[str, Any]) -> None:
         self._connected = connected
@@ -1540,10 +1540,34 @@ class FlashDialog(QDialog):
         for item in self._files_list.selectedItems():
             self._files_list.takeItem(self._files_list.row(item))
 
+    def _collect_files_for_flash(self) -> List[str]:
+        """Возвращает список файлов для прошивки.
+
+        - Если выбран файл и включена запись конфигурации — дописывает
+          имя/серийный номер в последнюю страницу.
+        - Если файлов нет, но включена запись конфигурации — готовит
+          временный HEX только с последней страницей (не стирает основную
+          прошивку, так как в нём нет данных).
+        """
+        if self._config_button.isChecked() and self._files_list.count() == 0:
+            return [self._prepare_config_only_hex()]
+
+        files: List[str] = []
+        for i in range(self._files_list.count()):
+            item = self._files_list.item(i)
+            if item is not None:
+                files.append(item.text())
+
+        if not self._config_button.isChecked():
+            return files
+
+        prepared: List[str] = []
+        for f in files:
+            prepared.append(self._prepare_firmware_with_config(f))
+        return prepared
+
     def _prepare_firmware_with_config(self, file_path: str) -> str:
         """Дополняет бинарник до размера Flash и записывает конфиг в последнюю страницу."""
-        if not self._config_button.isChecked():
-            return file_path
         name = self._device_name_edit.text().strip()
         if not name:
             raise ValueError(tr("Заполните поле «Устройство»"))
@@ -1579,10 +1603,6 @@ class FlashDialog(QDialog):
         return str(tmp)
 
     def _on_flash(self) -> None:
-        files = [self._files_list.item(i).text() for i in range(self._files_list.count())]
-        if not files:
-            QMessageBox.warning(self, tr("Внимание"), tr("Добавьте файлы прошивки"))
-            return
         method = self._method_combo.currentData()
         if method == "auto":
             QMessageBox.warning(self, tr("Внимание"), tr("Выберите конкретный способ программирования"))
@@ -1594,10 +1614,23 @@ class FlashDialog(QDialog):
                 tr("Выполняется другая операция с устройством. Дождитесь её завершения."),
             )
             return
-        logger.info("Старт прошивки: метод=%s, файлы=%s", method, files)
-        prepared = list(files)
+
+        try:
+            prepared = self._collect_files_for_flash()
+        except ValueError as exc:
+            QMessageBox.warning(self, tr("Внимание"), str(exc))
+            return
+
+        if not prepared:
+            QMessageBox.warning(self, tr("Внимание"), tr("Добавьте файлы прошивки или включите запись конфигурации"))
+            return
+
+        logger.info("Старт прошивки: метод=%s, файлы=%s", method, prepared)
         self._release_serial_port(method)
         self._flash_button.setEnabled(False)
+        self._config_button.setEnabled(False)
+        self._read_button.setEnabled(False)
+        self._read_config_button.setEnabled(False)
         self._progress_bar.setValue(0)
         self._flash_worker = FlashWorker(prepared, method, self._config, self)
         self._flash_worker.log_line.connect(self._log)
@@ -1640,6 +1673,7 @@ class FlashDialog(QDialog):
         self._flash_button.setEnabled(True)
         self._config_button.setEnabled(True)
         self._read_button.setEnabled(True)
+        self._read_config_button.setEnabled(True)
         self._log(message)
         self._restore_serial_port()
         if success:
