@@ -13,3 +13,7 @@ build/
 !build_linux.spec
 *.spec.bak
 .DS_Store
+*.xlsx
+*.xls
+.ruff_cache/
+/*.hex

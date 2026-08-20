@@ -169,7 +169,7 @@ class SerialManager(QObject):
         super().__init__(parent)
         self._port: Optional[SerialPort] = None
         self._reader: Optional[SerialReader] = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._config = Config()
         self._auto_reconnect = False
         self._reconnect_timer: Optional[QTimer] = None
@@ -181,18 +181,20 @@ class SerialManager(QObject):
 
     def is_open(self) -> bool:
         """Возвращает True, если порт открыт."""
-        if self._port is None:
-            return False
-        is_open = getattr(self._port, "is_open", False)
-        if callable(is_open):
-            is_open = is_open()
-        return bool(is_open)
+        with self._lock:
+            if self._port is None:
+                return False
+            is_open = getattr(self._port, "is_open", False)
+            if callable(is_open):
+                is_open = is_open()
+            return bool(is_open)
 
     def current_port_name(self) -> str:
         """Возвращает имя текущего порта или пустую строку."""
-        if self._port is None:
-            return ""
-        return getattr(self._port, "port", "")
+        with self._lock:
+            if self._port is None:
+                return ""
+            return getattr(self._port, "port", "")
 
     def open_port(self, port_name: str, baudrate: int, emulation: bool = False, auto_reconnect: bool = False, error_probability: int = 0) -> bool:
         """Открывает COM-порт (реальный или эмулированный).
@@ -207,69 +209,71 @@ class SerialManager(QObject):
         Returns:
             True при успешном открытии, иначе False.
         """
-        self._auto_reconnect = auto_reconnect
-        self._last_port_name = port_name
-        self._last_baudrate = baudrate
-        self._last_emulation = emulation
-        self._stop_reconnect_timer()
-        self.close_port()
-        try:
-            if emulation:
-                self._port = FakeSerial(port_name, baudrate, error_probability)
-                if self._replay_path:
-                    self._port.load_replay_data(self._replay_path)
-                    self._port.enable_replay(True)
-                self._port.open()
-                logger.info("Открыт эмулированный порт %s (ошибки %d%%)", port_name, error_probability)
-            else:
-                self._port = serial.Serial(
-                    port=port_name,
-                    baudrate=baudrate,
-                    bytesize=serial.EIGHTBITS,
-                    parity=serial.PARITY_NONE,
-                    stopbits=serial.STOPBITS_ONE,
-                    timeout=0.1,
-                    write_timeout=1,
-                )
-                logger.info("Открыт реальный порт %s на скорости %d (dtr=%s, rts=%s)", port_name, baudrate, self._port.dtr, self._port.rts)
+        with self._lock:
+            self._auto_reconnect = auto_reconnect
+            self._last_port_name = port_name
+            self._last_baudrate = baudrate
+            self._last_emulation = emulation
+            self._stop_reconnect_timer()
+            self.close_port()
+            try:
+                if emulation:
+                    self._port = FakeSerial(port_name, baudrate, error_probability)
+                    if self._replay_path:
+                        self._port.load_replay_data(self._replay_path)
+                        self._port.enable_replay(True)
+                    self._port.open()
+                    logger.info("Открыт эмулированный порт %s (ошибки %d%%)", port_name, error_probability)
+                else:
+                    self._port = serial.Serial(
+                        port=port_name,
+                        baudrate=baudrate,
+                        bytesize=serial.EIGHTBITS,
+                        parity=serial.PARITY_NONE,
+                        stopbits=serial.STOPBITS_ONE,
+                        timeout=0.1,
+                        write_timeout=1,
+                    )
+                    logger.info("Открыт реальный порт %s на скорости %d (dtr=%s, rts=%s)", port_name, baudrate, self._port.dtr, self._port.rts)
 
-            self._start_reader()
-            self._detect_device_id()
-            self._config.set_bulk(
-                {"port": port_name, "baudrate": baudrate, "emulation": emulation, "auto_reconnect": auto_reconnect, "error_probability": error_probability}
-            )
-            self.connection_changed.emit(True)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Не удалось открыть порт %s: %s", port_name, exc)
-            self.error_occurred.emit(f"Не удалось открыть порт {port_name}: {exc}")
-            self._port = None
-            self.connection_changed.emit(False)
-            self._schedule_reconnect()
-            return False
+                self._start_reader()
+                self._detect_device_id()
+                self._config.set_bulk(
+                    {"port": port_name, "baudrate": baudrate, "emulation": emulation, "auto_reconnect": auto_reconnect, "error_probability": error_probability}
+                )
+                self.connection_changed.emit(True)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Не удалось открыть порт %s: %s", port_name, exc)
+                self.error_occurred.emit(f"Не удалось открыть порт {port_name}: {exc}")
+                self._port = None
+                self.connection_changed.emit(False)
+                self._schedule_reconnect()
+                return False
 
     def close_port(self) -> None:
         """Закрывает порт и останавливает поток чтения."""
-        self._closing = True
-        self._stop_reconnect_timer()
-        if self._reader is not None:
-            try:
-                self._reader.finished.disconnect(self._on_reader_finished)
-            except RuntimeError:
-                pass
-            self._reader.stop()
-            self._reader = None
+        with self._lock:
+            self._closing = True
+            self._stop_reconnect_timer()
+            if self._reader is not None:
+                try:
+                    self._reader.finished.disconnect(self._on_reader_finished)
+                except RuntimeError:
+                    pass
+                self._reader.stop()
+                self._reader = None
 
-        if self._port is not None:
-            try:
-                self._port.close()
-                logger.info("Порт %s закрыт", self.current_port_name())
-            except Exception as exc:  # noqa: BLE001
-                logger.error("Ошибка при закрытии порта: %s", exc)
-            self._port = None
+            if self._port is not None:
+                try:
+                    self._port.close()
+                    logger.info("Порт %s закрыт", self.current_port_name())
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Ошибка при закрытии порта: %s", exc)
+                self._port = None
 
-        self.connection_changed.emit(False)
-        self._closing = False
+            self.connection_changed.emit(False)
+            self._closing = False
 
     def set_replay_path(self, path: Optional[str]) -> None:
         """Устанавливает путь к CSV-дампу для эмулятора."""
@@ -303,28 +307,29 @@ class SerialManager(QObject):
 
     def ping_device(self) -> bool:
         """Отправляет устройству запрос ID и возвращает True, если есть ответ."""
-        if self._port is None or not self.is_open():
-            return False
-        self._closing = True
-        self._stop_reader()
-        try:
-            self._port.reset_input_buffer()
-            self._port.write(bytes([CMD_DEVICE_ID]))
-            deadline = time.time() + 0.5
-            buffer = bytearray()
-            while time.time() < deadline:
-                available = self._port_in_waiting()
-                if available:
-                    buffer.extend(self._port.read(available))
-                    if CMD_DEVICE_ID_RESP in buffer:
-                        return True
-                time.sleep(0.01)
-            return False
-        except Exception:  # noqa: BLE001
-            return False
-        finally:
-            self._start_reader()
-            self._closing = False
+        with self._lock:
+            if self._port is None or not self.is_open():
+                return False
+            self._closing = True
+            self._stop_reader()
+            try:
+                self._port.reset_input_buffer()
+                self._port.write(bytes([CMD_DEVICE_ID]))
+                deadline = time.time() + 0.5
+                buffer = bytearray()
+                while time.time() < deadline:
+                    available = self._port_in_waiting()
+                    if available:
+                        buffer.extend(self._port.read(available))
+                        if CMD_DEVICE_ID_RESP in buffer:
+                            return True
+                    time.sleep(0.01)
+                return False
+            except Exception:  # noqa: BLE001
+                return False
+            finally:
+                self._start_reader()
+                self._closing = False
 
     def __del__(self) -> None:
         """Гарантирует закрытие порта при удалении менеджера."""
@@ -348,72 +353,73 @@ class SerialManager(QObject):
 
     def _detect_device_id(self) -> None:
         """Определяет тип, версию, серийный номер и объём памяти устройства."""
-        if self._port is None:
-            return
-        self._closing = True
-        self._stop_reader()
-        try:
-            device_type = DEVICE_TYPE_BASIC
-            device_version = 0
-            device_serial = ""
-            memory_kb = 0
+        with self._lock:
+            if self._port is None:
+                return
+            self._closing = True
+            self._stop_reader()
+            try:
+                device_type = DEVICE_TYPE_BASIC
+                device_version = 0
+                device_serial = ""
+                memory_kb = 0
 
-            # 1. Запрос типа/версии
-            self._port.reset_input_buffer()
-            self._port.write(bytes([CMD_DEVICE_ID]))
-            deadline = time.time() + 0.5
-            buffer = bytearray()
-            while time.time() < deadline:
-                available = self._port_in_waiting()
-                if available:
-                    buffer.extend(self._port.read(available))
-                    if CMD_DEVICE_ID_RESP in buffer:
-                        idx = buffer.index(CMD_DEVICE_ID_RESP)
-                        if idx + 3 <= len(buffer):
-                            device_type = buffer[idx + 1]
-                            device_version = buffer[idx + 2]
-                            break
-                time.sleep(0.01)
-
-            # 2. Запрос серийного номера и объёма памяти
-            self._port.reset_input_buffer()
-            self._port.write(bytes([CMD_DEVICE_INFO]))
-            deadline = time.time() + 0.5
-            buffer = bytearray()
-            while time.time() < deadline:
-                available = self._port_in_waiting()
-                if available:
-                    buffer.extend(self._port.read(available))
-                    if CMD_DEVICE_INFO_RESP in buffer:
-                        idx = buffer.index(CMD_DEVICE_INFO_RESP)
-                        if idx + 2 < len(buffer):
-                            serial_len = buffer[idx + 1]
-                            expected = idx + 2 + serial_len + 2
-                            if expected <= len(buffer):
-                                serial_bytes = bytes(buffer[idx + 2 : idx + 2 + serial_len])
-                                device_serial = serial_bytes.decode("utf-8", errors="ignore").strip()
-                                device_type = buffer[idx + 2 + serial_len]
-                                memory_kb = buffer[idx + 2 + serial_len + 1]
+                # 1. Запрос типа/версии
+                self._port.reset_input_buffer()
+                self._port.write(bytes([CMD_DEVICE_ID]))
+                deadline = time.time() + 0.5
+                buffer = bytearray()
+                while time.time() < deadline:
+                    available = self._port_in_waiting()
+                    if available:
+                        buffer.extend(self._port.read(available))
+                        if CMD_DEVICE_ID_RESP in buffer:
+                            idx = buffer.index(CMD_DEVICE_ID_RESP)
+                            if idx + 3 <= len(buffer):
+                                device_type = buffer[idx + 1]
+                                device_version = buffer[idx + 2]
                                 break
-                time.sleep(0.01)
+                    time.sleep(0.01)
 
-            total_memory = memory_kb * 1024 if memory_kb else 65536
-            self._config.set_bulk({
-                "device_type": device_type,
-                "device_version": device_version,
-                "device_serial": device_serial,
-                "serial_number": device_serial,
-                "total_memory": total_memory,
-            })
-            self.device_identified.emit(device_type, device_version)
-            logger.info("Устройство идентифицировано: type=0x%02X version=%d serial=%s mem=%d", device_type, device_version, device_serial or "-", total_memory)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Ошибка определения устройства: %s", exc)
-            self._config.set_bulk({"device_type": DEVICE_TYPE_BASIC, "device_version": 0, "device_serial": "", "total_memory": 65536})
-            self.device_identified.emit(DEVICE_TYPE_BASIC, 0)
-        finally:
-            self._start_reader()
-            self._closing = False
+                # 2. Запрос серийного номера и объёма памяти
+                self._port.reset_input_buffer()
+                self._port.write(bytes([CMD_DEVICE_INFO]))
+                deadline = time.time() + 0.5
+                buffer = bytearray()
+                while time.time() < deadline:
+                    available = self._port_in_waiting()
+                    if available:
+                        buffer.extend(self._port.read(available))
+                        if CMD_DEVICE_INFO_RESP in buffer:
+                            idx = buffer.index(CMD_DEVICE_INFO_RESP)
+                            if idx + 2 < len(buffer):
+                                serial_len = buffer[idx + 1]
+                                expected = idx + 2 + serial_len + 2
+                                if expected <= len(buffer):
+                                    serial_bytes = bytes(buffer[idx + 2 : idx + 2 + serial_len])
+                                    device_serial = serial_bytes.decode("utf-8", errors="ignore").strip()
+                                    device_type = buffer[idx + 2 + serial_len]
+                                    memory_kb = buffer[idx + 2 + serial_len + 1]
+                                    break
+                    time.sleep(0.01)
+
+                total_memory = memory_kb * 1024 if memory_kb else 65536
+                self._config.set_bulk({
+                    "device_type": device_type,
+                    "device_version": device_version,
+                    "device_serial": device_serial,
+                    "serial_number": device_serial,
+                    "total_memory": total_memory,
+                })
+                self.device_identified.emit(device_type, device_version)
+                logger.info("Устройство идентифицировано: type=0x%02X version=%d serial=%s mem=%d", device_type, device_version, device_serial or "-", total_memory)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Ошибка определения устройства: %s", exc)
+                self._config.set_bulk({"device_type": DEVICE_TYPE_BASIC, "device_version": 0, "device_serial": "", "total_memory": 65536})
+                self.device_identified.emit(DEVICE_TYPE_BASIC, 0)
+            finally:
+                self._start_reader()
+                self._closing = False
 
     def auto_detect_can_speed(self) -> Optional[int]:
         """Останавливает чтение, отправляет 0xA0, ждёт 0xA1 с определённой скоростью.
@@ -421,46 +427,48 @@ class SerialManager(QObject):
         Returns:
             Скорость CAN в кбит/с или None.
         """
-        if self._port is None or not self.is_open():
-            return None
-        self._closing = True
-        self._stop_reader()
-        try:
-            self._port.reset_input_buffer()
-            self._port.write(bytes([CMD_AUTO_SPEED]))
-            deadline = time.time() + 3.0
-            buffer = bytearray()
-            while time.time() < deadline:
-                available = self._port_in_waiting()
-                if available:
-                    buffer.extend(self._port.read(available))
-                    if CMD_AUTO_SPEED_RESP in buffer:
-                        idx = buffer.index(CMD_AUTO_SPEED_RESP)
-                        if idx + 2 < len(buffer):
-                            speed = (buffer[idx + 1] << 8) | buffer[idx + 2]
-                            self._config.set("can_speed_auto", True)
-                            self.can_speed_detected.emit(speed)
-                            logger.info("Скорость CAN определена: %d кбит/с", speed)
-                            return speed
-                time.sleep(0.01)
-            logger.info("Автоопределение скорости не дало результата")
-            return None
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Ошибка автоопределения скорости: %s", exc)
-            return None
-        finally:
-            self._start_reader()
-            self._closing = False
+        with self._lock:
+            if self._port is None or not self.is_open():
+                return None
+            self._closing = True
+            self._stop_reader()
+            try:
+                self._port.reset_input_buffer()
+                self._port.write(bytes([CMD_AUTO_SPEED]))
+                deadline = time.time() + 3.0
+                buffer = bytearray()
+                while time.time() < deadline:
+                    available = self._port_in_waiting()
+                    if available:
+                        buffer.extend(self._port.read(available))
+                        if CMD_AUTO_SPEED_RESP in buffer:
+                            idx = buffer.index(CMD_AUTO_SPEED_RESP)
+                            if idx + 2 < len(buffer):
+                                speed = (buffer[idx + 1] << 8) | buffer[idx + 2]
+                                self._config.set("can_speed_auto", True)
+                                self.can_speed_detected.emit(speed)
+                                logger.info("Скорость CAN определена: %d кбит/с", speed)
+                                return speed
+                    time.sleep(0.01)
+                logger.info("Автоопределение скорости не дало результата")
+                return None
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Ошибка автоопределения скорости: %s", exc)
+                return None
+            finally:
+                self._start_reader()
+                self._closing = False
 
     def _stop_reader(self) -> None:
         """Останавливает поток чтения и ждёт его завершения."""
-        if self._reader is not None:
-            try:
-                self._reader.finished.disconnect(self._on_reader_finished)
-            except RuntimeError:
-                pass
-            self._reader.stop()
-            self._reader = None
+        with self._lock:
+            if self._reader is not None:
+                try:
+                    self._reader.finished.disconnect(self._on_reader_finished)
+                except RuntimeError:
+                    pass
+                self._reader.stop()
+                self._reader = None
 
     def _start_reader(self) -> None:
         """Создаёт и запускает поток чтения повторно.
@@ -469,15 +477,16 @@ class SerialManager(QObject):
         (ping_device, _detect_device_id, auto_detect_can_speed) не терялся
         ни один из них — в частности raw_data, на котором работает COM-логгер.
         """
-        if self._port is None or not self.is_open():
-            return
-        self._reader = SerialReader(self._port, self)
-        self._reader.new_frame.connect(self.new_can_frame)
-        self._reader.new_raw_data.connect(self.raw_data)
-        self._reader.error.connect(self.error_occurred)
-        self._reader.heartbeat.connect(self.heartbeat)
-        self._reader.finished.connect(self._on_reader_finished)
-        self._reader.start()
+        with self._lock:
+            if self._port is None or not self.is_open():
+                return
+            self._reader = SerialReader(self._port, self)
+            self._reader.new_frame.connect(self.new_can_frame)
+            self._reader.new_raw_data.connect(self.raw_data)
+            self._reader.error.connect(self.error_occurred)
+            self._reader.heartbeat.connect(self.heartbeat)
+            self._reader.finished.connect(self._on_reader_finished)
+            self._reader.start()
 
     def _port_in_waiting(self) -> int:
         """Возвращает количество байт в буфере порта."""
@@ -488,19 +497,20 @@ class SerialManager(QObject):
 
     def _on_reader_finished(self) -> None:
         """Вызывается при завершении потока чтения; планирует переподключение."""
-        reader = self.sender()
-        if reader is None or reader is not self._reader:
-            return
-        self._reader = None
-        if self._port is not None:
-            try:
-                self._port.close()
-            except Exception as exc:  # noqa: BLE001
-                logger.error("Ошибка закрытия порта при завершении потока: %s", exc)
-            self._port = None
-        self.connection_changed.emit(False)
-        if not self._closing:
-            self._schedule_reconnect()
+        with self._lock:
+            reader = self.sender()
+            if reader is None or reader is not self._reader:
+                return
+            self._reader = None
+            if self._port is not None:
+                try:
+                    self._port.close()
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Ошибка закрытия порта при завершении потока: %s", exc)
+                self._port = None
+            self.connection_changed.emit(False)
+            if not self._closing:
+                self._schedule_reconnect()
 
     def _schedule_reconnect(self) -> None:
         """Запускает таймер для автоматического переподключения."""

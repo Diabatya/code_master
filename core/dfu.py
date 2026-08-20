@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Optional
 
 import usb.core
 import usb.util

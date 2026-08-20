@@ -55,6 +55,11 @@ from core.can_protocol import (
     DEVICE_TYPE_BASIC,
     DEVICE_TYPE_CAN_FD,
 )
+from core.stm32_info import (
+    CHIP_FLASH_SIZE_KB,
+    STM32_FLASH_SIZES,
+    STM32_PAGE_SIZES,
+)
 from models.config import Config
 from ui.com_settings_dialog import ComSettingsDialog
 from models.logger import get_logger
@@ -76,72 +81,6 @@ DEVICE_TYPES: List[Tuple[int, str]] = [
     (DEVICE_TYPE_ANALOG, "2 CAN +"),
     (DEVICE_TYPE_CAN_FD, "2 CAN FD"),
 ]
-
-STM32_FLASH_SIZES: Dict[str, int] = {
-    "STM32F103C8T6": 64,
-    "STM32F103RBT6": 128,
-    "STM32F105RCT6": 256,
-    "STM32F105VCT6": 256,
-    "STM32F107VCT6": 256,
-    "STM32F205RGT6": 1024,
-    "STM32F303CCT6": 256,
-    "STM32F407VGT6": 1024,
-    "STM32F429ZIT6": 2048,
-    "STM32F446RET6": 512,
-    "STM32F746ZGT6": 1024,
-}
-
-# Размер страницы flash в байтах. Для F1 — 1/2 КБ, F2/F4 — сектора 16+ КБ.
-STM32_PAGE_SIZES: Dict[str, int] = {
-    "STM32F103C8T6": 1024,
-    "STM32F103RBT6": 1024,
-    "STM32F105RCT6": 2048,
-    "STM32F105VCT6": 2048,
-    "STM32F107VCT6": 2048,
-    "STM32F205RGT6": 16384,
-    "STM32F303CCT6": 2048,
-    "STM32F407VGT6": 16384,
-    "STM32F429ZIT6": 16384,
-    "STM32F446RET6": 16384,
-    "STM32F746ZGT6": 16384,
-}
-
-# ST-LINK Device ID (например, 0x418) → модель по datasheet
-DEVICE_ID_TO_MODEL: Dict[str, str] = {
-    "0x410": "STM32F103RBT6",
-    "0x412": "STM32F103C8T6",
-    "0x413": "STM32F407VGT6",
-    "0x414": "STM32F105RCT6",
-    "0x418": "STM32F105VCT6",
-    "0x421": "STM32F446RET6",
-    "0x422": "STM32F303CCT6",
-    "0x434": "STM32F429ZIT6",
-    "0x440": "STM32F107VCT6",
-    "0x449": "STM32F746ZGT6",
-    "0x411": "STM32F205RGT6",
-}
-
-CHIP_FLASH_SIZE_KB: Dict[int, str] = {
-    0x412: "64/128",
-    0x410: "128/256",
-    0x414: "256/512",
-    0x418: "64/128",
-    0x420: "128/256",
-    0x430: "1024",
-    0x431: "256/512",
-    0x432: "512/1024",
-    0x433: "1024",
-    0x440: "1024",
-    0x441: "2048",
-    0x442: "512/1024",
-    0x444: "512/1024",
-    0x445: "1024",
-    0x448: "1024",
-    0x449: "2048",
-    0x450: "1024",
-    0x451: "2048",
-}
-
 
 def _flash_size_for_chip_id(chip_id: Optional[int]) -> str:
     """Возвращает строку с размером флеш-памяти по chip ID или 'Неизвестно'."""
@@ -1377,6 +1316,25 @@ class FlashDialog(QDialog):
             return STM32_FLASH_SIZES[model]
         return 256
 
+    def _get_page_size(self) -> int:
+        """Возвращает размер физической страницы Flash для выбранной модели МК.
+
+        Пусть пользователь не сможет записать конфиг по фиктивному 2048 байт,
+        если у чипа страница другого размера — это главный риск «окирпичивания».
+        """
+        target = self._target_mcu_edit.text().strip().upper()
+        if target in STM32_PAGE_SIZES:
+            return STM32_PAGE_SIZES[target]
+        model = self._chip_combo.currentData()
+        if model and model in STM32_PAGE_SIZES:
+            return STM32_PAGE_SIZES[model]
+        raise ValueError(
+            tr("Не удалось определить размер страницы Flash для {0}. "
+               "Выберите модель МК из списка или укажите вручную.").format(
+                target or model or tr("неизвестно")
+            )
+        )
+
     def _prepare_config_only_hex(self) -> str:
         """Создаёт временный HEX-файл с одной последней страницей конфигурации."""
         from intelhex import IntelHex
@@ -1388,10 +1346,10 @@ class FlashDialog(QDialog):
             raise ValueError(tr("Введите серийный номер"))
         try:
             flash_size_kb = self._get_flash_size_kb()
+            page_size = self._get_page_size()
         except ValueError:
             raise
 
-        page_size = 2048
         flash_size = flash_size_kb * 1024
         last_page = flash_size - page_size
         page = bytearray(b"\xFF") * page_size
@@ -1576,6 +1534,7 @@ class FlashDialog(QDialog):
             raise ValueError(tr("Введите серийный номер"))
         try:
             flash_size_kb = self._get_flash_size_kb()
+            page_size = self._get_page_size()
         except ValueError:
             raise
 
@@ -1590,7 +1549,6 @@ class FlashDialog(QDialog):
         image = bytearray(b"\xFF") * flash_size
         image[firmware_offset:firmware_offset + len(data)] = data
 
-        page_size = 2048
         last_page_offset = flash_size - page_size
         name_bytes = name.encode("ascii", errors="ignore")[:10].ljust(10)
         serial_bytes = serial.encode("ascii", errors="ignore")[:10].ljust(10)

@@ -11,6 +11,7 @@
 | pyqtgraph | MIT License | https://pyqtgraph.readthedocs.io/ |
 | intelhex | BSD License | https://github.com/python-intelhex/intelhex |
 | opendbc | MIT License | https://github.com/commaai/opendbc |
+| awesome-automotive-can-id | MIT License | https://github.com/iDoka/awesome-automotive-can-id |
 
 ## OpenDBC
 
