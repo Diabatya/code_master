@@ -1,8 +1,8 @@
 line-length = 120
-
-[lint]
-select = ["E9", "F"]
 extend-exclude = [
     "firmware/libs/**",
     "assets/version_info.py",
 ]
+
+[lint]
+select = ["E9", "F"]
