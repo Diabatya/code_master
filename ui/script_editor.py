@@ -214,6 +214,16 @@ class ScriptEditor(QWidget):
         self._title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         self._title.setProperty("title", True)
 
+        self._security_notice = QLabel(
+            tr(
+                "⚠ Это НЕ security-песочница: изоляция скриптов ограничивает только "
+                "случайные ошибки, но не защищает от намеренно вредоносного кода. "
+                "Не запускайте здесь скрипты из непроверенных источников."
+            )
+        )
+        self._security_notice.setWordWrap(True)
+        self._security_notice.setStyleSheet("color: #d9822b;")
+
         self._scripts_list = QListWidget()
         self._scripts_list.setFont(font)
         self._scripts_list.currentRowChanged.connect(self._on_script_selected)
@@ -254,6 +264,7 @@ class ScriptEditor(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
         layout.addWidget(self._title)
+        layout.addWidget(self._security_notice)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         left_panel = QWidget()

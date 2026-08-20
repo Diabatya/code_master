@@ -289,11 +289,10 @@ class SerialManager(QObject):
         Returns:
             True, если отправка выполнена, иначе False.
         """
-        if self._port is None or not self.is_open():
-            logger.warning("Попытка отправки в закрытый порт")
-            return False
-
         with self._lock:
+            if self._port is None or not self.is_open():
+                logger.warning("Попытка отправки в закрытый порт")
+                return False
             try:
                 preview = data[:16].hex(" ")
                 self._port.write(data)
