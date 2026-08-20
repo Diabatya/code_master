@@ -577,7 +577,6 @@ class Translator:
                 "Порт": "Port",
                 "Обновить список": "Refresh",
                 "Скорость порта": "Baudrate",
-                "Подключить": "Connect",
                 "Отключить": "Disconnect",
                 "Подключено": "Connected",
                 "Отключено": "Disconnected",
