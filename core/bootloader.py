@@ -17,6 +17,7 @@ except Exception:  # noqa: BLE001
         return []
 
 from core.firmware_utils import load_firmware_bytes
+from core.stm32_info import APPLICATION_BASE_ADDR, BOOTLOADER_BASE_ADDR
 from models.logger import get_logger
 
 logger = get_logger(__name__)
@@ -53,6 +54,36 @@ class Bootloader:
         self.port = port
         self._progress_callback = progress_callback
         self._stop_requested = False
+
+    @classmethod
+    def open(
+        cls,
+        port_name: str,
+        baudrate: int = 115200,
+        timeout: float = 1.0,
+        progress_callback: Optional[Callable[[int], None]] = None,
+    ) -> "Bootloader":
+        """Открывает COM-порт с параметрами bootloader-протокола AN3155
+        (8 бит, чётность Even, 1 стоп-бит) и возвращает готовый Bootloader.
+
+        Единая точка открытия порта для UART/USB CDC-прошивки — используется
+        и GUI (``ui/flash_dialog.py``: ``ConnectWorker``/``FlashWorker``/
+        ``ReadWorker``), и CLI (``main.py``), чтобы serial.Serial(...) с
+        одинаковыми параметрами не дублировался в нескольких местах и чтобы
+        таймауты/обработка ошибок открытия порта не расходились между путями.
+
+        Raises:
+            serial.SerialException: если порт не удалось открыть.
+        """
+        port = serial.Serial(
+            port_name,
+            baudrate,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_EVEN,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=timeout,
+        )
+        return cls(port, progress_callback=progress_callback)
 
     def request_stop(self) -> None:
         """Запрашивает остановку текущей операции прошивки."""
@@ -267,14 +298,26 @@ class Bootloader:
             raise BootloaderError(f"Ошибка стирания (ответ 0x{response:02X})")
         logger.info("Массовое стирание завершено")
 
-    def erase_pages(self, start: int, data: bytes, page_size: int = 2048, flash_base: int = 0x08000000) -> None:
-        """Стирает только страницы, в которых есть непустые данные.
+    def erase_pages(
+        self,
+        start: int,
+        data: bytes,
+        page_size: int = 2048,
+        flash_base: int = BOOTLOADER_BASE_ADDR,
+        skip_blank: bool = True,
+    ) -> None:
+        """Стирает страницы, которые будут перезаписаны.
 
         Args:
             start: Начальный адрес записи.
             data: Данные для записи (для определения пустых страниц).
             page_size: Размер страницы flash.
             flash_base: Базовый адрес flash.
+            skip_blank: Не стирать страницы, для которых записываемые данные
+                полностью состоят из 0xFF (по аналогии с core/dfu.py). При
+                False стираются все страницы диапазона, даже пустые —
+                это увеличивает число циклов erase, но иногда нужно
+                (например, чтобы гарантированно снести старые данные).
         """
         if not data:
             return
@@ -285,7 +328,12 @@ class Bootloader:
             seg_start = max(start, page)
             seg_end = min(end, page + page_size)
             page_data = data[seg_start - start : seg_end - start]
-            if page_data and not all(b == 0xFF for b in page_data):
+            if not page_data:
+                page += page_size
+                continue
+            if skip_blank and all(b == 0xFF for b in page_data):
+                logger.debug("Пропуск пустой страницы 0x%08X", page)
+            else:
                 pages_to_erase.append((page - flash_base) // page_size)
             page += page_size
 
@@ -461,15 +509,23 @@ class Bootloader:
         logger.info("BL diagnostics: версия=0x%02X, ID=0x%08X", version, device_id)
         return {"version": version, "device_id": device_id}
 
-    def flash_firmware(self, firmware_path: str, base_address: int = 0x08008000, page_size: int = 2048) -> None:
+    def flash_firmware(
+        self,
+        firmware_path: str,
+        base_address: int = APPLICATION_BASE_ADDR,
+        page_size: int = 2048,
+        skip_blank: bool = True,
+    ) -> None:
         """Записывает файл прошивки в память STM32.
 
         Поддерживает .bin, .hex (Intel HEX) и .elf.
 
         Args:
             firmware_path: Путь к файлу прошивки.
-            base_address: Начальный адрес записи (по умолчанию 0x08008000).
+            base_address: Начальный адрес записи (по умолчанию APPLICATION_BASE_ADDR).
             page_size: Размер страницы flash (для F105 — 2048 байт).
+            skip_blank: Не стирать страницы, для которых записываемые данные
+                полностью 0xFF (см. erase_pages()).
 
         Raises:
             BootloaderError: при ошибке прошивки.
@@ -484,7 +540,7 @@ class Bootloader:
         self.reconfigure_for_bootloader()
         self.enter_bootloader()
         self.sync()
-        self.erase_pages(base_address, firmware, page_size=page_size)
+        self.erase_pages(base_address, firmware, page_size=page_size, skip_blank=skip_blank)
 
         total = len(firmware)
         for offset in range(0, total, self.BLOCK_SIZE):

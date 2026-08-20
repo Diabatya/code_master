@@ -52,20 +52,11 @@ def _cli_flash(args: argparse.Namespace) -> int:
         return 1
     serial_manager.close_port()
 
+    bootloader = None
     try:
-        import serial as serial_module
-
         if args.emulation:
             raise BootloaderError("Режим эмуляции не поддерживает прошивку через CLI")
-        port = serial_module.Serial(
-            port_name,
-            args.baudrate,
-            bytesize=serial_module.EIGHTBITS,
-            parity=serial_module.PARITY_EVEN,
-            stopbits=serial_module.STOPBITS_ONE,
-            timeout=1,
-        )
-        bootloader = Bootloader(port)
+        bootloader = Bootloader.open(port_name, args.baudrate)
         bootloader.flash_firmware(args.firmware)
         print("Прошивка завершена успешно")
         return 0
@@ -73,10 +64,11 @@ def _cli_flash(args: argparse.Namespace) -> int:
         print(f"Ошибка прошивки: {exc}", file=sys.stderr)
         return 1
     finally:
-        try:
-            port.close()
-        except Exception:  # noqa: S110
-            pass
+        if bootloader is not None:
+            try:
+                bootloader.port.close()
+            except Exception:  # noqa: S110
+                pass
 
 
 def main() -> int:

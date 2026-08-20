@@ -2,6 +2,20 @@
 
 from typing import Dict
 
+# Единая точка истины для базовых адресов Flash (см. CURSOR_FIX_PROMPT.md 3.4):
+# раньше UART/USB CDC-путь (`ui/flash_dialog.py`) использовал магический
+# литерал 0x08008000, а ST-Link/DFU-путь — 0x08000000, каждый в нескольких
+# местах, без единого источника истины.
+#
+# BOOTLOADER_BASE_ADDR — начало Flash приложения нашего собственного STM32
+# bootloader'а (`firmware/bootloader/`) и полного образа (бутлоадер+приложение),
+# который заливается через ST-Link/DFU.
+BOOTLOADER_BASE_ADDR = 0x08000000
+# APPLICATION_BASE_ADDR — начало области приложения (после 32 КБ бутлоадера,
+# см. firmware/PROTOCOL.md), куда UART/USB CDC bootloader-протокол пишет
+# firmware приложения без самого бутлоадера.
+APPLICATION_BASE_ADDR = 0x08008000
+
 # Модель → размер Flash в КБ
 STM32_FLASH_SIZES: Dict[str, int] = {
     "STM32F103C8T6": 64,

@@ -8,6 +8,7 @@ from typing import Callable, Optional
 import usb.core
 import usb.util
 
+from core.stm32_info import BOOTLOADER_BASE_ADDR
 from models.logger import get_logger
 
 logger = get_logger(__name__)
@@ -465,7 +466,7 @@ class DfuDevice:
         затем выполнить zero-length DNLOAD с wValue=0.
         """
         try:
-            self._set_address(0x08000000)
+            self._set_address(BOOTLOADER_BASE_ADDR)
         except Exception:  # noqa: BLE001
             pass
         try:

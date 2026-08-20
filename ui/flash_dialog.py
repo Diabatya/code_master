@@ -56,6 +56,8 @@ from core.can_protocol import (
     DEVICE_TYPE_CAN_FD,
 )
 from core.stm32_info import (
+    APPLICATION_BASE_ADDR,
+    BOOTLOADER_BASE_ADDR,
     CHIP_FLASH_SIZE_KB,
     STM32_FLASH_SIZES,
     STM32_PAGE_SIZES,
@@ -514,22 +516,10 @@ class ConnectWorker(QThread):
         if not port:
             return False, {"error": tr("COM-порт не указан")}
         try:
-            import serial as serial_module
-        except Exception as exc:  # noqa: BLE001
-            return False, {"error": tr("pyserial не установлен: {0}").format(exc)}
-        try:
-            ser = serial_module.Serial(
-                port,
-                baud,
-                bytesize=serial_module.EIGHTBITS,
-                parity=serial_module.PARITY_EVEN,
-                stopbits=serial_module.STOPBITS_ONE,
-                timeout=1,
-            )
+            bl = Bootloader.open(port, baud)
         except Exception as exc:  # noqa: BLE001
             return False, {"error": str(exc)}
         try:
-            bl = Bootloader(ser)
             bl.reconfigure_for_bootloader()
             bl.enter_bootloader()
             bl.sync()
@@ -543,7 +533,7 @@ class ConnectWorker(QThread):
             return False, {"error": str(exc)}
         finally:
             try:
-                ser.close()
+                bl.port.close()
             except Exception:  # noqa: S110
                 pass
 
@@ -554,22 +544,10 @@ class ConnectWorker(QThread):
         if not port:
             return False, {"error": tr("USB CDC устройство не найдено")}
         try:
-            import serial as serial_module
-        except Exception as exc:  # noqa: BLE001
-            return False, {"error": tr("pyserial не установлен: {0}").format(exc)}
-        try:
-            ser = serial_module.Serial(
-                port,
-                115200,
-                bytesize=serial_module.EIGHTBITS,
-                parity=serial_module.PARITY_EVEN,
-                stopbits=serial_module.STOPBITS_ONE,
-                timeout=1,
-            )
+            bl = Bootloader.open(port, 115200)
         except Exception as exc:  # noqa: BLE001
             return False, {"error": str(exc)}
         try:
-            bl = Bootloader(ser)
             bl.reconfigure_for_bootloader()
             bl.enter_bootloader()
             bl.sync()
@@ -583,7 +561,7 @@ class ConnectWorker(QThread):
             return False, {"error": str(exc)}
         finally:
             try:
-                ser.close()
+                bl.port.close()
             except Exception:  # noqa: S110
                 pass
 
@@ -683,7 +661,7 @@ class FlashWorker(QThread):
         if not data:
             return False, tr("Файл прошивки пуст")
         if not base:
-            base = 0x08000000
+            base = BOOTLOADER_BASE_ADDR
         try:
             with ConnectHelper.session_with_chosen_probe(
                 return_first=True,
@@ -717,7 +695,7 @@ class FlashWorker(QThread):
         if not data:
             return False, tr("Файл прошивки пуст")
         if not base:
-            base = 0x08000000
+            base = BOOTLOADER_BASE_ADDR
         try:
             jlink = pylink.JLink()
             jlink.open()
@@ -739,34 +717,31 @@ class FlashWorker(QThread):
         if not port:
             return False, tr("COM-порт не указан")
         try:
-            import serial as serial_module
-        except Exception as exc:  # noqa: BLE001
-            return False, tr("pyserial не установлен: {0}").format(exc)
-        try:
-            ser = serial_module.Serial(
-                port,
-                baud,
-                bytesize=serial_module.EIGHTBITS,
-                parity=serial_module.PARITY_EVEN,
-                stopbits=serial_module.STOPBITS_ONE,
-                timeout=1,
-            )
+            bl = Bootloader.open(port, baud, progress_callback=lambda p: self.progress.emit(self._scaled_progress(p)))
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
         try:
             data, base = load_firmware_bytes(file_path)
             if not base:
-                base = 0x08008000
+                base = APPLICATION_BASE_ADDR
             if not data:
                 return False, tr("Файл прошивки пуст")
             with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
                 tmp.write(data)
                 bin_path = tmp.name
             try:
-                bl = Bootloader(ser, progress_callback=lambda p: self.progress.emit(self._scaled_progress(p)))
-                page_size = STM32_PAGE_SIZES.get(self._config.get("target_mcu", ""), 2048)
-                logger.info("UART прошивка: %s, base=0x%08X, размер=%d, page_size=%d", file_path, base, len(data), page_size)
-                bl.flash_firmware(bin_path, base, page_size=page_size)
+                target = self._config.get("target_mcu", "")
+                page_size = STM32_PAGE_SIZES.get(target, 2048)
+                # Как и в USB DFU-пути: если пишем полный образ Flash (с бутлоадером
+                # и/или конфигом), стираем все страницы, иначе старые данные на
+                # "пустых" страницах не совпадут с 0xFF и верификация не пройдёт.
+                flash_size = STM32_FLASH_SIZES.get(target, 256) * 1024
+                skip_blank = len(data) < flash_size
+                logger.info(
+                    "UART прошивка: %s, base=0x%08X, размер=%d, page_size=%d, skip_blank=%s",
+                    file_path, base, len(data), page_size, skip_blank,
+                )
+                bl.flash_firmware(bin_path, base, page_size=page_size, skip_blank=skip_blank)
                 ok = bl.verify(base, data)
                 return ok, tr("UART прошивка завершена: {0}").format(file_path)
             finally:
@@ -779,7 +754,7 @@ class FlashWorker(QThread):
             return False, str(exc)
         finally:
             try:
-                ser.close()
+                bl.port.close()
             except Exception:  # noqa: S110
                 pass
 
@@ -790,34 +765,28 @@ class FlashWorker(QThread):
         if not port:
             return False, tr("USB CDC устройство не найдено")
         try:
-            import serial as serial_module
-        except Exception as exc:  # noqa: BLE001
-            return False, tr("pyserial не установлен: {0}").format(exc)
-        try:
-            ser = serial_module.Serial(
-                port,
-                115200,
-                bytesize=serial_module.EIGHTBITS,
-                parity=serial_module.PARITY_EVEN,
-                stopbits=serial_module.STOPBITS_ONE,
-                timeout=1,
-            )
+            bl = Bootloader.open(port, 115200, progress_callback=lambda p: self.progress.emit(self._scaled_progress(p)))
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
         try:
             data, base = load_firmware_bytes(file_path)
             if not base:
-                base = 0x08008000
+                base = APPLICATION_BASE_ADDR
             if not data:
                 return False, tr("Файл прошивки пуст")
             with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
                 tmp.write(data)
                 bin_path = tmp.name
             try:
-                bl = Bootloader(ser, progress_callback=lambda p: self.progress.emit(self._scaled_progress(p)))
-                page_size = STM32_PAGE_SIZES.get(self._config.get("target_mcu", ""), 2048)
-                logger.info("USB CDC прошивка: %s, base=0x%08X, размер=%d, page_size=%d", file_path, base, len(data), page_size)
-                bl.flash_firmware(bin_path, base, page_size=page_size)
+                target = self._config.get("target_mcu", "")
+                page_size = STM32_PAGE_SIZES.get(target, 2048)
+                flash_size = STM32_FLASH_SIZES.get(target, 256) * 1024
+                skip_blank = len(data) < flash_size
+                logger.info(
+                    "USB CDC прошивка: %s, base=0x%08X, размер=%d, page_size=%d, skip_blank=%s",
+                    file_path, base, len(data), page_size, skip_blank,
+                )
+                bl.flash_firmware(bin_path, base, page_size=page_size, skip_blank=skip_blank)
                 ok = bl.verify(base, data)
                 return ok, tr("USB CDC прошивка завершена: {0}").format(file_path)
             finally:
@@ -830,7 +799,7 @@ class FlashWorker(QThread):
             return False, str(exc)
         finally:
             try:
-                ser.close()
+                bl.port.close()
             except Exception:  # noqa: S110
                 pass
 
@@ -841,7 +810,7 @@ class FlashWorker(QThread):
         if not bin_path:
             return False, tr("Не удалось подготовить BIN-файл из прошивки")
         if not base:
-            base = 0x08000000
+            base = BOOTLOADER_BASE_ADDR
         target = self._config.get("target_mcu", "")
         page_size = STM32_PAGE_SIZES.get(target, 2048)
         try:
@@ -909,7 +878,7 @@ class ReadWorker(QThread):
         method: str,
         config: Config,
         size: int = 0x10000,
-        start: int = 0x08000000,
+        start: int = BOOTLOADER_BASE_ADDR,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -984,17 +953,8 @@ class ReadWorker(QThread):
         baud = self._config.get("baudrate", 115200)
         if not port:
             raise RuntimeError(tr("COM-порт не указан"))
-        import serial as serial_module
-        ser = serial_module.Serial(
-            port,
-            baud,
-            bytesize=serial_module.EIGHTBITS,
-            parity=serial_module.PARITY_EVEN,
-            stopbits=serial_module.STOPBITS_ONE,
-            timeout=1,
-        )
+        bl = Bootloader.open(port, baud)
         try:
-            bl = Bootloader(ser)
             bl.reconfigure_for_bootloader()
             bl.enter_bootloader()
             bl.sync()
@@ -1003,7 +963,7 @@ class ReadWorker(QThread):
             return data, start
         finally:
             try:
-                ser.close()
+                bl.port.close()
             except Exception:  # noqa: S110
                 pass
 
@@ -1013,17 +973,8 @@ class ReadWorker(QThread):
             port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_APPLICATION_PID)
         if not port:
             raise RuntimeError(tr("USB CDC устройство не найдено"))
-        import serial as serial_module
-        ser = serial_module.Serial(
-            port,
-            115200,
-            bytesize=serial_module.EIGHTBITS,
-            parity=serial_module.PARITY_EVEN,
-            stopbits=serial_module.STOPBITS_ONE,
-            timeout=1,
-        )
+        bl = Bootloader.open(port, 115200)
         try:
-            bl = Bootloader(ser)
             bl.reconfigure_for_bootloader()
             bl.enter_bootloader()
             bl.sync()
@@ -1032,7 +983,7 @@ class ReadWorker(QThread):
             return data, start
         finally:
             try:
-                ser.close()
+                bl.port.close()
             except Exception:  # noqa: S110
                 pass
 
@@ -1540,9 +1491,9 @@ class FlashDialog(QDialog):
 
         data, base = load_firmware_bytes(file_path)
         if base == 0:
-            base = 0x08000000
+            base = BOOTLOADER_BASE_ADDR
         flash_size = flash_size_kb * 1024
-        firmware_offset = base - 0x08000000
+        firmware_offset = base - BOOTLOADER_BASE_ADDR
         if firmware_offset < 0 or firmware_offset + len(data) > flash_size:
             raise ValueError(tr("Прошивка не помещается в выбранный размер Flash"))
 
@@ -1559,6 +1510,61 @@ class FlashDialog(QDialog):
         tmp = Path(tempfile.gettempdir()) / f"{src.stem}_конфиг.bin"
         tmp.write_bytes(bytes(image))
         return str(tmp)
+
+    def _warn_base_address_mismatch(self, method: str, files: List[str]) -> bool:
+        """Предупреждает, если базовый адрес прошивки не соответствует
+        ожидаемому для выбранного способа программирования (см.
+        CURSOR_FIX_PROMPT.md 3.4): UART/USB CDC работают через наш
+        bootloader-протокол и ожидают образ приложения (без самого
+        bootloader'а), а ST-Link/J-Link/USB DFU обычно используются для
+        полного образа Flash, начиная с адреса бутлоадера.
+
+        Returns:
+            True, если можно продолжать прошивку (риска нет или пользователь
+            подтвердил), False — если пользователь отменил операцию.
+        """
+        risky_files: List[Tuple[str, int]] = []
+        for file_path in files:
+            try:
+                _, base = load_firmware_bytes(file_path)
+            except Exception:  # noqa: BLE001
+                continue
+            if not base:
+                continue
+            if method in ("uart", "usb_cdc") and base == BOOTLOADER_BASE_ADDR:
+                risky_files.append((file_path, base))
+            elif method in ("stlink", "jlink", "usb") and base == APPLICATION_BASE_ADDR:
+                risky_files.append((file_path, base))
+
+        if not risky_files:
+            return True
+
+        names = "\n".join(f"  {Path(p).name} (0x{b:08X})" for p, b in risky_files)
+        if method in ("uart", "usb_cdc"):
+            text = tr(
+                "Файл(ы) начинаются с адреса бутлоадера (0x{0:08X}):\n{1}\n\n"
+                "UART/USB CDC используют bootloader-протокол устройства и обычно "
+                "предназначены для прошивки области приложения. Запись по этому "
+                "адресу перезапишет сам bootloader на устройстве. Продолжить?"
+            ).format(BOOTLOADER_BASE_ADDR, names)
+        else:
+            text = tr(
+                "Файл(ы) начинаются с адреса приложения (0x{0:08X}), а не с адреса "
+                "бутлоадера (0x{1:08X}):\n{2}\n\n"
+                "Выбранный способ (ST-Link/J-Link/USB DFU) обычно используется для "
+                "прошивки полного образа Flash, включая bootloader. Если вы не "
+                "собираетесь перезаписывать весь образ — убедитесь, что это "
+                "ожидаемо. Продолжить?"
+            ).format(APPLICATION_BASE_ADDR, BOOTLOADER_BASE_ADDR, names)
+
+        answer = QMessageBox.warning(
+            self,
+            tr("Внимание: адрес прошивки"),
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def _on_flash(self) -> None:
         method = self._method_combo.currentData()
@@ -1581,6 +1587,9 @@ class FlashDialog(QDialog):
 
         if not prepared:
             QMessageBox.warning(self, tr("Внимание"), tr("Добавьте файлы прошивки или включите запись конфигурации"))
+            return
+
+        if not self._warn_base_address_mismatch(method, prepared):
             return
 
         logger.info("Старт прошивки: метод=%s, файлы=%s", method, prepared)
@@ -1690,6 +1699,7 @@ class FlashDialog(QDialog):
             return
         try:
             flash_size_kb = self._get_flash_size_kb()
+            page_size = self._get_page_size()
         except ValueError as exc:
             QMessageBox.warning(self, tr("Внимание"), str(exc))
             return
@@ -1700,7 +1710,6 @@ class FlashDialog(QDialog):
                 tr("Выполняется другая операция с устройством. Дождитесь её завершения."),
             )
             return
-        page_size = 2048
         start = flash_size_kb * 1024 - page_size
         self._read_config_button.setEnabled(False)
         self._progress_bar.setValue(0)
