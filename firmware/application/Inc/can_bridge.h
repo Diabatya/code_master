@@ -57,6 +57,22 @@ uint8_t CanBridge_Transmit(const can_frame_t *frame);
  * be reported to the PC (ТЗ 12.2: drop-oldest + error flag on overflow). */
 uint8_t CanBridge_TookOverflow(uint8_t channel);
 
+/* Returns 1 if channel's bxCAN peripheral raised at least one error
+ * interrupt (stuff/form/ACK/bit/CRC error, error-warning, error-passive or
+ * bus-off — see HAL_CAN_ERROR_* in stm32f1xx_hal_can.h) since the last
+ * call, clearing the flag on read (same drop-and-report semantics as
+ * CanBridge_TookOverflow()). If last_error_code is non-NULL, it receives
+ * the raw HAL error-code bitmask captured at the time of the most recent
+ * error, for diagnostics on the PC side (see PROTOCOL.md CMD_CAN_ERROR_STATUS). */
+uint8_t CanBridge_TookError(uint8_t channel, uint32_t *last_error_code);
+
+/* Returns 1 if channel's bxCAN peripheral entered Bus-Off state at least
+ * once since the last call, clearing the flag on read. AutoBusOff (see
+ * CanBridge_Init()) makes the peripheral recover automatically once the
+ * bus is quiet again, but the PC still needs to know it happened (e.g. to
+ * warn the user about a bad/missing termination or a disconnected bus). */
+uint8_t CanBridge_TookBusOff(uint8_t channel);
+
 #ifdef __cplusplus
 }
 #endif

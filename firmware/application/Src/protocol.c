@@ -30,6 +30,7 @@
 #define CMD_TRIGGER_READ       0xC3U
 #define CMD_TRIGGER_WRITE      0xC4U
 #define CMD_TRIGGER_ENABLE     0xC5U
+#define CMD_CAN_ERROR_STATUS   0xC6U
 #define CMD_RESP_OFFSET        0x10U /* response marker = request | 0x10, see PROTOCOL.md Part 2 */
 
 #define REBOOT_MAGIC_LEN 22U
@@ -208,6 +209,32 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       }
       uint8_t ok = Trigger_SetEnabled(payload[0], payload[1]);
       send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
+      break;
+    }
+
+    case CMD_CAN_ERROR_STATUS: {
+      /* Request payload: [channel]. Response payload: [had_error]
+       * [had_busoff][last_error_code (4 bytes, little-endian)]. Reading
+       * this clears the sticky had_error/had_busoff flags (same
+       * drop-and-report semantics as the RX-overflow flag), so the PC
+       * should poll it periodically to not miss transient faults. See
+       * CanBridge_TookError()/CanBridge_TookBusOff() in can_bridge.c and
+       * firmware/PROTOCOL.md. */
+      if (payload_len < 1U || payload[0] > 1U) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      uint32_t last_error_code = 0U;
+      uint8_t had_error = CanBridge_TookError(payload[0], &last_error_code);
+      uint8_t had_busoff = CanBridge_TookBusOff(payload[0]);
+      uint8_t out[6];
+      out[0] = had_error;
+      out[1] = had_busoff;
+      out[2] = (uint8_t)(last_error_code & 0xFFU);
+      out[3] = (uint8_t)((last_error_code >> 8) & 0xFFU);
+      out[4] = (uint8_t)((last_error_code >> 16) & 0xFFU);
+      out[5] = (uint8_t)((last_error_code >> 24) & 0xFFU);
+      send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
     }
 

@@ -17,6 +17,14 @@ typedef struct {
 
 static can_ring_t s_ring[2];
 
+/* Sticky per-channel error/bus-off flags + last raw HAL error code, set
+ * from HAL_CAN_ErrorCallback() (IRQ context) and consumed/cleared by
+ * CanBridge_TookError()/CanBridge_TookBusOff() (main loop / protocol.c),
+ * mirroring the existing overflow-flag pattern above. */
+static volatile uint8_t  s_error_pending[2];
+static volatile uint8_t  s_busoff_pending[2];
+static volatile uint32_t s_last_error_code[2];
+
 static void ring_push(uint8_t channel, const can_frame_t *frame)
 {
   can_ring_t *ring = &s_ring[channel];
@@ -55,6 +63,53 @@ uint8_t CanBridge_TookOverflow(uint8_t channel)
   uint8_t was = s_ring[channel].overflow;
   s_ring[channel].overflow = 0U;
   return was;
+}
+
+uint8_t CanBridge_TookError(uint8_t channel, uint32_t *last_error_code)
+{
+  if (channel > 1U) {
+    return 0U;
+  }
+  uint8_t was = s_error_pending[channel];
+  s_error_pending[channel] = 0U;
+  if (last_error_code != NULL) {
+    *last_error_code = s_last_error_code[channel];
+  }
+  return was;
+}
+
+uint8_t CanBridge_TookBusOff(uint8_t channel)
+{
+  if (channel > 1U) {
+    return 0U;
+  }
+  uint8_t was = s_busoff_pending[channel];
+  s_busoff_pending[channel] = 0U;
+  return was;
+}
+
+/* IRQ-context callback invoked by HAL_CAN_IRQHandler on any enabled error
+ * condition (see CAN_IT_ERROR/CAN_IT_BUSOFF/CAN_IT_LAST_ERROR_CODE
+ * activation in CanBridge_Init()). Kept minimal like
+ * HAL_CAN_RxFifo0MsgPendingCallback() below: just latch the flags/code for
+ * the main loop to pick up via CanBridge_TookError()/CanBridge_TookBusOff(),
+ * never block or do protocol work here. */
+void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
+{
+  uint8_t channel = (hcan->Instance == CAN1) ? 0U : 1U;
+  uint32_t code = hcan->ErrorCode;
+
+  s_last_error_code[channel] = code;
+  s_error_pending[channel] = 1U;
+  if ((code & HAL_CAN_ERROR_BOF) != 0U) {
+    s_busoff_pending[channel] = 1U;
+  }
+
+  /* HAL_CAN_IRQHandler() ORs newly detected error bits into hcan->ErrorCode
+   * (it never clears bits we've already consumed), so without resetting it
+   * here every future unrelated error would keep re-reporting old bits
+   * (e.g. a one-off bus-off would "stick" in every later error report). */
+  hcan->ErrorCode = HAL_CAN_ERROR_NONE;
 }
 
 static void gpio_init_can_pins(void)
@@ -172,6 +227,9 @@ static uint8_t configure_bit_timing(CAN_HandleTypeDef *hcan, uint32_t baud_kbps)
 uint8_t CanBridge_Init(uint32_t baud_kbps)
 {
   memset(s_ring, 0, sizeof(s_ring));
+  memset((void *)s_error_pending, 0, sizeof(s_error_pending));
+  memset((void *)s_busoff_pending, 0, sizeof(s_busoff_pending));
+  memset((void *)s_last_error_code, 0, sizeof(s_last_error_code));
 
   gpio_init_can_pins();
 
@@ -225,6 +283,20 @@ uint8_t CanBridge_Init(uint32_t baud_kbps)
     return 0U;
   }
   if (HAL_CAN_ActivateNotification(&hcan2, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK) {
+    return 0U;
+  }
+
+  /* Error/bus-off reporting (CURSOR_FIX_PROMPT.md 4.4): without these,
+   * AutoBusOff silently recovers the peripheral on its own, but neither the
+   * firmware nor the PC ever learn that a bus fault (e.g. bad/missing
+   * termination, disconnected bus) happened at all. See
+   * HAL_CAN_ErrorCallback() below and CMD_CAN_ERROR_STATUS in protocol.c /
+   * PROTOCOL.md. */
+  uint32_t error_its = CAN_IT_ERROR | CAN_IT_BUSOFF | CAN_IT_LAST_ERROR_CODE;
+  if (HAL_CAN_ActivateNotification(&hcan1, error_its) != HAL_OK) {
+    return 0U;
+  }
+  if (HAL_CAN_ActivateNotification(&hcan2, error_its) != HAL_OK) {
     return 0U;
   }
 
