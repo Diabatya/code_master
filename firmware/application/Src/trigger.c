@@ -6,6 +6,14 @@
 #include "main.h"
 #include "trigger.h"
 
+/* sizeof(trigger_t) must be a multiple of 2 (half-word) so that
+ * flash_write_all_triggers()'s halfword-by-halfword HAL_FLASH_Program()
+ * loop below never truncates the last byte, and so that the write step
+ * (sizeof(trigger_t)) matches the read step used by Trigger_Init(). Also
+ * make sure all 10 slots still fit in the trigger Flash page. */
+_Static_assert((sizeof(trigger_t) % 2U) == 0U, "trigger_t size must be halfword-aligned");
+_Static_assert((TRIGGER_COUNT * sizeof(trigger_t)) <= TRIGGER_PAGE_SIZE, "triggers must fit in the trigger Flash page");
+
 static trigger_t s_triggers[TRIGGER_COUNT];
 
 /* Pending deferred responses (delay_ms > 0). A small fixed-size list is

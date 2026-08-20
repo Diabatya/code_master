@@ -48,9 +48,12 @@ typedef struct __attribute__((packed)) {
   uint8_t  tx_dlc;
   uint8_t  tx_data[8];
   uint16_t delay_ms;        /* response delay, 0..~65s */
-  uint8_t  reserved[3];
+  uint8_t  reserved[4];     /* pads sizeof(trigger_t) to an even (half-word)
+                              * size, required for HAL_FLASH_Program(...,
+                              * FLASH_TYPEPROGRAM_HALFWORD, ...) writes to
+                              * not lose/misalign bytes; see trigger.c. */
   uint8_t  crc8;
-} trigger_t; /* 48 bytes, fits 10x in the 2KB page with room to spare */
+} trigger_t; /* 54 bytes, fits 10x in the 2KB page with room to spare */
 
 /* Loads all 10 triggers from Flash into RAM (call once at boot). Any slot
  * with a bad magic/CRC is treated as "disabled, all zero". */
