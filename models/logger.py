@@ -54,11 +54,26 @@ def setup_logging() -> None:
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
 
+    # logging.StreamHandler/FileHandler.emit() вызывает self.flush() (=fsync-подобный
+    # сброс на диск) после КАЖДОЙ записи. Протокол бутлоадера (core/bootloader.py)
+    # пишет несколько debug-строк на каждый 256-байтный блок прошивки — на полном
+    # образе 256 КБ это тысячи синхронных сбросов на диск, которые на медленном
+    # диске/антивирусе на Windows заметно тормозят саму прошивку. Буферизуем через
+    # MemoryHandler: пишем на диск пачками по 200 записей, а любую ERROR-запись —
+    # немедленно, чтобы не терять диагностику при сбое.
+    buffered_file_handler = logging.handlers.MemoryHandler(
+        capacity=200,
+        flushLevel=logging.ERROR,
+        target=file_handler,
+        flushOnClose=True,
+    )
+    buffered_file_handler.setLevel(logging.DEBUG)
+
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
 
-    root_logger.addHandler(file_handler)
+    root_logger.addHandler(buffered_file_handler)
     root_logger.addHandler(console_handler)
 
     logging.getLogger("code_master").info("Логирование настроено. Файл: %s", LOG_FILE)

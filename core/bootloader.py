@@ -178,7 +178,7 @@ class Bootloader:
             if timeout <= 0 or time.time() - start >= timeout:
                 logger.warning("Порт VID=0x%04X PID=0x%04X не найден (timeout=%.1f)", vid, pid, timeout)
                 return None
-            time.sleep(0.2)
+            time.sleep(0.05)
 
     def _port_info(self) -> Optional[Any]:
         """Возвращает информацию о текущем COM-порте."""
@@ -217,14 +217,16 @@ class Bootloader:
                     self.port.port = p.device
                     self.port.open()
                     return
-            time.sleep(0.2)
+            time.sleep(0.05)
         raise BootloaderError("Bootloader-порт не появился после перезагрузки")
 
     def reboot_to_bootloader(self, timeout: float = 10.0) -> None:
         """Программно перезагружает устройство в режим bootloader."""
         self.request_app_reboot()
-        # Даём приложению время записать флаг и сброситься
-        time.sleep(0.5)
+        # wait_for_bootloader_port() уже опрашивает порты в цикле каждые 0.2с
+        # и ищет именно bootloader PID, так что отдельная фиксированная пауза
+        # перед началом опроса не нужна — она просто добавляла 0.5с к каждому
+        # входу в bootloader, не влияя на результат.
         self.wait_for_bootloader_port(timeout)
 
     def enter_bootloader(self) -> None:
@@ -382,26 +384,26 @@ class Bootloader:
         # Формируем команду Write Memory 0x31
         self._send_command(0x31)
 
-        # Адрес + контрольная сумма адреса
+        # Адрес + контрольная сумма адреса — один write() вместо двух: тот же
+        # байтовый поток на проводе, но на один системный вызов/USB-пакет
+        # меньше на каждый из ~1000+ блоков полного образа (заметно на
+        # write()-с-задержкой драйверах, особенно на Windows/USB CDC).
         addr_bytes = address.to_bytes(4, "big")
         addr_checksum = 0
         for b in addr_bytes:
             addr_checksum ^= b
-        self.port.write(addr_bytes)
-        self.port.write(bytes([addr_checksum]))
+        self.port.write(addr_bytes + bytes([addr_checksum]))
 
         response = self._read_byte()
         if response != ACK:
             raise BootloaderError(f"Адрес не подтверждён (ответ 0x{response:02X})")
 
-        # Данные: N-1, затем байты, затем XOR
+        # Данные: N-1, затем байты, затем XOR — тоже одним write().
         n = length - 1
-        self.port.write(bytes([n]))
-        self.port.write(data)
         checksum = n
         for b in data:
             checksum ^= b
-        self.port.write(bytes([checksum]))
+        self.port.write(bytes([n]) + data + bytes([checksum]))
 
         response = self._read_byte(5.0)
         if response != ACK:
@@ -434,8 +436,7 @@ class Bootloader:
         addr_checksum = 0
         for b in addr_bytes:
             addr_checksum ^= b
-        self.port.write(addr_bytes)
-        self.port.write(bytes([addr_checksum]))
+        self.port.write(addr_bytes + bytes([addr_checksum]))
         if self._read_byte() != ACK:
             raise BootloaderError(f"Адрес чтения 0x{address:08X} не подтверждён")
 

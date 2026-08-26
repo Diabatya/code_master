@@ -4,7 +4,7 @@ import re
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 try:
     from pyocd.core.helpers import ConnectHelper
@@ -565,6 +565,12 @@ class ConnectWorker(QThread):
             except Exception:  # noqa: S110
                 pass
 
+    def try_method(self, method: str) -> Tuple[bool, Dict[str, Any]]:
+        """Публичная обёртка над `_try_method()` для повторного использования
+        авто-определения способа программирования вне ConnectWorker (см.
+        `_auto_detect_method()` ниже, используется FlashWorker/ReadWorker)."""
+        return self._try_method(method)
+
     def _try_usb(self) -> Tuple[bool, Dict[str, Any]]:
         if not _PYUSB:
             return False, {"error": tr("pyusb/libusb не установлен")}
@@ -595,6 +601,41 @@ class ConnectWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             logger.warning("USB DFU не доступен: %s", exc)
             return False, {"error": str(exc)}
+
+
+# Порядок перебора при методе "auto" для прошивки/чтения (FlashWorker/ReadWorker):
+# сперва самые дешёвые/быстрые для проверки способы, которыми управляет сама
+# прошивка устройства (наш bootloader может войти в режим программно — не
+# требует физического BOOT0/джампера), затем настоящий STM32 ROM DFU (нужен
+# BOOT0), и в конце отладочные пробники (могут требовать target_mcu/железо).
+AUTO_METHOD_ORDER: Tuple[str, ...] = ("usb_cdc", "uart", "usb", "stlink", "jlink")
+
+
+def _auto_detect_method(
+    config: Config,
+    log_callback: Optional[Callable[[str], None]] = None,
+    order: Tuple[str, ...] = AUTO_METHOD_ORDER,
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Перебирает способы программирования из `order` и возвращает первый,
+    для которого реально нашлось устройство (тот же перебор, что делает
+    ConnectWorker в режиме "Авто" при подключении, но переиспользуемый и для
+    прошивки/чтения — см. CanBridge... нет, см. отчёт пользователя: запись
+    только «Устройство»/«Серийный номер» не должна требовать от пользователя
+    вручную угадывать способ программирования).
+
+    Returns:
+        (method, info) при успехе — `info` содержит доп. данные вроде chip_id;
+        (None, {"error": ...}) если не найдено ни одно устройство.
+    """
+    prober = ConnectWorker("", config)
+    for method in order:
+        if log_callback:
+            log_callback(tr("Автоопределение: проверка {0}...").format(method))
+        ok, info = prober.try_method(method)
+        if ok:
+            info["method"] = method
+            return method, info
+    return None, {"error": tr("Не найдено ни одно поддерживаемое устройство (UART/USB CDC/USB DFU/ST-Link/J-Link)")}
 
 
 class FlashWorker(QThread):
@@ -638,16 +679,32 @@ class FlashWorker(QThread):
     def _scaled_progress(self, local: int) -> int:
         return int((self._current_index + local / 100) / self._total * 100)
 
+    def _resolve_method(self) -> Optional[str]:
+        """При методе "auto" определяет реально доступный способ один раз и
+        запоминает его в self._method (чтобы остальные файлы в этом же
+        запуске не проверялись заново)."""
+        if self._method != "auto":
+            return self._method
+        method, info = _auto_detect_method(self._config, log_callback=self.log_line.emit)
+        if method is None:
+            return None
+        self.log_line.emit(tr("Автоопределение: используется {0}").format(method))
+        self._method = method
+        return method
+
     def _flash_one(self, file_path: str) -> Tuple[bool, str]:
-        if self._method == "stlink":
+        method = self._resolve_method()
+        if method is None:
+            return False, tr("Не найдено ни одно поддерживаемое устройство (UART/USB CDC/USB DFU/ST-Link/J-Link)")
+        if method == "stlink":
             return self._flash_stlink(file_path)
-        if self._method == "jlink":
+        if method == "jlink":
             return self._flash_jlink(file_path)
-        if self._method == "uart":
+        if method == "uart":
             return self._flash_uart(file_path)
-        if self._method == "usb_cdc":
+        if method == "usb_cdc":
             return self._flash_usb_cdc(file_path)
-        if self._method == "usb":
+        if method == "usb":
             return self._flash_usb(file_path)
         return False, tr("Неизвестный способ программирования")
 
@@ -895,18 +952,31 @@ class ReadWorker(QThread):
             logger.exception("Ошибка чтения прошивки")
             self.finished.emit(False, str(exc), b"", 0)
 
+    def _resolve_method(self) -> str:
+        """При методе "auto" определяет реально доступный способ (см.
+        FlashWorker._resolve_method) и запоминает его."""
+        if self._method != "auto":
+            return self._method
+        method, info = _auto_detect_method(self._config, log_callback=self.log_line.emit)
+        if method is None:
+            raise RuntimeError(tr("Не найдено ни одно поддерживаемое устройство (UART/USB CDC/USB DFU/ST-Link/J-Link)"))
+        self.log_line.emit(tr("Автоопределение: используется {0}").format(method))
+        self._method = method
+        return method
+
     def _read_one(self) -> Tuple[bytes, int]:
-        if self._method == "stlink":
+        method = self._resolve_method()
+        if method == "stlink":
             return self._read_stlink()
-        if self._method == "jlink":
+        if method == "jlink":
             return self._read_jlink()
-        if self._method == "uart":
+        if method == "uart":
             return self._read_uart()
-        if self._method == "usb_cdc":
+        if method == "usb_cdc":
             return self._read_usb_cdc()
-        if self._method == "usb":
+        if method == "usb":
             return self._read_usb()
-        raise RuntimeError(tr("Чтение не поддерживается для {0}").format(self._method))
+        raise RuntimeError(tr("Чтение не поддерживается для {0}").format(method))
 
     def _read_stlink(self) -> Tuple[bytes, int]:
         if not _PYOCD:
@@ -1287,8 +1357,13 @@ class FlashDialog(QDialog):
         )
 
     def _prepare_config_only_hex(self) -> str:
-        """Создаёт временный HEX-файл с одной последней страницей конфигурации."""
-        from intelhex import IntelHex
+        """Создаёт временный HEX-файл с одной последней страницей конфигурации.
+
+        Конфигурация должна находиться по тому же абсолютному адресу, что и
+        в полном образе (BOOTLOADER_BASE_ADDR + последняя страница). Иначе
+        DFU/ST-Link получат адрес вне Flash (0x0003F800 вместо 0x0803F800) и
+        вернут errTARGET / bStatus=0x01.
+        """
         name = self._device_name_edit.text().strip()
         if not name:
             raise ValueError(tr("Заполните поле «Устройство»"))
@@ -1310,9 +1385,9 @@ class FlashDialog(QDialog):
         page[18:28] = serial_bytes
 
         tmp = Path(tempfile.gettempdir()) / f"config_only_{int(time.time())}.hex"
-        ih = IntelHex()
-        ih.puts(last_page, bytes(page))
-        ih.write_hex_file(tmp)
+        # Абсолютный адрес последней страницы — иначе load_firmware_bytes()
+        # вернёт base=0x0003F800, DFU запишет за пределы памяти.
+        _save_intel_hex(bytes(page), BOOTLOADER_BASE_ADDR + last_page, tmp)
         return str(tmp)
 
     def _on_config_toggled(self, checked: bool) -> None:
@@ -1568,9 +1643,6 @@ class FlashDialog(QDialog):
 
     def _on_flash(self) -> None:
         method = self._method_combo.currentData()
-        if method == "auto":
-            QMessageBox.warning(self, tr("Внимание"), tr("Выберите конкретный способ программирования"))
-            return
         if self._is_any_worker_running():
             QMessageBox.warning(
                 self,
@@ -1612,7 +1684,11 @@ class FlashDialog(QDialog):
         открыть. Запоминаем, был ли порт открыт, чтобы вернуть его обратно.
         """
         self._port_was_open = False
-        if method not in ("uart", "usb_cdc") or self._serial_manager is None:
+        # "auto" тоже может в итоге разрешиться в uart/usb_cdc (см.
+        # _auto_detect_method), поэтому порт освобождаем на всякий случай и
+        # для него — иначе SerialManager может держать открытым тот же COM,
+        # который попробует открыть Bootloader.open().
+        if method not in ("uart", "usb_cdc", "auto") or self._serial_manager is None:
             return
         if not self._serial_manager.is_open():
             return
@@ -1650,9 +1726,6 @@ class FlashDialog(QDialog):
 
     def _on_read_firmware(self) -> None:
         method = self._method_combo.currentData()
-        if method == "auto":
-            QMessageBox.warning(self, tr("Внимание"), tr("Выберите конкретный способ программирования"))
-            return
         try:
             size_kb = self._get_flash_size_kb()
         except ValueError as exc:
@@ -1694,9 +1767,6 @@ class FlashDialog(QDialog):
 
     def _on_read_config(self) -> None:
         method = self._method_combo.currentData()
-        if method == "auto":
-            QMessageBox.warning(self, tr("Внимание"), tr("Выберите конкретный способ программирования"))
-            return
         try:
             flash_size_kb = self._get_flash_size_kb()
             page_size = self._get_page_size()
