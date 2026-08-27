@@ -31,6 +31,7 @@ except Exception:
 from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -650,12 +651,14 @@ class FlashWorker(QThread):
         files: List[str],
         method: str,
         config: Config,
+        verify: bool = True,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
         self._files = files
         self._method = method
         self._config = config
+        self._verify = verify
         self._current_index = 0
         self._total = len(files)
 
@@ -760,8 +763,11 @@ class FlashWorker(QThread):
             jlink.connect(target=target, interface="SWD")
             jlink.erase()
             jlink.flash(base, data)
-            read = bytes(jlink.memory_read(base, len(data)))
-            ok = read == data
+            if self._verify:
+                read = bytes(jlink.memory_read(base, len(data)))
+                ok = read == data
+            else:
+                ok = True
             jlink.reset()
             jlink.close()
             return ok, tr("J-Link: прошивка завершена") if ok else tr("J-Link: верификация не прошла")
@@ -799,7 +805,7 @@ class FlashWorker(QThread):
                     file_path, base, len(data), page_size, skip_blank,
                 )
                 bl.flash_firmware(bin_path, base, page_size=page_size, skip_blank=skip_blank)
-                ok = bl.verify(base, data)
+                ok = bl.verify(base, data) if self._verify else True
                 return ok, tr("UART прошивка завершена: {0}").format(file_path)
             finally:
                 try:
@@ -844,7 +850,7 @@ class FlashWorker(QThread):
                     file_path, base, len(data), page_size, skip_blank,
                 )
                 bl.flash_firmware(bin_path, base, page_size=page_size, skip_blank=skip_blank)
-                ok = bl.verify(base, data)
+                ok = bl.verify(base, data) if self._verify else True
                 return ok, tr("USB CDC прошивка завершена: {0}").format(file_path)
             finally:
                 try:
@@ -904,8 +910,11 @@ class FlashWorker(QThread):
                 self.log_line.emit(tr("USB DFU: запись {0} байт...").format(len(data)))
                 dfu.download(base, data, progress=_make_progress(15, 50, tr("Запись Flash")))
                 dfu.abort()
-                self.log_line.emit(tr("USB DFU: верификация..."))
-                ok = dfu.upload(base, len(data), progress=_make_progress(50, 90, tr("Верификация Flash"))) == data
+                if self._verify:
+                    self.log_line.emit(tr("USB DFU: верификация..."))
+                    ok = dfu.upload(base, len(data), progress=_make_progress(50, 90, tr("Верификация Flash"))) == data
+                else:
+                    ok = True
                 self.log_line.emit(tr("USB DFU: завершение..."))
                 dfu.abort()
                 dfu.leave()
@@ -1071,6 +1080,129 @@ class ReadWorker(QThread):
         return data, start
 
 
+class EraseWorker(QThread):
+    '''Фоновое полное стирание Flash микроконтроллера.'''
+
+    log_line = Signal(str)
+    finished = Signal(bool, str)
+
+    def __init__(
+        self,
+        method: str,
+        config: Config,
+        parent: Optional[QObject] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._method = method
+        self._config = config
+
+    def run(self) -> None:
+        try:
+            method = self._resolve_method()
+            if method is None:
+                raise RuntimeError(tr('Не найдено ни одно поддерживаемое устройство'))
+            if method == 'stlink':
+                self._erase_stlink()
+            elif method == 'jlink':
+                self._erase_jlink()
+            elif method == 'uart':
+                self._erase_uart()
+            elif method == 'usb_cdc':
+                self._erase_usb_cdc()
+            elif method == 'usb':
+                self._erase_usb()
+            else:
+                raise RuntimeError(tr('Стирание не поддерживается для {0}').format(method))
+            self.finished.emit(True, tr('Flash успешно стёрт'))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception('Ошибка стирания Flash')
+            self.finished.emit(False, str(exc))
+
+    def _resolve_method(self) -> Optional[str]:
+        if self._method != 'auto':
+            return self._method
+        method, info = _auto_detect_method(self._config, log_callback=self.log_line.emit)
+        if method is None:
+            return None
+        self.log_line.emit(tr('Автоопределение: используется {0}').format(method))
+        self._method = method
+        return method
+
+    def _erase_uart(self) -> None:
+        port = self._config.get('port', '')
+        if not port:
+            raise RuntimeError(tr('COM-порт не указан'))
+        bl = Bootloader.open(port, self._config.get('baudrate', 115200))
+        try:
+            bl.reconfigure_for_bootloader()
+            bl.enter_bootloader()
+            bl.sync()
+            bl.erase(extended=True)
+        finally:
+            try:
+                bl.port.close()
+            except Exception:  # noqa: S110
+                pass
+
+    def _erase_usb_cdc(self) -> None:
+        port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_BOOTLOADER_PID)
+        if not port:
+            port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_APPLICATION_PID)
+        if not port:
+            raise RuntimeError(tr('USB CDC устройство не найдено'))
+        bl = Bootloader.open(port, 115200)
+        try:
+            bl.reconfigure_for_bootloader()
+            bl.enter_bootloader()
+            bl.sync()
+            bl.erase(extended=True)
+        finally:
+            try:
+                bl.port.close()
+            except Exception:  # noqa: S110
+                pass
+
+    def _erase_usb(self) -> None:
+        if not _PYUSB:
+            raise RuntimeError(tr('pyusb/libusb не установлены'))
+        from core.dfu import DfuDevice, find_dfu_device
+        dev = find_dfu_device()
+        with DfuDevice(dev) as dfu:
+            self.log_line.emit(tr('DFU: массовое стирание Flash...'))
+            dfu.mass_erase()
+
+    def _erase_stlink(self) -> None:
+        if not _PYOCD:
+            raise RuntimeError(tr('pyocd не установлен'))
+        target = self._config.get('target_mcu', '')
+        if not target:
+            raise RuntimeError(tr('Не указана целевая МК (target_mcu)'))
+        with ConnectHelper.session_with_chosen_probe(
+            return_first=True,
+            auto_open=True,
+            target_override=target,
+        ) as session:
+            target_obj = session.target
+            target_obj.reset_and_halt()
+            target_obj.mass_erase()
+            target_obj.reset()
+
+    def _erase_jlink(self) -> None:
+        if not _PYLINK:
+            raise RuntimeError(tr('pylink-square не установлен'))
+        target = self._config.get('target_mcu', '')
+        if not target:
+            raise RuntimeError(tr('Не указана целевая МК (target_mcu)'))
+        jlink = pylink.JLink()
+        jlink.open()
+        jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
+        jlink.connect(target=target, interface='SWD')
+        try:
+            jlink.erase()
+        finally:
+            jlink.close()
+
+
 class FlashDialog(QDialog):
     """Полноценный диалог прошивки микроконтроллера."""
 
@@ -1083,6 +1215,7 @@ class FlashDialog(QDialog):
         self._connect_worker: Optional[ConnectWorker] = None
         self._flash_worker: Optional[FlashWorker] = None
         self._read_worker: Optional[ReadWorker] = None
+        self._erase_worker: Optional[EraseWorker] = None
         self._connected = False
         self._last_chip_info: Dict[str, Any] = {}
         self._log_file: Optional[Path] = None
@@ -1094,7 +1227,7 @@ class FlashDialog(QDialog):
     def _is_any_worker_running(self) -> bool:
         return any(
             worker is not None and worker.isRunning()
-            for worker in (self._connect_worker, self._flash_worker, self._read_worker)
+            for worker in (self._connect_worker, self._flash_worker, self._read_worker, self._erase_worker)
         )
 
     def _create_widgets(self) -> None:
@@ -1159,6 +1292,10 @@ class FlashDialog(QDialog):
         self._config_button.setEnabled(True)
         self._config_button.setToolTip(tr("Дописать имя и серийный номер в прошивку/конфиг при нажатии 'Прошить'"))
 
+        self._verify_checkbox = QCheckBox(tr("Проверять после записи"))
+        self._verify_checkbox.setChecked(True)
+        self._verify_checkbox.setToolTip(tr("Отключите, чтобы ускорить прошивку за счёт пропуска чтения обратно"))
+
         # Файлы прошивки
         self._files_group = QGroupBox(tr("Файлы прошивки"))
         self._files_list = QListWidget()
@@ -1185,6 +1322,9 @@ class FlashDialog(QDialog):
         self._read_button.setFont(font)
         self._read_config_button = QPushButton(tr("Прочитать конфигурацию"))
         self._read_config_button.setFont(font)
+        self._erase_button = QPushButton(tr("Стереть Flash"))
+        self._erase_button.setFont(font)
+        self._erase_button.setStyleSheet("background-color: #F44336; color: #FFFFFF;")
         self._hex_editor_button = QPushButton(tr("Открыть HEX-редактор"))
         self._close_button = QPushButton(tr("Закрыть"))
 
@@ -1217,6 +1357,7 @@ class FlashDialog(QDialog):
 
         config_layout = QHBoxLayout()
         config_layout.addWidget(self._config_button)
+        config_layout.addWidget(self._verify_checkbox)
         config_layout.addStretch()
         layout.addLayout(config_layout)
 
@@ -1243,6 +1384,7 @@ class FlashDialog(QDialog):
         bottom.addWidget(self._flash_button)
         bottom.addWidget(self._read_button)
         bottom.addWidget(self._read_config_button)
+        bottom.addWidget(self._erase_button)
         bottom.addWidget(self._hex_editor_button)
         bottom.addWidget(self._close_button)
         layout.addLayout(bottom)
@@ -1258,6 +1400,7 @@ class FlashDialog(QDialog):
         self._flash_button.clicked.connect(self._on_flash)
         self._read_button.clicked.connect(self._on_read_firmware)
         self._read_config_button.clicked.connect(self._on_read_config)
+        self._erase_button.clicked.connect(self._on_erase_flash)
         self._hex_editor_button.clicked.connect(lambda: self.open_hex_editor())
         self._close_button.clicked.connect(self.reject)
         self._power_button.clicked.connect(self._on_power_toggle)
@@ -1670,8 +1813,9 @@ class FlashDialog(QDialog):
         self._config_button.setEnabled(False)
         self._read_button.setEnabled(False)
         self._read_config_button.setEnabled(False)
+        self._erase_button.setEnabled(False)
         self._progress_bar.setValue(0)
-        self._flash_worker = FlashWorker(prepared, method, self._config, self)
+        self._flash_worker = FlashWorker(prepared, method, self._config, verify=self._verify_checkbox.isChecked(), parent=self)
         self._flash_worker.log_line.connect(self._log)
         self._flash_worker.progress.connect(self._progress_bar.setValue)
         self._flash_worker.finished.connect(self._on_flash_finished)
@@ -1717,6 +1861,7 @@ class FlashDialog(QDialog):
         self._config_button.setEnabled(True)
         self._read_button.setEnabled(True)
         self._read_config_button.setEnabled(True)
+        self._erase_button.setEnabled(True)
         self._log(message)
         self._restore_serial_port()
         if success:
@@ -1742,6 +1887,7 @@ class FlashDialog(QDialog):
             )
             return
         self._read_button.setEnabled(False)
+        self._erase_button.setEnabled(False)
         self._progress_bar.setValue(0)
         self._release_serial_port(method)
         self._read_worker = ReadWorker(method, self._config, size=size_kb * 1024, parent=self)
@@ -1751,6 +1897,7 @@ class FlashDialog(QDialog):
 
     def _on_read_finished(self, success: bool, message: str, data: object, base: int) -> None:
         self._read_button.setEnabled(True)
+        self._erase_button.setEnabled(True)
         self._restore_serial_port()
         if not success or not isinstance(data, bytes) or not data:
             self._log(message)
@@ -1782,6 +1929,7 @@ class FlashDialog(QDialog):
             return
         start = flash_size_kb * 1024 - page_size
         self._read_config_button.setEnabled(False)
+        self._erase_button.setEnabled(False)
         self._progress_bar.setValue(0)
         self._release_serial_port(method)
         self._read_worker = ReadWorker(method, self._config, size=page_size, start=start, parent=self)
@@ -1791,6 +1939,7 @@ class FlashDialog(QDialog):
 
     def _on_config_read_finished(self, success: bool, message: str, data: object, base: int) -> None:
         self._read_config_button.setEnabled(True)
+        self._erase_button.setEnabled(True)
         self._restore_serial_port()
         if not success or not isinstance(data, bytes) or not data:
             self._log(message)
@@ -1812,6 +1961,53 @@ class FlashDialog(QDialog):
         except Exception as exc:  # noqa: BLE001
             self._log(tr("Не удалось распарсить конфигурацию: {0}").format(exc))
             QMessageBox.critical(self, tr("Ошибка"), str(exc))
+
+    def _on_erase_flash(self) -> None:
+        method = self._method_combo.currentData()
+        if self._is_any_worker_running():
+            QMessageBox.warning(
+                self,
+                tr('Внимание'),
+                tr('Выполняется другая операция с устройством. Дождитесь её завершения.'),
+            )
+            return
+        answer = QMessageBox.warning(
+            self,
+            tr('Внимание: полное стирание Flash'),
+            tr('Полное стирание удалит bootloader и всё приложение с МК.\n'
+               'Устройство перестанет работать до повторной прошивки.\n\n'
+               'Продолжить?'),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        logger.info('Старт стирания Flash: метод=%s', method)
+        self._release_serial_port(method)
+        self._flash_button.setEnabled(False)
+        self._config_button.setEnabled(False)
+        self._read_button.setEnabled(False)
+        self._read_config_button.setEnabled(False)
+        self._erase_button.setEnabled(False)
+        self._progress_bar.setValue(0)
+        self._erase_worker = EraseWorker(method, self._config, self)
+        self._erase_worker.log_line.connect(self._log)
+        self._erase_worker.finished.connect(self._on_erase_finished)
+        self._erase_worker.start()
+
+    def _on_erase_finished(self, success: bool, message: str) -> None:
+        logger.info('Стирание завершено: success=%s, message=%s', success, message)
+        self._flash_button.setEnabled(True)
+        self._config_button.setEnabled(True)
+        self._read_button.setEnabled(True)
+        self._read_config_button.setEnabled(True)
+        self._erase_button.setEnabled(True)
+        self._log(message)
+        self._restore_serial_port()
+        if success:
+            QMessageBox.information(self, tr('Готово'), message)
+        else:
+            QMessageBox.critical(self, tr('Ошибка'), message)
 
     def open_hex_editor(self, file_path: Optional[str] = None) -> None:
         if not file_path:

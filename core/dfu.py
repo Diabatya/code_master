@@ -165,29 +165,35 @@ class DfuDevice:
             i += length
         return None
 
-    def _get_transfer_size(self) -> Optional[int]:
-        """Возвращает wTransferSize из DFU functional descriptor, либо bMaxPacketSize0."""
+    def _get_transfer_size(self) -> int:
+        """Возвращает wTransferSize из DFU functional descriptor, либо bMaxPacketSize0.
+
+        Всегда возвращает положительное значение (минимум 64), чтобы fast-путь
+        DFU не сваливался в медленный _download_slow/_upload_slow, если
+        дескриптор не удалось распарсить или bMaxPacketSize0 равен 0.
+        """
         try:
             cfg = self.dev.get_active_configuration()
             for source in (getattr(cfg, "extra", b""), getattr(cfg, "extra_descriptors", [])):
                 size = self._parse_transfer_size(source)
-                if size is not None:
+                if size is not None and size > 0:
                     logger.debug("DFU wTransferSize из дескриптора: %d", size)
                     return size
             for intf in cfg.interfaces():
                 for alt in intf.altsettings():
                     for source in (getattr(alt, "extra", b""), getattr(alt, "extra_descriptors", [])):
                         size = self._parse_transfer_size(source)
-                        if size is not None:
+                        if size is not None and size > 0:
                             logger.debug("DFU wTransferSize из интерфейсного дескриптора: %d", size)
                             return size
             mps = getattr(self.dev, "bMaxPacketSize0", 0)
-            if mps:
+            if mps and mps > 0:
                 logger.debug("DFU wTransferSize fallback на bMaxPacketSize0: %d", mps)
                 return int(mps)
         except Exception:
             logger.debug("Не удалось прочитать DFU descriptor wTransferSize", exc_info=True)
-        return None
+        logger.debug("DFU wTransferSize fallback на 64")
+        return 64
 
     def _ctrl(self, request_type: int, request: int, value: int = 0, data_or_wlength=0, timeout: int = 5000):
         return self.dev.ctrl_transfer(
