@@ -288,7 +288,7 @@
 - [x] Размер Flash.
 - [x] Размер application.
 - [x] CRC application.
-- [ ] Статус config page.
+- [x] Статус config page.
 - [ ] Статус trigger page.
 - [x] Команда получения информации.
 - [x] Отображение информации в UI.

@@ -394,6 +394,7 @@ class SerialManager(QObject):
             "config_format_version": payload[4],
             "config_record_length": payload[5],
             "trigger_count": payload[6],
+            "config_valid": bool(payload[7]),
             "application_size": int.from_bytes(payload[8:12], "little"),
             "application_crc32": int.from_bytes(payload[12:16], "little"),
         }

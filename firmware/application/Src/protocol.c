@@ -282,6 +282,8 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
         10U,
         0U,
       };
+      out[7] = DeviceConfig_IsValid();
+      /* out[8..15] are filled from application metadata below. */
       out[2] = 256U & 0xFFU;
       out[3] = (256U >> 8) & 0xFFU;
       if (*(const uint32_t *)&metadata[0] == APP_METADATA_MAGIC) {

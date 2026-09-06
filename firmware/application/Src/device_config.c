@@ -7,6 +7,7 @@
 #include "device_config.h"
 
 static device_config_t s_config;
+static uint8_t s_config_valid;
 
 static uint8_t crc8(const uint8_t *data, uint32_t len)
 {
@@ -54,17 +55,24 @@ void DeviceConfig_Init(void)
             || (flash_cfg->reserved[0] == DEVICE_CONFIG_FORMAT_VERSION
                 && flash_cfg->reserved[1] == DEVICE_CONFIG_RECORD_SIZE))) {
       memcpy(&s_config, flash_cfg, sizeof(s_config));
+      s_config_valid = 1U;
       return;
     }
   }
   /* Blank/corrupt page: fall back to defaults without touching Flash (a
    * write only happens on an explicit CMD_CFG_WRITE/FACTORY_RESET). */
   load_defaults(&s_config);
+  s_config_valid = 0U;
 }
 
 const device_config_t *DeviceConfig_Get(void)
 {
   return &s_config;
+}
+
+uint8_t DeviceConfig_IsValid(void)
+{
+  return s_config_valid;
 }
 
 static uint8_t flash_write_config(const device_config_t *cfg)
@@ -131,6 +139,7 @@ uint8_t DeviceConfig_Write(const uint8_t *device_name, uint8_t device_name_len,
   }
 
   memcpy(&s_config, &new_cfg, sizeof(s_config));
+  s_config_valid = 1U;
   return 1U;
 }
 
@@ -144,5 +153,6 @@ uint8_t DeviceConfig_FactoryReset(void)
   }
 
   memcpy(&s_config, &defaults, sizeof(s_config));
+  s_config_valid = 1U;
   return 1U;
 }

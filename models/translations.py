@@ -622,6 +622,8 @@ class Translator:
                 "Диагностика триггеров": "Trigger diagnostics",
                 "Firmware: не определена": "Firmware: not detected",
                 "Firmware: информация недоступна": "Firmware: information unavailable",
+                "valid": "valid",
+                "defaults": "defaults",
                 "Firmware: app {0}, protocol {1}, Flash {2} KB, size {3} B, CRC32 {4}, config v{5}": "Firmware: app {0}, protocol {1}, Flash {2} KB, size {3} B, CRC32 {4}, config v{5}",
                 "Срабатываний: {0}\nМаксимальное опоздание: {1} мс": "Fired: {0}\nMaximum lateness: {1} ms",
                 "Firmware поддерживает один канал CAN для trigger_t; выберите CAN1 или CAN2": "Firmware supports one CAN channel per trigger_t; select CAN1 or CAN2",
