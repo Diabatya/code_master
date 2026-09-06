@@ -65,6 +65,9 @@ void Trigger_Init(void);
  * dedicated hardware timer). */
 void Trigger_Poll(void);
 
+/* Returns cumulative trigger timing counters since boot. */
+void Trigger_GetStats(uint32_t *fired_count, uint32_t *max_lateness_ms);
+
 /* Evaluates all enabled triggers against a freshly received frame and
  * arms any matching response (respecting its configured delay_ms). Must
  * be called from the main loop only, never from IRQ context. */

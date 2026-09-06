@@ -586,10 +586,13 @@ class CanTriggerTab(QWidget):
         sync_layout = QHBoxLayout()
         self._read_device_button = QPushButton(tr("Прочитать триггеры из устройства"))
         self._write_device_button = QPushButton(tr("Записать триггеры в устройство"))
+        self._trigger_stats_button = QPushButton(tr("Диагностика триггеров"))
         self._read_device_button.clicked.connect(self._read_triggers_from_device)
         self._write_device_button.clicked.connect(self._write_triggers_to_device)
+        self._trigger_stats_button.clicked.connect(self._read_trigger_stats)
         sync_layout.addWidget(self._read_device_button)
         sync_layout.addWidget(self._write_device_button)
+        sync_layout.addWidget(self._trigger_stats_button)
         layout.addLayout(sync_layout)
 
     def _device_trigger_values(self, index: int) -> Dict[str, Any]:
@@ -672,6 +675,19 @@ class CanTriggerTab(QWidget):
             logger.exception("Ошибка чтения триггеров из устройства")
             QMessageBox.critical(self, tr("Ошибка"), str(exc))
 
+    def _read_trigger_stats(self) -> None:
+        try:
+            stats = self._serial_manager.read_trigger_stats()
+            QMessageBox.information(
+                self,
+                tr("Диагностика триггеров"),
+                tr("Срабатываний: {0}\nМаксимальное опоздание: {1} мс").format(
+                    stats["fired_count"], stats["max_lateness_ms"]
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, tr("Ошибка"), str(exc))
+
     def _write_triggers_to_device(self) -> None:
         try:
             for index in range(TRIGGER_COUNT):
@@ -713,6 +729,7 @@ class CanTriggerTab(QWidget):
         """Обновляет статические строки вкладки триггеров."""
         self._read_device_button.setText(tr("Прочитать триггеры из устройства"))
         self._write_device_button.setText(tr("Записать триггеры в устройство"))
+        self._trigger_stats_button.setText(tr("Диагностика триггеров"))
         for i, block in enumerate(self._blocks):
             block["group"].setTitle(tr("Триггер {0}").format(i + 1))
             block["cache"]["cache_check"].setText(tr("Автоматическая запись DATA в Кэш"))

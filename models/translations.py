@@ -618,6 +618,8 @@ class Translator:
                 "Записать триггеры в устройство": "Write triggers to device",
                 "Триггеры прочитаны из устройства": "Triggers read from device",
                 "Триггеры записаны в устройство": "Triggers written to device",
+                "Диагностика триггеров": "Trigger diagnostics",
+                "Срабатываний: {0}\nМаксимальное опоздание: {1} мс": "Fired: {0}\nMaximum lateness: {1} ms",
                 "Firmware поддерживает один канал CAN для trigger_t; выберите CAN1 или CAN2": "Firmware supports one CAN channel per trigger_t; select CAN1 or CAN2",
                 "Firmware поддерживает один канал CAN для ответа; выберите CAN1 или CAN2": "Firmware supports one CAN channel per response; select CAN1 or CAN2",
                 "Конфигурация Flash повреждена: неверный magic или CRC8": "Flash configuration is corrupt: invalid magic or CRC8",

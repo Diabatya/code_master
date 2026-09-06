@@ -14,6 +14,7 @@ from core.can_protocol import (
     CMD_AUTO_SPEED,
     CMD_AUTO_SPEED_RESP,
     CMD_CAN_STATS,
+    CMD_TRIGGER_STATS,
     CMD_DEVICE_ID,
     CMD_DEVICE_ID_RESP,
     CMD_DEVICE_INFO,
@@ -361,6 +362,16 @@ class SerialManager(QObject):
             "rx_count": int.from_bytes(payload[0:4], "little"),
             "tx_count": int.from_bytes(payload[4:8], "little"),
             "lost_count": int.from_bytes(payload[8:12], "little"),
+        }
+
+    def read_trigger_stats(self) -> dict[str, int]:
+        """Возвращает счётчик срабатываний и максимальную задержку trigger."""
+        payload = self.request_control(CMD_TRIGGER_STATS, b"")
+        if len(payload) != 8:
+            raise RuntimeError("Некорректный ответ CMD_TRIGGER_STATS")
+        return {
+            "fired_count": int.from_bytes(payload[0:4], "little"),
+            "max_lateness_ms": int.from_bytes(payload[4:8], "little"),
         }
 
     def ping_device(self) -> bool:

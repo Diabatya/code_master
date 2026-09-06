@@ -27,6 +27,8 @@ typedef struct {
 } pending_response_t;
 
 static pending_response_t s_pending[TRIGGER_COUNT];
+static uint32_t s_fired_count;
+static uint32_t s_max_lateness_ms;
 
 static uint8_t crc8(const uint8_t *data, uint32_t len)
 {
@@ -51,6 +53,8 @@ static void load_default(trigger_t *t)
 void Trigger_Init(void)
 {
   memset(s_pending, 0, sizeof(s_pending));
+  s_fired_count = 0U;
+  s_max_lateness_ms = 0U;
 
   const uint8_t *page = (const uint8_t *)TRIGGER_PAGE_ADDR;
   for (uint8_t i = 0; i < TRIGGER_COUNT; i++) {
@@ -185,7 +189,9 @@ void Trigger_OnFrame(const can_frame_t *frame)
           .dlc = s_triggers[i].tx_dlc,
         };
         memcpy(resp.data, s_triggers[i].tx_data, 8);
-        CanBridge_Transmit(&resp);
+        if (CanBridge_Transmit(&resp)) {
+          s_fired_count++;
+        }
       } else {
         arm_response(i, &s_triggers[i]);
       }
@@ -198,6 +204,10 @@ void Trigger_Poll(void)
   uint32_t now = HAL_GetTick();
   for (uint8_t i = 0; i < TRIGGER_COUNT; i++) {
     if (s_pending[i].armed && (int32_t)(now - s_pending[i].fire_at_tick) >= 0) {
+      uint32_t lateness = now - s_pending[i].fire_at_tick;
+      if (lateness > s_max_lateness_ms) {
+        s_max_lateness_ms = lateness;
+      }
       s_pending[i].armed = 0U;
       const trigger_t *t = &s_triggers[s_pending[i].trigger_index];
       can_frame_t resp = {
@@ -207,7 +217,19 @@ void Trigger_Poll(void)
         .dlc = t->tx_dlc,
       };
       memcpy(resp.data, t->tx_data, 8);
-      CanBridge_Transmit(&resp);
+      if (CanBridge_Transmit(&resp)) {
+        s_fired_count++;
+      }
     }
+  }
+}
+
+void Trigger_GetStats(uint32_t *fired_count, uint32_t *max_lateness_ms)
+{
+  if (fired_count != NULL) {
+    *fired_count = s_fired_count;
+  }
+  if (max_lateness_ms != NULL) {
+    *max_lateness_ms = s_max_lateness_ms;
   }
 }
