@@ -251,6 +251,22 @@ lost_count: uint32 LE — кадры, отброшенные из-за пере�
 
 Счётчики монотонные до перезапуска устройства. Команда их не очищает.
 
+### 2.9 CMD_SYSTEM_INFO (0xC9) — информация о системе
+
+Запрос: `[0xC9][0x00]`.
+
+Ответ payload длиной 8 байт:
+
+```text
+application_version: uint8
+protocol_version:    uint8
+flash_size_kb:       uint16 LE
+config_format:       uint8
+config_record_length:uint8
+trigger_count:       uint8
+reserved:            uint8
+```
+
 ---
 
 ## Часть 3 — формат хранения конфигурации во Flash («страница А»)

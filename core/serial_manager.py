@@ -15,6 +15,7 @@ from core.can_protocol import (
     CMD_AUTO_SPEED_RESP,
     CMD_CAN_STATS,
     CMD_TRIGGER_STATS,
+    CMD_SYSTEM_INFO,
     CMD_DEVICE_ID,
     CMD_DEVICE_ID_RESP,
     CMD_DEVICE_INFO,
@@ -372,6 +373,20 @@ class SerialManager(QObject):
         return {
             "fired_count": int.from_bytes(payload[0:4], "little"),
             "max_lateness_ms": int.from_bytes(payload[4:8], "little"),
+        }
+
+    def read_system_info(self) -> dict[str, int]:
+        """Возвращает версию application, протокола и config-формата."""
+        payload = self.request_control(CMD_SYSTEM_INFO, b"")
+        if len(payload) != 8:
+            raise RuntimeError("Некорректный ответ CMD_SYSTEM_INFO")
+        return {
+            "application_version": payload[0],
+            "protocol_version": payload[1],
+            "flash_size_kb": int.from_bytes(payload[2:4], "little"),
+            "config_format_version": payload[4],
+            "config_record_length": payload[5],
+            "trigger_count": payload[6],
         }
 
     def ping_device(self) -> bool:

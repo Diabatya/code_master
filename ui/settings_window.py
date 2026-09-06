@@ -262,6 +262,8 @@ class SettingsWindow(QMainWindow):
         self._serial_edit.setReadOnly(True)
         self._serial_edit.setMinimumWidth(200)
         self._serial_edit.setPlaceholderText(tr("Неизвестно"))
+        self._system_info_label = QLabel(tr("Firmware: не определена"))
+        self._system_info_label.setFont(QFont("Segoe UI", 9))
 
         device_layout = QHBoxLayout()
         device_layout.setSpacing(8)
@@ -269,6 +271,7 @@ class SettingsWindow(QMainWindow):
         device_layout.addWidget(self._device_combo)
         device_layout.addWidget(self._serial_label)
         device_layout.addWidget(self._serial_edit)
+        device_layout.addWidget(self._system_info_label)
         device_layout.addStretch()
         self._device_layout = device_layout
 
@@ -389,6 +392,19 @@ class SettingsWindow(QMainWindow):
             self._device_combo.setCurrentIndex(index)
             self._device_combo.blockSignals(False)
         self._serial_edit.setText(serial)
+        try:
+            if self._serial_manager.is_open() and not self._config.get("emulation", False):
+                info = self._serial_manager.read_system_info()
+                self._system_info_label.setText(
+                    tr("Firmware: app {0}, protocol {1}, Flash {2} KB, config v{3}").format(
+                        info["application_version"],
+                        info["protocol_version"],
+                        info["flash_size_kb"],
+                        info["config_format_version"],
+                    )
+                )
+        except Exception:  # noqa: BLE001
+            self._system_info_label.setText(tr("Firmware: информация недоступна"))
 
     def retranslate_ui(self) -> None:
         """Обновляет статические строки окна настроек и всех вкладок."""
