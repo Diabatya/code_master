@@ -188,12 +188,18 @@ class DfuDevice:
                             return size
             mps = getattr(self.dev, "bMaxPacketSize0", 0)
             if mps and mps > 0:
-                logger.debug("DFU wTransferSize fallback на bMaxPacketSize0: %d", mps)
-                return int(mps)
+                logger.debug(
+                    "DFU bMaxPacketSize0=%d; это размер USB-пакета, не DFU-блока",
+                    mps,
+                )
         except Exception:
             logger.debug("Не удалось прочитать DFU descriptor wTransferSize", exc_info=True)
-        logger.debug("DFU wTransferSize fallback на 64")
-        return 64
+        # STM32 ROM DFU обычно принимает 2048 байт за один DNLOAD/UPLOAD.
+        # bMaxPacketSize0 (обычно 64) — это размер USB-пакета, а не размер
+        # полезного DFU-блока; использовать его здесь означает сотни лишних
+        # control-transfer и возвращает многоминутную запись.
+        logger.debug("DFU wTransferSize fallback на 2048")
+        return 2048
 
     def _ctrl(self, request_type: int, request: int, value: int = 0, data_or_wlength=0, timeout: int = 5000):
         return self.dev.ctrl_transfer(

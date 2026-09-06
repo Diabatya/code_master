@@ -50,7 +50,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.bootloader import Bootloader
-from core.firmware_utils import _save_intel_hex, load_firmware_bytes, prepare_bin_file
+from core.firmware_utils import _save_intel_hex, load_firmware_bytes
 from core.can_protocol import (
     DEVICE_TYPE_ANALOG,
     DEVICE_TYPE_BASIC,
@@ -869,52 +869,97 @@ class FlashWorker(QThread):
     def _flash_usb(self, file_path: str) -> Tuple[bool, str]:
         if not _PYUSB:
             return False, tr("pyusb/libusb не установлены")
-        bin_path, base = prepare_bin_file(file_path)
-        if not bin_path:
-            return False, tr("Не удалось подготовить BIN-файл из прошивки")
-        if not base:
-            base = BOOTLOADER_BASE_ADDR
+
         target = self._config.get("target_mcu", "")
         page_size = STM32_PAGE_SIZES.get(target, 2048)
+        path = Path(file_path)
         try:
             from core.dfu import DfuDevice, find_dfu_device
-            dev = find_dfu_device()
-            data = Path(bin_path).read_bytes()
-            logger.info("USB DFU прошивка: файл=%s, base=0x%08X, размер=%d, page_size=%d, МК=%s", file_path, base, len(data), page_size, target or "не указан")
 
-            def _make_progress(start_pct: int, end_pct: int, stage: str):
+            # Не превращаем разреженный HEX в один огромный BIN: при записи
+            # прошивки + конфига передаём только реальные сегменты.
+            if path.suffix.lower() == ".hex":
+                from intelhex import IntelHex
+
+                image = IntelHex(str(path))
+                segments = [
+                    (start, bytes(image.tobinarray(start=start, end=end - 1)))
+                    for start, end in image.segments()
+                ]
+            else:
+                data, base = load_firmware_bytes(file_path)
+                if not base:
+                    base = BOOTLOADER_BASE_ADDR
+                segments = [(base, data)]
+            segments = [(start, data) for start, data in segments if data]
+            if not segments:
+                return False, tr("Файл прошивки пуст")
+
+            total_bytes = sum(len(data) for _, data in segments)
+            logger.info(
+                "USB DFU прошивка: файл=%s, сегментов=%d, размер=%d, page_size=%d, МК=%s",
+                file_path, len(segments), total_bytes, page_size, target or "не указан",
+            )
+            dev = find_dfu_device()
+
+            def _progress_for_segment(start_pct: int, end_pct: int, segment_offset: int):
                 last_pct = -1
 
                 def _progress(current: int, total: int) -> None:
                     nonlocal last_pct
                     if not total:
                         return
-                    pct = int(start_pct + (current / total) * (end_pct - start_pct))
+                    overall = (segment_offset + min(current, total)) / total_bytes
+                    pct = int(start_pct + overall * (end_pct - start_pct))
                     if pct != last_pct:
                         last_pct = pct
                         self.progress.emit(pct)
-                        if pct and pct % 10 == 0:
-                            self.log_line.emit(f"{stage}: {pct}%")
 
                 return _progress
 
             with DfuDevice(dev) as dfu:
-                # Если заливаем полный образ Flash (например, с конфигом),
-                # стираем все страницы, иначе старые данные на пустых страницах
-                # не совпадут с 0xFF из образа и верификация не пройдёт.
-                flash_size_kb = STM32_FLASH_SIZES.get(target, 256)
-                flash_size = flash_size_kb * 1024
-                skip_blank = len(data) < flash_size
-                self.log_line.emit(tr("USB DFU: стирание Flash..."))
-                dfu.erase_pages(base, data, page_size=page_size, skip_blank=skip_blank, progress=_make_progress(0, 15, tr("Стирание Flash")))
-                self.log_line.emit(tr("USB DFU: запись {0} байт...").format(len(data)))
-                dfu.download(base, data, progress=_make_progress(15, 50, tr("Запись Flash")))
-                dfu.abort()
+                offset = 0
+                self.log_line.emit(tr("USB DFU: стирание Flash...") )
+                for start, data in segments:
+                    dfu.erase_pages(
+                        start,
+                        data,
+                        page_size=page_size,
+                        skip_blank=True,
+                        progress=_progress_for_segment(0, 15, offset),
+                    )
+                    offset += len(data)
+
+                self.log_line.emit(tr("USB DFU: запись {0} байт...").format(total_bytes))
+                offset = 0
+                for start, data in segments:
+                    dfu.download(
+                        start,
+                        data,
+                        progress=_progress_for_segment(15, 50, offset),
+                    )
+                    dfu.abort()
+                    offset += len(data)
+
+                ok = True
                 if self._verify:
                     self.log_line.emit(tr("USB DFU: верификация..."))
-                    ok = dfu.upload(base, len(data), progress=_make_progress(50, 90, tr("Верификация Flash"))) == data
-                else:
-                    ok = True
+                    offset = 0
+                    for start, data in segments:
+                        read_back = dfu.upload(
+                            start,
+                            len(data),
+                            progress=_progress_for_segment(50, 90, offset),
+                        )
+                        if read_back != data:
+                            logger.error(
+                                "DFU verify mismatch: адрес=0x%08X, ожидалось=%d, прочитано=%d",
+                                start, len(data), len(read_back),
+                            )
+                            ok = False
+                            break
+                        offset += len(data)
+
                 self.log_line.emit(tr("USB DFU: завершение..."))
                 dfu.abort()
                 dfu.leave()
@@ -925,12 +970,6 @@ class FlashWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             logger.exception("USB DFU ошибка при прошивке %s", file_path)
             return False, tr("USB DFU ошибка: {0}").format(exc)
-        finally:
-            if bin_path != file_path:
-                try:
-                    Path(bin_path).unlink(missing_ok=True)
-                except OSError:
-                    pass
 
 
 class ReadWorker(QThread):
@@ -1694,18 +1733,23 @@ class FlashDialog(QDialog):
         return prepared
 
     def _prepare_firmware_with_config(self, file_path: str) -> str:
-        """Дополняет бинарник до размера Flash и записывает конфиг в последнюю страницу."""
+        """Создаёт разреженный HEX с прошивкой и последней страницей конфига.
+
+        Раньше сюда записывался весь размер Flash, заполненный 0xFF. Для
+        небольшой прошивки это превращало 16 КБ в 256 КБ и заставляло DFU
+        передавать/проверять пустые области. В HEX оставляем только реальные
+        участки: прошивку и страницу конфигурации.
+        """
+        from intelhex import IntelHex
+
         name = self._device_name_edit.text().strip()
         if not name:
             raise ValueError(tr("Заполните поле «Устройство»"))
         serial = self._serial_edit.text().strip()
         if not serial:
             raise ValueError(tr("Введите серийный номер"))
-        try:
-            flash_size_kb = self._get_flash_size_kb()
-            page_size = self._get_page_size()
-        except ValueError:
-            raise
+        flash_size_kb = self._get_flash_size_kb()
+        page_size = self._get_page_size()
 
         data, base = load_firmware_bytes(file_path)
         if base == 0:
@@ -1715,18 +1759,17 @@ class FlashDialog(QDialog):
         if firmware_offset < 0 or firmware_offset + len(data) > flash_size:
             raise ValueError(tr("Прошивка не помещается в выбранный размер Flash"))
 
-        image = bytearray(b"\xFF") * flash_size
-        image[firmware_offset:firmware_offset + len(data)] = data
+        last_page = BOOTLOADER_BASE_ADDR + flash_size - page_size
+        page = bytearray(b"\xFF") * page_size
+        page[8:18] = name.encode("ascii", errors="ignore")[:10].ljust(10)
+        page[18:28] = serial.encode("ascii", errors="ignore")[:10].ljust(10)
 
-        last_page_offset = flash_size - page_size
-        name_bytes = name.encode("ascii", errors="ignore")[:10].ljust(10)
-        serial_bytes = serial.encode("ascii", errors="ignore")[:10].ljust(10)
-        image[last_page_offset + 8 : last_page_offset + 18] = name_bytes
-        image[last_page_offset + 18 : last_page_offset + 28] = serial_bytes
-
+        image = IntelHex()
+        image.puts(base, data)
+        image.puts(last_page, bytes(page))
         src = Path(file_path)
-        tmp = Path(tempfile.gettempdir()) / f"{src.stem}_конфиг.bin"
-        tmp.write_bytes(bytes(image))
+        tmp = Path(tempfile.gettempdir()) / f"{src.stem}_конфиг.hex"
+        image.write_hex_file(tmp)
         return str(tmp)
 
     def _warn_base_address_mismatch(self, method: str, files: List[str]) -> bool:
