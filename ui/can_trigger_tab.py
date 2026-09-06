@@ -690,11 +690,24 @@ class CanTriggerTab(QWidget):
 
     def _write_triggers_to_device(self) -> None:
         try:
+            changed = 0
             for index in range(TRIGGER_COUNT):
-                payload = bytes((index,)) + pack_trigger(self._device_trigger_values(index))
-                self._serial_manager.request_control(CMD_TRIGGER_WRITE, payload)
+                local_payload = pack_trigger(self._device_trigger_values(index))
+                remote_payload = self._serial_manager.request_control(
+                    CMD_TRIGGER_READ, bytes((index,))
+                )
+                if remote_payload == local_payload:
+                    continue
+                self._serial_manager.request_control(
+                    CMD_TRIGGER_WRITE, bytes((index,)) + local_payload
+                )
+                changed += 1
             self._save_config()
-            QMessageBox.information(self, tr("Готово"), tr("Триггеры записаны в устройство"))
+            QMessageBox.information(
+                self,
+                tr("Готово"),
+                tr("Триггеры записаны в устройство: изменено {0}").format(changed),
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Ошибка записи триггеров в устройство")
             QMessageBox.critical(self, tr("Ошибка"), str(exc))
