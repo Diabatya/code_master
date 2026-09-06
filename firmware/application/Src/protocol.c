@@ -34,6 +34,8 @@
 #define CMD_CAN_STATS           0xC7U
 #define CMD_TRIGGER_STATS       0xC8U
 #define CMD_SYSTEM_INFO         0xC9U
+#define APP_METADATA_ADDR       0x0803D000U
+#define APP_METADATA_MAGIC      0x41505031U
 #define CMD_RESP_OFFSET        0x10U /* response marker = request | 0x10, see PROTOCOL.md Part 2 */
 
 #define REBOOT_MAGIC_LEN 22U
@@ -269,7 +271,8 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
 
     case CMD_SYSTEM_INFO: {
       const device_config_t *cfg = DeviceConfig_Get();
-      uint8_t out[8] = {
+      const uint8_t *metadata = (const uint8_t *)APP_METADATA_ADDR;
+      uint8_t out[16] = {
         s_device_version,
         1U,
         0U,
@@ -281,6 +284,9 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       };
       out[2] = 256U & 0xFFU;
       out[3] = (256U >> 8) & 0xFFU;
+      if (*(const uint32_t *)&metadata[0] == APP_METADATA_MAGIC) {
+        memcpy(&out[8], &metadata[8], 8U);
+      }
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
     }

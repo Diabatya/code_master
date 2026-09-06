@@ -385,7 +385,7 @@ class SerialManager(QObject):
     def read_system_info(self) -> dict[str, int]:
         """Возвращает версию application, протокола и config-формата."""
         payload = self.request_control(CMD_SYSTEM_INFO, b"")
-        if len(payload) != 8:
+        if len(payload) != 16:
             raise RuntimeError("Некорректный ответ CMD_SYSTEM_INFO")
         return {
             "application_version": payload[0],
@@ -394,6 +394,8 @@ class SerialManager(QObject):
             "config_format_version": payload[4],
             "config_record_length": payload[5],
             "trigger_count": payload[6],
+            "application_size": int.from_bytes(payload[8:12], "little"),
+            "application_crc32": int.from_bytes(payload[12:16], "little"),
         }
 
     def ping_device(self) -> bool:

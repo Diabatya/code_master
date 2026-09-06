@@ -255,7 +255,7 @@ lost_count: uint32 LE — кадры, отброшенные из-за пере�
 
 Запрос: `[0xC9][0x00]`.
 
-Ответ payload длиной 8 байт:
+Ответ payload длиной 16 байт:
 
 ```text
 application_version: uint8
@@ -265,6 +265,8 @@ config_format:       uint8
 config_record_length:uint8
 trigger_count:       uint8
 reserved:            uint8
+application_size:    uint32 LE
+application_crc32:   uint32 LE
 ```
 
 ---

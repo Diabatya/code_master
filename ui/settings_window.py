@@ -396,10 +396,12 @@ class SettingsWindow(QMainWindow):
             if self._serial_manager.is_open() and not self._config.get("emulation", False):
                 info = self._serial_manager.read_system_info()
                 self._system_info_label.setText(
-                    tr("Firmware: app {0}, protocol {1}, Flash {2} KB, config v{3}").format(
+                    tr("Firmware: app {0}, protocol {1}, Flash {2} KB, size {3} B, CRC32 {4}, config v{5}").format(
                         info["application_version"],
                         info["protocol_version"],
                         info["flash_size_kb"],
+                        info["application_size"],
+                        f"0x{info['application_crc32']:08X}",
                         info["config_format_version"],
                     )
                 )
