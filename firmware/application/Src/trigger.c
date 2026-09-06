@@ -30,6 +30,8 @@ static pending_response_t s_pending[TRIGGER_COUNT];
 static uint32_t s_fired_count;
 static uint32_t s_max_lateness_ms;
 
+static uint8_t trigger_fields_valid(const trigger_t *trig);
+
 static uint8_t crc8(const uint8_t *data, uint32_t len)
 {
   uint8_t crc = 0x00U;
@@ -66,7 +68,8 @@ void Trigger_Init(void)
       if (computed == flash_t->crc8
           && ((flash_t->reserved[0] == 0U && flash_t->reserved[1] == 0U)
               || (flash_t->reserved[0] == TRIGGER_FORMAT_VERSION
-                  && flash_t->reserved[1] == TRIGGER_RECORD_SIZE))) {
+                  && flash_t->reserved[1] == TRIGGER_RECORD_SIZE))
+          && trigger_fields_valid(flash_t)) {
         memcpy(&s_triggers[i], flash_t, sizeof(trigger_t));
         continue;
       }
@@ -115,9 +118,22 @@ static uint8_t flash_write_all_triggers(void)
   return 1U;
 }
 
+static uint8_t trigger_fields_valid(const trigger_t *trig)
+{
+  if (trig == NULL || trig->rx_channel > 1U || trig->tx_channel > 1U
+      || trig->rx_extended > 1U || trig->tx_extended > 1U
+      || trig->rx_dlc > 8U || trig->tx_dlc > 8U) {
+    return 0U;
+  }
+  uint32_t rx_max = trig->rx_extended ? 0x1FFFFFFFU : 0x7FFU;
+  uint32_t tx_max = trig->tx_extended ? 0x1FFFFFFFU : 0x7FFU;
+  return (trig->rx_id <= rx_max && trig->rx_id_mask <= rx_max
+          && trig->tx_id <= tx_max) ? 1U : 0U;
+}
+
 uint8_t Trigger_Set(uint8_t index, const trigger_t *trig)
 {
-  if (index >= TRIGGER_COUNT) {
+  if (index >= TRIGGER_COUNT || !trigger_fields_valid(trig)) {
     return 0U;
   }
 
