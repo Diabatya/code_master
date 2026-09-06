@@ -52,6 +52,9 @@ void DeviceConfig_Init(void);
 /* Returns a pointer to the current in-RAM config (read-only for callers). */
 const device_config_t *DeviceConfig_Get(void);
 
+/* Returns 1 when the persisted page passed magic/CRC/format validation. */
+uint8_t DeviceConfig_IsValid(void);
+
 /* Validates and writes a new config to Flash (erase + program the whole
  * 2 KB page — see the timing caveat in firmware/PROTOCOL.md Part 3).
  * Returns 1 on success, 0 on invalid parameters or Flash-program failure.
