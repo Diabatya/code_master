@@ -286,8 +286,8 @@
 - [ ] Git commit.
 - [ ] MCU ID.
 - [x] Размер Flash.
-- [ ] Размер application.
-- [ ] CRC application.
+- [x] Размер application.
+- [x] CRC application.
 - [ ] Статус config page.
 - [ ] Статус trigger page.
 - [x] Команда получения информации.
