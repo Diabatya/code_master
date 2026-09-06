@@ -174,7 +174,7 @@
 
 - [x] Реализовать `CMD_TRIGGER_READ` в Python.
 - [x] Реализовать `CMD_TRIGGER_WRITE` в Python.
-- [ ] Реализовать `CMD_TRIGGER_ENABLE` в Python.
+- [x] Реализовать `CMD_TRIGGER_ENABLE` в Python.
 - [x] Добавить кнопку «Прочитать из устройства».
 - [x] Добавить кнопку «Записать в устройство».
 - [x] Добавить кнопку «Записать все».
