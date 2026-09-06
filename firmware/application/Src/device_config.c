@@ -122,6 +122,10 @@ uint8_t DeviceConfig_Write(const uint8_t *device_name, uint8_t device_name_len,
   new_cfg.reserved[1] = DEVICE_CONFIG_RECORD_SIZE;
   new_cfg.crc8 = crc8((const uint8_t *)&new_cfg, offsetof(device_config_t, crc8));
 
+  if (memcmp(&new_cfg, &s_config, sizeof(new_cfg)) == 0) {
+    return 1U;
+  }
+
   if (!flash_write_config(&new_cfg)) {
     return 0U;
   }

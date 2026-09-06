@@ -120,6 +120,10 @@ uint8_t Trigger_Set(uint8_t index, const trigger_t *trig)
   new_t.magic = TRIGGER_MAGIC;
   new_t.crc8 = crc8((const uint8_t *)&new_t, offsetof(trigger_t, crc8));
 
+  if (memcmp(&new_t, &s_triggers[index], sizeof(new_t)) == 0) {
+    return 1U;
+  }
+
   trigger_t backup = s_triggers[index];
   s_triggers[index] = new_t;
 
