@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -21,8 +22,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.can_protocol import pack_can_frame
+from core.can_protocol import CMD_TRIGGER_READ, CMD_TRIGGER_WRITE, pack_can_frame
 from core.serial_manager import SerialManager
+from core.trigger_protocol import pack_trigger, unpack_trigger
 from models.config import Config
 from models.logger import get_logger
 from models.translations import _ as tr
@@ -581,6 +583,106 @@ class CanTriggerTab(QWidget):
         layout.addWidget(scroll)
         layout.addWidget(self._memory_indicator)
 
+        sync_layout = QHBoxLayout()
+        self._read_device_button = QPushButton(tr("Прочитать триггеры из устройства"))
+        self._write_device_button = QPushButton(tr("Записать триггеры в устройство"))
+        self._read_device_button.clicked.connect(self._read_triggers_from_device)
+        self._write_device_button.clicked.connect(self._write_triggers_to_device)
+        sync_layout.addWidget(self._read_device_button)
+        sync_layout.addWidget(self._write_device_button)
+        layout.addLayout(sync_layout)
+
+    def _device_trigger_values(self, index: int) -> Dict[str, Any]:
+        block = self._blocks[index]
+        recv = block["recv"]
+        if recv["channel"].currentIndex() > 1:
+            raise ValueError(tr("Firmware поддерживает один канал CAN для trigger_t; выберите CAN1 или CAN2"))
+        recv_id = self._parse_id(recv["id"].text()) or 0
+        rx_extended = recv["bit"].currentIndex()
+        rx_mask = 0x1FFFFFFF if rx_extended else 0x7FF
+        rx_values = self._parse_data(recv["data"])
+        rx_data = bytes((value or 0) & 0xFF for value in rx_values)
+        rx_data_mask = bytes(0xFF if value is not None else 0 for value in rx_values)
+
+        response_rows = block["response"]["rows"]
+        response = response_rows[0] if response_rows else None
+        if response is None:
+            tx_id, tx_channel, tx_extended, tx_dlc = 0, 0, 0, 0
+            tx_data = b""
+            delay_ms = 0
+        else:
+            if response["channel"].currentIndex() > 1:
+                raise ValueError(tr("Firmware поддерживает один канал CAN для ответа; выберите CAN1 или CAN2"))
+            tx_id = self._parse_id(response["id"].text()) or 0
+            tx_channel = response["channel"].currentIndex()
+            tx_extended = response["bit"].currentIndex()
+            tx_dlc = response["dlc"].value()
+            tx_data = bytes((value or 0) & 0xFF for value in self._parse_data(response["data"]))
+            delay_ms = response["delay_before_send"].value()
+
+        return {
+            "enabled": int(block["group"].isChecked()),
+            "rx_channel": recv["channel"].currentIndex(),
+            "rx_extended": rx_extended,
+            "rx_id": recv_id,
+            "rx_id_mask": rx_mask,
+            "rx_dlc": recv["dlc"].value(),
+            "rx_data": rx_data,
+            "rx_data_mask": rx_data_mask,
+            "tx_channel": tx_channel,
+            "tx_extended": tx_extended,
+            "tx_id": tx_id,
+            "tx_dlc": tx_dlc,
+            "tx_data": tx_data,
+            "delay_ms": delay_ms,
+        }
+
+    def _apply_device_trigger(self, index: int, values: Dict[str, Any]) -> None:
+        block = self._blocks[index]
+        recv = block["recv"]
+        block["group"].setChecked(bool(values["enabled"]))
+        recv["channel"].setCurrentIndex(min(values["rx_channel"], 1))
+        recv["bit"].setCurrentIndex(int(values["rx_extended"]))
+        recv["id"].setText(int_to_hex(values["rx_id"], 8 if values["rx_extended"] else 3))
+        recv["dlc"].setValue(max(1, min(8, values["rx_dlc"] or 8)))
+        for edit, value in zip(recv["data"], values["rx_data"]):
+            edit.setText(f"{value:02X}")
+        self._set_data_enabled(recv["data"], recv["dlc"].value())
+
+        rows = block["response"]["rows"]
+        if rows:
+            row = rows[0]
+            row["channel"].setCurrentIndex(min(values["tx_channel"], 1))
+            row["bit"].setCurrentIndex(int(values["tx_extended"]))
+            row["id"].setText(int_to_hex(values["tx_id"], 8 if values["tx_extended"] else 3))
+            row["dlc"].setValue(min(8, values["tx_dlc"]))
+            for edit, value in zip(row["data"], values["tx_data"]):
+                edit.setText(f"{value:02X}")
+            row["delay_before_send"].setValue(values["delay_ms"])
+            self._set_data_enabled(row["data"], row["dlc"].value())
+
+    def _read_triggers_from_device(self) -> None:
+        try:
+            for index in range(TRIGGER_COUNT):
+                payload = self._serial_manager.request_control(CMD_TRIGGER_READ, bytes((index,)))
+                self._apply_device_trigger(index, unpack_trigger(payload))
+            self._save_config()
+            QMessageBox.information(self, tr("Готово"), tr("Триггеры прочитаны из устройства"))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Ошибка чтения триггеров из устройства")
+            QMessageBox.critical(self, tr("Ошибка"), str(exc))
+
+    def _write_triggers_to_device(self) -> None:
+        try:
+            for index in range(TRIGGER_COUNT):
+                payload = bytes((index,)) + pack_trigger(self._device_trigger_values(index))
+                self._serial_manager.request_control(CMD_TRIGGER_WRITE, payload)
+            self._save_config()
+            QMessageBox.information(self, tr("Готово"), tr("Триггеры записаны в устройство"))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Ошибка записи триггеров в устройство")
+            QMessageBox.critical(self, tr("Ошибка"), str(exc))
+
     def _on_cache_active_changed(self, index: int, state: int) -> None:
         enabled = state == Qt.CheckState.Checked.value
         block = self._blocks[index]
@@ -609,6 +711,8 @@ class CanTriggerTab(QWidget):
 
     def retranslate_ui(self) -> None:
         """Обновляет статические строки вкладки триггеров."""
+        self._read_device_button.setText(tr("Прочитать триггеры из устройства"))
+        self._write_device_button.setText(tr("Записать триггеры в устройство"))
         for i, block in enumerate(self._blocks):
             block["group"].setTitle(tr("Триггер {0}").format(i + 1))
             block["cache"]["cache_check"].setText(tr("Автоматическая запись DATA в Кэш"))
