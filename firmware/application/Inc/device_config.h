@@ -1,7 +1,7 @@
 /* Device configuration storage ("страница А" per ТЗ 11.2 — Device Name,
- * Serial Number, VID/PID) persisted in the last Flash page of the
- * application region. See firmware/PROTOCOL.md Part 3 for the exact byte
- * layout and the memory map (0x0803D800..0x0803DFFF).
+ * Serial Number, VID/PID) persisted in the dedicated configuration page
+ * before the trigger pages. See firmware/PROTOCOL.md Part 3 for the exact
+ * byte layout and the memory map (0x0803D800..0x0803DFFF).
  *
  * This is a *different* "page A" concept than the bootloader/application
  * Flash split (0x08000000/0x08008000) — do not confuse the two; see the

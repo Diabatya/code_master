@@ -62,8 +62,11 @@ uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
       chunk = APP_TX_DATA_SIZE;
     }
     if (hcdc != NULL) {
+      uint32_t wait_start = HAL_GetTick();
       while (hcdc->TxState == 1U) {
-        /* wait for previous IN transfer to complete */
+        if ((HAL_GetTick() - wait_start) >= 100U) {
+          return 1U;
+        }
       }
     }
     memcpy(UserTxBufferFS, Buf + sent, chunk);

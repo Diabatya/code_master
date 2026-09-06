@@ -304,6 +304,53 @@ class SerialManager(QObject):
                 self.error_occurred.emit(f"Ошибка отправки: {exc}")
                 return False
 
+    def request_control(self, command: int, payload: bytes = b"", timeout: float = 1.0) -> bytes:
+        """Выполняет синхронную команду конфигурационного протокола C0-C6.
+
+        На время запроса останавливает общий reader, чтобы ответ не был
+        разобран как CAN-кадр. Формат ответа: [command|0x10, status, len, data].
+        """
+        if len(payload) > 255:
+            raise ValueError("Слишком длинный payload управляющей команды")
+        with self._lock:
+            if self._port is None or not self.is_open():
+                raise RuntimeError("Порт не подключен")
+            self._closing = True
+            self._stop_reader()
+            try:
+                self._port.reset_input_buffer()
+                self._port.write(bytes((command & 0xFF, len(payload))) + payload)
+                deadline = time.time() + timeout
+                response_marker = (command | 0x10) & 0xFF
+                buffer = bytearray()
+                while time.time() < deadline:
+                    available = self._port_in_waiting()
+                    if available:
+                        buffer.extend(self._port.read(available))
+                        while len(buffer) >= 3:
+                            try:
+                                index = buffer.index(response_marker)
+                            except ValueError:
+                                del buffer[:-2]
+                                break
+                            if index:
+                                del buffer[:index]
+                            if len(buffer) < 3:
+                                break
+                            length = buffer[2]
+                            if len(buffer) < 3 + length:
+                                break
+                            status = buffer[1]
+                            result = bytes(buffer[3 : 3 + length])
+                            if status != 0:
+                                raise RuntimeError(f"Устройство отклонило команду 0x{command:02X}: статус 0x{status:02X}")
+                            return result
+                    time.sleep(0.005)
+                raise TimeoutError(f"Таймаут ответа на команду 0x{command:02X}")
+            finally:
+                self._start_reader()
+                self._closing = False
+
     def ping_device(self) -> bool:
         """Отправляет устройству запрос ID и возвращает True, если есть ответ."""
         with self._lock:

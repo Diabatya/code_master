@@ -10,7 +10,31 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from core.bootloader import ACK, Bootloader
-from core.stm32_info import APPLICATION_BASE_ADDR, BOOTLOADER_BASE_ADDR
+from core.stm32_info import (
+    APPLICATION_BASE_ADDR,
+    BOOTLOADER_BASE_ADDR,
+    DEVICE_CONFIG_PAGE_SIZE,
+    build_device_config_page,
+    merge_device_config_page,
+    parse_device_config,
+    device_config_crc8,
+)
+
+
+def test_device_config_page_uses_firmware_layout_and_preserves_fields() -> None:
+    existing = bytearray(build_device_config_page("OLD", "123"))
+    existing[25:27] = (0x1234).to_bytes(2, "little")
+    existing[27:29] = (0x5678).to_bytes(2, "little")
+    existing[31] = device_config_crc8(existing[:31])
+
+    updated = merge_device_config_page(
+        build_device_config_page("NEW", "456"), bytes(existing)
+    )
+    parsed = parse_device_config(updated)
+    assert parsed is not None
+    assert parsed[:2] == ("NEW", "456")
+    assert parsed[2:] == (0x1234, 0x5678)
+    assert len(updated) == DEVICE_CONFIG_PAGE_SIZE
 
 
 def _make_bootloader() -> tuple[Bootloader, MagicMock]:

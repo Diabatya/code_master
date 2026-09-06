@@ -15,11 +15,15 @@ print("main ok", flush=True)
 print(f"flash button size: {w._flash_button.size().width()}x{w._flash_button.size().height()}", flush=True)
 print(f"flash text: {repr(w._flash_button.text())}", flush=True)
 
-w._on_configure_clicked()
+# Открываем окно настроек напрямую: _on_configure_clicked() запускает
+# асинхронный диалог подключения, который нельзя проверять сразу после вызова.
+w._open_settings_window()
 sw = w._settings_window
 print("settings opened", flush=True)
 trigger_tab = sw._trigger_tab
+sw._tabs.setCurrentWidget(trigger_tab)
 block = trigger_tab._blocks[0]
+block["group"].setChecked(True)
 cache = block["cache"]
 print(f"cache check text: {cache['cache_check'].text()}", flush=True)
 print(f"cache fields enabled default: {cache['fields_widget'].isEnabled()}", flush=True)

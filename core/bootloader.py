@@ -17,7 +17,13 @@ except Exception:  # noqa: BLE001
         return []
 
 from core.firmware_utils import load_firmware_bytes
-from core.stm32_info import APPLICATION_BASE_ADDR, BOOTLOADER_BASE_ADDR
+from core.stm32_info import (
+    APPLICATION_BASE_ADDR,
+    BOOTLOADER_BASE_ADDR,
+    DEVICE_CONFIG_PAGE_ADDR,
+    DEVICE_CONFIG_PAGE_SIZE,
+    merge_device_config_page,
+)
 from models.logger import get_logger
 
 logger = get_logger(__name__)
@@ -541,6 +547,10 @@ class Bootloader:
         self.reconfigure_for_bootloader()
         self.enter_bootloader()
         self.sync()
+        if base_address == DEVICE_CONFIG_PAGE_ADDR and len(firmware) >= DEVICE_CONFIG_PAGE_SIZE:
+            existing = self.read_memory(base_address, DEVICE_CONFIG_PAGE_SIZE)
+            firmware = merge_device_config_page(firmware, existing)
+            logger.info("Сохранены VID/PID и служебные поля существующей config-страницы")
         self.erase_pages(base_address, firmware, page_size=page_size, skip_blank=skip_blank)
 
         total = len(firmware)

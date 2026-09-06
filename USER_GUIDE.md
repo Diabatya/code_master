@@ -30,6 +30,18 @@ python main.py
 
 Требования: Python 3.10+, PySide6, pyserial.
 
+### Драйверы интерфейсов
+
+Приложение не устанавливает системные USB-драйверы автоматически.
+
+- **UART/USB-UART:** установите драйвер своего адаптера CH340/CH341, CP210x или FTDI. После установки порт появится как COM-порт (Windows) или `/dev/ttyUSB*`/`/dev/ttyACM*` (Linux).
+- **USB CDC CodeMaster:** Windows 10/11, macOS и Linux обычно используют встроенный CDC-драйвер. На Linux пользователю могут понадобиться udev-права на `/dev/ttyACM*`.
+- **STM32 ROM DFU (`0483:DF11`):** в Windows нужен WinUSB/libusb-драйвер (например, через Zadig или STM32CubeProgrammer). В Linux нужны libusb и udev-правило.
+- **ST-Link:** установите ST-Link USB-драйвер/ПО ST или настройте WinUSB/libusb для используемого pyOCD backend. В Linux добавьте udev-правила.
+- **J-Link:** установите SEGGER J-Link Software and Documentation Pack, включая J-Link DLL и USB-драйвер. Одного `pylink-square` недостаточно.
+
+После установки драйвера переподключите устройство и нажмите **Обновить список портов** или выберите способ **Авто**.
+
 ---
 
 ## 🔌 Первое подключение

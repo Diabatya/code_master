@@ -82,12 +82,11 @@ uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
        * requirement (ТЗ 12.3). On timeout, give up on this transmit rather
        * than deadlock; the PC-side protocol already tolerates dropped/lost
        * responses (commands can be retried, CAN frames are best-effort). */
-      uint32_t guard = 0U;
-      while (hcdc->TxState == 1U && guard < 50000U) {
-        guard++;
-      }
-      if (hcdc->TxState == 1U) {
-        return 1U;
+      uint32_t wait_start = HAL_GetTick();
+      while (hcdc->TxState == 1U) {
+        if ((HAL_GetTick() - wait_start) >= 100U) {
+          return 1U;
+        }
       }
     }
     memcpy(UserTxBufferFS, Buf + sent, chunk);

@@ -26,7 +26,10 @@ class IdPasteEdit(QLineEdit):
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if (
             event.key() == Qt.Key.Key_V
-            and event.modifiers() == Qt.KeyboardModifier.ControlModifier
+            and event.modifiers() in (
+                Qt.KeyboardModifier.ControlModifier,
+                Qt.KeyboardModifier.MetaModifier,
+            )
             and self._fill_callback is not None
         ):
             text = QApplication.clipboard().text()

@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 try:
     from pyocd.core.helpers import ConnectHelper
-    from pyocd.flash.flash_builder import FlashBuilder
+    from pyocd.flash.builder import FlashBuilder
 
     _PYOCD = True
 except Exception:
@@ -52,6 +52,8 @@ from PySide6.QtWidgets import (
 from core.bootloader import Bootloader
 from core.firmware_utils import _save_intel_hex, load_firmware_bytes
 from core.can_protocol import (
+    CMD_CFG_READ,
+    CMD_CFG_WRITE,
     DEVICE_TYPE_ANALOG,
     DEVICE_TYPE_BASIC,
     DEVICE_TYPE_CAN_FD,
@@ -60,8 +62,14 @@ from core.stm32_info import (
     APPLICATION_BASE_ADDR,
     BOOTLOADER_BASE_ADDR,
     CHIP_FLASH_SIZE_KB,
+    DEVICE_CONFIG_PAGE_ADDR,
+    DEVICE_CONFIG_PAGE_SIZE,
+    DEVICE_CONFIG_NAME_MAX,
     STM32_FLASH_SIZES,
     STM32_PAGE_SIZES,
+    build_device_config_page,
+    merge_device_config_page,
+    parse_device_config,
 )
 from models.config import Config
 from ui.com_settings_dialog import ComSettingsDialog
@@ -737,6 +745,9 @@ class FlashWorker(QThread):
                 if flash is None:
                     return False, tr("Адрес 0x%08X вне flash") % base
                 self._config.set("total_memory", int(flash.length))
+                if base == DEVICE_CONFIG_PAGE_ADDR and len(data) >= DEVICE_CONFIG_PAGE_SIZE:
+                    existing = bytes(target_obj.read_memory_block8(base, DEVICE_CONFIG_PAGE_SIZE))
+                    data = merge_device_config_page(data, existing)
                 builder = FlashBuilder(flash)
                 builder.add_data(base, data)
                 builder.program(chip_erase="sector")
@@ -761,7 +772,12 @@ class FlashWorker(QThread):
             jlink.open()
             jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
             jlink.connect(target=target, interface="SWD")
-            jlink.erase()
+            if base == DEVICE_CONFIG_PAGE_ADDR and len(data) >= DEVICE_CONFIG_PAGE_SIZE:
+                existing = bytes(jlink.memory_read(base, DEVICE_CONFIG_PAGE_SIZE))
+                data = merge_device_config_page(data, existing)
+            flash_size = STM32_FLASH_SIZES.get(target, 256) * 1024
+            if base == BOOTLOADER_BASE_ADDR and len(data) >= flash_size:
+                jlink.erase()
             jlink.flash(base, data)
             if self._verify:
                 read = bytes(jlink.memory_read(base, len(data)))
@@ -918,8 +934,20 @@ class FlashWorker(QThread):
                 return _progress
 
             with DfuDevice(dev) as dfu:
+                # Конфиг-запись должна сохранить VID/PID, reserved и будущие
+                # поля страницы. Сначала читаем только 2-КБ страницу, затем
+                # объединяем её с новым именем/serial и лишь после этого стираем.
+                preserved_segments = []
+                for start, data in segments:
+                    incoming = parse_device_config(data)
+                    if start == DEVICE_CONFIG_PAGE_ADDR and len(data) >= DEVICE_CONFIG_PAGE_SIZE and incoming:
+                        current_page = dfu.upload(start, DEVICE_CONFIG_PAGE_SIZE)
+                        data = build_device_config_page(incoming[0], incoming[1], current_page)
+                    preserved_segments.append((start, data))
+                segments = preserved_segments
+
                 offset = 0
-                self.log_line.emit(tr("USB DFU: стирание Flash...") )
+                self.log_line.emit(tr("USB DFU: стирание Flash..."))
                 for start, data in segments:
                     dfu.erase_pages(
                         start,
@@ -1277,7 +1305,7 @@ class FlashDialog(QDialog):
         self._device_name_label.setFont(font)
         self._device_name_edit = QLineEdit()
         self._device_name_edit.setFont(font)
-        self._device_name_edit.setMaxLength(10)
+        self._device_name_edit.setMaxLength(DEVICE_CONFIG_NAME_MAX)
         self._device_name_edit.setPlaceholderText("2CAN")
 
         self._serial_label = QLabel(tr("Серийный номер"))
@@ -1472,13 +1500,14 @@ class FlashDialog(QDialog):
         index = self._method_combo.findData(method)
         if index >= 0:
             self._method_combo.setCurrentIndex(index)
-        target_mcu = self._config.get("target_mcu", "")
+        target_mcu = self._config.get("target_mcu", "") or "STM32F105RCT6"
         self._target_mcu_edit.setText(target_mcu)
+        self._config.set("target_mcu", target_mcu)
         if target_mcu in STM32_FLASH_SIZES:
             idx = self._chip_combo.findData(target_mcu)
             if idx >= 0:
                 self._chip_combo.setCurrentIndex(idx)
-        total_kb = self._config.get("total_memory", 65536) // 1024
+        total_kb = self._config.get("total_memory", STM32_FLASH_SIZES.get("STM32F105RCT6", 256) * 1024) // 1024
         if total_kb > 0:
             self._read_size_edit.setCurrentText(str(total_kb))
         self._device_name_edit.setText(self._config.get("device_type_name", ""))
@@ -1539,37 +1568,17 @@ class FlashDialog(QDialog):
         )
 
     def _prepare_config_only_hex(self) -> str:
-        """Создаёт временный HEX-файл с одной последней страницей конфигурации.
-
-        Конфигурация должна находиться по тому же абсолютному адресу, что и
-        в полном образе (BOOTLOADER_BASE_ADDR + последняя страница). Иначе
-        DFU/ST-Link получат адрес вне Flash (0x0003F800 вместо 0x0803F800) и
-        вернут errTARGET / bStatus=0x01.
-        """
+        """Создаёт HEX только с реальной страницей конфигурации firmware."""
         name = self._device_name_edit.text().strip()
         if not name:
             raise ValueError(tr("Заполните поле «Устройство»"))
         serial = self._serial_edit.text().strip()
         if not serial:
             raise ValueError(tr("Введите серийный номер"))
-        try:
-            flash_size_kb = self._get_flash_size_kb()
-            page_size = self._get_page_size()
-        except ValueError:
-            raise
 
-        flash_size = flash_size_kb * 1024
-        last_page = flash_size - page_size
-        page = bytearray(b"\xFF") * page_size
-        name_bytes = name.encode("ascii", errors="ignore")[:10].ljust(10)
-        serial_bytes = serial.encode("ascii", errors="ignore")[:10].ljust(10)
-        page[8:18] = name_bytes
-        page[18:28] = serial_bytes
-
+        page = build_device_config_page(name, serial)
         tmp = Path(tempfile.gettempdir()) / f"config_only_{int(time.time())}.hex"
-        # Абсолютный адрес последней страницы — иначе load_firmware_bytes()
-        # вернёт base=0x0003F800, DFU запишет за пределы памяти.
-        _save_intel_hex(bytes(page), BOOTLOADER_BASE_ADDR + last_page, tmp)
+        _save_intel_hex(page, DEVICE_CONFIG_PAGE_ADDR, tmp)
         return str(tmp)
 
     def _on_config_toggled(self, checked: bool) -> None:
@@ -1749,7 +1758,6 @@ class FlashDialog(QDialog):
         if not serial:
             raise ValueError(tr("Введите серийный номер"))
         flash_size_kb = self._get_flash_size_kb()
-        page_size = self._get_page_size()
 
         data, base = load_firmware_bytes(file_path)
         if base == 0:
@@ -1759,14 +1767,11 @@ class FlashDialog(QDialog):
         if firmware_offset < 0 or firmware_offset + len(data) > flash_size:
             raise ValueError(tr("Прошивка не помещается в выбранный размер Flash"))
 
-        last_page = BOOTLOADER_BASE_ADDR + flash_size - page_size
-        page = bytearray(b"\xFF") * page_size
-        page[8:18] = name.encode("ascii", errors="ignore")[:10].ljust(10)
-        page[18:28] = serial.encode("ascii", errors="ignore")[:10].ljust(10)
+        page = build_device_config_page(name, serial)
 
         image = IntelHex()
         image.puts(base, data)
-        image.puts(last_page, bytes(page))
+        image.puts(DEVICE_CONFIG_PAGE_ADDR, page)
         src = Path(file_path)
         tmp = Path(tempfile.gettempdir()) / f"{src.stem}_конфиг.hex"
         image.write_hex_file(tmp)
@@ -1827,8 +1832,36 @@ class FlashDialog(QDialog):
         )
         return answer == QMessageBox.StandardButton.Yes
 
+    def _try_direct_config_write(self, method: str) -> bool:
+        """Пишет конфигурацию через C1 без входа в bootloader/DFU.
+
+        Возвращает True, если операция завершена (успешно или с ошибкой), и
+        False, если нужно продолжить обычным DFU/UART-путём.
+        """
+        if not self._config_button.isChecked() or self._files_list.count() != 0:
+            return False
+        if method not in ("auto", "usb_cdc") or self._serial_manager is None:
+            return False
+        if not self._serial_manager.is_open():
+            return False
+        name = self._device_name_edit.text().strip().encode("ascii", errors="ignore")[:DEVICE_CONFIG_NAME_MAX]
+        serial = self._serial_edit.text().strip().encode("ascii", errors="ignore")[:10]
+        payload = bytes((len(name),)) + name + bytes((len(serial),)) + serial
+        payload += bytes((0x83, 0x04, 0x40, 0x57))
+        try:
+            self._serial_manager.request_control(CMD_CFG_WRITE, payload)
+            message = tr("Конфигурация записана без перепрошивки Flash")
+            self._log(message)
+            QMessageBox.information(self, tr("Готово"), message)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Прямая запись конфигурации недоступна, использую bootloader: %s", exc)
+            return False
+
     def _on_flash(self) -> None:
         method = self._method_combo.currentData()
+        if self._try_direct_config_write(method):
+            return
         if self._is_any_worker_running():
             QMessageBox.warning(
                 self,
@@ -1955,14 +1988,46 @@ class FlashDialog(QDialog):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), str(exc))
 
+    def _try_direct_config_read(self, method: str) -> bool:
+        if method not in ("auto", "usb_cdc") or self._serial_manager is None:
+            return False
+        if not self._serial_manager.is_open():
+            return False
+        try:
+            payload = self._serial_manager.request_control(CMD_CFG_READ, b"")
+            if len(payload) < 2:
+                raise ValueError("Неполный ответ CMD_CFG_READ")
+            name_len = payload[0]
+            if name_len > DEVICE_CONFIG_NAME_MAX or len(payload) < 1 + name_len + 1:
+                raise ValueError("Некорректная длина имени в CMD_CFG_READ")
+            pos = 1
+            name = payload[pos : pos + name_len].decode("ascii", errors="ignore")
+            pos += name_len
+            serial_len = payload[pos]
+            pos += 1
+            if serial_len > 10 or len(payload) < pos + serial_len + 4:
+                raise ValueError("Некорректная длина serial в CMD_CFG_READ")
+            serial = payload[pos : pos + serial_len].decode("ascii", errors="ignore")
+            self._device_name_edit.setText(name)
+            self._serial_edit.setText(serial)
+            self._config.set_bulk({
+                "device_type_name": name,
+                "device_serial": serial,
+                "serial_number": serial,
+            })
+            message = tr("Прочитана конфигурация: {0} / {1}").format(name, serial)
+            self._log(message)
+            QMessageBox.information(self, tr("Готово"), message)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Прямое чтение конфигурации недоступно, использую Flash: %s", exc)
+            return False
+
     def _on_read_config(self) -> None:
         method = self._method_combo.currentData()
-        try:
-            flash_size_kb = self._get_flash_size_kb()
-            page_size = self._get_page_size()
-        except ValueError as exc:
-            QMessageBox.warning(self, tr("Внимание"), str(exc))
+        if self._try_direct_config_read(method):
             return
+        page_size = DEVICE_CONFIG_PAGE_SIZE
         if self._is_any_worker_running():
             QMessageBox.warning(
                 self,
@@ -1970,7 +2035,7 @@ class FlashDialog(QDialog):
                 tr("Выполняется другая операция с устройством. Дождитесь её завершения."),
             )
             return
-        start = flash_size_kb * 1024 - page_size
+        start = DEVICE_CONFIG_PAGE_ADDR
         self._read_config_button.setEnabled(False)
         self._erase_button.setEnabled(False)
         self._progress_bar.setValue(0)
@@ -1990,8 +2055,10 @@ class FlashDialog(QDialog):
             return
         self._log(message)
         try:
-            name = data[8:18].rstrip(b"\xFF\x00").decode("ascii", errors="ignore").strip()
-            serial = data[18:28].rstrip(b"\xFF\x00").decode("ascii", errors="ignore").strip()
+            parsed = parse_device_config(data)
+            if parsed is None:
+                raise ValueError(tr("Конфигурация Flash повреждена: неверный magic или CRC8"))
+            name, serial, _vid, _pid = parsed
             self._device_name_edit.setText(name)
             self._serial_edit.setText(serial)
             self._config.set_bulk({
@@ -2014,12 +2081,23 @@ class FlashDialog(QDialog):
                 tr('Выполняется другая операция с устройством. Дождитесь её завершения.'),
             )
             return
+        application_only = method in ('uart', 'usb_cdc')
+        if application_only:
+            warning_text = tr(
+                'Этот способ стирает область приложения, но оставляет bootloader.\n'
+                'Приложение перестанет работать до повторной прошивки.\n\n'
+                'Продолжить?'
+            )
+        else:
+            warning_text = tr(
+                'Эта операция может стереть bootloader и всё приложение с МК.\n'
+                'Устройство перестанет работать до повторной прошивки.\n\n'
+                'Продолжить?'
+            )
         answer = QMessageBox.warning(
             self,
-            tr('Внимание: полное стирание Flash'),
-            tr('Полное стирание удалит bootloader и всё приложение с МК.\n'
-               'Устройство перестанет работать до повторной прошивки.\n\n'
-               'Продолжить?'),
+            tr('Внимание: стирание Flash'),
+            warning_text,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

@@ -19,6 +19,9 @@ CMD_DEVICE_INFO = 0x92      # Запрос расширенной информа
 CMD_DEVICE_INFO_RESP = 0x93 # Ответ с серийным номером и объёмом памяти
 CMD_AUTO_SPEED = 0xA0       # Запрос автоопределения скорости CAN
 CMD_AUTO_SPEED_RESP = 0xA1  # Ответ с определённой скоростью
+CMD_CFG_READ = 0xC0
+CMD_CFG_WRITE = 0xC1
+CMD_CFG_FACTORY_RESET = 0xC2
 
 # Типы устройств
 DEVICE_TYPE_BASIC = 0x00   # Базовое CAN 2.0
