@@ -24,7 +24,9 @@
 #define STM32F105_PID      0x0418U
 
 #define FLASH_START        0x08000000U
+#define FLASH_END          (FLASH_START + 256U * 1024U)
 #define APP_START          0x08008000U
+#define APP_CODE_END       0x0803D800U
 #define APP_PAGES_START    16U
 #define APP_PAGES_TOTAL    112U
 
@@ -68,16 +70,20 @@ static bool bl_address_in_app(uint32_t address)
   if (address < APP_START) {
     return false;
   }
-  if (address >= (FLASH_START + 256U * 1024U)) {
+  if (address >= FLASH_END) {
     return false;
   }
   return true;
 }
 
-static bool bl_app_is_valid(void)
+static bool bl_app_is_valid(uint32_t address)
 {
-  uint32_t sp = *(__IO uint32_t *)APP_START;
-  uint32_t rv = *(__IO uint32_t *)(APP_START + 4U);
+  if (address < APP_START || address > (APP_CODE_END - 8U)) {
+    return false;
+  }
+
+  uint32_t sp = *(__IO uint32_t *)address;
+  uint32_t rv = *(__IO uint32_t *)(address + 4U);
 
   /* Stack pointer should be in RAM (0x20000000 - 0x20010000 for 64 KB) */
   if ((sp < 0x20000000U) || (sp > 0x20010000U)) {
@@ -88,7 +94,7 @@ static bool bl_app_is_valid(void)
     return false;
   }
   rv &= ~1U;
-  if ((rv < APP_START) || (rv >= (FLASH_START + 256U * 1024U))) {
+  if ((rv < APP_START) || (rv >= APP_CODE_END)) {
     return false;
   }
   return true;
@@ -113,7 +119,7 @@ bool Bootloader_ShouldStay(void)
   *(__IO uint32_t *)BOOTLOADER_FLAG_ADDRESS = 0U;
   RCC->CSR |= RCC_CSR_RMVF;
 
-  if (!stay && !bl_app_is_valid()) {
+  if (!stay && !bl_app_is_valid(APP_START)) {
     stay = true;
   }
   return stay;
@@ -121,7 +127,7 @@ bool Bootloader_ShouldStay(void)
 
 void Bootloader_JumpToApplication(uint32_t address)
 {
-  if (!bl_app_is_valid()) {
+  if (!bl_app_is_valid(address)) {
     return;
   }
 
@@ -187,7 +193,7 @@ static bool bl_address_check(uint32_t address, uint16_t len)
   if (!bl_address_in_app(address)) {
     return false;
   }
-  if ((address + len) > (FLASH_START + 256U * 1024U)) {
+  if ((uint32_t)len > (FLASH_END - address)) {
     return false;
   }
   return true;
