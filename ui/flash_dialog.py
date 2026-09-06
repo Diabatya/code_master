@@ -941,8 +941,16 @@ class FlashWorker(QThread):
                 for start, data in segments:
                     incoming = parse_device_config(data)
                     if start == DEVICE_CONFIG_PAGE_ADDR and len(data) >= DEVICE_CONFIG_PAGE_SIZE and incoming:
-                        current_page = dfu.upload(start, DEVICE_CONFIG_PAGE_SIZE)
-                        data = build_device_config_page(incoming[0], incoming[1], current_page)
+                        try:
+                            current_page = dfu.upload(start, DEVICE_CONFIG_PAGE_SIZE)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "Не удалось прочитать старую config-страницу DFU, "
+                                "записываю валидную страницу по умолчанию: %s",
+                                exc,
+                            )
+                        else:
+                            data = build_device_config_page(incoming[0], incoming[1], current_page)
                     preserved_segments.append((start, data))
                 segments = preserved_segments
 
@@ -2057,7 +2065,13 @@ class FlashDialog(QDialog):
         try:
             parsed = parse_device_config(data)
             if parsed is None:
-                raise ValueError(tr("Конфигурация Flash повреждена: неверный magic или CRC8"))
+                message = tr(
+                    "Страница конфигурации не инициализирована или создана старой версией firmware. "
+                    "Сначала запишите конфигурацию заново."
+                )
+                self._log(message)
+                QMessageBox.warning(self, tr("Внимание"), message)
+                return
             name, serial, _vid, _pid = parsed
             self._device_name_edit.setText(name)
             self._serial_edit.setText(serial)

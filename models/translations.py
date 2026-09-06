@@ -615,6 +615,7 @@ class Translator:
                 "Конфигурация из Flash: устройство={0}, серийный={1}": "Configuration from Flash: device={0}, serial={1}",
                 "Конфигурация записана без перепрошивки Flash": "Configuration written without reflashing Flash",
                 "Конфигурация Flash повреждена: неверный magic или CRC8": "Flash configuration is corrupt: invalid magic or CRC8",
+                "Страница конфигурации не инициализирована или создана старой версией firmware. Сначала запишите конфигурацию заново.": "The configuration page is uninitialized or was created by an older firmware version. Write the configuration again first.",
                 "Модель чипа": "Chip model",
                 "Например: STM32F103RC": "For example: STM32F103RC",
                 "Не найдено ни одно поддерживаемое устройство": "No supported device found",
