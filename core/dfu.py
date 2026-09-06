@@ -483,7 +483,7 @@ class DfuDevice:
             pass
         try:
             self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, b"", timeout=1000)
-        except usb.core.USBError:
+        except (usb.core.USBError, OSError):
             pass  # устройство перезагружается и отваливается
 
     def close(self) -> None:
@@ -491,7 +491,7 @@ class DfuDevice:
         if self.intf is not None:
             try:
                 usb.util.release_interface(self.dev, self.intf.bInterfaceNumber)
-            except usb.core.USBError:
+            except (usb.core.USBError, OSError):
                 pass
             self.intf = None
         try:
