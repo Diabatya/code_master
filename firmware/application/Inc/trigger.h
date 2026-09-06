@@ -31,6 +31,8 @@ extern "C" {
 #define TRIGGER_PAGE_ADDR    0x0803E000U
 #define TRIGGER_PAGE_SIZE    2048U /* one page holds all 10 slots, see layout below */
 #define TRIGGER_MAGIC         0x54524731U /* "TRG1" */
+#define TRIGGER_FORMAT_VERSION 1U
+#define TRIGGER_RECORD_SIZE    54U
 
 typedef struct __attribute__((packed)) {
   uint32_t magic;

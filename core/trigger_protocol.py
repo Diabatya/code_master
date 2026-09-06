@@ -6,6 +6,7 @@ import struct
 from typing import Dict, Any
 
 TRIGGER_MAGIC = 0x54524731
+TRIGGER_FORMAT_VERSION = 1
 TRIGGER_SIZE = 54
 _TRIGGER_FORMAT = "<IBBBIIB8s8sBBIB8sH4sB"
 
@@ -39,7 +40,7 @@ def pack_trigger(values: Dict[str, Any]) -> bytes:
             int(values.get("tx_dlc", 0)) & 0xFF,
             bytes(values.get("tx_data", b""))[:8].ljust(8, b"\x00"),
             int(values.get("delay_ms", 0)) & 0xFFFF,
-            b"\x00" * 4,
+            bytes((TRIGGER_FORMAT_VERSION, TRIGGER_SIZE, 0, 0)),
             0,
         )
     )
@@ -56,6 +57,11 @@ def unpack_trigger(payload: bytes) -> Dict[str, Any]:
         raise ValueError("Неверный magic trigger_t")
     if crc8(payload[:-1]) != payload[-1]:
         raise ValueError("Неверный CRC8 trigger_t")
+    if not (
+        (values[15][0] == 0 and values[15][1] == 0)
+        or (values[15][0] == TRIGGER_FORMAT_VERSION and values[15][1] == TRIGGER_SIZE)
+    ):
+        raise ValueError("Неподдерживаемая версия trigger_t")
     return {
         "enabled": values[1],
         "rx_channel": values[2],

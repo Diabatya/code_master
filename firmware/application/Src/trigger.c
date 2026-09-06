@@ -47,6 +47,8 @@ static void load_default(trigger_t *t)
   memset(t, 0, sizeof(*t));
   t->magic = TRIGGER_MAGIC;
   t->enabled = 0U;
+  t->reserved[0] = TRIGGER_FORMAT_VERSION;
+  t->reserved[1] = TRIGGER_RECORD_SIZE;
   t->crc8 = crc8((const uint8_t *)t, offsetof(trigger_t, crc8));
 }
 
@@ -61,7 +63,10 @@ void Trigger_Init(void)
     const trigger_t *flash_t = (const trigger_t *)(page + (uint32_t)i * sizeof(trigger_t));
     if (flash_t->magic == TRIGGER_MAGIC) {
       uint8_t computed = crc8((const uint8_t *)flash_t, offsetof(trigger_t, crc8));
-      if (computed == flash_t->crc8) {
+      if (computed == flash_t->crc8
+          && ((flash_t->reserved[0] == 0U && flash_t->reserved[1] == 0U)
+              || (flash_t->reserved[0] == TRIGGER_FORMAT_VERSION
+                  && flash_t->reserved[1] == TRIGGER_RECORD_SIZE))) {
         memcpy(&s_triggers[i], flash_t, sizeof(trigger_t));
         continue;
       }
@@ -118,6 +123,8 @@ uint8_t Trigger_Set(uint8_t index, const trigger_t *trig)
 
   trigger_t new_t = *trig;
   new_t.magic = TRIGGER_MAGIC;
+  new_t.reserved[0] = TRIGGER_FORMAT_VERSION;
+  new_t.reserved[1] = TRIGGER_RECORD_SIZE;
   new_t.crc8 = crc8((const uint8_t *)&new_t, offsetof(trigger_t, crc8));
 
   if (memcmp(&new_t, &s_triggers[index], sizeof(new_t)) == 0) {
