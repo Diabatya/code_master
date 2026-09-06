@@ -686,6 +686,7 @@ class Translator:
                 "Кликните по строке": "Click a row",
                 "Принято: 0 | Скорость: 0 пак/с": "Received: 0 | Rate: 0 frames/s",
                 "Принято: {0} | Скорость: {1} пак/с": "Received: {0} | Rate: {1} frames/s",
+                " | Устройство RX: {0} TX: {1} Потеряно: {2}": " | Device RX: {0} TX: {1} Lost: {2}",
                 "Скорость CAN1": "CAN1 bitrate",
                 "Скорость CAN2": "CAN2 bitrate",
                 "Сохранить триггерную запись": "Save trigger recording",

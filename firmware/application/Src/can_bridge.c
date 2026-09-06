@@ -13,9 +13,12 @@ typedef struct {
   volatile uint16_t head;
   volatile uint16_t tail;
   volatile uint8_t  overflow;
+  volatile uint32_t rx_count;
+  volatile uint32_t lost_count;
 } can_ring_t;
 
 static can_ring_t s_ring[2];
+static volatile uint32_t s_tx_count[2];
 
 /* Sticky per-channel error/bus-off flags + last raw HAL error code, set
  * from HAL_CAN_ErrorCallback() (IRQ context) and consumed/cleared by
@@ -36,7 +39,9 @@ static void ring_push(uint8_t channel, const can_frame_t *frame)
      * stale window. */
     ring->tail = (uint16_t)((ring->tail + 1U) & (CAN_RING_DEPTH - 1U));
     ring->overflow = 1U;
+    ring->lost_count++;
   }
+  ring->rx_count++;
   ring->buf[ring->head] = *frame;
   ring->head = next;
 }
@@ -53,6 +58,20 @@ uint8_t CanBridge_PopRx(uint8_t channel, can_frame_t *out)
   *out = ring->buf[ring->tail];
   ring->tail = (uint16_t)((ring->tail + 1U) & (CAN_RING_DEPTH - 1U));
   return 1U;
+}
+
+void CanBridge_GetStats(uint8_t channel, can_stats_t *out)
+{
+  if (out == NULL) {
+    return;
+  }
+  if (channel > 1U) {
+    memset(out, 0, sizeof(*out));
+    return;
+  }
+  out->rx_count = s_ring[channel].rx_count;
+  out->tx_count = s_tx_count[channel];
+  out->lost_count = s_ring[channel].lost_count;
 }
 
 uint8_t CanBridge_TookOverflow(uint8_t channel)
@@ -330,7 +349,11 @@ uint8_t CanBridge_Transmit(const can_frame_t *frame)
   uint32_t mailbox;
   for (uint32_t attempt = 0; attempt < 500U; attempt++) {
     if (HAL_CAN_GetTxMailboxesFreeLevel(hcan) > 0U) {
-      return (HAL_CAN_AddTxMessage(hcan, &header, (uint8_t *)frame->data, &mailbox) == HAL_OK) ? 1U : 0U;
+      if (HAL_CAN_AddTxMessage(hcan, &header, (uint8_t *)frame->data, &mailbox) != HAL_OK) {
+        return 0U;
+      }
+      s_tx_count[frame->channel]++;
+      return 1U;
     }
   }
   return 0U;

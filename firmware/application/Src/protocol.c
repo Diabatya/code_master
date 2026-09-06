@@ -31,6 +31,7 @@
 #define CMD_TRIGGER_WRITE      0xC4U
 #define CMD_TRIGGER_ENABLE     0xC5U
 #define CMD_CAN_ERROR_STATUS   0xC6U
+#define CMD_CAN_STATS           0xC7U
 #define CMD_RESP_OFFSET        0x10U /* response marker = request | 0x10, see PROTOCOL.md Part 2 */
 
 #define REBOOT_MAGIC_LEN 22U
@@ -234,6 +235,21 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       out[3] = (uint8_t)((last_error_code >> 8) & 0xFFU);
       out[4] = (uint8_t)((last_error_code >> 16) & 0xFFU);
       out[5] = (uint8_t)((last_error_code >> 24) & 0xFFU);
+      send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
+      break;
+    }
+
+    case CMD_CAN_STATS: {
+      if (payload_len < 1U || payload[0] > 1U) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      can_stats_t stats;
+      CanBridge_GetStats(payload[0], &stats);
+      uint8_t out[12];
+      memcpy(&out[0], &stats.rx_count, 4U);
+      memcpy(&out[4], &stats.tx_count, 4U);
+      memcpy(&out[8], &stats.lost_count, 4U);
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
     }

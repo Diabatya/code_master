@@ -515,7 +515,16 @@ class CanChannelMonitor(QWidget):
         while self._packet_times and now - self._packet_times[0] > 1.0:
             self._packet_times.popleft()
         speed = len(self._packet_times)
-        self._stats_label.setText(tr("Принято: {0} | Скорость: {1} пак/с").format(self._received_count, speed))
+        text = tr("Принято: {0} | Скорость: {1} пак/с").format(self._received_count, speed)
+        try:
+            if self._serial_manager.is_open() and not self._config.get("emulation", False):
+                device = self._serial_manager.read_can_stats(self._channel - 1)
+                text += tr(" | Устройство RX: {0} TX: {1} Потеряно: {2}").format(
+                    device["rx_count"], device["tx_count"], device["lost_count"]
+                )
+        except Exception:  # noqa: BLE001
+            pass
+        self._stats_label.setText(text)
 
     def _format_signals(self, can_id: int, data: bytes) -> str:
         db = self._dbc_manager.get_cantools_db()

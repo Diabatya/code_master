@@ -30,6 +30,12 @@ typedef struct {
   uint8_t  data[8];
 } can_frame_t;
 
+typedef struct {
+  uint32_t rx_count;
+  uint32_t tx_count;
+  uint32_t lost_count;
+} can_stats_t;
+
 /* Initializes CAN1 (master) + CAN2 (slave) peripherals, GPIO, filters
  * (pass-all on both, filtering is done in software by triggers/UI), and
  * enables RX FIFO0 pending interrupts. baud_kbps applies to both channels
@@ -51,6 +57,9 @@ uint8_t CanBridge_PopRx(uint8_t channel, can_frame_t *out);
  * mailbox for a bounded number of polls; used both for trigger responses
  * and for PC->device forwarded frames). Returns 1 on success. */
 uint8_t CanBridge_Transmit(const can_frame_t *frame);
+
+/* Reads cumulative RX/TX/lost counters for one channel. */
+void CanBridge_GetStats(uint8_t channel, can_stats_t *out);
 
 /* Returns 1 if channel's RX ring has overflowed at least once since the
  * last call (clears the flag on read) — surfaced to protocol.c so it can

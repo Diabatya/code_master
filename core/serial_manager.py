@@ -13,6 +13,7 @@ from PySide6.QtCore import QObject, QThread, Signal, QTimer
 from core.can_protocol import (
     CMD_AUTO_SPEED,
     CMD_AUTO_SPEED_RESP,
+    CMD_CAN_STATS,
     CMD_DEVICE_ID,
     CMD_DEVICE_ID_RESP,
     CMD_DEVICE_INFO,
@@ -350,6 +351,17 @@ class SerialManager(QObject):
             finally:
                 self._start_reader()
                 self._closing = False
+
+    def read_can_stats(self, channel: int) -> dict[str, int]:
+        """Возвращает накопительные RX/TX/lost-счётчики CAN-канала."""
+        payload = self.request_control(CMD_CAN_STATS, bytes((channel & 0xFF,)))
+        if len(payload) != 12:
+            raise RuntimeError("Некорректный ответ CMD_CAN_STATS")
+        return {
+            "rx_count": int.from_bytes(payload[0:4], "little"),
+            "tx_count": int.from_bytes(payload[4:8], "little"),
+            "lost_count": int.from_bytes(payload[8:12], "little"),
+        }
 
     def ping_device(self) -> bool:
         """Отправляет устройству запрос ID и возвращает True, если есть ответ."""
