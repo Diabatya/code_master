@@ -1866,6 +1866,7 @@ class FlashDialog(QDialog):
         payload += bytes((0x83, 0x04, 0x40, 0x57))
         try:
             self._serial_manager.request_control(CMD_CFG_WRITE, payload)
+            self._mark_operation_disconnected()
             message = tr("Конфигурация записана без перепрошивки Flash")
             self._log(message)
             QMessageBox.information(self, tr("Готово"), message)
@@ -1947,8 +1948,14 @@ class FlashDialog(QDialog):
         except Exception as exc:  # noqa: BLE001
             logger.error("Не удалось восстановить COM-порт: %s", exc)
 
+    def _mark_operation_disconnected(self) -> None:
+        """Сбрасывает зелёный статус после операции с USB/DFU устройством."""
+        self._last_chip_info = {}
+        self._set_connect_status(False, {})
+
     def _on_flash_finished(self, success: bool, message: str) -> None:
         logger.info("Прошивка завершена: success=%s, message=%s", success, message)
+        self._mark_operation_disconnected()
         self._flash_button.setEnabled(True)
         self._config_button.setEnabled(True)
         self._read_button.setEnabled(True)
@@ -1988,6 +1995,7 @@ class FlashDialog(QDialog):
         self._read_worker.start()
 
     def _on_read_finished(self, success: bool, message: str, data: object, base: int) -> None:
+        self._mark_operation_disconnected()
         self._read_button.setEnabled(True)
         self._erase_button.setEnabled(True)
         self._restore_serial_port()
@@ -2062,6 +2070,7 @@ class FlashDialog(QDialog):
         self._read_worker.start()
 
     def _on_config_read_finished(self, success: bool, message: str, data: object, base: int) -> None:
+        self._mark_operation_disconnected()
         self._read_config_button.setEnabled(True)
         self._erase_button.setEnabled(True)
         self._restore_serial_port()
@@ -2140,6 +2149,7 @@ class FlashDialog(QDialog):
 
     def _on_erase_finished(self, success: bool, message: str) -> None:
         logger.info('Стирание завершено: success=%s, message=%s', success, message)
+        self._mark_operation_disconnected()
         self._flash_button.setEnabled(True)
         self._config_button.setEnabled(True)
         self._read_button.setEnabled(True)
