@@ -18,6 +18,10 @@ APPLICATION_BASE_ADDR = 0x08008000
 
 # Страница конфигурации приложения. Она не является последней страницей
 # физической Flash: страницы 124-127 зарезервированы под триггеры.
+APP_METADATA_PAGE_ADDR = 0x0803D000
+APP_METADATA_PAGE_SIZE = 2048
+APP_METADATA_MAGIC = 0x41505031
+APP_METADATA_VERSION = 1
 DEVICE_CONFIG_PAGE_ADDR = 0x0803D800
 DEVICE_CONFIG_PAGE_SIZE = 2048
 DEVICE_CONFIG_NAME_MAX = 9

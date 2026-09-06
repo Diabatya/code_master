@@ -26,7 +26,10 @@
 #define FLASH_START        0x08000000U
 #define FLASH_END          (FLASH_START + 256U * 1024U)
 #define APP_START          0x08008000U
-#define APP_CODE_END       0x0803D800U
+#define APP_CODE_END       0x0803D000U
+#define APP_METADATA_ADDR  0x0803D000U
+#define APP_METADATA_MAGIC 0x41505031U
+#define APP_METADATA_VERSION 1U
 #define APP_PAGES_START    16U
 #define APP_PAGES_TOTAL    112U
 
@@ -76,6 +79,42 @@ static bool bl_address_in_app(uint32_t address)
   return true;
 }
 
+static uint32_t bl_crc32(uint32_t address, uint32_t length)
+{
+  uint32_t crc = 0xFFFFFFFFU;
+  const uint8_t *data = (const uint8_t *)address;
+  for (uint32_t i = 0; i < length; i++) {
+    crc ^= data[i];
+    for (uint32_t bit = 0; bit < 8U; bit++) {
+      crc = (crc >> 1) ^ ((crc & 1U) ? 0xEDB88320U : 0U);
+    }
+  }
+  return crc ^ 0xFFFFFFFFU;
+}
+
+static bool bl_metadata_is_valid(void)
+{
+  const uint8_t *metadata = (const uint8_t *)APP_METADATA_ADDR;
+  uint32_t magic = *(const uint32_t *)&metadata[0];
+  if (magic == 0xFFFFFFFFU || magic == 0U) {
+    /* Backward compatibility with application images built before metadata. */
+    return true;
+  }
+  if (magic != APP_METADATA_MAGIC) {
+    return false;
+  }
+  if (*(const uint16_t *)&metadata[4] != APP_METADATA_VERSION) {
+    return false;
+  }
+
+  uint32_t image_size = *(const uint32_t *)&metadata[8];
+  uint32_t expected_crc = *(const uint32_t *)&metadata[12];
+  if (image_size < 8U || image_size > (APP_METADATA_ADDR - APP_START)) {
+    return false;
+  }
+  return bl_crc32(APP_START, image_size) == expected_crc;
+}
+
 static bool bl_app_is_valid(uint32_t address)
 {
   if (address < APP_START || address > (APP_CODE_END - 8U)) {
@@ -97,7 +136,7 @@ static bool bl_app_is_valid(uint32_t address)
   if ((rv < APP_START) || (rv >= APP_CODE_END)) {
     return false;
   }
-  return true;
+  return bl_metadata_is_valid();
 }
 
 void Bootloader_RequestStay(void)

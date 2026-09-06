@@ -2,29 +2,25 @@
  *
  * Flash layout (see firmware/PROTOCOL.md, Part 3):
  *   0x08000000 - 0x08007FFF (32 KB)  bootloader (not part of this project)
- *   0x08008000 - 0x0803D7FF (214 KB) application code  <-- this .ld's FLASH region
+ *   0x08008000 - 0x0803CFFF (212 KB) application code  <-- this .ld's FLASH region
+ *   0x0803D000 - 0x0803D7FF (2 KB)   application integrity metadata
  *   0x0803D800 - 0x0803DFFF (2 KB)   device config page ("page A" per ТЗ 11.2)
  *   0x0803E000 - 0x0803FFFF (8 KB)   trigger storage (10 slots)
  *
- * NOTE: an earlier draft of this file used LENGTH = 222K, which is WRONG —
- * 0x0803D800 - 0x08008000 = 0x35800 = 219136 bytes = 214 KB exactly, not 222.
- * The old 222K value put the end of the FLASH region 8 KB past the real
- * boundary, i.e. INSIDE the device-config page (and overlapping into the
- * trigger page too) — the linker could have placed .text/.data there, which
- * a later CMD_CFG_WRITE/CMD_TRIGGER_WRITE erase would have silently
- * corrupted (overwriting live code with configuration data). Fixed to the
- * arithmetically correct 214K.
+ * The metadata page is intentionally excluded from the linker FLASH region.
+ * It is generated after linking by firmware/tools/add_app_metadata.py and
+ * contains the application size and CRC32 used by the bootloader.
  *
- * The config/trigger pages are intentionally excluded from the FLASH region
- * given to the linker so that .text/.data can never be placed there by
- * accident; device_config.c / trigger.c address them directly via their own
- * fixed pointers (see Inc/device_config.h, Inc/trigger.h).
+ * The metadata, config and trigger pages are intentionally excluded from the
+ * linker FLASH region so that .text/.data can never be placed there by
+ * accident; device_config.c / trigger.c address their own fixed pages directly
+ * (see Inc/device_config.h, Inc/trigger.h).
  */
 
 MEMORY
 {
   RAM    (xrw) : ORIGIN = 0x20000000, LENGTH = 64K
-  FLASH  (rx)  : ORIGIN = 0x08008000, LENGTH = 214K
+  FLASH  (rx)  : ORIGIN = 0x08008000, LENGTH = 212K
 }
 
 /* Highest address of the stack. End of 64 KB RAM. */

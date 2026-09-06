@@ -19,7 +19,8 @@
 | Образ | Адрес | Назначение |
 |---|---:|---|
 | Bootloader | `0x08000000–0x08007FFF` | Запуск application, USB CDC/AN3155, обновление и чтение Flash |
-| Application | `0x08008000–0x0803D7FF` | CAN-мост, USB CDC, триггеры и основной протокол |
+| Application | `0x08008000–0x0803CFFF` | CAN-мост, USB CDC, триггеры и основной протокол |
+| App metadata | `0x0803D000–0x0803D7FF` | CRC32, размер и версия application |
 | Конфигурация | `0x0803D800–0x0803DFFF` | Имя, serial, VID/PID, magic, CRC8 |
 | Триггеры | `0x0803E000–0x0803FFFF` | 10 структур триггеров по 54 байта |
 

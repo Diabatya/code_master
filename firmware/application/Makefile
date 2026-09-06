@@ -91,11 +91,14 @@ $(BUILD_DIR)/%.o: %.s Makefile | $(BUILD_DIR)
 $(BUILD_DIR)/$(PROJECT).elf: $(OBJECTS) Makefile
 	$(LD) $(OBJECTS) $(LDFLAGS) -o $@
 
-$(BUILD_DIR)/$(PROJECT).bin: $(BUILD_DIR)/$(PROJECT).elf
-	$(CP) -O binary $< $@
-
-$(BUILD_DIR)/$(PROJECT).hex: $(BUILD_DIR)/$(PROJECT).elf
+$(BUILD_DIR)/$(PROJECT).raw.hex: $(BUILD_DIR)/$(PROJECT).elf
 	$(CP) -O ihex $< $@
+
+$(BUILD_DIR)/$(PROJECT).hex: $(BUILD_DIR)/$(PROJECT).raw.hex ../tools/add_app_metadata.py
+	python3 ../tools/add_app_metadata.py $< $@ $(BUILD_DIR)/$(PROJECT).bin
+
+$(BUILD_DIR)/$(PROJECT).bin: $(BUILD_DIR)/$(PROJECT).hex
+	@test -f $@
 
 $(BUILD_DIR):
 	mkdir -p $@

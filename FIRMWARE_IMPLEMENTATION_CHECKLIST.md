@@ -33,7 +33,8 @@
 ## 0.2. Зафиксировать базовую карту памяти
 
 - [ ] Bootloader: `0x08000000–0x08007FFF`.
-- [ ] Application: `0x08008000–0x0803D7FF`.
+- [ ] Application: `0x08008000–0x0803CFFF`.
+- [ ] Application metadata: `0x0803D000–0x0803D7FF`.
 - [ ] Config page: `0x0803D800–0x0803DFFF`.
 - [ ] Trigger storage: `0x0803E000–0x0803FFFF`.
 - [ ] Размер Flash STM32F105RCT6: 256 КБ.
