@@ -288,7 +288,8 @@ offset 14  : uint8_t  serial_len
 offset 15  : char     serial[10]
 offset 25  : uint16_t vid
 offset 27  : uint16_t pid
-offset 29  : uint8_t  reserved[2]
+offset 29  : uint8_t  format_version (0 = legacy, 1 = current)
+offset 30  : uint8_t  record_length  (32 for current format)
 offset 31  : uint8_t  crc8          (CRC-8, полином 0x07, по байтам offset 0..30)
 ```
 

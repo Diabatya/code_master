@@ -27,6 +27,8 @@ DEVICE_CONFIG_PAGE_SIZE = 2048
 DEVICE_CONFIG_NAME_MAX = 9
 DEVICE_CONFIG_SERIAL_MAX = 10
 DEVICE_CONFIG_MAGIC = 0x43464730
+DEVICE_CONFIG_FORMAT_VERSION = 1
+DEVICE_CONFIG_RECORD_SIZE = 32
 DEVICE_CONFIG_DEFAULT_VID = 0x0483
 DEVICE_CONFIG_DEFAULT_PID = 0x5740
 
@@ -71,7 +73,8 @@ def build_device_config_page(
     record[15:25] = serial_bytes.ljust(DEVICE_CONFIG_SERIAL_MAX, b"\x00")
     record[25:27] = int(vid).to_bytes(2, "little")
     record[27:29] = int(pid).to_bytes(2, "little")
-    record[29:31] = page[29:31] if current is not None else b"\x00\x00"
+    record[29] = DEVICE_CONFIG_FORMAT_VERSION
+    record[30] = DEVICE_CONFIG_RECORD_SIZE
     record[31] = device_config_crc8(record[:31])
     page[:32] = record
     return bytes(page)
@@ -85,6 +88,11 @@ def parse_device_config(page: bytes) -> Optional[Tuple[str, str, int, int]]:
     if name_len > DEVICE_CONFIG_NAME_MAX or serial_len > DEVICE_CONFIG_SERIAL_MAX:
         return None
     if device_config_crc8(page[:31]) != page[31]:
+        return None
+    if not (
+        (page[29] == 0 and page[30] == 0)
+        or (page[29] == DEVICE_CONFIG_FORMAT_VERSION and page[30] == DEVICE_CONFIG_RECORD_SIZE)
+    ):
         return None
     name = page[5:14][:name_len].decode("ascii", errors="ignore")
     serial = page[15:25][:serial_len].decode("ascii", errors="ignore")

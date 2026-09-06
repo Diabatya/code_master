@@ -36,6 +36,8 @@ static void load_defaults(device_config_t *cfg)
   cfg->serial_len = 0U;
   cfg->vid = DEVICE_CONFIG_DEFAULT_VID;
   cfg->pid = DEVICE_CONFIG_DEFAULT_PID;
+  cfg->reserved[0] = DEVICE_CONFIG_FORMAT_VERSION;
+  cfg->reserved[1] = DEVICE_CONFIG_RECORD_SIZE;
   cfg->crc8 = crc8((const uint8_t *)cfg, offsetof(device_config_t, crc8));
 }
 
@@ -47,7 +49,10 @@ void DeviceConfig_Init(void)
     uint8_t computed = crc8((const uint8_t *)flash_cfg, offsetof(device_config_t, crc8));
     if (computed == flash_cfg->crc8
         && flash_cfg->device_name_len <= DEVICE_CONFIG_NAME_MAX
-        && flash_cfg->serial_len <= DEVICE_CONFIG_SERIAL_MAX) {
+        && flash_cfg->serial_len <= DEVICE_CONFIG_SERIAL_MAX
+        && ((flash_cfg->reserved[0] == 0U && flash_cfg->reserved[1] == 0U)
+            || (flash_cfg->reserved[0] == DEVICE_CONFIG_FORMAT_VERSION
+                && flash_cfg->reserved[1] == DEVICE_CONFIG_RECORD_SIZE))) {
       memcpy(&s_config, flash_cfg, sizeof(s_config));
       return;
     }
@@ -113,6 +118,8 @@ uint8_t DeviceConfig_Write(const uint8_t *device_name, uint8_t device_name_len,
   }
   new_cfg.vid = (vid != 0U) ? vid : DEVICE_CONFIG_DEFAULT_VID;
   new_cfg.pid = (pid != 0U) ? pid : DEVICE_CONFIG_DEFAULT_PID;
+  new_cfg.reserved[0] = DEVICE_CONFIG_FORMAT_VERSION;
+  new_cfg.reserved[1] = DEVICE_CONFIG_RECORD_SIZE;
   new_cfg.crc8 = crc8((const uint8_t *)&new_cfg, offsetof(device_config_t, crc8));
 
   if (!flash_write_config(&new_cfg)) {
