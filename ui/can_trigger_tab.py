@@ -96,6 +96,7 @@ class CanTriggerTab(QWidget):
         self._serial_manager = serial_manager
         self._config = Config()
         self._blocks: List[Dict[str, Any]] = []
+        self._applying_device_state = False
         self._memory_indicator = MemoryIndicator(self)
 
         self._create_widgets()
@@ -569,6 +570,7 @@ class CanTriggerTab(QWidget):
 
             group_layout.addWidget(content)
             block["group"].toggled.connect(lambda checked, content=content: content.setVisible(checked))
+            block["group"].toggled.connect(lambda checked, idx=self._blocks.index(block): self._on_trigger_toggled(idx, checked))
             block["content"] = content
 
             container_layout.addWidget(block["group"])
@@ -643,6 +645,7 @@ class CanTriggerTab(QWidget):
     def _apply_device_trigger(self, index: int, values: Dict[str, Any]) -> None:
         block = self._blocks[index]
         recv = block["recv"]
+        self._applying_device_state = True
         block["group"].setChecked(bool(values["enabled"]))
         recv["channel"].setCurrentIndex(min(values["rx_channel"], 1))
         recv["bit"].setCurrentIndex(int(values["rx_extended"]))
@@ -663,6 +666,7 @@ class CanTriggerTab(QWidget):
                 edit.setText(f"{value:02X}")
             row["delay_before_send"].setValue(values["delay_ms"])
             self._set_data_enabled(row["data"], row["dlc"].value())
+        self._applying_device_state = False
 
     def _read_triggers_from_device(self) -> None:
         try:
@@ -711,6 +715,20 @@ class CanTriggerTab(QWidget):
         except Exception as exc:  # noqa: BLE001
             logger.exception("Ошибка записи триггеров в устройство")
             QMessageBox.critical(self, tr("Ошибка"), str(exc))
+
+    def _on_trigger_toggled(self, index: int, enabled: bool) -> None:
+        if (
+            self._applying_device_state
+            or not self._serial_manager.is_open()
+            or self._config.get("emulation", False)
+        ):
+            return
+        try:
+            self._serial_manager.set_trigger_enabled(index, enabled)
+            self._save_config()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось изменить enabled trigger %d: %s", index, exc)
+            QMessageBox.warning(self, tr("Ошибка"), str(exc))
 
     def _on_cache_active_changed(self, index: int, state: int) -> None:
         enabled = state == Qt.CheckState.Checked.value
@@ -870,16 +888,20 @@ class CanTriggerTab(QWidget):
 
     def set_config(self, triggers: List[Dict[str, Any]]) -> None:
         """Загружает конфигурацию триггеров из списка."""
-        for i, block in enumerate(self._blocks):
-            trigger = triggers[i] if i < len(triggers) else {}
-            block["group"].setChecked(bool(trigger.get("active", False)))
-            cache_active = bool(trigger.get("cache", False))
-            block["cache"]["cache_check"].setChecked(cache_active)
-            self._on_cache_active_changed(i, Qt.CheckState.Checked.value if cache_active else Qt.CheckState.Unchecked.value)
+        self._applying_device_state = True
+        try:
+            for i, block in enumerate(self._blocks):
+                trigger = triggers[i] if i < len(triggers) else {}
+                block["group"].setChecked(bool(trigger.get("active", False)))
+                cache_active = bool(trigger.get("cache", False))
+                block["cache"]["cache_check"].setChecked(cache_active)
+                self._on_cache_active_changed(i, Qt.CheckState.Checked.value if cache_active else Qt.CheckState.Unchecked.value)
 
-            self._set_row(block["recv"], trigger, "recv")
-            self._set_response_rows(block["response"], trigger.get("responses", []))
-            self._set_cache(block["cache"], trigger)
+                self._set_row(block["recv"], trigger, "recv")
+                self._set_response_rows(block["response"], trigger.get("responses", []))
+                self._set_cache(block["cache"], trigger)
+        finally:
+            self._applying_device_state = False
 
     def _set_row(self, row: Dict[str, Any], data: Dict[str, Any], prefix: str) -> None:
         row["channel"].setCurrentIndex(int(data.get(f"{prefix}_channel", 0)))

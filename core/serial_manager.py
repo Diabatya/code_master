@@ -14,6 +14,7 @@ from core.can_protocol import (
     CMD_AUTO_SPEED,
     CMD_AUTO_SPEED_RESP,
     CMD_CAN_STATS,
+    CMD_TRIGGER_ENABLE,
     CMD_TRIGGER_STATS,
     CMD_SYSTEM_INFO,
     CMD_DEVICE_ID,
@@ -364,6 +365,12 @@ class SerialManager(QObject):
             "tx_count": int.from_bytes(payload[4:8], "little"),
             "lost_count": int.from_bytes(payload[8:12], "little"),
         }
+
+    def set_trigger_enabled(self, index: int, enabled: bool) -> None:
+        """Включает/выключает trigger без перезаписи всей структуры."""
+        if not 0 <= index < 10:
+            raise ValueError("Некорректный индекс trigger")
+        self.request_control(CMD_TRIGGER_ENABLE, bytes((index, int(enabled))))
 
     def read_trigger_stats(self) -> dict[str, int]:
         """Возвращает счётчик срабатываний и максимальную задержку trigger."""
