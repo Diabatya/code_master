@@ -50,7 +50,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.bootloader import Bootloader
-from core.firmware_utils import _save_intel_hex, load_firmware_bytes
+from core.firmware_utils import _save_intel_hex, load_firmware_bytes, validate_application_vector
 from core.can_protocol import (
     CMD_CFG_READ,
     CMD_CFG_WRITE,
@@ -707,6 +707,13 @@ class FlashWorker(QThread):
         method = self._resolve_method()
         if method is None:
             return False, tr("Не найдено ни одно поддерживаемое устройство (UART/USB CDC/USB DFU/ST-Link/J-Link)")
+        try:
+            image, base = load_firmware_bytes(file_path)
+            valid, reason = validate_application_vector(image, base)
+            if not valid:
+                return False, tr("Проверка application до записи не пройдена: {0}").format(reason)
+        except Exception as exc:  # noqa: BLE001
+            return False, tr("Не удалось проверить файл перед записью: {0}").format(exc)
         if method == "stlink":
             return self._flash_stlink(file_path)
         if method == "jlink":

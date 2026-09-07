@@ -123,6 +123,30 @@ def load_firmware_bytes(file_path: str) -> Tuple[bytes, int]:
     return path.read_bytes(), 0
 
 
+def validate_application_vector(data: bytes, base_address: int) -> Tuple[bool, str]:
+    """Проверяет MSP/reset vector application до начала Flash erase."""
+    from core.stm32_info import APPLICATION_BASE_ADDR, BOOTLOADER_BASE_ADDR
+
+    if base_address == APPLICATION_BASE_ADDR:
+        offset = 0
+    elif base_address == BOOTLOADER_BASE_ADDR and len(data) >= APPLICATION_BASE_ADDR - BOOTLOADER_BASE_ADDR + 8:
+        offset = APPLICATION_BASE_ADDR - BOOTLOADER_BASE_ADDR
+    else:
+        return True, ""
+    if len(data) < offset + 8:
+        return False, "Файл application короче таблицы векторов"
+    sp = int.from_bytes(data[offset : offset + 4], "little")
+    reset = int.from_bytes(data[offset + 4 : offset + 8], "little")
+    if not 0x20000000 <= sp <= 0x20010000:
+        return False, f"Некорректный MSP: 0x{sp:08X}"
+    if (reset & 1) == 0:
+        return False, f"Reset vector не является Thumb-адресом: 0x{reset:08X}"
+    reset &= ~1
+    if not APPLICATION_BASE_ADDR <= reset < 0x0803D000:
+        return False, f"Reset vector вне application: 0x{reset:08X}"
+    return True, ""
+
+
 def prepare_bin_file(file_path: str, default_base: int = 0x08000000) -> Tuple[Optional[str], int]:
     """Подготавливает временный .bin для утилит, которым нужен бинарный файл."""
     path = Path(file_path)

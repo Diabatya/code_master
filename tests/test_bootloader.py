@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from core.bootloader import ACK, Bootloader
+from core.firmware_utils import validate_application_vector
 from core.stm32_info import (
     APPLICATION_BASE_ADDR,
     BOOTLOADER_BASE_ADDR,
@@ -19,6 +20,19 @@ from core.stm32_info import (
     parse_device_config,
     device_config_crc8,
 )
+
+
+def test_application_vector_preflight_rejects_invalid_images() -> None:
+    valid = bytearray(8)
+    valid[0:4] = (0x20001000).to_bytes(4, "little")
+    valid[4:8] = (APPLICATION_BASE_ADDR | 1).to_bytes(4, "little")
+    assert validate_application_vector(bytes(valid), APPLICATION_BASE_ADDR)[0]
+
+    invalid = bytearray(valid)
+    invalid[4:8] = (0x0803D000).to_bytes(4, "little")
+    ok, reason = validate_application_vector(bytes(invalid), APPLICATION_BASE_ADDR)
+    assert not ok
+    assert "Reset vector" in reason
 
 
 def test_device_config_page_uses_firmware_layout_and_preserves_fields() -> None:
