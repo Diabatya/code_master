@@ -636,6 +636,7 @@ class Translator:
                 "Firmware поддерживает один канал CAN для ответа; выберите CAN1 или CAN2": "Firmware supports one CAN channel per response; select CAN1 or CAN2",
                 "Конфигурация Flash повреждена: неверный magic или CRC8": "Flash configuration is corrupt: invalid magic or CRC8",
                 "Страница конфигурации не инициализирована или создана старой версией firmware. Сначала запишите конфигурацию заново.": "The configuration page is uninitialized or was created by an older firmware version. Write the configuration again first.",
+                "Найдена старая конфигурация: {0} / {1}. Запишите её заново для миграции.": "Legacy configuration found: {0} / {1}. Write it again to migrate it.",
                 "Модель чипа": "Chip model",
                 "Например: STM32F103RC": "For example: STM32F103RC",
                 "Не найдено ни одно поддерживаемое устройство": "No supported device found",

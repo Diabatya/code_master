@@ -20,6 +20,7 @@ APPLICATION_BASE_ADDR = 0x08008000
 # физической Flash: страницы 124-127 зарезервированы под триггеры.
 APP_METADATA_PAGE_ADDR = 0x0803D000
 APP_METADATA_PAGE_SIZE = 2048
+LEGACY_CONFIG_PAGE_ADDR = 0x0803F800
 APP_METADATA_MAGIC = 0x41505031
 APP_METADATA_VERSION = 1
 DEVICE_CONFIG_PAGE_ADDR = 0x0803D800
@@ -99,6 +100,22 @@ def parse_device_config(page: bytes) -> Optional[Tuple[str, str, int, int]]:
     vid = int.from_bytes(page[25:27], "little")
     pid = int.from_bytes(page[27:29], "little")
     return name, serial, vid, pid
+
+
+def parse_legacy_device_config(page: bytes) -> Optional[Tuple[str, str]]:
+    """Разбирает старый GUI-формат name@8..17/serial@18..27."""
+    if len(page) < 28:
+        return None
+    raw_name = page[8:18].rstrip(b"\\xFF\\x00 ")
+    raw_serial = page[18:28].rstrip(b"\\xFF\\x00 ")
+    if not raw_name and not raw_serial:
+        return None
+    if any(byte < 0x20 or byte > 0x7E for byte in raw_name + raw_serial):
+        return None
+    return (
+        raw_name.decode("ascii", errors="ignore"),
+        raw_serial.decode("ascii", errors="ignore"),
+    )
 
 
 def merge_device_config_page(incoming_page: bytes, existing_page: bytes) -> bytes:

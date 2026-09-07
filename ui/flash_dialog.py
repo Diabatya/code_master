@@ -65,11 +65,13 @@ from core.stm32_info import (
     DEVICE_CONFIG_PAGE_ADDR,
     DEVICE_CONFIG_PAGE_SIZE,
     DEVICE_CONFIG_NAME_MAX,
+    LEGACY_CONFIG_PAGE_ADDR,
     STM32_FLASH_SIZES,
     STM32_PAGE_SIZES,
     build_device_config_page,
     merge_device_config_page,
     parse_device_config,
+    parse_legacy_device_config,
 )
 from models.config import Config
 from ui.com_settings_dialog import ComSettingsDialog
@@ -1046,6 +1048,15 @@ class ReadWorker(QThread):
     def run(self) -> None:
         try:
             data, base = self._read_one()
+            if self._start == DEVICE_CONFIG_PAGE_ADDR and parse_device_config(data) is None:
+                previous_start = self._start
+                self._start = LEGACY_CONFIG_PAGE_ADDR
+                try:
+                    legacy_data, legacy_base = self._read_one()
+                    if parse_legacy_device_config(legacy_data) is not None:
+                        data, base = legacy_data, legacy_base
+                finally:
+                    self._start = previous_start
             self.finished.emit(True, tr("Чтение завершено: {0} байт").format(len(data)), data, base)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Ошибка чтения прошивки")
@@ -2089,14 +2100,21 @@ class FlashDialog(QDialog):
         try:
             parsed = parse_device_config(data)
             if parsed is None:
-                message = tr(
-                    "Страница конфигурации не инициализирована или создана старой версией firmware. "
-                    "Сначала запишите конфигурацию заново."
-                )
+                legacy = parse_legacy_device_config(data)
+                if legacy is None:
+                    message = tr(
+                        "Страница конфигурации не инициализирована или создана старой версией firmware. "
+                        "Сначала запишите конфигурацию заново."
+                    )
+                    self._log(message)
+                    QMessageBox.warning(self, tr("Внимание"), message)
+                    return
+                name, serial = legacy
+                message = tr("Найдена старая конфигурация: {0} / {1}. Запишите её заново для миграции.").format(name, serial)
                 self._log(message)
                 QMessageBox.warning(self, tr("Внимание"), message)
-                return
-            name, serial, _vid, _pid = parsed
+            else:
+                name, serial, _vid, _pid = parsed
             self._device_name_edit.setText(name)
             self._serial_edit.setText(serial)
             self._config.set_bulk({
