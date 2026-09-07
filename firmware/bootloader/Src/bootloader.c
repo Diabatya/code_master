@@ -384,40 +384,76 @@ static void bl_cmd_go(void)
   Bootloader_JumpToApplication(address);
 }
 
+static bool bl_flash_erase_pages(const uint16_t *pages, uint16_t count)
+{
+  FLASH_EraseInitTypeDef erase = {0};
+  uint32_t error = 0U;
+  erase.TypeErase = FLASH_TYPEERASE_PAGES;
+  erase.NbPages = 1U;
+
+  HAL_FLASH_Unlock();
+  for (uint16_t i = 0U; i < count; i++) {
+    if (pages[i] < APP_PAGES_START || pages[i] >= (APP_PAGES_START + APP_PAGES_TOTAL)) {
+      HAL_FLASH_Lock();
+      return false;
+    }
+    erase.PageAddress = FLASH_START + ((uint32_t)pages[i] * 2048U);
+    if (HAL_FLASHEx_Erase(&erase, &error) != HAL_OK) {
+      HAL_FLASH_Lock();
+      return false;
+    }
+  }
+  HAL_FLASH_Lock();
+  return true;
+}
+
 static void bl_cmd_erase(bool extended)
 {
-  uint8_t buf[3];
+  uint8_t header[2];
 
   if (extended) {
-    if (!bl_read_bytes(buf, 2, 200)) { bl_send_nack(); return; }
-    if (CDC_GetRxAvailable() > 0) {
-      uint8_t next = CDC_ReadRxByte();
-      uint8_t cs = buf[0] ^ buf[1];
-      if (next != cs) {
-        (void)next;
+    if (!bl_read_bytes(header, 2, 200)) { bl_send_nack(); return; }
+    uint16_t number_minus_one = ((uint16_t)header[0] << 8) | header[1];
+    if (number_minus_one == 0xFFFFU) {
+      uint8_t checksum;
+      if (!bl_read_byte(&checksum, 200) || checksum != (uint8_t)(header[0] ^ header[1])) {
+        bl_send_nack();
+        return;
       }
+      if (bl_flash_erase_app()) { bl_send_ack(); } else { bl_send_nack(); }
+      return;
     }
 
-    uint16_t pages = ((uint16_t)buf[0] << 8) | buf[1];
-    if (pages == 0xFFFFU) {
-      if (bl_flash_erase_app()) { bl_send_ack(); } else { bl_send_nack(); }
-    } else {
-      bl_send_nack();
+    uint16_t count = (uint16_t)(number_minus_one + 1U);
+    if (count > APP_PAGES_TOTAL) { bl_send_nack(); return; }
+    uint16_t pages[APP_PAGES_TOTAL];
+    uint8_t checksum = (uint8_t)(header[0] ^ header[1]);
+    for (uint16_t i = 0U; i < count; i++) {
+      uint8_t page_bytes[2];
+      if (!bl_read_bytes(page_bytes, 2, 200)) { bl_send_nack(); return; }
+      checksum ^= page_bytes[0] ^ page_bytes[1];
+      pages[i] = ((uint16_t)page_bytes[0] << 8) | page_bytes[1];
     }
+    uint8_t received_checksum;
+    if (!bl_read_byte(&received_checksum, 200) || received_checksum != checksum) {
+      bl_send_nack();
+      return;
+    }
+    if (bl_flash_erase_pages(pages, count)) { bl_send_ack(); } else { bl_send_nack(); }
+    return;
+  }
+
+  uint8_t page_count;
+  if (!bl_read_byte(&page_count, 200)) { bl_send_nack(); return; }
+  uint8_t checksum;
+  if (!bl_read_byte(&checksum, 200) || checksum != (uint8_t)(page_count ^ 0xFFU)) {
+    bl_send_nack();
+    return;
+  }
+  if (page_count == 0xFFU) {
+    if (bl_flash_erase_app()) { bl_send_ack(); } else { bl_send_nack(); }
   } else {
-    if (!bl_read_byte(&buf[0], 200)) { bl_send_nack(); return; }
-    if (CDC_GetRxAvailable() > 0) {
-      uint8_t next = CDC_ReadRxByte();
-      if (next != (buf[0] ^ 0xFFU)) {
-        (void)next;
-      }
-    }
-
-    if (buf[0] == 0xFFU) {
-      if (bl_flash_erase_app()) { bl_send_ack(); } else { bl_send_nack(); }
-    } else {
-      bl_send_nack();
-    }
+    bl_send_nack();
   }
 }
 
