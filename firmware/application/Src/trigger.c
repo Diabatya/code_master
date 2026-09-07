@@ -15,6 +15,8 @@ _Static_assert((sizeof(trigger_t) % 2U) == 0U, "trigger_t size must be halfword-
 _Static_assert((TRIGGER_COUNT * sizeof(trigger_t)) <= TRIGGER_PAGE_SIZE, "triggers must fit in the trigger Flash page");
 
 static trigger_t s_triggers[TRIGGER_COUNT];
+static trigger_t s_staged[TRIGGER_COUNT];
+static uint16_t s_stage_mask;
 
 /* Pending deferred responses (delay_ms > 0). A small fixed-size list is
  * enough since there are at most TRIGGER_COUNT=10 triggers and each can
@@ -57,6 +59,8 @@ static void load_default(trigger_t *t)
 void Trigger_Init(void)
 {
   memset(s_pending, 0, sizeof(s_pending));
+  memset(s_staged, 0, sizeof(s_staged));
+  s_stage_mask = 0U;
   s_fired_count = 0U;
   s_max_lateness_ms = 0U;
 
@@ -131,30 +135,47 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
           && trig->tx_id <= tx_max) ? 1U : 0U;
 }
 
-uint8_t Trigger_Set(uint8_t index, const trigger_t *trig)
+uint8_t Trigger_Stage(uint8_t index, const trigger_t *trig)
 {
   if (index >= TRIGGER_COUNT || !trigger_fields_valid(trig)) {
     return 0U;
   }
+  trigger_t staged = *trig;
+  staged.magic = TRIGGER_MAGIC;
+  staged.reserved[0] = TRIGGER_FORMAT_VERSION;
+  staged.reserved[1] = TRIGGER_RECORD_SIZE;
+  staged.crc8 = crc8((const uint8_t *)&staged, offsetof(trigger_t, crc8));
+  s_staged[index] = staged;
+  s_stage_mask |= (uint16_t)(1U << index);
+  return 1U;
+}
 
-  trigger_t new_t = *trig;
-  new_t.magic = TRIGGER_MAGIC;
-  new_t.reserved[0] = TRIGGER_FORMAT_VERSION;
-  new_t.reserved[1] = TRIGGER_RECORD_SIZE;
-  new_t.crc8 = crc8((const uint8_t *)&new_t, offsetof(trigger_t, crc8));
-
-  if (memcmp(&new_t, &s_triggers[index], sizeof(new_t)) == 0) {
+uint8_t Trigger_Commit(void)
+{
+  if (s_stage_mask == 0U) {
     return 1U;
   }
-
-  trigger_t backup = s_triggers[index];
-  s_triggers[index] = new_t;
-
+  trigger_t backup[TRIGGER_COUNT];
+  memcpy(backup, s_triggers, sizeof(backup));
+  for (uint8_t i = 0U; i < TRIGGER_COUNT; i++) {
+    if ((s_stage_mask & (uint16_t)(1U << i)) != 0U) {
+      s_triggers[i] = s_staged[i];
+    }
+  }
   if (!flash_write_all_triggers()) {
-    s_triggers[index] = backup; /* roll back RAM mirror on Flash failure */
+    memcpy(s_triggers, backup, sizeof(s_triggers));
     return 0U;
   }
+  s_stage_mask = 0U;
   return 1U;
+}
+
+uint8_t Trigger_Set(uint8_t index, const trigger_t *trig)
+{
+  if (!Trigger_Stage(index, trig)) {
+    return 0U;
+  }
+  return Trigger_Commit();
 }
 
 uint8_t Trigger_SetEnabled(uint8_t index, uint8_t enabled)

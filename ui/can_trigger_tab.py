@@ -22,7 +22,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.can_protocol import CMD_TRIGGER_READ, CMD_TRIGGER_WRITE, pack_can_frame
+from core.can_protocol import (
+    CMD_TRIGGER_COMMIT,
+    CMD_TRIGGER_READ,
+    CMD_TRIGGER_STAGE,
+    pack_can_frame,
+)
 from core.serial_manager import SerialManager
 from core.trigger_protocol import pack_trigger, unpack_trigger
 from models.config import Config
@@ -724,9 +729,11 @@ class CanTriggerTab(QWidget):
                 if remote_payload == local_payload:
                     continue
                 self._serial_manager.request_control(
-                    CMD_TRIGGER_WRITE, bytes((index,)) + local_payload
+                    CMD_TRIGGER_STAGE, bytes((index,)) + local_payload
                 )
                 changed += 1
+            if changed:
+                self._serial_manager.request_control(CMD_TRIGGER_COMMIT, b"")
             self._save_config()
             QMessageBox.information(
                 self,

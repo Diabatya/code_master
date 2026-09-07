@@ -34,6 +34,8 @@
 #define CMD_CAN_STATS           0xC7U
 #define CMD_TRIGGER_STATS       0xC8U
 #define CMD_SYSTEM_INFO         0xC9U
+#define CMD_TRIGGER_STAGE       0xCAU
+#define CMD_TRIGGER_COMMIT      0xCBU
 #define APP_METADATA_ADDR       0x0803D000U
 #define APP_METADATA_MAGIC      0x41505031U
 #define CMD_RESP_OFFSET        0x10U /* response marker = request | 0x10, see PROTOCOL.md Part 2 */
@@ -269,6 +271,28 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       break;
     }
 
+    case CMD_TRIGGER_STAGE: {
+      if (payload_len < 1U + sizeof(trigger_t) || payload[0] >= TRIGGER_COUNT) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      trigger_t staged;
+      memcpy(&staged, &payload[1], sizeof(staged));
+      uint8_t ok = Trigger_Stage(payload[0], &staged);
+      send_new_cmd_response(cmd, ok ? 0x00U : 0x01U, NULL, 0U);
+      break;
+    }
+
+    case CMD_TRIGGER_COMMIT: {
+      if (payload_len != 0U) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      uint8_t ok = Trigger_Commit();
+      send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
+      break;
+    }
+
     case CMD_SYSTEM_INFO: {
       const device_config_t *cfg = DeviceConfig_Get();
       const uint8_t *metadata = (const uint8_t *)APP_METADATA_ADDR;
@@ -437,7 +461,7 @@ static uint16_t try_parse_one(void)
   }
 
   /* --- New commands (0xC0-0xC5), see PROTOCOL.md Part 2 --- */
-  if (marker >= 0xC0U && marker <= 0xC9U) {
+  if (marker >= 0xC0U && marker <= 0xCBU) {
     if (avail < 2U) {
       return 0U;
     }

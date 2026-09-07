@@ -85,6 +85,10 @@ uint8_t Trigger_Get(uint8_t index, trigger_t *out);
  * where possible to minimize erase/reprogram cycles. */
 uint8_t Trigger_Set(uint8_t index, const trigger_t *trig);
 
+/* Stages one trigger in RAM and commits all staged records in one Flash erase. */
+uint8_t Trigger_Stage(uint8_t index, const trigger_t *trig);
+uint8_t Trigger_Commit(void);
+
 /* Enables/disables a trigger without touching its other fields (still
  * requires a full page rewrite per the note above). */
 uint8_t Trigger_SetEnabled(uint8_t index, uint8_t enabled);
