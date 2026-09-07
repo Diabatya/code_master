@@ -69,6 +69,8 @@ extern "C" {
  * via GPIO here for the standalone-mode decision in the main loop. */
 #define VBUS_SENSE_PORT GPIOA
 #define VBUS_SENSE_PIN  GPIO_PIN_9
+/* Set to 1 only when the real board connects PA9 to USB VBUS. */
+#define APPLICATION_USE_VBUS_SENSE 0U
 
 /* Status LED, reused from the bootloader project. */
 #define LED_PORT GPIOC

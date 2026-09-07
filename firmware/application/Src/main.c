@@ -74,7 +74,7 @@ int main(void)
   Protocol_Init(APP_DEVICE_TYPE, APP_DEVICE_VERSION);
 
   uint8_t usb_active = 0U;
-  if (VBUS_Present()) {
+  if (!APPLICATION_USE_VBUS_SENSE || VBUS_Present()) {
     USBD_Init(&hUsbDeviceFS, &FS_Desc, 0);
     USBD_RegisterClass(&hUsbDeviceFS, USBD_CDC_CLASS);
     USBD_CDC_RegisterInterface(&hUsbDeviceFS, &USBD_CDC_fops);
@@ -86,7 +86,7 @@ int main(void)
     HAL_IWDG_Refresh(&hiwdg);
 
     uint8_t vbus_now = VBUS_Present();
-    if (vbus_now && !usb_active) {
+    if (APPLICATION_USE_VBUS_SENSE && vbus_now && !usb_active) {
       /* USB plugged in while running standalone: start the stack now
        * rather than requiring a reboot. */
       USBD_Init(&hUsbDeviceFS, &FS_Desc, 0);
@@ -94,7 +94,7 @@ int main(void)
       USBD_CDC_RegisterInterface(&hUsbDeviceFS, &USBD_CDC_fops);
       USBD_Start(&hUsbDeviceFS);
       usb_active = 1U;
-    } else if (!vbus_now && usb_active) {
+    } else if (APPLICATION_USE_VBUS_SENSE && !vbus_now && usb_active) {
       /* USB removed: deactivate the stack, keep CAN+triggers running
        * (ТЗ 12.4 — "device must continue CAN+triggers standalone with USB
        * deactivated"). */
