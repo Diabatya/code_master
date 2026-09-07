@@ -484,7 +484,7 @@
 - [x] Собрать macOS artifact.
 - [x] Собрать Linux artifact.
 - [x] Проверить `pip-audit`.
-- [ ] Проверить Git diff.
+- [x] Проверить Git diff.
 - [ ] Проверить Git status.
 - [x] Создать release commit.
 - [x] Запушить `main`.
