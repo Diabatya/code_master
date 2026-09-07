@@ -424,7 +424,7 @@
 - [x] Проверить адрес config page.
 - [x] Проверить адрес trigger page.
 - [ ] Проверить предупреждения компилятора.
-- [ ] Проверить trigger round-trip:
+- [x] Проверить trigger round-trip:
   ```bash
   cd firmware/application/tests
   cc -I stubs -I ../Inc test_trigger_flash.c -o /tmp/test_trigger_flash
@@ -472,24 +472,24 @@
 
 - [ ] Обновить версию application.
 - [ ] Обновить версию bootloader при необходимости.
-- [ ] Обновить версию протокола при изменении новых команд.
-- [ ] Обновить `README.md`.
-- [ ] Обновить `USER_GUIDE.md`.
-- [ ] Обновить `firmware/PROTOCOL.md`.
-- [ ] Обновить `firmware/application/README.md`.
-- [ ] Собрать `.hex` и `.bin`.
-- [ ] Проверить SHA256 firmware-файлов.
-- [ ] Добавить firmware artifacts в release.
-- [ ] Собрать Windows artifact.
-- [ ] Собрать macOS artifact.
-- [ ] Собрать Linux artifact.
-- [ ] Проверить `pip-audit`.
+- [x] Обновить версию протокола при изменении новых команд.
+- [x] Обновить `README.md`.
+- [x] Обновить `USER_GUIDE.md`.
+- [x] Обновить `firmware/PROTOCOL.md`.
+- [x] Обновить `firmware/application/README.md`.
+- [x] Собрать `.hex` и `.bin`.
+- [x] Проверить SHA256 firmware-файлов.
+- [x] Добавить firmware artifacts в release.
+- [x] Собрать Windows artifact.
+- [x] Собрать macOS artifact.
+- [x] Собрать Linux artifact.
+- [x] Проверить `pip-audit`.
 - [ ] Проверить Git diff.
 - [ ] Проверить Git status.
-- [ ] Создать release commit.
-- [ ] Запушить `main`.
-- [ ] Дождаться успешного GitHub Actions.
-- [ ] Проверить опубликованный release.
+- [x] Создать release commit.
+- [x] Запушить `main`.
+- [x] Дождаться успешного GitHub Actions.
+- [x] Проверить опубликованный release.
 - [ ] Сохранить резервную копию предыдущего release.
 
 ---
