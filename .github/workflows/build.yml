@@ -87,8 +87,48 @@ jobs:
           name: CodeMaster-linux
           path: dist/CodeMaster
 
+  build-firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi
+      - name: Build firmware
+        run: |
+          make -C firmware/application
+          make -C firmware/bootloader
+          cc -I firmware/application/tests/stubs -I firmware/application/Inc \
+            firmware/application/tests/test_trigger_flash.c \
+            -o /tmp/test_trigger_flash
+          /tmp/test_trigger_flash
+          cc -I firmware/application/tests/stubs -I firmware/application/Inc \
+            firmware/application/tests/test_device_config.c \
+            -o /tmp/test_device_config
+          /tmp/test_device_config
+      - name: Verify application metadata
+        run: |
+          python3 -m pip install intelhex
+          python3 firmware/tools/add_app_metadata.py \
+            firmware/application/build/codemaster_app.raw.hex \
+            /tmp/codemaster_app_checked.hex
+      - name: Collect firmware artifacts
+        run: |
+          mkdir firmware-artifacts
+          cp firmware/application/build/codemaster_app.hex firmware-artifacts/
+          cp firmware/application/build/codemaster_app.bin firmware-artifacts/
+          cp firmware/bootloader/build/codemaster_bootloader.hex firmware-artifacts/
+          cp firmware/bootloader/build/codemaster_bootloader.bin firmware-artifacts/
+          (cd firmware-artifacts && sha256sum * > SHA256SUMS.txt)
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: CodeMaster-firmware
+          path: firmware-artifacts
+
   release:
-    needs: [build-windows, build-macos, build-linux]
+    needs: [build-windows, build-macos, build-linux, build-firmware]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -118,6 +158,7 @@ jobs:
           mv artifacts/CodeMaster-windows/CodeMaster.exe dist/CodeMaster.exe
           mv artifacts/CodeMaster-macos/CodeMaster.dmg dist/CodeMaster.dmg
           mv artifacts/CodeMaster-linux/CodeMaster dist/CodeMaster
+          cp artifacts/CodeMaster-firmware/* dist/
           chmod +x dist/CodeMaster
       - name: Create/Update latest release
         if: steps.release_info.outputs.is_tag == 'false'
@@ -133,6 +174,11 @@ jobs:
             dist/CodeMaster.exe
             dist/CodeMaster.dmg
             dist/CodeMaster
+            dist/codemaster_app.hex
+            dist/codemaster_app.bin
+            dist/codemaster_bootloader.hex
+            dist/codemaster_bootloader.bin
+            dist/SHA256SUMS.txt
       - name: Create versioned release
         if: steps.release_info.outputs.is_tag == 'true'
         uses: softprops/action-gh-release@v2
@@ -144,6 +190,11 @@ jobs:
             dist/CodeMaster.exe
             dist/CodeMaster.dmg
             dist/CodeMaster
+            dist/codemaster_app.hex
+            dist/codemaster_app.bin
+            dist/codemaster_bootloader.hex
+            dist/codemaster_bootloader.bin
+            dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
           generate_release_notes: true
         env:
