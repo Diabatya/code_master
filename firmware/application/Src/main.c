@@ -68,7 +68,8 @@ int main(void)
    * 12.4), so bring the CAN bridge up unconditionally, before deciding
    * whether to start USB at all. */
   if (!CanBridge_Init(g_can_baud_kbps)) {
-    Error_Handler();
+    /* Keep USB/application diagnostics available even when the board's CAN
+     * transceiver, pinout or termination prevents CAN initialization. */
   }
 
   Protocol_Init(APP_DEVICE_TYPE, APP_DEVICE_VERSION);

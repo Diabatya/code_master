@@ -31,6 +31,7 @@ static volatile uint32_t s_error_count[2];
 static volatile uint32_t s_busoff_count[2];
 static volatile uint32_t s_recovery_count[2];
 static volatile uint8_t s_busoff_active[2];
+static uint8_t s_can_ready;
 
 static void ring_push(uint8_t channel, const can_frame_t *frame)
 {
@@ -83,6 +84,9 @@ void CanBridge_GetStats(uint8_t channel, can_stats_t *out)
 
 void CanBridge_PollHealth(void)
 {
+  if (!s_can_ready) {
+    return;
+  }
   CAN_HandleTypeDef *handles[2] = { &hcan1, &hcan2 };
   for (uint8_t channel = 0U; channel < 2U; channel++) {
     if (s_busoff_active[channel]
@@ -271,6 +275,11 @@ uint8_t CanBridge_Init(uint32_t baud_kbps)
   memset((void *)s_error_pending, 0, sizeof(s_error_pending));
   memset((void *)s_busoff_pending, 0, sizeof(s_busoff_pending));
   memset((void *)s_last_error_code, 0, sizeof(s_last_error_code));
+  memset((void *)s_error_count, 0, sizeof(s_error_count));
+  memset((void *)s_busoff_count, 0, sizeof(s_busoff_count));
+  memset((void *)s_recovery_count, 0, sizeof(s_recovery_count));
+  memset((void *)s_busoff_active, 0, sizeof(s_busoff_active));
+  s_can_ready = 0U;
 
   gpio_init_can_pins();
 
@@ -347,12 +356,15 @@ uint8_t CanBridge_Init(uint32_t baud_kbps)
    * schematic is available (see README.md "Placeholder pinout"). */
   CanBridge_SetTransceiverMode(0, 0, 0);
   CanBridge_SetTransceiverMode(1, 0, 0);
-
+  s_can_ready = 1U;
   return 1U;
 }
 
 uint8_t CanBridge_Transmit(const can_frame_t *frame)
 {
+  if (!s_can_ready || frame == NULL || frame->channel > 1U) {
+    return 0U;
+  }
   CAN_HandleTypeDef *hcan = (frame->channel == 0U) ? &hcan1 : &hcan2;
 
   CAN_TxHeaderTypeDef header;
