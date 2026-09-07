@@ -20,6 +20,7 @@ static uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 static uint8_t rx_fifo[RX_FIFO_SIZE];
 static volatile uint16_t rx_head = 0;
 static volatile uint16_t rx_tail = 0;
+static volatile uint32_t tx_dropped = 0U;
 
 static USBD_CDC_LineCodingTypeDef LineCoding = {
   115200,
@@ -85,6 +86,7 @@ uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
       uint32_t wait_start = HAL_GetTick();
       while (hcdc->TxState == 1U) {
         if ((HAL_GetTick() - wait_start) >= 100U) {
+          tx_dropped++;
           return 1U;
         }
       }
@@ -92,11 +94,17 @@ uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
     memcpy(UserTxBufferFS, Buf + sent, chunk);
     USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, chunk);
     if (USBD_CDC_TransmitPacket(&hUsbDeviceFS) != USBD_OK) {
+      tx_dropped++;
       return 1U;
     }
     sent += chunk;
   }
   return 0U;
+}
+
+uint32_t CDC_GetTxDropped(void)
+{
+  return tx_dropped;
 }
 
 static int8_t CDC_Init_FS(void)

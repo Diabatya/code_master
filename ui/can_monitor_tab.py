@@ -526,6 +526,8 @@ class CanChannelMonitor(QWidget):
                     device["error_count"],
                     device["busoff_count"],
                 )
+                usb = self._serial_manager.read_usb_stats()
+                text += tr(" USB dropped: {0}").format(usb["tx_dropped"])
         except Exception:  # noqa: BLE001
             pass
         self._stats_label.setText(text)

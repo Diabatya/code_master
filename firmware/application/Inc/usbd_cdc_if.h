@@ -19,6 +19,7 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
 uint16_t CDC_GetRxAvailable(void);
 uint8_t CDC_ReadRxByte(void);
 uint8_t CDC_PeekRxByte(uint16_t offset, uint8_t *out);
+uint32_t CDC_GetTxDropped(void);
 
 #ifdef __cplusplus
 }

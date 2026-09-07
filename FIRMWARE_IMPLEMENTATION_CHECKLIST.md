@@ -218,7 +218,7 @@
 - [x] CAN error count.
 - [x] Bus-off count.
 - [ ] Auto-recovery count.
-- [ ] USB dropped packets.
+- [x] USB dropped packets.
 
 ## 4.2. Протокол диагностики
 

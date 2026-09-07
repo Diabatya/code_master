@@ -36,6 +36,7 @@
 #define CMD_SYSTEM_INFO         0xC9U
 #define CMD_TRIGGER_STAGE       0xCAU
 #define CMD_TRIGGER_COMMIT      0xCBU
+#define CMD_USB_STATS            0xCCU
 #define APP_METADATA_ADDR       0x0803D000U
 #define APP_METADATA_MAGIC      0x41505031U
 #define CMD_RESP_OFFSET        0x10U /* response marker = request | 0x10, see PROTOCOL.md Part 2 */
@@ -295,6 +296,14 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       break;
     }
 
+    case CMD_USB_STATS: {
+      uint32_t dropped = CDC_GetTxDropped();
+      uint8_t out[4];
+      memcpy(out, &dropped, sizeof(out));
+      send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
+      break;
+    }
+
     case CMD_SYSTEM_INFO: {
       const device_config_t *cfg = DeviceConfig_Get();
       const uint8_t *metadata = (const uint8_t *)APP_METADATA_ADDR;
@@ -463,7 +472,7 @@ static uint16_t try_parse_one(void)
   }
 
   /* --- New commands (0xC0-0xC5), see PROTOCOL.md Part 2 --- */
-  if (marker >= 0xC0U && marker <= 0xCBU) {
+  if (marker >= 0xC0U && marker <= 0xCCU) {
     if (avail < 2U) {
       return 0U;
     }

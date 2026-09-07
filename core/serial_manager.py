@@ -17,6 +17,7 @@ from core.can_protocol import (
     CMD_TRIGGER_ENABLE,
     CMD_TRIGGER_STATS,
     CMD_SYSTEM_INFO,
+    CMD_USB_STATS,
     CMD_DEVICE_ID,
     CMD_DEVICE_ID_RESP,
     CMD_DEVICE_INFO,
@@ -383,6 +384,13 @@ class SerialManager(QObject):
             "fired_count": int.from_bytes(payload[0:4], "little"),
             "max_lateness_ms": int.from_bytes(payload[4:8], "little"),
         }
+
+    def read_usb_stats(self) -> dict[str, int]:
+        """Возвращает количество потерянных USB CDC TX-передач."""
+        payload = self.request_control(CMD_USB_STATS, b"")
+        if len(payload) != 4:
+            raise RuntimeError("Некорректный ответ CMD_USB_STATS")
+        return {"tx_dropped": int.from_bytes(payload, "little")}
 
     def read_system_info(self) -> dict[str, int]:
         """Возвращает версию application, протокола и config-формата."""
