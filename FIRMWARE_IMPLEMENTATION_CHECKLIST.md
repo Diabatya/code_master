@@ -217,7 +217,7 @@
 - [x] Overflow ring buffer.
 - [x] CAN error count.
 - [x] Bus-off count.
-- [ ] Auto-recovery count.
+- [x] Auto-recovery count.
 - [x] USB dropped packets.
 
 ## 4.2. Протокол диагностики

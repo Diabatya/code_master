@@ -29,6 +29,8 @@ static volatile uint8_t  s_busoff_pending[2];
 static volatile uint32_t s_last_error_code[2];
 static volatile uint32_t s_error_count[2];
 static volatile uint32_t s_busoff_count[2];
+static volatile uint32_t s_recovery_count[2];
+static volatile uint8_t s_busoff_active[2];
 
 static void ring_push(uint8_t channel, const can_frame_t *frame)
 {
@@ -76,6 +78,19 @@ void CanBridge_GetStats(uint8_t channel, can_stats_t *out)
   out->lost_count = s_ring[channel].lost_count;
   out->error_count = s_error_count[channel];
   out->busoff_count = s_busoff_count[channel];
+  out->recovery_count = s_recovery_count[channel];
+}
+
+void CanBridge_PollHealth(void)
+{
+  CAN_HandleTypeDef *handles[2] = { &hcan1, &hcan2 };
+  for (uint8_t channel = 0U; channel < 2U; channel++) {
+    if (s_busoff_active[channel]
+        && ((handles[channel]->Instance->ESR & CAN_ESR_BOFF) == 0U)) {
+      s_busoff_active[channel] = 0U;
+      s_recovery_count[channel]++;
+    }
+  }
 }
 
 uint8_t CanBridge_TookOverflow(uint8_t channel)
@@ -128,6 +143,7 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
   if ((code & HAL_CAN_ERROR_BOF) != 0U) {
     s_busoff_pending[channel] = 1U;
     s_busoff_count[channel]++;
+    s_busoff_active[channel] = 1U;
   }
 
   /* HAL_CAN_IRQHandler() ORs newly detected error bits into hcan->ErrorCode

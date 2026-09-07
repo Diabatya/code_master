@@ -701,7 +701,7 @@ class Translator:
                 "Кликните по строке": "Click a row",
                 "Принято: 0 | Скорость: 0 пак/с": "Received: 0 | Rate: 0 frames/s",
                 "Принято: {0} | Скорость: {1} пак/с": "Received: {0} | Rate: {1} frames/s",
-                " | Устройство RX: {0} TX: {1} Потеряно: {2} Errors: {3} Bus-off: {4}": " | Device RX: {0} TX: {1} Lost: {2} Errors: {3} Bus-off: {4}",
+                " | Устройство RX: {0} TX: {1} Потеряно: {2} Errors: {3} Bus-off: {4} Recovery: {5}": " | Device RX: {0} TX: {1} Lost: {2} Errors: {3} Bus-off: {4} Recovery: {5}",
                 " USB dropped: {0}": " USB dropped: {0}",
                 "Скорость CAN1": "CAN1 bitrate",
                 "Скорость CAN2": "CAN2 bitrate",

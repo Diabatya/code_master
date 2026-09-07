@@ -367,6 +367,7 @@ class SerialManager(QObject):
             "lost_count": int.from_bytes(payload[8:12], "little"),
             "error_count": int.from_bytes(payload[12:16], "little") if len(payload) >= 16 else 0,
             "busoff_count": int.from_bytes(payload[16:20], "little") if len(payload) >= 20 else 0,
+            "recovery_count": int.from_bytes(payload[20:24], "little") if len(payload) >= 24 else 0,
         }
 
     def set_trigger_enabled(self, index: int, enabled: bool) -> None:

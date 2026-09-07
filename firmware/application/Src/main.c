@@ -108,6 +108,7 @@ int main(void)
      * non-blocking with respect to CAN reception, which happens in the
      * CAN1/CAN2 RX IRQ handlers regardless of what the main loop is doing
      * (ТЗ 12.3). */
+    CanBridge_PollHealth();
     Trigger_Poll();
     if (usb_active) {
       Protocol_Poll();

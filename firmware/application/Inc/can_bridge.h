@@ -36,6 +36,7 @@ typedef struct {
   uint32_t lost_count;
   uint32_t error_count;
   uint32_t busoff_count;
+  uint32_t recovery_count;
 } can_stats_t;
 
 /* Initializes CAN1 (master) + CAN2 (slave) peripherals, GPIO, filters
@@ -62,6 +63,7 @@ uint8_t CanBridge_Transmit(const can_frame_t *frame);
 
 /* Reads cumulative RX/TX/lost counters for one channel. */
 void CanBridge_GetStats(uint8_t channel, can_stats_t *out);
+void CanBridge_PollHealth(void);
 
 /* Returns 1 if channel's RX ring has overflowed at least once since the
  * last call (clears the flag on read) — surfaced to protocol.c so it can
