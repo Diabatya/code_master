@@ -91,6 +91,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: recursive
       - name: Install ARM toolchain
         run: |
           sudo apt-get update
