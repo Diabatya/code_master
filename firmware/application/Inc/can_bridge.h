@@ -34,6 +34,8 @@ typedef struct {
   uint32_t rx_count;
   uint32_t tx_count;
   uint32_t lost_count;
+  uint32_t error_count;
+  uint32_t busoff_count;
 } can_stats_t;
 
 /* Initializes CAN1 (master) + CAN2 (slave) peripherals, GPIO, filters

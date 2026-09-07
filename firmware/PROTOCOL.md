@@ -241,13 +241,17 @@ firmware, ни ПК никогда не узнавали, что шина воо
 
 Запрос: `[0xC7][0x01][channel:1]` (`channel`: 0 = CAN1, 1 = CAN2).
 
-Ответ payload длиной 12 байт:
+Ответ payload длиной 20 байт:
 
 ```text
-rx_count:   uint32 LE — принятые CAN-кадры
-tx_count:   uint32 LE — успешно переданные CAN-кадры
-lost_count: uint32 LE — кадры, отброшенные из-за переполнения RX ring
+rx_count:     uint32 LE — принятые CAN-кадры
+tx_count:     uint32 LE — успешно переданные CAN-кадры
+lost_count:   uint32 LE — кадры, отброшенные из-за переполнения RX ring
+error_count:  uint32 LE — CAN error interrupts
+busoff_count: uint32 LE — переходы в bus-off
 ```
+
+Host должен принимать и старый 12-байтный ответ для совместимости.
 
 Счётчики монотонные до перезапуска устройства. Команда их не очищает.
 

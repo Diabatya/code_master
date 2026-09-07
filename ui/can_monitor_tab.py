@@ -519,8 +519,12 @@ class CanChannelMonitor(QWidget):
         try:
             if self._serial_manager.is_open() and not self._config.get("emulation", False):
                 device = self._serial_manager.read_can_stats(self._channel - 1)
-                text += tr(" | Устройство RX: {0} TX: {1} Потеряно: {2}").format(
-                    device["rx_count"], device["tx_count"], device["lost_count"]
+                text += tr(" | Устройство RX: {0} TX: {1} Потеряно: {2} Errors: {3} Bus-off: {4}").format(
+                    device["rx_count"],
+                    device["tx_count"],
+                    device["lost_count"],
+                    device["error_count"],
+                    device["busoff_count"],
                 )
         except Exception:  # noqa: BLE001
             pass

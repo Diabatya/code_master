@@ -358,12 +358,14 @@ class SerialManager(QObject):
     def read_can_stats(self, channel: int) -> dict[str, int]:
         """Возвращает накопительные RX/TX/lost-счётчики CAN-канала."""
         payload = self.request_control(CMD_CAN_STATS, bytes((channel & 0xFF,)))
-        if len(payload) != 12:
+        if len(payload) < 12:
             raise RuntimeError("Некорректный ответ CMD_CAN_STATS")
         return {
             "rx_count": int.from_bytes(payload[0:4], "little"),
             "tx_count": int.from_bytes(payload[4:8], "little"),
             "lost_count": int.from_bytes(payload[8:12], "little"),
+            "error_count": int.from_bytes(payload[12:16], "little") if len(payload) >= 16 else 0,
+            "busoff_count": int.from_bytes(payload[16:20], "little") if len(payload) >= 20 else 0,
         }
 
     def set_trigger_enabled(self, index: int, enabled: bool) -> None:

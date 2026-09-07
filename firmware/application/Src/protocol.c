@@ -252,10 +252,12 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       }
       can_stats_t stats;
       CanBridge_GetStats(payload[0], &stats);
-      uint8_t out[12];
+      uint8_t out[20];
       memcpy(&out[0], &stats.rx_count, 4U);
       memcpy(&out[4], &stats.tx_count, 4U);
       memcpy(&out[8], &stats.lost_count, 4U);
+      memcpy(&out[12], &stats.error_count, 4U);
+      memcpy(&out[16], &stats.busoff_count, 4U);
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
     }

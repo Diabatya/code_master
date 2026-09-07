@@ -215,8 +215,8 @@
 - [x] TX CAN2.
 - [x] Потерянные кадры.
 - [x] Overflow ring buffer.
-- [ ] CAN error count.
-- [ ] Bus-off count.
+- [x] CAN error count.
+- [x] Bus-off count.
 - [ ] Auto-recovery count.
 - [ ] USB dropped packets.
 
