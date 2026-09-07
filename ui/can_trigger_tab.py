@@ -589,12 +589,15 @@ class CanTriggerTab(QWidget):
         self._read_device_button = QPushButton(tr("Прочитать триггеры из устройства"))
         self._write_device_button = QPushButton(tr("Записать триггеры в устройство"))
         self._trigger_stats_button = QPushButton(tr("Диагностика триггеров"))
+        self._compare_device_button = QPushButton(tr("Сравнить с устройством"))
         self._read_device_button.clicked.connect(self._read_triggers_from_device)
         self._write_device_button.clicked.connect(self._write_triggers_to_device)
         self._trigger_stats_button.clicked.connect(self._read_trigger_stats)
+        self._compare_device_button.clicked.connect(self._compare_with_device)
         sync_layout.addWidget(self._read_device_button)
         sync_layout.addWidget(self._write_device_button)
         sync_layout.addWidget(self._trigger_stats_button)
+        sync_layout.addWidget(self._compare_device_button)
         layout.addLayout(sync_layout)
 
     def _device_trigger_values(self, index: int) -> Dict[str, Any]:
@@ -679,6 +682,24 @@ class CanTriggerTab(QWidget):
             logger.exception("Ошибка чтения триггеров из устройства")
             QMessageBox.critical(self, tr("Ошибка"), str(exc))
 
+    def _compare_with_device(self) -> None:
+        try:
+            different = []
+            for index in range(TRIGGER_COUNT):
+                local_payload = pack_trigger(self._device_trigger_values(index))
+                remote_payload = self._serial_manager.request_control(
+                    CMD_TRIGGER_READ, bytes((index,))
+                )
+                if local_payload != remote_payload:
+                    different.append(str(index + 1))
+            if different:
+                message = tr("Отличаются триггеры: {0}").format(", ".join(different))
+            else:
+                message = tr("Триггеры совпадают с устройством")
+            QMessageBox.information(self, tr("Сравнение триггеров"), message)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, tr("Ошибка"), str(exc))
+
     def _read_trigger_stats(self) -> None:
         try:
             stats = self._serial_manager.read_trigger_stats()
@@ -761,6 +782,7 @@ class CanTriggerTab(QWidget):
         self._read_device_button.setText(tr("Прочитать триггеры из устройства"))
         self._write_device_button.setText(tr("Записать триггеры в устройство"))
         self._trigger_stats_button.setText(tr("Диагностика триггеров"))
+        self._compare_device_button.setText(tr("Сравнить с устройством"))
         for i, block in enumerate(self._blocks):
             block["group"].setTitle(tr("Триггер {0}").format(i + 1))
             block["cache"]["cache_check"].setText(tr("Автоматическая запись DATA в Кэш"))
