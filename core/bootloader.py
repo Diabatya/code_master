@@ -61,6 +61,9 @@ class Bootloader:
         self._progress_callback = progress_callback
         self._stop_requested = False
 
+    OPEN_RETRIES = 15
+    OPEN_RETRY_DELAY = 0.2
+
     @classmethod
     def open(
         cls,
@@ -78,18 +81,36 @@ class Bootloader:
         одинаковыми параметрами не дублировался в нескольких местах и чтобы
         таймауты/обработка ошибок открытия порта не расходились между путями.
 
+        На Windows порт USB CDC может числиться в ``comports()``, но ещё
+        недолго быть неготовым сразу после reset/пере-энумерации устройства —
+        ``SetCommState`` в этом окне падает с ERROR_GEN_FAILURE (31,
+        «устройство не работает») или ERROR_ACCESS_DENIED. Поэтому открытие
+        повторяется с короткой паузой.
+
         Raises:
             serial.SerialException: если порт не удалось открыть.
         """
-        port = serial.Serial(
-            port_name,
-            baudrate,
-            bytesize=serial.EIGHTBITS,
-            parity=serial.PARITY_EVEN,
-            stopbits=serial.STOPBITS_ONE,
-            timeout=timeout,
-        )
-        return cls(port, progress_callback=progress_callback)
+        last_exc: Optional[Exception] = None
+        for attempt in range(cls.OPEN_RETRIES):
+            try:
+                port = serial.Serial(
+                    port_name,
+                    baudrate,
+                    bytesize=serial.EIGHTBITS,
+                    parity=serial.PARITY_EVEN,
+                    stopbits=serial.STOPBITS_ONE,
+                    timeout=timeout,
+                )
+                return cls(port, progress_callback=progress_callback)
+            except (serial.SerialException, OSError) as exc:
+                last_exc = exc
+                logger.debug(
+                    "Открытие порта %s: попытка %d/%d неудачна: %s",
+                    port_name, attempt + 1, cls.OPEN_RETRIES, exc,
+                )
+                time.sleep(cls.OPEN_RETRY_DELAY)
+        assert last_exc is not None
+        raise last_exc
 
     def request_stop(self) -> None:
         """Запрашивает остановку текущей операции прошивки."""
@@ -107,7 +128,7 @@ class Bootloader:
             self.port.stopbits = serial.STOPBITS_ONE
             self.port.bytesize = serial.EIGHTBITS
             self.port.baudrate = 115200
-            self.port.open()
+            self._open_port_with_retry()
             logger.info("Порт перенастроен для bootloader: Even, 1 стоп-бит")
         except Exception as exc:  # noqa: BLE001
             # Раньше здесь был только warning: порт оставался закрытым, и
@@ -116,6 +137,29 @@ class Bootloader:
             raise BootloaderError(
                 f"Не удалось открыть порт {getattr(self.port, 'port', '?')} для бутлоадера: {exc}"
             ) from exc
+
+    def _open_port_with_retry(self) -> None:
+        """Открывает уже настроенный ``self.port`` с повторами.
+
+        Та же причина, что и в ``open()``: на Windows после пере-энумерации
+        USB CDC устройства CreateFile/SetCommState временно возвращает
+        ERROR_GEN_FAILURE (31)/ERROR_ACCESS_DENIED, хотя порт уже виден в
+        ``comports()``.
+        """
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.OPEN_RETRIES):
+            try:
+                self.port.open()
+                return
+            except (serial.SerialException, OSError) as exc:
+                last_exc = exc
+                logger.debug(
+                    "Открытие порта %s: попытка %d/%d неудачна: %s",
+                    getattr(self.port, "port", "?"), attempt + 1, self.OPEN_RETRIES, exc,
+                )
+                time.sleep(self.OPEN_RETRY_DELAY)
+        assert last_exc is not None
+        raise last_exc
 
     def _read_byte(self, timeout: float = 1.0) -> int:
         """Считывает один байт из порта с таймаутом.
@@ -221,8 +265,14 @@ class Bootloader:
                     except Exception:  # noqa: S110
                         pass
                     self.port.port = p.device
-                    self.port.open()
-                    return
+                    try:
+                        self._open_port_with_retry()
+                    except (serial.SerialException, OSError) as exc:
+                        # Порт появился в списке, но устройство ещё
+                        # конфигурируется — продолжаем ждать.
+                        logger.debug("Порт %s пока не открывается: %s", p.device, exc)
+                    else:
+                        return
             time.sleep(0.05)
         raise BootloaderError("Bootloader-порт не появился после перезагрузки")
 
