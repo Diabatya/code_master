@@ -172,8 +172,16 @@ void Bootloader_JumpToApplication(uint32_t address)
 
   uint32_t sp = *(__IO uint32_t *)address;
   uint32_t rv = *(__IO uint32_t *)(address + 4U);
+  void (*app_reset)(void) = (void (*)(void))rv;
 
   __disable_irq();
+  SysTick->CTRL = 0U;
+  SysTick->LOAD = 0U;
+  SysTick->VAL = 0U;
+  for (uint32_t i = 0U; i < 8U; i++) {
+    NVIC->ICER[i] = 0xFFFFFFFFU;
+    NVIC->ICPR[i] = 0xFFFFFFFFU;
+  }
 
   /* Reset peripheral clocks used by bootloader */
   __HAL_RCC_USB_OTG_FS_CLK_DISABLE();
@@ -182,9 +190,11 @@ void Bootloader_JumpToApplication(uint32_t address)
   __HAL_RCC_AFIO_CLK_DISABLE();
 
   SCB->VTOR = address;
+  __set_CONTROL(0U);
   __set_MSP(sp);
-
-  void (*app_reset)(void) = (void (*)(void))rv;
+  __DSB();
+  __ISB();
+  __enable_irq();
   app_reset();
 
   while (1) { }
