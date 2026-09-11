@@ -519,7 +519,9 @@ class CanChannelMonitor(QWidget):
         try:
             if self._serial_manager.is_open() and not self._config.get("emulation", False):
                 device = self._serial_manager.read_can_stats(self._channel)
-                text += tr(" | Устройство RX: {0} TX: {1} Потеряно: {2} Errors: {3} Bus-off: {4} Recovery: {5}").format(
+                ready = tr("OK") if device.get("ready") else tr("INIT FAIL")
+                text += tr(" | Ready: {0} | RX: {1} TX: {2} Потеряно: {3} Errors: {4} Bus-off: {5} Recovery: {6}").format(
+                    ready,
                     device["rx_count"],
                     device["tx_count"],
                     device["lost_count"],

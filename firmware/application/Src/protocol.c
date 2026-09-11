@@ -229,13 +229,14 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * should poll it periodically to not miss transient faults. See
        * CanBridge_TookError()/CanBridge_TookBusOff() in can_bridge.c and
        * firmware/PROTOCOL.md. */
-      if (payload_len < 1U || payload[0] > 1U) {
+      if (payload_len < 1U || payload[0] < 1U || payload[0] > 2U) {
         send_new_cmd_response(cmd, 0x01U, NULL, 0U);
         break;
       }
+      uint8_t err_channel = (uint8_t)(payload[0] - 1U);
       uint32_t last_error_code = 0U;
-      uint8_t had_error = CanBridge_TookError(payload[0], &last_error_code);
-      uint8_t had_busoff = CanBridge_TookBusOff(payload[0]);
+      uint8_t had_error = CanBridge_TookError(err_channel, &last_error_code);
+      uint8_t had_busoff = CanBridge_TookBusOff(err_channel);
       uint8_t out[6];
       out[0] = had_error;
       out[1] = had_busoff;
@@ -254,13 +255,14 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       }
       can_stats_t stats;
       CanBridge_GetStats((uint8_t)(payload[0] - 1U), &stats);
-      uint8_t out[24];
+      uint8_t out[25];
       memcpy(&out[0], &stats.rx_count, 4U);
       memcpy(&out[4], &stats.tx_count, 4U);
       memcpy(&out[8], &stats.lost_count, 4U);
       memcpy(&out[12], &stats.error_count, 4U);
       memcpy(&out[16], &stats.busoff_count, 4U);
       memcpy(&out[20], &stats.recovery_count, 4U);
+      out[24] = CanBridge_IsReady();
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
     }

@@ -292,9 +292,9 @@ uint8_t CanBridge_Init(uint32_t baud_kbps)
   gpio_init_can_pins();
 
   __HAL_RCC_CAN1_CLK_ENABLE();
-  /* CAN2 clock is gated by the CAN1 clock enable on connectivity-line
-   * parts (shared filter banks/master-slave relationship), but HAL still
-   * expects CAN2's own instance to be usable once CAN1's clock is on. */
+  __HAL_RCC_CAN2_CLK_ENABLE();
+  /* On STM32F105/F107 the CAN2 clock has its own APB1 enable bit, even
+   * though the filter banks are shared with CAN1. Both must be on. */
 
   hcan1.Instance = CAN1;
   hcan2.Instance = CAN2;
@@ -366,6 +366,11 @@ uint8_t CanBridge_Init(uint32_t baud_kbps)
   CanBridge_SetTransceiverMode(1, 0, 0);
   s_can_ready = 1U;
   return 1U;
+}
+
+uint8_t CanBridge_IsReady(void)
+{
+  return s_can_ready;
 }
 
 uint8_t CanBridge_Transmit(const can_frame_t *frame)

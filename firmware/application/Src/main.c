@@ -25,7 +25,7 @@
 #include "protocol.h"
 
 #define APP_DEVICE_TYPE     0x00U /* DEVICE_TYPE_BASIC, see PROTOCOL.md 1.2 */
-#define APP_DEVICE_VERSION  0x01U /* v0.1 — bump manually on release */
+#define APP_DEVICE_VERSION  0x02U /* v0.2 — bump manually on release */
 
 /* Default/fallback CAN bit rate used until a real auto-baud sweep or a
  * config command sets otherwise (see protocol.c's CMD_AUTO_SPEED note and

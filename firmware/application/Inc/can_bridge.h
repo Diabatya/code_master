@@ -61,6 +61,9 @@ uint8_t CanBridge_PopRx(uint8_t channel, can_frame_t *out);
  * and for PC->device forwarded frames). Returns 1 on success. */
 uint8_t CanBridge_Transmit(const can_frame_t *frame);
 
+/* Returns 1 if CAN1/CAN2 have been successfully initialized and are ready. */
+uint8_t CanBridge_IsReady(void);
+
 /* Reads cumulative RX/TX/lost counters for one channel. */
 void CanBridge_GetStats(uint8_t channel, can_stats_t *out);
 void CanBridge_PollHealth(void);
