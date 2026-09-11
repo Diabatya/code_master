@@ -126,7 +126,8 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
 {
   if (trig == NULL || trig->rx_channel > 1U || trig->tx_channel > 1U
       || trig->rx_extended > 1U || trig->tx_extended > 1U
-      || trig->rx_dlc > 8U || trig->tx_dlc > 8U) {
+      || trig->rx_dlc > 8U || trig->tx_dlc > 8U
+      || trig->tx_rtr > 1U) {
     return 0U;
   }
   uint32_t rx_max = trig->rx_extended ? 0x1FFFFFFFU : 0x7FFU;
@@ -233,6 +234,7 @@ void Trigger_OnFrame(const can_frame_t *frame)
         can_frame_t resp = {
           .channel = s_triggers[i].tx_channel,
           .extended = s_triggers[i].tx_extended,
+          .rtr = s_triggers[i].tx_rtr,
           .id = s_triggers[i].tx_id,
           .dlc = s_triggers[i].tx_dlc,
         };
@@ -261,6 +263,7 @@ void Trigger_Poll(void)
       can_frame_t resp = {
         .channel = t->tx_channel,
         .extended = t->tx_extended,
+        .rtr = t->tx_rtr,
         .id = t->tx_id,
         .dlc = t->tx_dlc,
       };

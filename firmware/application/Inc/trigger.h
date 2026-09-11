@@ -50,10 +50,9 @@ typedef struct __attribute__((packed)) {
   uint8_t  tx_dlc;
   uint8_t  tx_data[8];
   uint16_t delay_ms;        /* response delay, 0..~65s */
-  uint8_t  reserved[4];     /* pads sizeof(trigger_t) to an even (half-word)
-                              * size, required for HAL_FLASH_Program(...,
-                              * FLASH_TYPEPROGRAM_HALFWORD, ...) writes to
-                              * not lose/misalign bytes; see trigger.c. */
+  uint8_t  reserved[2];     /* [0]=FORMAT_VERSION, [1]=RECORD_SIZE */
+  uint8_t  tx_rtr;          /* 0=data response, 1=Remote Transmission Request */
+  uint8_t  reserved_pad;    /* keeps sizeof(trigger_t) even */
   uint8_t  crc8;
 } trigger_t; /* 54 bytes, fits 10x in the 2KB page with room to spare */
 

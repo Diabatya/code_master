@@ -249,6 +249,11 @@ class CanTriggerTab(QWidget):
         dlc = self._make_dlc_spin(font)
         data, data_widget = self._make_data_edits(font)
 
+        rtr = QCheckBox(tr("RTR"))
+        rtr.setFont(font)
+        rtr.setToolTip(tr("Remote Transmission Request"))
+        rtr.toggled.connect(lambda checked: self._set_data_enabled(data, 0 if checked else dlc.value()))
+
         delay_before_send = self._make_delay_spin(font)
         delay_before_send.setFixedWidth(80)
         delay_between = self._make_delay_spin(font)
@@ -288,9 +293,12 @@ class CanTriggerTab(QWidget):
         row_layout.addWidget(delay_between)
         row_layout.addWidget(QLabel(tr("Кол-во")))
         row_layout.addWidget(count)
+        row_layout.addWidget(rtr)
         row_layout.addWidget(remove_button)
 
-        dlc.valueChanged.connect(lambda value: self._set_data_enabled(data, value))
+        dlc.valueChanged.connect(
+            lambda value: self._set_data_enabled(data, 0 if rtr.isChecked() else value)
+        )
         self._set_data_enabled(data, dlc.value())
 
         next_delay = self._make_delay_spin(font)
@@ -312,6 +320,7 @@ class CanTriggerTab(QWidget):
             "delay_before_label": delay_before_label,
             "delay_between_label": delay_between_label,
             "count": count,
+            "rtr": rtr,
             "next_delay": next_delay,
             "pause_widget": pause_widget,
             "remove_button": remove_button,
@@ -622,6 +631,7 @@ class CanTriggerTab(QWidget):
         if response is None:
             tx_id, tx_channel, tx_extended, tx_dlc = 0, 0, 0, 0
             tx_data = b""
+            tx_rtr = 0
             delay_ms = 0
         else:
             if response["channel"].currentIndex() > 1:
@@ -631,6 +641,7 @@ class CanTriggerTab(QWidget):
             tx_extended = response["bit"].currentIndex()
             tx_dlc = response["dlc"].value()
             tx_data = bytes((value or 0) & 0xFF for value in self._parse_data(response["data"]))
+            tx_rtr = int(response["rtr"].isChecked())
             delay_ms = response["delay_before_send"].value()
 
         return {
@@ -647,6 +658,7 @@ class CanTriggerTab(QWidget):
             "tx_id": tx_id,
             "tx_dlc": tx_dlc,
             "tx_data": tx_data,
+            "tx_rtr": tx_rtr,
             "delay_ms": delay_ms,
         }
 
@@ -672,8 +684,9 @@ class CanTriggerTab(QWidget):
             row["dlc"].setValue(min(8, values["tx_dlc"]))
             for edit, value in zip(row["data"], values["tx_data"]):
                 edit.setText(f"{value:02X}")
+            row["rtr"].setChecked(bool(values.get("tx_rtr", 0)))
             row["delay_before_send"].setValue(values["delay_ms"])
-            self._set_data_enabled(row["data"], row["dlc"].value())
+            self._set_data_enabled(row["data"], 0 if row["rtr"].isChecked() else row["dlc"].value())
         self._applying_device_state = False
 
     def _read_triggers_from_device(self) -> None:
@@ -848,6 +861,7 @@ class CanTriggerTab(QWidget):
                 "channel": row["channel"].currentIndex(),
                 "id": can_id,
                 "data": self._parse_data(row["data"]),
+                "rtr": int(row["rtr"].isChecked()),
                 "delay_before_send": row["delay_before_send"].value(),
                 "delay_between": row["delay_between"].value(),
                 "count": row["count"].value(),
@@ -962,7 +976,8 @@ class CanTriggerTab(QWidget):
         bytes_data = parse_data_bytes(str(data.get("data", "")).split())
         for d, edit in enumerate(response["data"]):
             edit.setText(f"{bytes_data[d]:02X}" if d < len(bytes_data) else "")
-        self._set_data_enabled(response["data"], response["dlc"].value())
+        response["rtr"].setChecked(bool(data.get("rtr", 0)))
+        self._set_data_enabled(response["data"], 0 if response["rtr"].isChecked() else response["dlc"].value())
         response["delay_before_send"].setValue(int(data.get("delay_before_send", 0)))
         response["delay_between"].setValue(int(data.get("delay_between", data.get("delay", 0))))
         response["count"].setValue(int(data.get("count", 1)))

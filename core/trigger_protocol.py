@@ -8,7 +8,7 @@ from typing import Dict, Any
 TRIGGER_MAGIC = 0x54524731
 TRIGGER_FORMAT_VERSION = 1
 TRIGGER_SIZE = 54
-_TRIGGER_FORMAT = "<IBBBIIB8s8sBBIB8sH4sB"
+_TRIGGER_FORMAT = "<IBBBIIB8s8sBBIB8sH2sBBB"
 
 
 def crc8(data: bytes) -> int:
@@ -40,7 +40,9 @@ def pack_trigger(values: Dict[str, Any]) -> bytes:
             int(values.get("tx_dlc", 0)) & 0xFF,
             bytes(values.get("tx_data", b""))[:8].ljust(8, b"\x00"),
             int(values.get("delay_ms", 0)) & 0xFFFF,
-            bytes((TRIGGER_FORMAT_VERSION, TRIGGER_SIZE, 0, 0)),
+            bytes((TRIGGER_FORMAT_VERSION, TRIGGER_SIZE)),
+            int(values.get("tx_rtr", 0)) & 0xFF,
+            0,
             0,
         )
     )
@@ -77,4 +79,5 @@ def unpack_trigger(payload: bytes) -> Dict[str, Any]:
         "tx_dlc": values[12],
         "tx_data": values[13],
         "delay_ms": values[14],
+        "tx_rtr": values[16],
     }
