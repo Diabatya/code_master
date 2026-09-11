@@ -224,12 +224,19 @@ class ComLoggerWindow(QDialog):
         self._hex_checkbox.setFont(font)
         self._hex_checkbox.setChecked(True)
 
-        self._autoscroll_checkbox = QCheckBox(tr("Автоскролл"))
-        self._autoscroll_checkbox.setFont(font)
-        self._autoscroll_checkbox.setChecked(False)
-        self._autoscroll_checkbox.setToolTip(
+        self._autoscroll_button = QPushButton(tr("Автоскролл"))
+        self._autoscroll_button.setFont(font)
+        self._autoscroll_button.setCheckable(True)
+        self._autoscroll_button.setChecked(False)
+        self._autoscroll_button.setToolTip(
             tr("Автоматически прокручивать таблицу к последнему сообщению")
         )
+        self._autoscroll_button.setStyleSheet(
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #4A4A6A; }"
+            "QPushButton:checked { background-color: #4CAF50; color: #FFFFFF; }"
+        )
+        self._autoscroll_button.toggled.connect(self._on_autoscroll_toggled)
 
         self._send_input = QLineEdit()
         self._send_input.setFont(QFont("Consolas", 10))
@@ -292,7 +299,7 @@ class ComLoggerWindow(QDialog):
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
         bottom.addWidget(self._hex_checkbox)
-        bottom.addWidget(self._autoscroll_checkbox)
+        bottom.addWidget(self._autoscroll_button)
         bottom.addWidget(self._send_input, 1)
         bottom.addWidget(self._send_button)
         bottom.addWidget(self._clear_button)
@@ -517,6 +524,19 @@ class ComLoggerWindow(QDialog):
         if ok:
             self._add_row(tr("TX"), data, time.time(), self._tx_color())
 
+    def _on_autoscroll_toggled(self, checked: bool) -> None:
+        """Визуально отображает состояние автопрокрутки."""
+        if checked:
+            self._autoscroll_button.setStyleSheet(
+                "QPushButton { background-color: #4CAF50; color: #FFFFFF; border: none; border-radius: 4px; }"
+                "QPushButton:hover { background-color: #45A049; }"
+            )
+        else:
+            self._autoscroll_button.setStyleSheet(
+                "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+                "QPushButton:hover { background-color: #4A4A6A; }"
+            )
+
     @staticmethod
     def _parse_hex_string(text: str) -> bytes:
         text = text.strip()
@@ -569,7 +589,7 @@ class ComLoggerWindow(QDialog):
         self._table.setItem(row, 2, items[2])
         self._table.setItem(row, 3, items[3])
 
-        if self._autoscroll_checkbox.isChecked():
+        if self._autoscroll_button.isChecked():
             self._table.scrollToBottom()
 
     def _tx_color(self) -> QColor:

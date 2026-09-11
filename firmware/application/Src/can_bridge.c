@@ -391,7 +391,7 @@ uint8_t CanBridge_Transmit(const can_frame_t *frame)
   header.StdId = frame->extended ? 0U : (frame->id & 0x7FFU);
   header.ExtId = frame->extended ? (frame->id & 0x1FFFFFFFU) : 0U;
   header.IDE = frame->extended ? CAN_ID_EXT : CAN_ID_STD;
-  header.RTR = CAN_RTR_DATA;
+  header.RTR = frame->rtr ? CAN_RTR_REMOTE : CAN_RTR_DATA;
   header.DLC = frame->dlc;
   header.TransmitGlobalTime = DISABLE;
 
@@ -427,6 +427,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 
   frame.channel = (hcan->Instance == CAN1) ? 0U : 1U;
   frame.extended = (header.IDE == CAN_ID_EXT) ? 1U : 0U;
+  frame.rtr = (header.RTR == CAN_RTR_REMOTE) ? 1U : 0U;
   frame.id = frame.extended ? header.ExtId : header.StdId;
   frame.dlc = (uint8_t)header.DLC;
 

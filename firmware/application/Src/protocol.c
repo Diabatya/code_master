@@ -12,10 +12,14 @@
 #include "trigger.h"
 
 /* Markers, see firmware/PROTOCOL.md 1.1 (must match core/can_protocol.py) */
-#define MARKER_RX_STD   0xAAU /* device -> PC, standard ID */
-#define MARKER_RX_EXT   0xABU /* device -> PC, extended ID */
-#define MARKER_TX_STD   0xBBU /* PC -> device, standard ID */
-#define MARKER_TX_EXT   0xBCU /* PC -> device, extended ID */
+#define MARKER_RX_STD        0xAAU /* device -> PC, standard ID */
+#define MARKER_RX_RTR_STD    0xACU /* device -> PC, standard RTR */
+#define MARKER_RX_EXT        0xABU /* device -> PC, extended ID */
+#define MARKER_RX_RTR_EXT    0xADU /* device -> PC, extended RTR */
+#define MARKER_TX_STD        0xBBU /* PC -> device, standard ID */
+#define MARKER_TX_RTR_STD    0xBDU /* PC -> device, standard RTR */
+#define MARKER_TX_EXT        0xBCU /* PC -> device, extended ID */
+#define MARKER_TX_RTR_EXT    0xBEU /* PC -> device, extended RTR */
 
 #define CMD_DEVICE_ID        0x90U
 #define CMD_DEVICE_ID_RESP   0x91U
@@ -82,7 +86,11 @@ static void send_can_frame(const can_frame_t *frame)
   uint8_t buf[16];
   uint32_t n = 0;
 
-  buf[n++] = frame->extended ? MARKER_RX_EXT : MARKER_RX_STD;
+  if (frame->rtr) {
+    buf[n++] = frame->extended ? MARKER_RX_RTR_EXT : MARKER_RX_RTR_STD;
+  } else {
+    buf[n++] = frame->extended ? MARKER_RX_EXT : MARKER_RX_STD;
+  }
   /* Wire format uses 1-based channel numbers (1=CAN1, 2=CAN2). */
   buf[n++] = (uint8_t)(frame->channel + 1U);
   if (frame->extended) {
@@ -95,8 +103,10 @@ static void send_can_frame(const can_frame_t *frame)
     buf[n++] = (uint8_t)((frame->id >> 8) & 0xFFU);
   }
   buf[n++] = frame->dlc;
-  for (uint8_t i = 0; i < frame->dlc; i++) {
-    buf[n++] = frame->data[i];
+  if (!frame->rtr) {
+    for (uint8_t i = 0; i < frame->dlc; i++) {
+      buf[n++] = frame->data[i];
+    }
   }
   /* checksum covers the WHOLE frame INCLUDING the marker, per
    * core/can_protocol.py::pack_can_frame ("frame += bytes([xor_checksum(frame)])"
@@ -393,9 +403,11 @@ static uint16_t try_parse_one(void)
     }
   }
 
-  /* --- CAN frame from PC (0xBB/0xBC) --- */
-  if (marker == MARKER_TX_STD || marker == MARKER_TX_EXT) {
-    uint8_t extended = (marker == MARKER_TX_EXT) ? 1U : 0U;
+  /* --- CAN frame from PC (0xBB/0xBC/0xBD/0xBE) --- */
+  if (marker == MARKER_TX_STD || marker == MARKER_TX_EXT ||
+      marker == MARKER_TX_RTR_STD || marker == MARKER_TX_RTR_EXT) {
+    uint8_t extended = (marker == MARKER_TX_EXT || marker == MARKER_TX_RTR_EXT) ? 1U : 0U;
+    uint8_t rtr = (marker == MARKER_TX_RTR_STD || marker == MARKER_TX_RTR_EXT) ? 1U : 0U;
     /* Bytes needed to safely read the dlc field: marker+channel+id+dlc,
      * i.e. up to and including the dlc byte itself (offset 6 ext / 4 std,
      * so 7/5 bytes). An earlier version used 8/6 here (one too many),
@@ -421,10 +433,9 @@ static uint16_t try_parse_one(void)
     if (dlc > 8U) {
       return 1U; /* corrupt length: resync by dropping just the marker */
     }
-    /* total_len (including checksum) = header_len + dlc + 1, i.e. 8+dlc
-     * (ext, max 16) / 6+dlc (std, max 14) — matches PROTOCOL.md 1.1 and
-     * core/can_protocol.py's `total_length = 4 + id_length + length`. */
-    uint32_t total_len = header_len + dlc + 1U;
+    /* total_len (including checksum) = header_len + (rtr ? 0 : dlc) + 1.
+     * For RTR the dlc byte is the requested length, but there are no data bytes. */
+    uint32_t total_len = header_len + (rtr ? 0U : (uint32_t)dlc) + 1U;
     if (avail < total_len) {
       return 0U; /* wait for the rest */
     }
@@ -449,9 +460,14 @@ static uint16_t try_parse_one(void)
     can_frame_t frame;
     frame.channel = channel;
     frame.extended = extended;
+    frame.rtr = rtr;
     frame.id = id;
     frame.dlc = dlc;
-    memcpy(frame.data, &frame_bytes[len_off + 1U], dlc);
+    if (rtr) {
+      memset(frame.data, 0, sizeof(frame.data));
+    } else {
+      memcpy(frame.data, &frame_bytes[len_off + 1U], dlc);
+    }
     CanBridge_Transmit(&frame);
     return (uint16_t)total_len;
   }

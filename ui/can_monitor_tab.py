@@ -260,9 +260,9 @@ class CanChannelMonitor(QWidget):
         self._highlight_interval_ms = 500
 
         self._table = QTableWidget()
-        self._table.setColumnCount(7)
+        self._table.setColumnCount(8)
         self._table.setHorizontalHeaderLabels(
-            [tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("Счётчик"), tr("ASCII"), tr("Пояснение")]
+            [tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("Счётчик"), tr("ASCII"), tr("Пояснение"), tr("RTR")]
         )
         self._table.setFont(font)
         self._table.verticalHeader().setVisible(False)
@@ -272,11 +272,12 @@ class CanChannelMonitor(QWidget):
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.setColumnWidth(0, 90)
         self._table.setColumnWidth(1, 50)
-        self._table.setColumnWidth(2, 220)
+        self._table.setColumnWidth(2, 210)
         self._table.setColumnWidth(3, 90)
         self._table.setColumnWidth(4, 80)
         self._table.setColumnWidth(5, 90)
-        self._table.setColumnWidth(6, 180)
+        self._table.setColumnWidth(6, 170)
+        self._table.setColumnWidth(7, 50)
         self._table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
         self._table.setMinimumHeight(200)
         self._table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -330,6 +331,17 @@ class CanChannelMonitor(QWidget):
         setCheckableWithIndicator(self._cyclic_button)
         self._cyclic_button.toggled.connect(self._on_cyclic_toggled)
 
+        self._rtr_button = QPushButton(tr("RTR"))
+        self._rtr_button.setFixedSize(50, 36)
+        self._rtr_button.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        self._rtr_button.setStyleSheet(
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #4A4A6A; }"
+        )
+        self._rtr_button.setToolTip(tr("Remote Transmission Request"))
+        setCheckableWithIndicator(self._rtr_button)
+        self._rtr_button.toggled.connect(self._on_rtr_toggled)
+
         self._cyclic_timer = QTimer(self)
         self._cyclic_timer.timeout.connect(self._send_cyclic_frame)
 
@@ -379,6 +391,7 @@ class CanChannelMonitor(QWidget):
         send_bottom.addWidget(self._send_period_spin)
         send_bottom.addWidget(self._send_button)
         send_bottom.addWidget(self._cyclic_button)
+        send_bottom.addWidget(self._rtr_button)
         send_bottom.addStretch()
 
         self._sent_label = QLabel(tr("Отправлено: 0"))
@@ -397,8 +410,9 @@ class CanChannelMonitor(QWidget):
         self._timer.start(1000)
 
     def _on_send_dlc_changed(self, value: int) -> None:
+        rtr = self._rtr_button.isChecked()
         for i, edit in enumerate(self._send_data_edits):
-            if i >= value:
+            if i >= value or rtr:
                 edit.setText("")
                 edit.setEnabled(False)
             else:
@@ -425,6 +439,20 @@ class CanChannelMonitor(QWidget):
         else:
             self._cyclic_button.setStyleSheet("")
             self._stop_cyclic_timer()
+
+    def _on_rtr_toggled(self, checked: bool) -> None:
+        if checked:
+            self._rtr_button.setStyleSheet(
+                "QPushButton { background-color: #FF9800; color: #FFFFFF; border: none; border-radius: 4px; }"
+                "QPushButton:hover { background-color: #F57C00; }"
+            )
+            self._send_data_widget.setEnabled(False)
+        else:
+            self._rtr_button.setStyleSheet(
+                "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+                "QPushButton:hover { background-color: #4A4A6A; }"
+            )
+            self._send_data_widget.setEnabled(True)
 
     def _start(self) -> None:
         if not self._serial_manager.is_open():
@@ -508,10 +536,9 @@ class CanChannelMonitor(QWidget):
             return
         dlc = self._send_dlc_spin.value()
         data = self._data_from_send_edits(dlc)
-        self._cyclic_frame = pack_can_frame(self._channel_byte, can_id, data)
+        rtr = self._rtr_button.isChecked() if self._rtr_button is not None else False
+        self._cyclic_frame = pack_can_frame(self._channel_byte, can_id, data, rtr=rtr, dlc=dlc)
         if self._send_cyclic_frame():
-            self._sent_count += 1
-            self._update_sent_label()
             if self._cyclic_button.isChecked():
                 self._start_cyclic_timer()
 
@@ -584,17 +611,20 @@ class CanChannelMonitor(QWidget):
         period_ms = int((now - stats["last_time"]) * 1000)
         return f"{period_ms} ms"
 
-    def _build_row_items(self, frame_id: int, data: bytes, timestamp: str, period: str, count: int) -> List[str]:
+    def _build_row_items(
+        self, frame_id: int, dlc: int, data: bytes, rtr: bool, timestamp: str, period: str, count: int
+    ) -> List[str]:
         id_width = 8 if frame_id > 0x7FF else 3
-        signals = self._format_signals(frame_id, data)
+        signals = "" if rtr else self._format_signals(frame_id, data)
         return [
             int_to_hex(frame_id, id_width),
-            str(len(data)),
-            " ".join(format_data_bytes(data)),
+            str(dlc),
+            "-" if rtr else " ".join(format_data_bytes(data)),
             period,
             str(count),
-            _ascii_from_data(data),
+            "" if rtr else _ascii_from_data(data),
             signals,
+            "R" if rtr else "",
         ]
 
     def add_frame(self, frame: Dict[str, object]) -> None:
@@ -602,6 +632,8 @@ class CanChannelMonitor(QWidget):
             return
         frame_id = int(frame["id"])
         data = bytes(frame["data"])
+        rtr = bool(frame.get("rtr", False))
+        dlc = int(frame.get("dlc", len(data)))
         if self._filter_enabled and self._matches_filter(frame_id, data):
             return
 
@@ -617,10 +649,10 @@ class CanChannelMonitor(QWidget):
         stats["last_time"] = now
 
         timestamp = time.strftime("%H:%M:%S") + f".{int((now % 1) * 1000):03d}"
-        items = self._build_row_items(frame_id, data, timestamp, period, stats["count"])
+        items = self._build_row_items(frame_id, dlc, data, rtr, timestamp, period, stats["count"])
 
         tooltip = ""
-        if self._dbc_manager.is_loaded():
+        if not rtr and self._dbc_manager.is_loaded():
             tooltip = self._dbc_manager.describe_frame(frame_id, data)
 
         if frame_id in self._id_to_row:
@@ -827,7 +859,7 @@ class CanChannelMonitor(QWidget):
         self._clear_button.setText(tr("Очистить"))
         self._search_edit.setPlaceholderText(tr("Поиск по ID или данным…"))
         self._table.setHorizontalHeaderLabels(
-            [tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("Счётчик"), tr("ASCII"), tr("Пояснение")]
+            [tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("Счётчик"), tr("ASCII"), tr("Пояснение"), tr("RTR")]
         )
         self._send_button.setText(tr("Отправить"))
         self._cyclic_button.setToolTip(tr("Циклически"))

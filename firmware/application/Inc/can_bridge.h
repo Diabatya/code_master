@@ -25,6 +25,7 @@ extern "C" {
 typedef struct {
   uint8_t  channel;      /* 0 = CAN1, 1 = CAN2 */
   uint8_t  extended;      /* 0 = standard 11-bit ID, 1 = extended 29-bit ID */
+  uint8_t  rtr;           /* 0 = data frame, 1 = Remote Transmission Request */
   uint32_t id;
   uint8_t  dlc;           /* 0..8, CAN 2.0 only (no CAN FD, see PROTOCOL.md) */
   uint8_t  data[8];

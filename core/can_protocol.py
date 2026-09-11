@@ -11,6 +11,10 @@ MARKER_TX = 0xBB  # Маркер исходящего кадра
 MARKER_RX = 0xAA  # Маркер входящего кадра
 MARKER_TX_EXT = 0xBC  # Маркер исходящего кадра с Extended (29-битным) CAN-ID
 MARKER_RX_EXT = 0xAB  # Маркер входящего кадра с Extended (29-битным) CAN-ID
+MARKER_TX_RTR = 0xBD       # Маркер исходящего RTR-кадра (Standard)
+MARKER_RX_RTR = 0xAC       # Маркер входящего RTR-кадра (Standard)
+MARKER_TX_RTR_EXT = 0xBE   # Маркер исходящего RTR-кадра (Extended)
+MARKER_RX_RTR_EXT = 0xAD   # Маркер входящего RTR-кадра (Extended)
 
 # Команды управления и конфигурации USB-моста
 CMD_DEVICE_ID = 0x90        # Запрос типа/версии устройства
@@ -54,28 +58,39 @@ def xor_checksum(data: bytes) -> int:
     return checksum
 
 
-def pack_can_frame(channel: int, can_id: int, data: bytes) -> bytes:
+def pack_can_frame(
+    channel: int, can_id: int, data: bytes, rtr: bool = False, dlc: Optional[int] = None
+) -> bytes:
     """Формирует байтовый кадр для передачи через UART-мост.
 
     Args:
         channel: Номер канала (0x01 для CAN1, 0x02 для CAN2).
         can_id: 11-битный или 29-битный идентификатор CAN.
-        data: Полезные данные, от 0 до 8 байт (CAN 2.0).
+        data: Полезные данные, от 0 до 8 байт (CAN 2.0). Для RTR-кадра
+            игнорируется, используется только `dlc`.
+        rtr: Если True — сформировать Remote Transmission Request.
+        dlc: Значение DLC (0..8). Для RTR задаёт запрашиваемую длину.
 
     Returns:
         Упакованный байтовый кадр с контрольной суммой.
     """
     data = bytes(data)[:8]
-    length = len(data)
+    if rtr and dlc is None:
+        length = 0
+    elif dlc is not None:
+        length = max(0, min(8, dlc))
+    else:
+        length = len(data)
     if can_id > 0x7FF:
-        marker = MARKER_TX_EXT
+        marker = MARKER_TX_RTR_EXT if rtr else MARKER_TX_EXT
         frame = bytes([marker, channel & 0xFF])
         frame += can_id.to_bytes(4, "little")
         frame += bytes([length])
     else:
-        marker = MARKER_TX
+        marker = MARKER_TX_RTR if rtr else MARKER_TX
         frame = bytes([marker, channel & 0xFF, can_id & 0xFF, (can_id >> 8) & 0xFF, length])
-    frame += data
+    if not rtr:
+        frame += data[:length]
     frame += bytes([xor_checksum(frame)])
     return frame
 
@@ -87,42 +102,41 @@ def unpack_can_frame(raw: bytes) -> Optional[Dict[str, object]]:
         raw: Накопленный байтовый буфер, полученный из COM-порта.
 
     Returns:
-        Словарь {'channel': int, 'id': int, 'data': bytes, 'extended': bool} или None,
-        если кадр не найден или контрольная сумма не совпадает.
+        Словарь {'channel': int, 'id': int, 'data': bytes, 'extended': bool,
+        'rtr': bool, 'dlc': int} или None, если кадр не найден или
+        контрольная сумма не совпадает.
     """
-    marker_index = raw.find(bytes([MARKER_RX]))
-    extended_marker_index = raw.find(bytes([MARKER_RX_EXT]))
+    rx_markers = (MARKER_RX, MARKER_RX_EXT, MARKER_RX_RTR, MARKER_RX_RTR_EXT)
+    marker_index = -1
+    marker = 0
+    for m in rx_markers:
+        idx = raw.find(bytes([m]))
+        if idx >= 0 and (marker_index < 0 or idx < marker_index):
+            marker_index = idx
+            marker = m
 
-    if marker_index < 0 and extended_marker_index < 0:
+    if marker_index < 0:
         return None
 
-    if marker_index < 0 or (0 <= extended_marker_index < marker_index):
-        marker_index = extended_marker_index
-        extended = True
-    else:
-        extended = False
+    extended = marker in (MARKER_RX_EXT, MARKER_RX_RTR_EXT)
+    rtr = marker in (MARKER_RX_RTR, MARKER_RX_RTR_EXT)
+    id_length = 4 if extended else 2
+    length_offset = 6 if extended else 4
+    header_length = 4 + id_length  # marker + channel + id + dlc
 
-    if extended:
-        # Минимальная длина: маркер + канал + 4 байта ID + длина + 1 байт контрольной суммы
-        if len(raw) - marker_index < 8:
-            return None
-        length = raw[marker_index + 6]
-        id_length = 4
-    else:
-        # Минимальная длина: маркер + канал + 2 байта ID + длина + 1 байт контрольной суммы
-        if len(raw) - marker_index < 6:
-            return None
-        length = raw[marker_index + 4]
-        id_length = 2
+    if len(raw) - marker_index < header_length:
+        return None
 
+    length = raw[marker_index + length_offset]
     if length > 8:
-        # Некорректная длина данных — возможно, повреждённый кадр
         return None
 
-    # Общая длина: маркер + канал + id + dlc + данные + checksum
-    total_length = 4 + id_length + length
-    if len(raw) - marker_index < total_length:
+    data_length = 0 if rtr else length
+    total_length = header_length + data_length
+    if len(raw) - marker_index < total_length + 1:  # +1 checksum
         return None
+
+    total_length += 1  # include checksum byte
 
     frame = raw[marker_index : marker_index + total_length]
     received_checksum = frame[-1]
@@ -136,8 +150,15 @@ def unpack_can_frame(raw: bytes) -> Optional[Dict[str, object]]:
         can_id = int.from_bytes(frame[2:6], "little")
     else:
         can_id = frame[2] | (frame[3] << 8)
-    data = frame[3 + id_length : -1]
-    return {"channel": channel, "id": can_id, "data": data, "extended": extended}
+    data = frame[header_length:-1] if not rtr else b""
+    return {
+        "channel": channel,
+        "id": can_id,
+        "data": data,
+        "dlc": length,
+        "extended": extended,
+        "rtr": rtr,
+    }
 
 
 def parse_all_frames(raw: bytes) -> tuple[List[Dict[str, object]], bytes]:
@@ -179,24 +200,29 @@ def parse_all_frames(raw: bytes) -> tuple[List[Dict[str, object]], bytes]:
 
 def _find_marker(raw: bytes) -> int:
     """Возвращает индекс ближайшего RX-маркера или -1, если маркеров нет."""
-    std = raw.find(bytes([MARKER_RX]))
-    ext = raw.find(bytes([MARKER_RX_EXT]))
-    if std < 0:
-        return ext
-    if ext < 0:
-        return std
-    return min(std, ext)
+    rx_markers = (MARKER_RX, MARKER_RX_EXT, MARKER_RX_RTR, MARKER_RX_RTR_EXT)
+    result = -1
+    for m in rx_markers:
+        idx = raw.find(bytes([m]))
+        if idx >= 0 and (result < 0 or idx < result):
+            result = idx
+    return result
 
 
 def _is_incomplete(raw: bytes, marker_index: int) -> bool:
     """True, если от маркера ещё не пришло достаточно байт для полного кадра."""
-    extended = raw[marker_index] == MARKER_RX_EXT
-    header = 8 if extended else 6
+    marker = raw[marker_index]
+    extended = marker in (MARKER_RX_EXT, MARKER_RX_RTR_EXT)
+    rtr = marker in (MARKER_RX_RTR, MARKER_RX_RTR_EXT)
+    id_length = 4 if extended else 2
+    length_offset = 6 if extended else 4
     available = len(raw) - marker_index
+    header = 4 + id_length  # marker + channel + id + dlc
     if available < header:
         return True
-    length = raw[marker_index + (6 if extended else 4)]
+    length = raw[marker_index + length_offset]
     if length > 8:
         # Заведомо битый кадр — ждать бессмысленно
         return False
-    return available < (4 + (4 if extended else 2) + length)
+    data_length = 0 if rtr else length
+    return available < (header + data_length + 1)
