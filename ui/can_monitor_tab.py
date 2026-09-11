@@ -518,7 +518,7 @@ class CanChannelMonitor(QWidget):
         text = tr("Принято: {0} | Скорость: {1} пак/с").format(self._received_count, speed)
         try:
             if self._serial_manager.is_open() and not self._config.get("emulation", False):
-                device = self._serial_manager.read_can_stats(self._channel - 1)
+                device = self._serial_manager.read_can_stats(self._channel)
                 text += tr(" | Устройство RX: {0} TX: {1} Потеряно: {2} Errors: {3} Bus-off: {4} Recovery: {5}").format(
                     device["rx_count"],
                     device["tx_count"],

@@ -357,7 +357,10 @@ class SerialManager(QObject):
                 self._closing = False
 
     def read_can_stats(self, channel: int) -> dict[str, int]:
-        """Возвращает накопительные RX/TX/lost-счётчики CAN-канала."""
+        """Возвращает накопительные RX/TX/lost-счётчики CAN-канала.
+
+        channel задаётся в формате wire-протокола: 1 = CAN1, 2 = CAN2.
+        """
         payload = self.request_control(CMD_CAN_STATS, bytes((channel & 0xFF,)))
         if len(payload) < 12:
             raise RuntimeError("Некорректный ответ CMD_CAN_STATS")

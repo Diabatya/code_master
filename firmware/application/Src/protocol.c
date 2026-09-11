@@ -82,7 +82,8 @@ static void send_can_frame(const can_frame_t *frame)
   uint32_t n = 0;
 
   buf[n++] = frame->extended ? MARKER_RX_EXT : MARKER_RX_STD;
-  buf[n++] = frame->channel;
+  /* Wire format uses 1-based channel numbers (1=CAN1, 2=CAN2). */
+  buf[n++] = (uint8_t)(frame->channel + 1U);
   if (frame->extended) {
     buf[n++] = (uint8_t)(frame->id & 0xFFU);
     buf[n++] = (uint8_t)((frame->id >> 8) & 0xFFU);
@@ -247,12 +248,12 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     }
 
     case CMD_CAN_STATS: {
-      if (payload_len < 1U || payload[0] > 1U) {
+      if (payload_len < 1U || payload[0] < 1U || payload[0] > 2U) {
         send_new_cmd_response(cmd, 0x01U, NULL, 0U);
         break;
       }
       can_stats_t stats;
-      CanBridge_GetStats(payload[0], &stats);
+      CanBridge_GetStats((uint8_t)(payload[0] - 1U), &stats);
       uint8_t out[24];
       memcpy(&out[0], &stats.rx_count, 4U);
       memcpy(&out[4], &stats.tx_count, 4U);

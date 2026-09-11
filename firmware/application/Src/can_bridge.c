@@ -161,6 +161,11 @@ static void gpio_init_can_pins(void)
 {
   GPIO_InitTypeDef gpio = {0};
 
+  __HAL_RCC_AFIO_CLK_ENABLE();
+  /* CAN1 default pins on F105 are PA11/PA12; main.h uses PB8/PB9, so enable
+   * the AFIO remap that routes CAN1 RX/TX to PB8/PB9. */
+  __HAL_AFIO_REMAP_CAN1_2();
+
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /* CAN1 RX (input floating/pull-up per AF input) + TX (AF push-pull) */
@@ -237,10 +242,13 @@ void CanBridge_SetTransceiverMode(uint8_t channel, uint8_t silent, uint8_t term_
 
 static uint8_t configure_bit_timing(CAN_HandleTypeDef *hcan, uint32_t baud_kbps)
 {
-  /* APB1 = 36 MHz (see SystemClock_Config in main.c). Prescaler/BS1/BS2
-   * chosen for a fixed 16 time-quanta bit (BS1=13tq, BS2=2tq, SJW=1tq,
-   * sample point ~87.5%), scaling only the prescaler with baud rate —
-   * standard, well-tested combination for CAN 2.0 at 36 MHz APB clock. */
+  /* APB1 = 36 MHz (see SystemClock_Config in main.c). Use 18 time quanta
+   * per bit (BS1=15tq, BS2=2tq, SJW=1tq, sample point ~88.9%) and scale
+   * only the prescaler. This gives exact standard baud rates at 36 MHz:
+   * 36 MHz / (prescaler * 18) = target baud.
+   *
+   * Previous 16-tq settings produced 562.5 kbit/s for the 500 kbit/s
+   * default instead of the requested rate. */
   uint32_t prescaler;
   switch (baud_kbps) {
     case 1000: prescaler = 2;  break;
@@ -257,7 +265,7 @@ static uint8_t configure_bit_timing(CAN_HandleTypeDef *hcan, uint32_t baud_kbps)
   hcan->Init.Prescaler = prescaler;
   hcan->Init.Mode = CAN_MODE_NORMAL;
   hcan->Init.SyncJumpWidth = CAN_SJW_1TQ;
-  hcan->Init.TimeSeg1 = CAN_BS1_13TQ;
+  hcan->Init.TimeSeg1 = CAN_BS1_15TQ;
   hcan->Init.TimeSeg2 = CAN_BS2_2TQ;
   hcan->Init.TimeTriggeredMode = DISABLE;
   hcan->Init.AutoBusOff = ENABLE;
@@ -362,10 +370,17 @@ uint8_t CanBridge_Init(uint32_t baud_kbps)
 
 uint8_t CanBridge_Transmit(const can_frame_t *frame)
 {
-  if (!s_can_ready || frame == NULL || frame->channel > 1U) {
+  if (!s_can_ready || frame == NULL) {
     return 0U;
   }
-  CAN_HandleTypeDef *hcan = (frame->channel == 0U) ? &hcan1 : &hcan2;
+  /* Wire format uses 1-based channel numbers (1 = CAN1, 2 = CAN2), matching
+   * core/can_protocol.py and the UI; internal arrays and HAL handles stay
+   * 0-based. */
+  if (frame->channel < 1U || frame->channel > 2U) {
+    return 0U;
+  }
+  uint8_t internal_channel = (uint8_t)(frame->channel - 1U);
+  CAN_HandleTypeDef *hcan = (internal_channel == 0U) ? &hcan1 : &hcan2;
 
   CAN_TxHeaderTypeDef header;
   header.StdId = frame->extended ? 0U : (frame->id & 0x7FFU);
@@ -386,7 +401,7 @@ uint8_t CanBridge_Transmit(const can_frame_t *frame)
       if (HAL_CAN_AddTxMessage(hcan, &header, (uint8_t *)frame->data, &mailbox) != HAL_OK) {
         return 0U;
       }
-      s_tx_count[frame->channel]++;
+      s_tx_count[internal_channel]++;
       return 1U;
     }
   }

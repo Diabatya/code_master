@@ -43,7 +43,7 @@ USB CDC на уровне физики, но должен приниматься
 [marker:1][channel:1][id:2 или 4][len:1][data:len][checksum:1]
 ```
 
-- `channel`: `0` = CAN1, `1` = CAN2.
+- `channel`: `1` = CAN1, `2` = CAN2 (wire-формат, совпадает с `core/can_protocol.py` и UI).
 - `id`: 2 байта LE для стандартного маркера (0xBB/0xAA), 4 байта LE для расширенного
   (0xBC/0xAB).
 - `len`: 0–8 (CAN 2.0, **не CAN FD** — FD-поддержка была реализована и полностью
