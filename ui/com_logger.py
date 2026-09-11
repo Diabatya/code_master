@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -243,6 +244,10 @@ class ComLoggerWindow(QDialog):
         self._clear_button = QPushButton(tr("Очистить"))
         self._clear_button.setFont(font)
 
+        self._export_button = QPushButton(tr("Сохранить лог"))
+        self._export_button.setFont(font)
+        self._export_button.setToolTip(tr("Выгрузить COM-лог в текстовый файл"))
+
     @staticmethod
     def _shrinkable(widget: QWidget) -> None:
         """Разрешает виджету сжиматься, чтобы окно можно было сузить."""
@@ -291,6 +296,7 @@ class ComLoggerWindow(QDialog):
         bottom.addWidget(self._send_input, 1)
         bottom.addWidget(self._send_button)
         bottom.addWidget(self._clear_button)
+        bottom.addWidget(self._export_button)
         root.addLayout(bottom)
 
     def _connect_signals(self) -> None:
@@ -298,6 +304,7 @@ class ComLoggerWindow(QDialog):
         self._open_button.clicked.connect(self._on_open_close)
         self._send_button.clicked.connect(self._on_send)
         self._clear_button.clicked.connect(self._clear_table)
+        self._export_button.clicked.connect(self._on_export_log)
         self._port_combo.currentIndexChanged.connect(self._on_port_changed)
         self._virtual_port_combo.currentIndexChanged.connect(self._on_virtual_port_changed)
         self._main_checkbox.stateChanged.connect(self._on_main_toggled)
@@ -584,6 +591,32 @@ class ComLoggerWindow(QDialog):
 
     def _clear_table(self) -> None:
         self._table.setRowCount(0)
+
+    def _on_export_log(self) -> None:
+        """Сохраняет содержимое таблицы COM-логгера в текстовый файл."""
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            tr("Сохранить COM-лог"),
+            "",
+            tr("Текстовые файлы (*.txt);;Все файлы (*.*)"),
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(f"{tr('Время')}\t{tr('Направление')}\t{tr('Данные (HEX)')}\t{tr('ASCII')}\n")
+                f.write("-" * 80 + "\n")
+                for row in range(self._table.rowCount()):
+                    time_text = self._table.item(row, 0).text() if self._table.item(row, 0) else ""
+                    dir_text = self._table.item(row, 1).text() if self._table.item(row, 1) else ""
+                    hex_text = self._table.item(row, 2).text() if self._table.item(row, 2) else ""
+                    ascii_text = self._table.item(row, 3).text() if self._table.item(row, 3) else ""
+                    f.write(f"{time_text}\t{dir_text}\t{hex_text}\t{ascii_text}\n")
+            self._status_label.setText(tr("Лог сохранён: {0}").format(path))
+            logger.info("COM-лог сохранён: %s", path)
+        except OSError as exc:
+            logger.error("Не удалось сохранить COM-лог: %s", exc)
+            QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить лог:\n{0}").format(exc))
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._disconnect()
