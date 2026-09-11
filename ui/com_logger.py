@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.can_protocol import parse_all_frames
 from core.listen_only import CanPacket, ListenOnlyMode
 from core.serial_manager import SerialManager
 from models.config import Config
@@ -238,6 +239,20 @@ class ComLoggerWindow(QDialog):
         )
         self._autoscroll_button.toggled.connect(self._on_autoscroll_toggled)
 
+        self._filter_button = QPushButton(tr("Фильтр"))
+        self._filter_button.setFont(font)
+        self._filter_button.setCheckable(True)
+        self._filter_button.setChecked(False)
+        self._filter_button.setToolTip(
+            tr("Показывать только CAN-кадры, скрыть служебный обмен")
+        )
+        self._filter_button.setStyleSheet(
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #4A4A6A; }"
+            "QPushButton:checked { background-color: #2196F3; color: #FFFFFF; }"
+        )
+        self._filter_button.toggled.connect(self._on_filter_toggled)
+
         self._send_input = QLineEdit()
         self._send_input.setFont(QFont("Consolas", 10))
         self._send_input.setPlaceholderText(tr("Введите HEX: 01 02 03 или текст"))
@@ -300,6 +315,7 @@ class ComLoggerWindow(QDialog):
         bottom.setSpacing(8)
         bottom.addWidget(self._hex_checkbox)
         bottom.addWidget(self._autoscroll_button)
+        bottom.addWidget(self._filter_button)
         bottom.addWidget(self._send_input, 1)
         bottom.addWidget(self._send_button)
         bottom.addWidget(self._clear_button)
@@ -483,6 +499,8 @@ class ComLoggerWindow(QDialog):
             self._status_label.setText(tr("Отключено"))
 
     def _on_data_received(self, data: bytes, timestamp: float) -> None:
+        if self._filter_button.isChecked() and not self._is_can_packet(data):
+            return
         self._add_row(tr("RX"), data, timestamp, self._rx_color())
 
     def _on_packet(self, pkt: CanPacket) -> None:
@@ -491,6 +509,8 @@ class ComLoggerWindow(QDialog):
         self._add_row(direction, pkt.data, time.time(), self._rx_color() if pkt.is_rx else self._tx_color())
 
     def _on_raw_chunk(self, is_rx: bool, data: bytes) -> None:
+        if self._filter_button.isChecked():
+            return
         direction = tr("МК") if is_rx else tr("Конф")
         self._add_row(direction, data, time.time(), self._rx_color() if is_rx else self._tx_color())
 
@@ -536,6 +556,27 @@ class ComLoggerWindow(QDialog):
                 "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
                 "QPushButton:hover { background-color: #4A4A6A; }"
             )
+
+    def _on_filter_toggled(self, checked: bool) -> None:
+        """Визуально отображает состояние фильтра CAN-кадров."""
+        if checked:
+            self._filter_button.setStyleSheet(
+                "QPushButton { background-color: #2196F3; color: #FFFFFF; border: none; border-radius: 4px; }"
+                "QPushButton:hover { background-color: #1976D2; }"
+            )
+        else:
+            self._filter_button.setStyleSheet(
+                "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+                "QPushButton:hover { background-color: #4A4A6A; }"
+            )
+
+    @staticmethod
+    def _is_can_packet(data: bytes) -> bool:
+        """True, если данные являются ровно одним CAN-кадром."""
+        if not data:
+            return False
+        frames, leftover = parse_all_frames(data)
+        return len(frames) >= 1 and not leftover
 
     @staticmethod
     def _parse_hex_string(text: str) -> bytes:

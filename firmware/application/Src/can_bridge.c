@@ -163,10 +163,13 @@ static void gpio_init_can_pins(void)
 
   __HAL_RCC_AFIO_CLK_ENABLE();
   /* CAN1 default pins on F105 are PA11/PA12; main.h uses PB8/PB9, so enable
-   * the AFIO remap that routes CAN1 RX/TX to PB8/PB9. */
+   * the AFIO remap that routes CAN1 RX/TX to PB8/PB9.
+   * CAN2 default pins are PB12/PB13; main.h uses PB5/PB6, enable CAN2 remap. */
   __HAL_AFIO_REMAP_CAN1_2();
+  __HAL_AFIO_REMAP_CAN2_ENABLE();
 
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /* CAN1 RX (input floating/pull-up per AF input) + TX (AF push-pull) */
   gpio.Pin = CAN1_RX_PIN;

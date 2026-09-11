@@ -333,7 +333,7 @@ class CanChannelMonitor(QWidget):
 
         self._rtr_button = QPushButton(tr("RTR"))
         self._rtr_button.setFixedSize(50, 36)
-        self._rtr_button.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        self._rtr_button.setFont(QFont("Arial", 9, QFont.Weight.Bold))
         self._rtr_button.setStyleSheet(
             "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
             "QPushButton:hover { background-color: #4A4A6A; }"
@@ -447,12 +447,16 @@ class CanChannelMonitor(QWidget):
                 "QPushButton:hover { background-color: #F57C00; }"
             )
             self._send_data_widget.setEnabled(False)
+            opacity = QGraphicsOpacityEffect(self._send_data_widget)
+            opacity.setOpacity(0.35)
+            self._send_data_widget.setGraphicsEffect(opacity)
         else:
             self._rtr_button.setStyleSheet(
                 "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
                 "QPushButton:hover { background-color: #4A4A6A; }"
             )
             self._send_data_widget.setEnabled(True)
+            self._send_data_widget.setGraphicsEffect(None)
 
     def _start(self) -> None:
         if not self._serial_manager.is_open():
@@ -911,11 +915,18 @@ class CanMonitorTab(QWidget):
         self._can1_speed_combo = QComboBox()
         self._can1_speed_combo.setFont(compact_font)
         self._can1_speed_combo.setEditable(True)
-        self._can1_speed_combo.setFixedWidth(120)
-        for preset in ["33.3", "125", "250", "500", "1000"]:
+        self._can1_speed_combo.setFixedWidth(100)
+        for preset in ["33.3", "50", "100", "125", "250", "500", "800", "1000"]:
             self._can1_speed_combo.addItem(preset)
+        self._can1_speed_combo.setMaxVisibleItems(12)
         self._can1_speed_combo.lineEdit().setValidator(QDoubleValidator(0.1, 10000.0, 1, self))
         self._can1_speed_combo.lineEdit().setPlaceholderText(tr("кбит/с"))
+
+        self._can1_speed_button = QPushButton("▼")
+        self._can1_speed_button.setFont(compact_font)
+        self._can1_speed_button.setFixedSize(28, 26)
+        self._can1_speed_button.setToolTip(tr("Выбрать из списка"))
+        self._can1_speed_button.clicked.connect(self._can1_speed_combo.showPopup)
 
         self._can1_terminator_check = QCheckBox(tr("120 Ом"))
         self._can1_terminator_check.setToolTip(tr("Включить терминатный резистор 120 Ом"))
@@ -928,11 +939,18 @@ class CanMonitorTab(QWidget):
         self._can2_speed_combo = QComboBox()
         self._can2_speed_combo.setFont(compact_font)
         self._can2_speed_combo.setEditable(True)
-        self._can2_speed_combo.setFixedWidth(120)
-        for preset in ["33.3", "125", "250", "500", "1000"]:
+        self._can2_speed_combo.setFixedWidth(100)
+        for preset in ["33.3", "50", "100", "125", "250", "500", "800", "1000"]:
             self._can2_speed_combo.addItem(preset)
+        self._can2_speed_combo.setMaxVisibleItems(12)
         self._can2_speed_combo.lineEdit().setValidator(QDoubleValidator(0.1, 10000.0, 1, self))
         self._can2_speed_combo.lineEdit().setPlaceholderText(tr("кбит/с"))
+
+        self._can2_speed_button = QPushButton("▼")
+        self._can2_speed_button.setFont(compact_font)
+        self._can2_speed_button.setFixedSize(28, 26)
+        self._can2_speed_button.setToolTip(tr("Выбрать из списка"))
+        self._can2_speed_button.clicked.connect(self._can2_speed_combo.showPopup)
 
         self._can2_terminator_check = QCheckBox(tr("120 Ом"))
         self._can2_terminator_check.setToolTip(tr("Включить терминатный резистор 120 Ом"))
@@ -1016,9 +1034,11 @@ class CanMonitorTab(QWidget):
         buttons_layout.addWidget(self._highlight_interval_spin)
         buttons_layout.addWidget(self._can1_speed_label)
         buttons_layout.addWidget(self._can1_speed_combo)
+        buttons_layout.addWidget(self._can1_speed_button)
         buttons_layout.addWidget(self._can1_terminator_check)
         buttons_layout.addWidget(self._can2_speed_label)
         buttons_layout.addWidget(self._can2_speed_combo)
+        buttons_layout.addWidget(self._can2_speed_button)
         buttons_layout.addWidget(self._can2_terminator_check)
         buttons_layout.addSpacing(16)
         buttons_layout.addWidget(self._sleep_mode_label)

@@ -1823,6 +1823,13 @@ class FlashDialog(QDialog):
             True, если можно продолжать прошивку (риска нет или пользователь
             подтвердил), False — если пользователь отменил операцию.
         """
+        # DFU/ST-Link/J-Link can program any address (bootloader + app in one go),
+        # so no address mismatch warning for those methods. Only warn for the
+        # in-app bootloader protocol (UART/USB CDC) where writing to the
+        # bootloader area would corrupt the running bootloader.
+        if method not in ("uart", "usb_cdc"):
+            return True
+
         risky_files: List[Tuple[str, int]] = []
         for file_path in files:
             try:
@@ -1831,9 +1838,7 @@ class FlashDialog(QDialog):
                 continue
             if not base:
                 continue
-            if method in ("uart", "usb_cdc") and base == BOOTLOADER_BASE_ADDR:
-                risky_files.append((file_path, base))
-            elif method in ("stlink", "jlink", "usb") and base == APPLICATION_BASE_ADDR:
+            if base == BOOTLOADER_BASE_ADDR:
                 risky_files.append((file_path, base))
 
         if not risky_files:

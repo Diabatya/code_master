@@ -22,31 +22,31 @@ extern "C" {
 #define BOOTLOADER_FLAG_ADDRESS 0x20004FF0U
 #define BOOTLOADER_FLAG_VALUE   0xDEADBEEFU
 
-/* ---- Placeholder pinout (PLACEHOLDER — confirm against real schematic) --- */
+/* ---- Board pinout for the custom CAN1/CAN2 TJA1050 board ----------------- */
 
-/* CAN1: default (non-remapped) bxCAN1 pins on the F105 */
+/* CAN1: remapped to PB8/PB9 (see AFIO remap in can_bridge.c) */
 #define CAN1_RX_PORT   GPIOB
 #define CAN1_RX_PIN    GPIO_PIN_8
 #define CAN1_TX_PORT   GPIOB
 #define CAN1_TX_PIN    GPIO_PIN_9
 
-/* CAN2: default (non-remapped) bxCAN2 pins on the F105 */
+/* CAN2: remapped to PB5/PB6 (see AFIO remap in can_bridge.c) */
 #define CAN2_RX_PORT   GPIOB
-#define CAN2_RX_PIN    GPIO_PIN_12
+#define CAN2_RX_PIN    GPIO_PIN_5
 #define CAN2_TX_PORT   GPIOB
-#define CAN2_TX_PIN    GPIO_PIN_13
+#define CAN2_TX_PIN    GPIO_PIN_6
 
-/* TJA1050 Normal(0)/Silent(1) select pin per channel — PLACEHOLDER */
+/* TJA1050 Normal(0)/Silent(1) select pin per channel. 0 = Normal, 1 = Silent */
 #define CAN1_TXRX_S_PORT  GPIOB
-#define CAN1_TXRX_S_PIN   GPIO_PIN_0
+#define CAN1_TXRX_S_PIN   GPIO_PIN_7
 #define CAN2_TXRX_S_PORT  GPIOB
-#define CAN2_TXRX_S_PIN   GPIO_PIN_1
+#define CAN2_TXRX_S_PIN   GPIO_PIN_4
 
-/* 120R bus-termination enable per channel — PLACEHOLDER */
-#define CAN1_TERM_PORT GPIOC
-#define CAN1_TERM_PIN  GPIO_PIN_0
-#define CAN2_TERM_PORT GPIOC
-#define CAN2_TERM_PIN  GPIO_PIN_1
+/* 120R bus-termination enable per channel. 1 = enabled */
+#define CAN1_TERM_PORT GPIOB
+#define CAN1_TERM_PIN  GPIO_PIN_3
+#define CAN2_TERM_PORT GPIOD
+#define CAN2_TERM_PIN  GPIO_PIN_2
 
 /* Silent->Normal switch settle time before first TX (ТЗ note: needs
  * oscilloscope calibration against real TJA1050 + board; a few microseconds
