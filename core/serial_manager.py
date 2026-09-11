@@ -13,6 +13,7 @@ from PySide6.QtCore import QObject, QThread, Signal, QTimer
 from core.can_protocol import (
     CMD_AUTO_SPEED,
     CMD_AUTO_SPEED_RESP,
+    CMD_CAN_MODE,
     CMD_CAN_STATS,
     CMD_TRIGGER_ENABLE,
     CMD_TRIGGER_STATS,
@@ -379,6 +380,13 @@ class SerialManager(QObject):
         if not 0 <= index < 10:
             raise ValueError("Некорректный индекс trigger")
         self.request_control(CMD_TRIGGER_ENABLE, bytes((index, int(enabled))))
+
+    def set_can_mode(self, channel: int, mode: int, terminator: bool) -> None:
+        """Устанавливает режим CAN (Normal=0/Silent=1) и состояние терминатора.
+
+        channel: 1 = CAN1, 2 = CAN2.
+        """
+        self.request_control(CMD_CAN_MODE, bytes((channel & 0xFF, mode & 0xFF, int(terminator))))
 
     def read_trigger_stats(self) -> dict[str, int]:
         """Возвращает счётчик срабатываний и максимальную задержку trigger."""

@@ -200,6 +200,7 @@ class CanChannelMonitor(QWidget):
     """Панель мониторинга одного CAN-канала."""
 
     create_trigger_requested = Signal(dict)
+    monitoring_state_changed = Signal(int, bool)
 
     def __init__(self, channel: int, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -237,8 +238,7 @@ class CanChannelMonitor(QWidget):
         self._start_button.clicked.connect(self._start)
 
         self._stop_button = QPushButton(tr("Остановить"))
-        setup_button(self._stop_button, height=28)
-        self._stop_button.setMinimumWidth(90)
+        self._stop_button.setFixedSize(90, 28)
         self._stop_button.setFont(compact_font)
         self._stop_button.clicked.connect(self._stop)
 
@@ -246,6 +246,8 @@ class CanChannelMonitor(QWidget):
         setup_button(self._clear_button, height=28)
         self._clear_button.setFont(compact_font)
         self._clear_button.clicked.connect(self._clear)
+
+        self._update_monitor_buttons()
 
         self._search_edit = QLineEdit()
         self._search_edit.setFixedWidth(160)
@@ -437,13 +439,38 @@ class CanChannelMonitor(QWidget):
                 QMessageBox.warning(self, tr("Внимание"), tr("Устройство не подключено"))
                 return
         self._running = True
+        self._update_monitor_buttons()
+        self.monitoring_state_changed.emit(self._channel, True)
         logger.info("Мониторинг CAN%d запущен", self._channel)
 
     def _stop(self) -> None:
         self._running = False
         self._cyclic_button.setChecked(False)
         self._stop_cyclic_timer()
+        self._update_monitor_buttons()
+        self.monitoring_state_changed.emit(self._channel, False)
         logger.info("Мониторинг CAN%d остановлен", self._channel)
+
+    def _update_monitor_buttons(self) -> None:
+        """Визуально отображает текущее состояние мониторинга."""
+        if self._running:
+            self._start_button.setText(tr("Запущено"))
+            self._start_button.setEnabled(False)
+            self._start_button.setStyleSheet(
+                "QPushButton { background-color: #4CAF50; color: #FFFFFF; border: none; border-radius: 4px; }"
+            )
+            self._stop_button.setText(tr("Остановить"))
+            self._stop_button.setEnabled(True)
+            self._stop_button.setStyleSheet("")
+        else:
+            self._start_button.setText(tr("Запустить"))
+            self._start_button.setEnabled(True)
+            self._start_button.setStyleSheet("")
+            self._stop_button.setText(tr("Остановлено"))
+            self._stop_button.setEnabled(False)
+            self._stop_button.setStyleSheet(
+                "QPushButton { background-color: #F44336; color: #FFFFFF; border: none; border-radius: 4px; }"
+            )
 
     def _clear(self) -> None:
         self._table.setRowCount(0)
@@ -797,8 +824,6 @@ class CanChannelMonitor(QWidget):
 
     def retranslate_ui(self) -> None:
         """Обновляет статические строки панели мониторинга канала."""
-        self._start_button.setText(tr("Запустить"))
-        self._stop_button.setText(tr("Остановить"))
         self._clear_button.setText(tr("Очистить"))
         self._search_edit.setPlaceholderText(tr("Поиск по ID или данным…"))
         self._table.setHorizontalHeaderLabels(
@@ -808,6 +833,7 @@ class CanChannelMonitor(QWidget):
         self._cyclic_button.setToolTip(tr("Циклически"))
         self._stats_label.setText(tr("Принято: 0 | Скорость: 0 пак/с"))
         self._sent_label.setText(tr("Отправлено: 0"))
+        self._update_monitor_buttons()
 
 
 class CanMonitorTab(QWidget):
@@ -863,7 +889,7 @@ class CanMonitorTab(QWidget):
         self._can1_terminator_check.setToolTip(tr("Включить терминатный резистор 120 Ом"))
         self._can1_terminator_check.setFont(compact_font)
         self._can1_terminator_check.setChecked(self._config.get("can1_terminator", False))
-        self._can1_terminator_check.toggled.connect(lambda checked: self._config.set("can1_terminator", checked))
+        self._can1_terminator_check.toggled.connect(self._on_can1_terminator_toggled)
 
         self._can2_speed_label = QLabel(tr("Скорость CAN2"))
         self._can2_speed_label.setFont(compact_font)
@@ -880,7 +906,7 @@ class CanMonitorTab(QWidget):
         self._can2_terminator_check.setToolTip(tr("Включить терминатный резистор 120 Ом"))
         self._can2_terminator_check.setFont(compact_font)
         self._can2_terminator_check.setChecked(self._config.get("can2_terminator", False))
-        self._can2_terminator_check.toggled.connect(lambda checked: self._config.set("can2_terminator", checked))
+        self._can2_terminator_check.toggled.connect(self._on_can2_terminator_toggled)
 
         self._sleep_mode_label = QLabel(tr("Переход в режим сна"))
         self._sleep_mode_label.setFont(compact_font)
@@ -929,6 +955,8 @@ class CanMonitorTab(QWidget):
         self._monitor2 = CanChannelMonitor(2, self._serial_manager, self)
         self._monitor1.create_trigger_requested.connect(self.create_trigger_requested)
         self._monitor2.create_trigger_requested.connect(self.create_trigger_requested)
+        self._monitor1.monitoring_state_changed.connect(self._on_monitor_state_changed)
+        self._monitor2.monitoring_state_changed.connect(self._on_monitor_state_changed)
         self._splitter.addWidget(self._monitor1)
         self._splitter.addWidget(self._monitor2)
         self._splitter.setSizes([450, 450])
@@ -1020,6 +1048,29 @@ class CanMonitorTab(QWidget):
         except ValueError:
             speed_kbps = 500.0
         self._config.set("can2_speed", max(1000, int(round(speed_kbps * 1000))))
+
+    def _on_can1_terminator_toggled(self, checked: bool) -> None:
+        self._config.set("can1_terminator", checked)
+        self._apply_can_mode(1)
+
+    def _on_can2_terminator_toggled(self, checked: bool) -> None:
+        self._config.set("can2_terminator", checked)
+        self._apply_can_mode(2)
+
+    def _on_monitor_state_changed(self, channel: int, running: bool) -> None:
+        """При запуске мониторинга применяет текущий режим и терминатор."""
+        if running:
+            self._apply_can_mode(channel)
+
+    def _apply_can_mode(self, channel: int) -> None:
+        """Отправляет в МК режим Normal и состояние терминатора для канала."""
+        if not self._serial_manager.is_open():
+            return
+        term = bool(self._config.get(f"can{channel}_terminator", False))
+        try:
+            self._serial_manager.set_can_mode(channel, 0, term)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось установить режим CAN%d: %s", channel, exc)
 
     def _on_sleep_time_changed(self, value: int) -> None:
         self._config.set("sleep_time", value)

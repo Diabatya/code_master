@@ -31,6 +31,7 @@ CMD_SYSTEM_INFO = 0xC9
 CMD_TRIGGER_STAGE = 0xCA
 CMD_TRIGGER_COMMIT = 0xCB
 CMD_USB_STATS = 0xCC
+CMD_CAN_MODE = 0xCD  # Управление режимом CAN (Normal/Silent) и терминатором
 
 # Типы устройств
 DEVICE_TYPE_BASIC = 0x00   # Базовое CAN 2.0

@@ -37,6 +37,7 @@
 #define CMD_TRIGGER_STAGE       0xCAU
 #define CMD_TRIGGER_COMMIT      0xCBU
 #define CMD_USB_STATS            0xCCU
+#define CMD_CAN_MODE             0xCDU /* управление режимом и терминатором CAN */
 #define APP_METADATA_ADDR       0x0803D000U
 #define APP_METADATA_MAGIC      0x41505031U
 #define CMD_RESP_OFFSET        0x10U /* response marker = request | 0x10, see PROTOCOL.md Part 2 */
@@ -305,6 +306,20 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       uint8_t out[4];
       memcpy(out, &dropped, sizeof(out));
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
+      break;
+    }
+
+    case CMD_CAN_MODE: {
+      /* payload: [channel:1][mode:1][term:1]
+       * channel: 1 = CAN1, 2 = CAN2
+       * mode:    0 = Normal (передача разрешена), 1 = Silent (только приём)
+       * term:    0/1 — включить 120 Ом терминатор */
+      if (payload_len < 3U || payload[0] < 1U || payload[0] > 2U) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      CanBridge_SetTransceiverMode((uint8_t)(payload[0] - 1U), payload[1], payload[2]);
+      send_new_cmd_response(cmd, 0x00U, NULL, 0U);
       break;
     }
 
