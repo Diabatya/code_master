@@ -163,6 +163,10 @@ class ComLoggerWindow(QDialog):
         self._listen_mode.packet_ready.connect(self._on_packet)
         self._listen_mode.raw_chunk_ready.connect(self._on_raw_chunk)
         self._listen_mode.is_active_changed.connect(self._set_connected)
+        # Буферы склейки для фильтра CAN: кадр может быть разрезан
+        # между двумя чанками, поэтому хвост храним до следующей порции.
+        self._filter_buf_rx = bytearray()
+        self._filter_buf_tx = bytearray()
 
         self._create_widgets()
         self._build_layout()
@@ -499,7 +503,8 @@ class ComLoggerWindow(QDialog):
             self._status_label.setText(tr("Отключено"))
 
     def _on_data_received(self, data: bytes, timestamp: float) -> None:
-        if self._filter_button.isChecked() and not self._is_can_packet(data):
+        if self._filter_button.isChecked():
+            self._log_filtered_chunk(True, data, timestamp)
             return
         self._add_row(tr("RX"), data, timestamp, self._rx_color())
 
@@ -510,9 +515,28 @@ class ComLoggerWindow(QDialog):
 
     def _on_raw_chunk(self, is_rx: bool, data: bytes) -> None:
         if self._filter_button.isChecked():
+            self._log_filtered_chunk(is_rx, data, time.time())
             return
         direction = tr("МК") if is_rx else tr("Конф")
         self._add_row(direction, data, time.time(), self._rx_color() if is_rx else self._tx_color())
+
+    def _log_filtered_chunk(self, is_rx: bool, data: bytes, timestamp: float) -> None:
+        """Показывает только CAN-кадры из сырого потока (режим «Фильтр»).
+
+        Служебный обмен приложения и МК (опрос статуса, ответы команд)
+        пропускается; полные CAN-кадры вырезаются из потока и показываются
+        отдельными строками — в том числе разрезанные между чанками.
+        """
+        buf = self._filter_buf_rx if is_rx else self._filter_buf_tx
+        buf += data
+        frames, leftover = parse_all_frames(bytes(buf), tx=not is_rx)
+        buf[:] = leftover
+        if len(buf) > 4096:
+            del buf[:-256]
+        color = self._rx_color() if is_rx else self._tx_color()
+        direction = tr("МК") if is_rx else tr("Конф")
+        for frame in frames:
+            self._add_row(direction, frame["raw"], timestamp, color)
 
     def _on_send(self) -> None:
         if self._main_listener:
@@ -569,14 +593,6 @@ class ComLoggerWindow(QDialog):
                 "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
                 "QPushButton:hover { background-color: #4A4A6A; }"
             )
-
-    @staticmethod
-    def _is_can_packet(data: bytes) -> bool:
-        """True, если данные являются ровно одним CAN-кадром."""
-        if not data:
-            return False
-        frames, leftover = parse_all_frames(data)
-        return len(frames) >= 1 and not leftover
 
     @staticmethod
     def _parse_hex_string(text: str) -> bytes:

@@ -249,10 +249,19 @@ class CanTriggerTab(QWidget):
         dlc = self._make_dlc_spin(font)
         data, data_widget = self._make_data_edits(font)
 
-        rtr = QCheckBox(tr("RTR"))
-        rtr.setFont(font)
+        rtr = QPushButton(tr("RTR"))
+        rtr.setFixedSize(44, 26)
+        rtr.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+        rtr.setCheckable(True)
         rtr.setToolTip(tr("Remote Transmission Request"))
-        rtr.toggled.connect(lambda checked: self._set_data_enabled(data, 0 if checked else dlc.value()))
+        rtr.setStyleSheet(
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #4A4A6A; }"
+            "QPushButton:checked { background-color: #FF9800; color: #FFFFFF; }"
+        )
+        rtr.toggled.connect(
+            lambda checked, d=data, w=data_widget, s=dlc: self._on_row_rtr_toggled(checked, d, w, s)
+        )
 
         delay_before_send = self._make_delay_spin(font)
         delay_before_send.setFixedWidth(80)
@@ -502,6 +511,15 @@ class CanTriggerTab(QWidget):
                 edit.setEnabled(False)
             else:
                 edit.setEnabled(True)
+
+    def _on_row_rtr_toggled(
+        self, checked: bool, edits: List[QLineEdit], widget: QWidget, dlc: QSpinBox
+    ) -> None:
+        """RTR в ответе триггера: поле Data блокируется и бледнеет,
+        редактируемыми остаются только ID и DLC."""
+        self._set_data_enabled(edits, 0 if checked else dlc.value())
+        widget.setEnabled(not checked)
+        self._set_widget_opacity(widget, 0.35 if checked else 1.0)
 
     def _fill_row_from_packet(self, row: Dict[str, Any], parsed: Dict[str, Any]) -> None:
         """Заполняет строку (ID, DLC, Data) из распарсенного пакета."""

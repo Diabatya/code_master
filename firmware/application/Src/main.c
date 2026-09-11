@@ -166,7 +166,7 @@ static void MX_GPIO_Init(void)
   gpio.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(VBUS_SENSE_PORT, &gpio);
 
-  /* General-purpose outputs OUT1-3 (PC2-4), default LOW. */
+  /* General-purpose outputs OUT1-3 (PC10/PC11/PC12 per ТЗ 2.4), default LOW. */
   gpio.Mode = GPIO_MODE_OUTPUT_PP;
   gpio.Pull = GPIO_NOPULL;
   gpio.Speed = GPIO_SPEED_FREQ_LOW;

@@ -338,7 +338,7 @@ class CanChannelMonitor(QWidget):
 
         self._rtr_button = QPushButton(tr("RTR"))
         self._rtr_button.setFixedSize(50, 36)
-        self._rtr_button.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+        self._rtr_button.setFont(QFont("Arial", 7, QFont.Weight.Bold))
         self._rtr_button.setStyleSheet(
             "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
             "QPushButton:hover { background-color: #4A4A6A; }"
@@ -957,7 +957,7 @@ class CanMonitorTab(QWidget):
 
         self._can1_speed_button = QPushButton("▼")
         self._can1_speed_button.setFont(compact_font)
-        self._can1_speed_button.setFixedSize(28, 26)
+        self._fit_speed_button(self._can1_speed_button, self._can1_speed_combo)
         self._can1_speed_button.setToolTip(tr("Выбрать из списка"))
         self._can1_speed_button.clicked.connect(self._can1_speed_combo.showPopup)
 
@@ -966,6 +966,7 @@ class CanMonitorTab(QWidget):
         self._can1_terminator_check.setFont(compact_font)
         self._can1_terminator_check.setChecked(self._config.get("can1_terminator", False))
         self._can1_terminator_check.toggled.connect(self._on_can1_terminator_toggled)
+        self._update_terminator_style(self._can1_terminator_check)
 
         self._can2_speed_label = QLabel(tr("Скорость CAN2"))
         self._can2_speed_label.setFont(compact_font)
@@ -981,7 +982,7 @@ class CanMonitorTab(QWidget):
 
         self._can2_speed_button = QPushButton("▼")
         self._can2_speed_button.setFont(compact_font)
-        self._can2_speed_button.setFixedSize(28, 26)
+        self._fit_speed_button(self._can2_speed_button, self._can2_speed_combo)
         self._can2_speed_button.setToolTip(tr("Выбрать из списка"))
         self._can2_speed_button.clicked.connect(self._can2_speed_combo.showPopup)
 
@@ -990,6 +991,7 @@ class CanMonitorTab(QWidget):
         self._can2_terminator_check.setFont(compact_font)
         self._can2_terminator_check.setChecked(self._config.get("can2_terminator", False))
         self._can2_terminator_check.toggled.connect(self._on_can2_terminator_toggled)
+        self._update_terminator_style(self._can2_terminator_check)
 
         self._sleep_mode_label = QLabel(tr("Переход в режим сна"))
         self._sleep_mode_label.setFont(compact_font)
@@ -1134,12 +1136,32 @@ class CanMonitorTab(QWidget):
             speed_kbps = 500.0
         self._config.set("can2_speed", max(1000, int(round(speed_kbps * 1000))))
 
+    @staticmethod
+    def _fit_speed_button(button: QPushButton, combo: QComboBox) -> None:
+        """Кнопка списка скоростей: высота = высоте поля, ширина = высоте (квадрат)."""
+        height = combo.sizeHint().height()
+        if height <= 0:
+            height = 26
+        button.setFixedSize(height, height)
+
+    @staticmethod
+    def _update_terminator_style(check: QCheckBox) -> None:
+        """Цветовая индикация включённого терминатора 120 Ом."""
+        if check.isChecked():
+            check.setStyleSheet(
+                "QCheckBox { background-color: #4CAF50; color: #FFFFFF; padding: 2px 6px; border-radius: 4px; }"
+            )
+        else:
+            check.setStyleSheet("")
+
     def _on_can1_terminator_toggled(self, checked: bool) -> None:
         self._config.set("can1_terminator", checked)
+        self._update_terminator_style(self._can1_terminator_check)
         self._apply_can_mode(1)
 
     def _on_can2_terminator_toggled(self, checked: bool) -> None:
         self._config.set("can2_terminator", checked)
+        self._update_terminator_style(self._can2_terminator_check)
         self._apply_can_mode(2)
 
     def _on_monitor_state_changed(self, channel: int, running: bool) -> None:

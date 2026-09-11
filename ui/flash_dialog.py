@@ -1088,12 +1088,19 @@ class FlashWorker(QThread):
                     dfu.abort()
                 except (usb.core.USBError, OSError) as exc:
                     logger.info("DFU: устройство отключилось при финальном ABORT: %s", exc)
-                try:
-                    dfu.leave()
-                except (usb.core.USBError, OSError) as exc:
-                    # ROM DFU обычно отключает USB сразу после reset; это
-                    # нормальный финал уже успешно проверенной записи.
-                    logger.info("DFU: устройство отключилось при выходе: %s", exc)
+                if self._current_index < self._total - 1:
+                    # Ещё есть файлы: НЕ выходим из DFU — leave() делает
+                    # reset, устройство уходит с 0483:DF11, и следующий файл
+                    # падал бы на DFU_GETSTATUS во время пере-энумерации.
+                    # Финальный leave выполнится после последнего файла.
+                    self.log_line.emit(tr("USB DFU: устройство остаётся в режиме прошивки для следующего файла"))
+                else:
+                    try:
+                        dfu.leave()
+                    except (usb.core.USBError, OSError) as exc:
+                        # ROM DFU обычно отключает USB сразу после reset; это
+                        # нормальный финал уже успешно проверенной записи.
+                        logger.info("DFU: устройство отключилось при выходе: %s", exc)
             self.progress.emit(100)
             return ok, tr("USB DFU: прошивка завершена") if ok else tr("USB DFU: верификация не прошла")
         except usb.core.NoBackendError:

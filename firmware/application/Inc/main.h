@@ -1,10 +1,9 @@
 /* Main header for the STM32F105 CAN-gateway application firmware.
  *
- * Pinout used below is a PLACEHOLDER — no schematic was available when this
- * firmware was written (confirmed with the project owner: "Есть только текст
- * ТЗ, схемы нет"). Every non-obvious pin choice is called out with a comment
- * and is collected again in firmware/application/README.md. Re-check against
- * the real board before flashing hardware.
+ * Pinout below follows the owner-provided ТЗ table (section 2.4):
+ * CAN1 PB8/PB9 + RS PB7 + TERM PB3, CAN2 PB5/PB6 + RS PB4 + TERM PD2,
+ * USB PA9..PA12, OUT1..OUT4 = PC10/PC11/PC12/PA15, LED PC13.
+ * See firmware/PINOUT.md for the full table and free-pin notes.
  */
 
 #ifndef __MAIN_H
@@ -53,14 +52,15 @@ extern "C" {
  * is typical per the datasheet). PLACEHOLDER, conservative. */
 #define CAN_TRANSCEIVER_SWITCH_DELAY_US 5U
 
-/* General-purpose outputs OUT1..OUT4 per ТЗ. OUT4 = PA15, which is normally
- * JTDI; JTAG is disabled (SWD-only debug, ТЗ 13) to free this pin. */
+/* General-purpose outputs OUT1..OUT4 per ТЗ 2.4: PC10/PC11/PC12/PA15.
+ * OUT4 = PA15, which is normally JTDI; JTAG is disabled (SWD-only debug,
+ * ТЗ 13) to free this pin. */
 #define OUT1_PORT GPIOC
-#define OUT1_PIN  GPIO_PIN_2
+#define OUT1_PIN  GPIO_PIN_10
 #define OUT2_PORT GPIOC
-#define OUT2_PIN  GPIO_PIN_3
+#define OUT2_PIN  GPIO_PIN_11
 #define OUT3_PORT GPIOC
-#define OUT3_PIN  GPIO_PIN_4
+#define OUT3_PIN  GPIO_PIN_12
 #define OUT4_PORT GPIOA
 #define OUT4_PIN  GPIO_PIN_15
 

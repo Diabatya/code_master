@@ -95,21 +95,30 @@ def pack_can_frame(
     return frame
 
 
-def unpack_can_frame(raw: bytes) -> Optional[Dict[str, object]]:
+_RX_MARKERS = (MARKER_RX, MARKER_RX_EXT, MARKER_RX_RTR, MARKER_RX_RTR_EXT)
+_TX_MARKERS = (MARKER_TX, MARKER_TX_EXT, MARKER_TX_RTR, MARKER_TX_RTR_EXT)
+_EXT_MARKERS = (MARKER_RX_EXT, MARKER_TX_EXT, MARKER_RX_RTR_EXT, MARKER_TX_RTR_EXT)
+_RTR_MARKERS = (MARKER_RX_RTR, MARKER_TX_RTR, MARKER_RX_RTR_EXT, MARKER_TX_RTR_EXT)
+
+
+def unpack_can_frame(raw: bytes, tx: bool = False) -> Optional[Dict[str, object]]:
     """Ищет и распаковывает один CAN-кадр из байтового потока.
 
     Args:
         raw: Накопленный байтовый буфер, полученный из COM-порта.
+        tx: False — искать кадры МК→ПК (маркеры 0xAA-0xAD);
+            True — кадры ПК→МК (маркеры 0xBB-0xBE). Нужно для
+            COM-логгера в режиме прослушивания, где видны оба направления.
 
     Returns:
         Словарь {'channel': int, 'id': int, 'data': bytes, 'extended': bool,
-        'rtr': bool, 'dlc': int} или None, если кадр не найден или
-        контрольная сумма не совпадает.
+        'rtr': bool, 'dlc': int, 'raw': bytes} или None, если кадр не найден
+        или контрольная сумма не совпадает.
     """
-    rx_markers = (MARKER_RX, MARKER_RX_EXT, MARKER_RX_RTR, MARKER_RX_RTR_EXT)
+    markers = _TX_MARKERS if tx else _RX_MARKERS
     marker_index = -1
     marker = 0
-    for m in rx_markers:
+    for m in markers:
         idx = raw.find(bytes([m]))
         if idx >= 0 and (marker_index < 0 or idx < marker_index):
             marker_index = idx
@@ -118,11 +127,11 @@ def unpack_can_frame(raw: bytes) -> Optional[Dict[str, object]]:
     if marker_index < 0:
         return None
 
-    extended = marker in (MARKER_RX_EXT, MARKER_RX_RTR_EXT)
-    rtr = marker in (MARKER_RX_RTR, MARKER_RX_RTR_EXT)
+    extended = marker in _EXT_MARKERS
+    rtr = marker in _RTR_MARKERS
     id_length = 4 if extended else 2
     length_offset = 6 if extended else 4
-    header_length = 4 + id_length  # marker + channel + id + dlc
+    header_length = 3 + id_length  # marker + channel + id + dlc
 
     if len(raw) - marker_index < header_length:
         return None
@@ -158,21 +167,23 @@ def unpack_can_frame(raw: bytes) -> Optional[Dict[str, object]]:
         "dlc": length,
         "extended": extended,
         "rtr": rtr,
+        "raw": frame,
     }
 
 
-def parse_all_frames(raw: bytes) -> tuple[List[Dict[str, object]], bytes]:
+def parse_all_frames(raw: bytes, tx: bool = False) -> tuple[List[Dict[str, object]], bytes]:
     """Извлекает все полные CAN-кадры из буфера.
 
     Args:
         raw: Байтовый буфер, накопленный из COM-порта.
+        tx: False — кадры МК→ПК; True — кадры ПК→МК (см. unpack_can_frame).
 
     Returns:
         Кортеж: список распакованных кадров и оставшийся неполный буфер.
     """
     frames: List[Dict[str, object]] = []
     while True:
-        frame = unpack_can_frame(raw)
+        frame = unpack_can_frame(raw, tx=tx)
         if frame is None:
             # Кадр не собрался. Возможны два случая:
             #  1) данных ещё недостаточно — ждём следующую порцию;
@@ -180,7 +191,7 @@ def parse_all_frames(raw: bytes) -> tuple[List[Dict[str, object]], bytes]:
             #     или некорректный DLC) — тогда пропускаем этот байт-маркер,
             #     иначе буфер навсегда застрянет на повреждённом байте и будет
             #     расти без ограничений, а новые кадры перестанут разбираться.
-            marker_index = _find_marker(raw)
+            marker_index = _find_marker(raw, tx=tx)
             if marker_index < 0:
                 # Маркеров нет вовсе — хранить нечего, кроме возможного хвоста
                 raw = b""
@@ -192,17 +203,17 @@ def parse_all_frames(raw: bytes) -> tuple[List[Dict[str, object]], bytes]:
             raw = raw[marker_index + 1 :]
             continue
         frames.append(frame)
-        marker_index = _find_marker(raw)
-        total_length = (8 if frame["extended"] else 6) + len(frame["data"])  # type: ignore[arg-type]
+        marker_index = _find_marker(raw, tx=tx)
+        total_length = len(frame["raw"])  # type: ignore[arg-type]
         raw = raw[marker_index + total_length :]
     return frames, raw
 
 
-def _find_marker(raw: bytes) -> int:
-    """Возвращает индекс ближайшего RX-маркера или -1, если маркеров нет."""
-    rx_markers = (MARKER_RX, MARKER_RX_EXT, MARKER_RX_RTR, MARKER_RX_RTR_EXT)
+def _find_marker(raw: bytes, tx: bool = False) -> int:
+    """Возвращает индекс ближайшего маркера кадра или -1, если маркеров нет."""
+    markers = _TX_MARKERS if tx else _RX_MARKERS
     result = -1
-    for m in rx_markers:
+    for m in markers:
         idx = raw.find(bytes([m]))
         if idx >= 0 and (result < 0 or idx < result):
             result = idx
@@ -212,12 +223,12 @@ def _find_marker(raw: bytes) -> int:
 def _is_incomplete(raw: bytes, marker_index: int) -> bool:
     """True, если от маркера ещё не пришло достаточно байт для полного кадра."""
     marker = raw[marker_index]
-    extended = marker in (MARKER_RX_EXT, MARKER_RX_RTR_EXT)
-    rtr = marker in (MARKER_RX_RTR, MARKER_RX_RTR_EXT)
+    extended = marker in _EXT_MARKERS
+    rtr = marker in _RTR_MARKERS
     id_length = 4 if extended else 2
     length_offset = 6 if extended else 4
     available = len(raw) - marker_index
-    header = 4 + id_length  # marker + channel + id + dlc
+    header = 3 + id_length  # marker + channel + id + dlc
     if available < header:
         return True
     length = raw[marker_index + length_offset]

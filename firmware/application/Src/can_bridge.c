@@ -361,6 +361,22 @@ uint8_t CanBridge_Init(uint32_t baud_kbps)
     return 0U;
   }
 
+  /* NVIC lines must be enabled explicitly: HAL_CAN_ActivateNotification()
+   * only programs CAN_IER inside the peripheral — without NVIC the CPU
+   * never vectors into the IRQ handlers and RX FIFO0 never gets drained.
+   * This was the root cause of "no reception": filters were pass-all and
+   * the callback was wired, but CANx_RX0/CANx_SCE were never unmasked in
+   * the NVIC. On F105 connectivity line CAN1 TX/RX0 share the legacy
+   * USB_HP/USB_LP vector names (see stm32f1xx_it.c header note). */
+  HAL_NVIC_SetPriority(USB_LP_CAN1_RX0_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(USB_LP_CAN1_RX0_IRQn);
+  HAL_NVIC_SetPriority(CAN1_SCE_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(CAN1_SCE_IRQn);
+  HAL_NVIC_SetPriority(CAN2_RX0_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(CAN2_RX0_IRQn);
+  HAL_NVIC_SetPriority(CAN2_SCE_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(CAN2_SCE_IRQn);
+
   /* Default both channels to Normal mode, termination off — actual
    * per-channel state (Normal/Silent, termination on/off) is a hardware
    * jumper/config concern per board and should be revisited once the real
