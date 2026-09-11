@@ -554,7 +554,10 @@ class ComLoggerWindow(QDialog):
         self._table.setItem(row, 2, items[2])
         self._table.setItem(row, 3, items[3])
 
-        self._table.scrollToBottom()
+        vbar = self._table.verticalScrollBar()
+        at_bottom = vbar.value() >= vbar.maximum() - vbar.singleStep()
+        if at_bottom:
+            self._table.scrollToBottom()
 
     def _tx_color(self) -> QColor:
         return QColor(30, 130, 76) if self._is_dark_theme() else QColor(200, 230, 201)
