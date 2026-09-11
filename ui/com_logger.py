@@ -223,6 +223,13 @@ class ComLoggerWindow(QDialog):
         self._hex_checkbox.setFont(font)
         self._hex_checkbox.setChecked(True)
 
+        self._autoscroll_checkbox = QCheckBox(tr("Автоскролл"))
+        self._autoscroll_checkbox.setFont(font)
+        self._autoscroll_checkbox.setChecked(False)
+        self._autoscroll_checkbox.setToolTip(
+            tr("Автоматически прокручивать таблицу к последнему сообщению")
+        )
+
         self._send_input = QLineEdit()
         self._send_input.setFont(QFont("Consolas", 10))
         self._send_input.setPlaceholderText(tr("Введите HEX: 01 02 03 или текст"))
@@ -280,6 +287,7 @@ class ComLoggerWindow(QDialog):
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
         bottom.addWidget(self._hex_checkbox)
+        bottom.addWidget(self._autoscroll_checkbox)
         bottom.addWidget(self._send_input, 1)
         bottom.addWidget(self._send_button)
         bottom.addWidget(self._clear_button)
@@ -554,9 +562,7 @@ class ComLoggerWindow(QDialog):
         self._table.setItem(row, 2, items[2])
         self._table.setItem(row, 3, items[3])
 
-        vbar = self._table.verticalScrollBar()
-        at_bottom = vbar.value() >= vbar.maximum() - vbar.singleStep()
-        if at_bottom:
+        if self._autoscroll_checkbox.isChecked():
             self._table.scrollToBottom()
 
     def _tx_color(self) -> QColor:
