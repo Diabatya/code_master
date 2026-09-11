@@ -20,7 +20,8 @@ AR = arm-none-eabi-ar
 LD = arm-none-eabi-gcc
 
 MCU = -mcpu=cortex-m3 -mthumb
-DEFS = -DSTM32F105xC -DUSE_HAL_DRIVER
+GIT_COMMIT := $(shell git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
+DEFS = -DSTM32F105xC -DUSE_HAL_DRIVER -DGIT_COMMIT_STR=\"$(GIT_COMMIT)\"
 
 INCLUDES = \
   -IInc \

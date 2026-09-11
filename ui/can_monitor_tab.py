@@ -221,6 +221,11 @@ class CanChannelMonitor(QWidget):
         self._id_data_variants: Dict[int, Set[bytes]] = {}
         self._highlight_timers: Dict[int, QTimer] = {}
         self._ignored_ids: set[int] = set()
+        # Предыдущие значения счётчиков ошибок — для визуальных предупреждений
+        # (чек-лист 4.2): bus-off/рост потерь подсвечивают строку статуса.
+        self._prev_busoff = 0
+        self._prev_lost = 0
+        self._warn_level = 0  # 0=ok, 1=lost, 2=bus-off
 
         self._create_widgets()
         self._layout_widgets()
@@ -516,6 +521,10 @@ class CanChannelMonitor(QWidget):
         self._sent_count = 0
         self._packet_times.clear()
         self._last_packet_time = None
+        self._prev_busoff = 0
+        self._prev_lost = 0
+        self._warn_level = 0
+        self._stats_label.setStyleSheet("")
         self._stats_label.setText(tr("Принято: 0 | Скорость: 0 пак/с"))
         self._update_sent_label()
 
@@ -589,9 +598,33 @@ class CanChannelMonitor(QWidget):
                 )
                 usb = self._serial_manager.read_usb_stats()
                 text += tr(" USB dropped: {0}").format(usb["tx_dropped"])
+                self._update_error_warnings(device)
         except Exception:  # noqa: BLE001
             pass
+        if self._warn_level == 2:
+            text += tr("  ⚠ BUS-OFF — проверьте шину/терминацию")
+        elif self._warn_level == 1:
+            text += tr("  ⚠ Потеряны кадры CAN")
         self._stats_label.setText(text)
+
+    def _update_error_warnings(self, device: Dict[str, int]) -> None:
+        """Подсвечивает строку статуса при bus-off или росте потерь кадров."""
+        busoff = int(device.get("busoff_count", 0))
+        lost = int(device.get("lost_count", 0))
+        if busoff > self._prev_busoff:
+            self._warn_level = 2
+            logger.warning("CAN%d: bus-off (всего %d)", self._channel, busoff)
+        elif lost > self._prev_lost and self._warn_level < 2:
+            self._warn_level = 1
+            logger.warning("CAN%d: потеряны кадры (всего %d)", self._channel, lost)
+        self._prev_busoff = busoff
+        self._prev_lost = lost
+        if self._warn_level == 2:
+            self._stats_label.setStyleSheet("color: #FFFFFF; background-color: #C62828;")
+        elif self._warn_level == 1:
+            self._stats_label.setStyleSheet("color: #FFFFFF; background-color: #E65100;")
+        else:
+            self._stats_label.setStyleSheet("")
 
     def _format_signals(self, can_id: int, data: bytes) -> str:
         db = self._dbc_manager.get_cantools_db()

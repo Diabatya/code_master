@@ -274,19 +274,25 @@ Host должен принимать и старый 12-байтный отве�
 
 Запрос: `[0xC9][0x00]`.
 
-Ответ payload длиной 16 байт:
+Ответ payload: минимум 16 байт (базовая часть), актуальные прошивки — 56 байт:
 
 ```text
-application_version: uint8
-protocol_version:    uint8
-flash_size_kb:       uint16 LE
-config_format:       uint8
-config_record_length:uint8
-trigger_count:       uint8
-reserved:            uint8
-application_size:    uint32 LE
-application_crc32:   uint32 LE
+offset 0  application_version: uint8
+offset 1  protocol_version:    uint8
+offset 2  flash_size_kb:       uint16 LE
+offset 4  config_format:       uint8
+offset 5  config_record_length:uint8
+offset 6  trigger_count:       uint8
+offset 7  config_valid:        uint8
+offset 8  application_size:    uint32 LE
+offset 12 application_crc32:   uint32 LE
+offset 16 mcu_uid96:           12 байт (Unique Device ID, 0x1FFFF7E8)
+offset 28 build_datetime:      20 байт ASCII ("Mmm dd yyyy hh:mm:ss")
+offset 48 git_commit:          8 байт ASCII (короткий hash, с нулями)
 ```
+
+Читатель обязан проверять длину payload: старые прошивки отвечают
+ровно 16 байтами и не содержат полей после offset 15.
 
 ---
 
@@ -326,8 +332,18 @@ offset 8  : uint32_t image_size     (байт от 0x08008000)
 offset 12 : uint32_t crc32         (CRC-32/IEEE по image_size байтам)
 ```
 
-Bootloader проверяет эти метаданные, если magic присутствует. Старые образы
-без metadata остаются совместимыми и проверяются по vector table.
+Bootloader проверяет метаданные строго: application запускается только при
+валидном magic + совпавшем CRC32. Стёртая страница (0xFF), обнулённый magic
+(0x00 — записывается конфигуратором в начале обновления, «UPDATE_STARTED»)
+или незаписанная запись означают «обновление не завершено» — устройство
+остаётся в bootloader. Метаданные всегда пишутся последним шагом, после
+кода и верификации — это «флаг завершённого обновления» («UPDATE_VERIFIED»).
+
+Через AN3155 разрешены запись и постраничное стирание только для
+`0x08008000`–`0x0803DFFF` (application + metadata + config). Область
+триггеров `0x0803E000`–`0x0803FFFF` через AN3155 недоступна — триггеры
+обновляются только командами CMD_TRIGGER_STAGE/COMMIT. Mass erase (0xFFFF)
+по-прежнему стирает весь application-регион целиком.
 
 Формат страницы конфигурации (`device_config_t`, см. `Inc/device_config.h`):
 

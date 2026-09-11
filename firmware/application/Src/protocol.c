@@ -44,6 +44,10 @@
 #define CMD_CAN_MODE             0xCDU /* управление режимом и терминатором CAN */
 #define APP_METADATA_ADDR       0x0803D000U
 #define APP_METADATA_MAGIC      0x41505031U
+#define STM32_UID96_ADDR        0x1FFFF7E8U /* Unique Device ID (96 бит), F1 */
+#ifndef GIT_COMMIT_STR
+#define GIT_COMMIT_STR          "unknown"
+#endif
 #define CMD_RESP_OFFSET        0x10U /* response marker = request | 0x10, see PROTOCOL.md Part 2 */
 
 #define REBOOT_MAGIC_LEN 22U
@@ -336,7 +340,9 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     case CMD_SYSTEM_INFO: {
       const device_config_t *cfg = DeviceConfig_Get();
       const uint8_t *metadata = (const uint8_t *)APP_METADATA_ADDR;
-      uint8_t out[16] = {
+      /* 16 байт базовой части (как раньше) + UID96 + дата/время сборки +
+       * git commit. Старые версии ПК читают только первые 16 байт. */
+      uint8_t out[56] = {
         s_device_version,
         1U,
         0U,
@@ -353,6 +359,17 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       if (*(const uint32_t *)&metadata[0] == APP_METADATA_MAGIC) {
         memcpy(&out[8], &metadata[8], 8U);
       }
+      /* Уникальный 96-битный ID кристалла */
+      memcpy(&out[16], (const void *)STM32_UID96_ADDR, 12U);
+      /* Дата и время сборки: "Mmm dd yyyy hh:mm:ss" = 20 символов */
+      {
+        const char stamp[] = __DATE__ " " __TIME__;
+        memcpy(&out[28], stamp, 20U);
+      }
+      /* Короткий git commit, дополненный нулями до 8 байт */
+      memset(&out[48], 0, 8U);
+      memcpy(&out[48], GIT_COMMIT_STR,
+             (sizeof(GIT_COMMIT_STR) - 1U) < 8U ? (sizeof(GIT_COMMIT_STR) - 1U) : 8U);
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
     }

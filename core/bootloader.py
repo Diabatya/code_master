@@ -16,12 +16,14 @@ except Exception:  # noqa: BLE001
     def comports() -> list:
         return []
 
-from core.firmware_utils import load_firmware_bytes
+from core.firmware_utils import load_firmware_bytes, validate_write_region
 from core.stm32_info import (
     APPLICATION_BASE_ADDR,
+    APP_METADATA_PAGE_ADDR,
     BOOTLOADER_BASE_ADDR,
     DEVICE_CONFIG_PAGE_ADDR,
     DEVICE_CONFIG_PAGE_SIZE,
+    build_app_metadata,
     merge_device_config_page,
 )
 from models.logger import get_logger
@@ -566,16 +568,54 @@ class Bootloader:
         logger.info("BL diagnostics: версия=0x%02X, ID=0x%08X", version, device_id)
         return {"version": version, "device_id": device_id}
 
+    def _write_region(self, address: int, data: bytes, written: int, total: int) -> int:
+        """Пишет data по адресу блоками BLOCK_SIZE с повторами и прогрессом.
+
+        Returns:
+            Обновлённое число уже записанных байт (для прогресса).
+        """
+        for offset in range(0, len(data), self.BLOCK_SIZE):
+            if self._stop_requested:
+                raise BootloaderError("Операция отменена")
+            block = data[offset : offset + self.BLOCK_SIZE]
+            block_addr = address + offset
+            for attempt in range(self.MAX_RETRIES):
+                try:
+                    self.write_memory(block_addr, block)
+                    logger.debug("Записан блок 0x%08X, %d байт", block_addr, len(block))
+                    break
+                except BootloaderError as exc:
+                    logger.warning("Повтор записи блока 0x%08X: %s", block_addr, exc)
+                    if attempt == self.MAX_RETRIES - 1:
+                        raise BootloaderError(
+                            f"Ошибка записи блока 0x{block_addr:08X} ({len(block)} байт): {exc}"
+                        ) from exc
+                    time.sleep(0.1)
+            written += len(block)
+            if self._progress_callback:
+                self._progress_callback(min(100, int(written / total * 100)))
+        return written
+
     def flash_firmware(
         self,
         firmware_path: str,
         base_address: int = APPLICATION_BASE_ADDR,
         page_size: int = 2048,
         skip_blank: bool = True,
+        status_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         """Записывает файл прошивки в память STM32.
 
         Поддерживает .bin, .hex (Intel HEX) и .elf.
+
+        Порядок обновления application (base_address == APPLICATION_BASE_ADDR):
+          1. инвалидация метаданных (запись 4 нулевых байт) — при обрыве
+             устройство остаётся в bootloader, а не запускает обрывок кода;
+          2. стирание и запись кода;
+          3. запись метаданных ПОСЛЕДНИМИ — валидный magic+CRC служит
+             «флагом завершённого обновления» (bl_metadata_is_valid).
+        Если образ не содержит страницу метаданных, запись генерируется
+        на стороне ПК (build_app_metadata) и дописывается тем же способом.
 
         Args:
             firmware_path: Путь к файлу прошивки.
@@ -583,9 +623,11 @@ class Bootloader:
             page_size: Размер страницы flash (для F105 — 2048 байт).
             skip_blank: Не стирать страницы, для которых записываемые данные
                 полностью 0xFF (см. erase_pages()).
+            status_callback: Функция для текстового статуса этапа
+                (подключение/стирание/запись/метаданные).
 
         Raises:
-            BootloaderError: при ошибке прошивки.
+            BootloaderError: при ошибке прошивки или запрещённой области.
         """
         firmware, file_base = load_firmware_bytes(firmware_path)
         if not firmware:
@@ -593,7 +635,20 @@ class Bootloader:
         if file_base:
             base_address = file_base
 
-        logger.info("Начинаю прошивку: %s, base=0x%08X, размер %d байт, page_size=%d", firmware_path, base_address, len(firmware), page_size)
+        ok, reason = validate_write_region(base_address, len(firmware))
+        if not ok:
+            raise BootloaderError(f"Запрещённая область записи: {reason}")
+
+        def status(text: str) -> None:
+            logger.info("Этап: %s", text)
+            if status_callback:
+                status_callback(text)
+
+        logger.info(
+            "Начинаю прошивку: %s, base=0x%08X, размер %d байт, page_size=%d",
+            firmware_path, base_address, len(firmware), page_size,
+        )
+        status("Подключение к bootloader")
         self.reconfigure_for_bootloader()
         self.enter_bootloader()
         self.sync()
@@ -601,28 +656,37 @@ class Bootloader:
             existing = self.read_memory(base_address, DEVICE_CONFIG_PAGE_SIZE)
             firmware = merge_device_config_page(firmware, existing)
             logger.info("Сохранены VID/PID и служебные поля существующей config-страницы")
-        self.erase_pages(base_address, firmware, page_size=page_size, skip_blank=skip_blank)
 
-        total = len(firmware)
-        for offset in range(0, total, self.BLOCK_SIZE):
-            if self._stop_requested:
-                raise BootloaderError("Операция отменена")
-            block = firmware[offset : offset + self.BLOCK_SIZE]
-            address = base_address + offset
-            for attempt in range(self.MAX_RETRIES):
-                try:
-                    self.write_memory(address, block)
-                    logger.debug("Записан блок 0x%08X, %d байт", address, len(block))
-                    break
-                except BootloaderError as exc:
-                    logger.warning("Повтор записи блока 0x%08X: %s", address, exc)
-                    if attempt == self.MAX_RETRIES - 1:
-                        raise
-                    time.sleep(0.1)
+        # Метаданные — отдельным последним шагом, чтобы «флаг валидности»
+        # появлялся только после полной записи кода.
+        meta_rel = APP_METADATA_PAGE_ADDR - base_address
+        code, meta = firmware, None
+        if 0 <= meta_rel < len(firmware):
+            code, meta = firmware[:meta_rel], firmware[meta_rel:]
 
-            progress = min(100, int((offset + self.BLOCK_SIZE) / total * 100))
-            if self._progress_callback:
-                self._progress_callback(progress)
+        is_app_update = base_address == APPLICATION_BASE_ADDR
+        if is_app_update:
+            status("Подготовка обновления")
+            # UPDATE_STARTED: гасим magic метаданных. Запись нулей работает
+            # и на стёртой странице, и поверх старого magic — flash умеет
+            # только гасить биты.
+            self.write_memory(APP_METADATA_PAGE_ADDR, b"\x00" * 4)
+            if meta is None:
+                meta = build_app_metadata(code)
+
+        status("Стирание Flash")
+        self.erase_pages(base_address, code, page_size=page_size, skip_blank=skip_blank)
+        if meta is not None:
+            self.erase_pages(
+                APP_METADATA_PAGE_ADDR, meta, page_size=page_size, skip_blank=skip_blank
+            )
+
+        status(f"Запись {len(code)} байт с 0x{base_address:08X}")
+        total = len(code) + (len(meta) if meta else 0)
+        written = self._write_region(base_address, code, 0, total)
+        if meta is not None:
+            status(f"Запись метаданных ({len(meta)} байт)")
+            self._write_region(APP_METADATA_PAGE_ADDR, meta, written, total)
 
         if self._progress_callback:
             self._progress_callback(100)

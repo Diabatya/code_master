@@ -5,6 +5,7 @@ from typing import List, Optional
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QStandardItemModel, QStandardItem
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QCompleter,
     QFileDialog,
@@ -264,6 +265,9 @@ class SettingsWindow(QMainWindow):
         self._serial_edit.setPlaceholderText(tr("Неизвестно"))
         self._system_info_label = QLabel(tr("Firmware: не определена"))
         self._system_info_label.setFont(QFont("Segoe UI", 9))
+        self._copy_id_button = QPushButton(tr("Копировать ID"))
+        self._copy_id_button.setFixedHeight(24)
+        self._copy_id_button.clicked.connect(self._copy_device_id)
 
         device_layout = QHBoxLayout()
         device_layout.setSpacing(8)
@@ -271,6 +275,7 @@ class SettingsWindow(QMainWindow):
         device_layout.addWidget(self._device_combo)
         device_layout.addWidget(self._serial_label)
         device_layout.addWidget(self._serial_edit)
+        device_layout.addWidget(self._copy_id_button)
         device_layout.addWidget(self._system_info_label)
         device_layout.addStretch()
         self._device_layout = device_layout
@@ -395,19 +400,39 @@ class SettingsWindow(QMainWindow):
         try:
             if self._serial_manager.is_open() and not self._config.get("emulation", False):
                 info = self._serial_manager.read_system_info()
-                self._system_info_label.setText(
-                    tr("Firmware: app {0}, protocol {1}, Flash {2} KB, size {3} B, CRC32 {4}, config v{5} ({6})").format(
-                        info["application_version"],
-                        info["protocol_version"],
-                        info["flash_size_kb"],
-                        info["application_size"],
-                        f"0x{info['application_crc32']:08X}",
-                        info["config_format_version"],
-                        tr("valid") if info["config_valid"] else tr("defaults"),
-                    )
+                text = tr("Firmware: app {0}, protocol {1}, Flash {2} KB, size {3} B, CRC32 {4}, config v{5} ({6})").format(
+                    info["application_version"],
+                    info["protocol_version"],
+                    info["flash_size_kb"],
+                    info["application_size"],
+                    f"0x{info['application_crc32']:08X}",
+                    info["config_format_version"],
+                    tr("valid") if info["config_valid"] else tr("defaults"),
                 )
+                extras = []
+                if info.get("mcu_uid"):
+                    extras.append(tr("UID {0}").format(info["mcu_uid"]))
+                if info.get("build_datetime"):
+                    extras.append(tr("сборка {0}").format(info["build_datetime"]))
+                if info.get("git_commit"):
+                    extras.append(tr("commit {0}").format(info["git_commit"]))
+                if extras:
+                    text += "\n" + ", ".join(extras)
+                self._system_info_label.setText(text)
         except Exception:  # noqa: BLE001
             self._system_info_label.setText(tr("Firmware: информация недоступна"))
+
+    def _copy_device_id(self) -> None:
+        """Копирует MCU UID (или серийный номер, если UID недоступен) в буфер."""
+        uid = ""
+        try:
+            if self._serial_manager.is_open() and not self._config.get("emulation", False):
+                uid = str(self._serial_manager.read_system_info().get("mcu_uid") or "")
+        except Exception:  # noqa: BLE001
+            pass
+        text = uid or self._serial_edit.text()
+        if text:
+            QApplication.clipboard().setText(text)
 
     def retranslate_ui(self) -> None:
         """Обновляет статические строки окна настроек и всех вкладок."""

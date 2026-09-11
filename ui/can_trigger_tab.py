@@ -546,12 +546,17 @@ class CanTriggerTab(QWidget):
             group.setCheckable(True)
             group.setChecked(False)
 
+            status = QLabel(tr("Статус: не читался"))
+            status.setFont(font)
+            status.setStyleSheet("color: #9E9E9E;")
+
             recv = self._create_receive_row(font, tr("Приём"))
             response = self._create_response_block(font)
             cache = self._create_cache_block(font, i)
 
             block = {
                 "group": group,
+                "status": status,
                 "recv": recv,
                 "response": response,
                 "cache": cache,
@@ -582,6 +587,7 @@ class CanTriggerTab(QWidget):
             self._set_cache_enabled(block, False)
             block["cache"]["cache_check"].setEnabled(True)
 
+            group_layout.addWidget(block["status"])
             group_layout.addWidget(content)
             block["group"].toggled.connect(lambda checked, content=content: content.setVisible(checked))
             block["group"].toggled.connect(lambda checked, idx=self._blocks.index(block): self._on_trigger_toggled(idx, checked))
@@ -662,6 +668,35 @@ class CanTriggerTab(QWidget):
             "delay_ms": delay_ms,
         }
 
+    def _set_trigger_status(self, index: int, state: str) -> None:
+        """Обновляет строку статуса триггера.
+
+        state: 'unknown' | 'enabled' | 'disabled' | 'synced' | 'differs' | 'written'
+        """
+        label = self._blocks[index]["status"]
+        enabled = self._blocks[index]["group"].isChecked()
+        on_off = tr("вкл") if enabled else tr("выкл")
+        if state == "synced":
+            text = tr("Статус: {0}, совпадает с устройством").format(on_off)
+            color = "#66BB6A"
+        elif state == "written":
+            text = tr("Статус: {0}, записан в устройство").format(on_off)
+            color = "#66BB6A"
+        elif state == "differs":
+            text = tr("Статус: {0}, ОТЛИЧАЕТСЯ от устройства").format(on_off)
+            color = "#EF5350"
+        elif state == "enabled":
+            text = tr("Статус: включён в устройстве")
+            color = "#66BB6A"
+        elif state == "disabled":
+            text = tr("Статус: выключен")
+            color = "#9E9E9E"
+        else:
+            text = tr("Статус: не читался")
+            color = "#9E9E9E"
+        label.setText(text)
+        label.setStyleSheet(f"color: {color};")
+
     def _apply_device_trigger(self, index: int, values: Dict[str, Any]) -> None:
         block = self._blocks[index]
         recv = block["recv"]
@@ -688,6 +723,7 @@ class CanTriggerTab(QWidget):
             row["delay_before_send"].setValue(values["delay_ms"])
             self._set_data_enabled(row["data"], 0 if row["rtr"].isChecked() else row["dlc"].value())
         self._applying_device_state = False
+        self._set_trigger_status(index, "enabled" if values["enabled"] else "disabled")
 
     def _read_triggers_from_device(self) -> None:
         try:
@@ -710,6 +746,9 @@ class CanTriggerTab(QWidget):
                 )
                 if local_payload != remote_payload:
                     different.append(str(index + 1))
+                    self._set_trigger_status(index, "differs")
+                else:
+                    self._set_trigger_status(index, "synced")
             if different:
                 message = tr("Отличаются триггеры: {0}").format(", ".join(different))
             else:
@@ -740,10 +779,12 @@ class CanTriggerTab(QWidget):
                     CMD_TRIGGER_READ, bytes((index,))
                 )
                 if remote_payload == local_payload:
+                    self._set_trigger_status(index, "synced")
                     continue
                 self._serial_manager.request_control(
                     CMD_TRIGGER_STAGE, bytes((index,)) + local_payload
                 )
+                self._set_trigger_status(index, "written")
                 changed += 1
             if changed:
                 self._serial_manager.request_control(CMD_TRIGGER_COMMIT, b"")
@@ -767,6 +808,7 @@ class CanTriggerTab(QWidget):
         try:
             self._serial_manager.set_trigger_enabled(index, enabled)
             self._save_config()
+            self._set_trigger_status(index, "enabled" if enabled else "disabled")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Не удалось изменить enabled trigger %d: %s", index, exc)
             QMessageBox.warning(self, tr("Ошибка"), str(exc))

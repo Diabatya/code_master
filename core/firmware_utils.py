@@ -147,6 +147,43 @@ def validate_application_vector(data: bytes, base_address: int) -> Tuple[bool, s
     return True, ""
 
 
+def validate_write_region(base: int, size: int) -> Tuple[bool, str]:
+    """Проверяет, что область записи [base, base+size) допустима для AN3155.
+
+    Bootloader разрешает запись только в application + metadata + config
+    page (0x08008000–0x0803DFFF). Trigger-страницы (0x0803E000–0x0803FFFF)
+    через AN3155 не пишутся — они обновляются командами CMD_TRIGGER_*.
+    """
+    from core.stm32_info import (
+        APPLICATION_BASE_ADDR,
+        DEVICE_CONFIG_PAGE_ADDR,
+        FLASH_END_ADDR,
+        TRIGGER_REGION_ADDR,
+    )
+
+    end = base + size
+    if base < APPLICATION_BASE_ADDR:
+        return False, f"Адрес 0x{base:08X} ниже области application (0x{APPLICATION_BASE_ADDR:08X})"
+    if base >= TRIGGER_REGION_ADDR:
+        return False, (
+            f"Адрес 0x{base:08X} попадает в область триггеров "
+            f"(0x{TRIGGER_REGION_ADDR:08X}–0x{FLASH_END_ADDR:08X}) — запись запрещена"
+        )
+    if end > TRIGGER_REGION_ADDR:
+        return False, (
+            f"Образ выходит за 0x{TRIGGER_REGION_ADDR:08X} в область триггеров — запись запрещена"
+        )
+    # Образ application не должен пересекать config-страницу частично:
+    # либо он заканчивается на metadata (<= 0x0803D800), либо это явная
+    # запись всей config-страницы (base == DEVICE_CONFIG_PAGE_ADDR).
+    if base < DEVICE_CONFIG_PAGE_ADDR < end:
+        return False, (
+            f"Образ application пересекает config-страницу 0x{DEVICE_CONFIG_PAGE_ADDR:08X} — "
+            "запрещено, чтобы не затереть имя/serial устройства"
+        )
+    return True, ""
+
+
 def prepare_bin_file(file_path: str, default_base: int = 0x08000000) -> Tuple[Optional[str], int]:
     """Подготавливает временный .bin для утилит, которым нужен бинарный файл."""
     path = Path(file_path)

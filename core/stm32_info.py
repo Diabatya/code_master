@@ -25,6 +25,11 @@ APP_METADATA_MAGIC = 0x41505031
 APP_METADATA_VERSION = 1
 DEVICE_CONFIG_PAGE_ADDR = 0x0803D800
 DEVICE_CONFIG_PAGE_SIZE = 2048
+# Область хранения триггеров — страницы 124–127. Через AN3155 bootloader
+# она недоступна для записи/постраничного стирания: триггеры меняются
+# только командами CMD_TRIGGER_* в приложении.
+TRIGGER_REGION_ADDR = 0x0803E000
+FLASH_END_ADDR = 0x08040000
 DEVICE_CONFIG_NAME_MAX = 9
 DEVICE_CONFIG_SERIAL_MAX = 10
 DEVICE_CONFIG_MAGIC = 0x43464730
@@ -59,7 +64,8 @@ def build_device_config_page(
         page.extend(b"\xFF" * (DEVICE_CONFIG_PAGE_SIZE - len(page)))
     current = parse_device_config(bytes(page))
     if current is None:
-        page[:] = b"\xFF" * DEVICE_CONFIG_PAGE_SIZE
+        # Невалидная/отсутствующая запись — обновляем только первые 32 байта,
+        # остальную страницу (reserved и будущие поля) не трогаем.
         vid, pid = DEVICE_CONFIG_DEFAULT_VID, DEVICE_CONFIG_DEFAULT_PID
     else:
         vid, pid = current[2], current[3]
@@ -106,8 +112,8 @@ def parse_legacy_device_config(page: bytes) -> Optional[Tuple[str, str]]:
     """Разбирает старый GUI-формат name@8..17/serial@18..27."""
     if len(page) < 28:
         return None
-    raw_name = page[8:18].rstrip(b"\\xFF\\x00 ")
-    raw_serial = page[18:28].rstrip(b"\\xFF\\x00 ")
+    raw_name = page[8:18].rstrip(b"\xFF\x00 ")
+    raw_serial = page[18:28].rstrip(b"\xFF\x00 ")
     if not raw_name and not raw_serial:
         return None
     if any(byte < 0x20 or byte > 0x7E for byte in raw_name + raw_serial):
@@ -124,6 +130,26 @@ def merge_device_config_page(incoming_page: bytes, existing_page: bytes) -> byte
     if incoming is None:
         return incoming_page
     return build_device_config_page(incoming[0], incoming[1], existing_page)
+
+
+def build_app_metadata(image: bytes) -> bytes:
+    """Строит 16-байтную запись метаданных приложения (APP1).
+
+    Записывается bootloader'ом/конфигуратором ПОСЛЕДНИМ шагом обновления —
+    пока CRC и размер не записаны, bootloader считает приложение
+    невалидным и остаётся в режиме прошивки (см. bl_metadata_is_valid).
+    """
+    import binascii
+    import struct
+
+    return struct.pack(
+        "<IHHII",
+        APP_METADATA_MAGIC,
+        APP_METADATA_VERSION,
+        0,  # reserved
+        len(image),
+        binascii.crc32(image) & 0xFFFFFFFF,
+    )
 
 
 # Модель → размер Flash в КБ

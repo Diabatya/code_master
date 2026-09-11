@@ -405,12 +405,16 @@ class SerialManager(QObject):
             raise RuntimeError("Некорректный ответ CMD_USB_STATS")
         return {"tx_dropped": int.from_bytes(payload, "little")}
 
-    def read_system_info(self) -> dict[str, int]:
-        """Возвращает версию application, протокола и config-формата."""
+    def read_system_info(self) -> dict[str, object]:
+        """Возвращает версию application, протокола и config-формата.
+
+        Расширенные прошивки дополнительно отдают UID96 кристалла,
+        дату/время сборки и git commit (payload 56 байт); старые — 16.
+        """
         payload = self.request_control(CMD_SYSTEM_INFO, b"")
-        if len(payload) != 16:
+        if len(payload) < 16:
             raise RuntimeError("Некорректный ответ CMD_SYSTEM_INFO")
-        return {
+        info: dict[str, object] = {
             "application_version": payload[0],
             "protocol_version": payload[1],
             "flash_size_kb": int.from_bytes(payload[2:4], "little"),
@@ -421,6 +425,15 @@ class SerialManager(QObject):
             "application_size": int.from_bytes(payload[8:12], "little"),
             "application_crc32": int.from_bytes(payload[12:16], "little"),
         }
+        if len(payload) >= 28:
+            info["mcu_uid"] = payload[16:28].hex().upper()
+        if len(payload) >= 48:
+            info["build_datetime"] = payload[28:48].decode("ascii", errors="ignore").strip("\x00 ")
+        if len(payload) >= 56:
+            commit = payload[48:56].split(b"\x00")[0].decode("ascii", errors="ignore")
+            if commit:
+                info["git_commit"] = commit
+        return info
 
     def ping_device(self) -> bool:
         """Отправляет устройству запрос ID и возвращает True, если есть ответ."""

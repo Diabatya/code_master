@@ -33,6 +33,19 @@
 #define APP_PAGES_START    16U
 #define APP_PAGES_TOTAL    112U
 
+/* Memory map (firmware/PROTOCOL.md §2):
+ *   0x0803D000-0x0803D7FF  app metadata page (page 122)
+ *   0x0803D800-0x0803DFFF  device config page (page 123) — writable via
+ *                          AN3155 for config-only updates
+ *   0x0803E000-0x0803FFFF  trigger storage (pages 124-127) — triggers are
+ *                          written ONLY through the application protocol
+ *                          (CMD_TRIGGER_*), never via raw AN3155 writes.
+ */
+#define DEVICE_CFG_ADDR    0x0803D800U
+#define TRIGGER_ADDR       0x0803E000U
+#define ERASABLE_PAGE_END  124U   /* pages 16..123 may be individually erased */
+#define WRITABLE_END       TRIGGER_ADDR
+
 static const uint8_t ack = ACK_BYTE;
 static const uint8_t nack = NACK_BYTE;
 
@@ -79,6 +92,35 @@ static bool bl_address_in_app(uint32_t address)
   return true;
 }
 
+/* Read Memory may cover the whole application region (config + trigger
+ * pages included — "read full flash" needs them). */
+static bool bl_address_readable(uint32_t address, uint16_t len)
+{
+  if (!bl_address_in_app(address)) {
+    return false;
+  }
+  if ((uint32_t)len > (FLASH_END - address)) {
+    return false;
+  }
+  return true;
+}
+
+/* Write Memory is restricted to the application code + metadata + device
+ * config page (…0x0803DFFF). The trigger region 0x0803E000–0x0803FFFF is
+ * never writable through AN3155: triggers are stored only via the
+ * application-level CMD_TRIGGER_STAGE/COMMIT commands, so a corrupted or
+ * malicious .hex cannot silently rewrite them. */
+static bool bl_address_writable(uint32_t address, uint16_t len)
+{
+  if (address < APP_START || address >= WRITABLE_END) {
+    return false;
+  }
+  if ((uint32_t)len > (WRITABLE_END - address)) {
+    return false;
+  }
+  return true;
+}
+
 static uint32_t bl_crc32(uint32_t address, uint32_t length)
 {
   uint32_t crc = 0xFFFFFFFFU;
@@ -94,12 +136,17 @@ static uint32_t bl_crc32(uint32_t address, uint32_t length)
 
 static bool bl_metadata_is_valid(void)
 {
+  /* Strict check: the application is bootable only when its metadata page
+   * holds a valid APP1 record with a matching CRC32. There is no
+   * "no metadata = valid" fallback on purpose: the configurator always
+   * writes the metadata record LAST during an update (after code and
+   * verify), so any interrupted update — erased page (0xFF), explicit
+   * invalidation (0x00) or a torn record — leaves the magic invalid and
+   * the device stays in the bootloader instead of booting a partial
+   * image. Images built before the metadata feature must simply be
+   * reflashed once through the bootloader/DFU. */
   const uint8_t *metadata = (const uint8_t *)APP_METADATA_ADDR;
   uint32_t magic = *(const uint32_t *)&metadata[0];
-  if (magic == 0xFFFFFFFFU || magic == 0U) {
-    /* Backward compatibility with application images built before metadata. */
-    return true;
-  }
   if (magic != APP_METADATA_MAGIC) {
     return false;
   }
@@ -237,17 +284,6 @@ static bool bl_flash_erase_app(void)
   return ok;
 }
 
-static bool bl_address_check(uint32_t address, uint16_t len)
-{
-  if (!bl_address_in_app(address)) {
-    return false;
-  }
-  if ((uint32_t)len > (FLASH_END - address)) {
-    return false;
-  }
-  return true;
-}
-
 /* -------------------------------------------------------------------------- */
 /* Command handlers                                                           */
 /* -------------------------------------------------------------------------- */
@@ -304,20 +340,21 @@ static void bl_cmd_read_memory(void)
   uint8_t sum = addr[0] ^ addr[1] ^ addr[2] ^ addr[3];
   if (ck != sum) { bl_send_nack(); return; }
 
+  uint32_t address = ((uint32_t)addr[0] << 24) | ((uint32_t)addr[1] << 16) |
+                     ((uint32_t)addr[2] << 8) | (uint32_t)addr[3];
+
+  /* Address is validated before the first ACK so a rejected read never
+   * leaks into the data stream (AN3155 expects NACK at the address stage). */
+  if (!bl_address_in_app(address)) { bl_send_nack(); return; }
+
   bl_send_ack();
 
   if (!bl_read_byte(&n, 200)) { bl_send_nack(); return; }
 
   uint16_t length = (uint16_t)n + 1U;
+  if (!bl_address_readable(address, length)) { bl_send_nack(); return; }
+
   bl_send_ack();
-
-  uint32_t address = ((uint32_t)addr[0] << 24) | ((uint32_t)addr[1] << 16) |
-                     ((uint32_t)addr[2] << 8) | (uint32_t)addr[3];
-
-  if (!bl_address_check(address, length)) {
-    bl_send_nack();
-    return;
-  }
 
   /* Send data in chunks to fit the TX buffer. */
   uint16_t sent = 0;
@@ -344,7 +381,7 @@ static void bl_cmd_write_memory(void)
   uint32_t address = ((uint32_t)addr[0] << 24) | ((uint32_t)addr[1] << 16) |
                      ((uint32_t)addr[2] << 8) | (uint32_t)addr[3];
 
-  if (!bl_address_in_app(address)) { bl_send_nack(); return; }
+  if (address < APP_START || address >= WRITABLE_END) { bl_send_nack(); return; }
 
   bl_send_ack();
 
@@ -364,7 +401,7 @@ static void bl_cmd_write_memory(void)
   }
   if (ck != sum) { bl_send_nack(); return; }
 
-  if (!bl_address_check(address, length)) { bl_send_nack(); return; }
+  if (!bl_address_writable(address, length)) { bl_send_nack(); return; }
 
   if (!bl_flash_program(address, data, length)) {
     bl_send_nack();
@@ -403,7 +440,11 @@ static bool bl_flash_erase_pages(const uint16_t *pages, uint16_t count)
 
   HAL_FLASH_Unlock();
   for (uint16_t i = 0U; i < count; i++) {
-    if (pages[i] < APP_PAGES_START || pages[i] >= (APP_PAGES_START + APP_PAGES_TOTAL)) {
+    /* Individual page erase: app + metadata + config pages only
+     * (16..123). Trigger pages 124..127 are excluded — trigger storage is
+     * owned by the application's CMD_TRIGGER_* commit path. Mass erase
+     * (0xFFFF) still wipes the whole application region deliberately. */
+    if (pages[i] < APP_PAGES_START || pages[i] >= ERASABLE_PAGE_END) {
       HAL_FLASH_Lock();
       return false;
     }

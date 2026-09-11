@@ -60,6 +60,8 @@ from core.can_protocol import (
 )
 from core.stm32_info import (
     APPLICATION_BASE_ADDR,
+    APP_METADATA_PAGE_ADDR,
+    APP_METADATA_PAGE_SIZE,
     BOOTLOADER_BASE_ADDR,
     CHIP_FLASH_SIZE_KB,
     DEVICE_CONFIG_PAGE_ADDR,
@@ -68,6 +70,7 @@ from core.stm32_info import (
     LEGACY_CONFIG_PAGE_ADDR,
     STM32_FLASH_SIZES,
     STM32_PAGE_SIZES,
+    build_app_metadata,
     build_device_config_page,
     merge_device_config_page,
     parse_device_config,
@@ -829,9 +832,20 @@ class FlashWorker(QThread):
                     "UART прошивка: %s, base=0x%08X, размер=%d, page_size=%d, skip_blank=%s",
                     file_path, base, len(data), page_size, skip_blank,
                 )
-                bl.flash_firmware(bin_path, base, page_size=page_size, skip_blank=skip_blank)
-                ok = bl.verify(base, data) if self._verify else True
-                return ok, tr("UART прошивка завершена: {0}").format(file_path)
+                bl.flash_firmware(
+                    bin_path, base, page_size=page_size, skip_blank=skip_blank,
+                    status_callback=self.log_line.emit,
+                )
+                if self._verify:
+                    self.log_line.emit(
+                        tr("Верификация {0} байт с 0x{1:08X}...").format(len(data), base)
+                    )
+                    ok = bl.verify(base, data)
+                else:
+                    ok = True
+                if not ok:
+                    return False, tr("UART: верификация не прошла (CRC mismatch) — {0}").format(file_path)
+                return True, tr("UART прошивка завершена: {0}").format(file_path)
             finally:
                 try:
                     Path(bin_path).unlink(missing_ok=True)
@@ -874,9 +888,20 @@ class FlashWorker(QThread):
                     "USB CDC прошивка: %s, base=0x%08X, размер=%d, page_size=%d, skip_blank=%s",
                     file_path, base, len(data), page_size, skip_blank,
                 )
-                bl.flash_firmware(bin_path, base, page_size=page_size, skip_blank=skip_blank)
-                ok = bl.verify(base, data) if self._verify else True
-                return ok, tr("USB CDC прошивка завершена: {0}").format(file_path)
+                bl.flash_firmware(
+                    bin_path, base, page_size=page_size, skip_blank=skip_blank,
+                    status_callback=self.log_line.emit,
+                )
+                if self._verify:
+                    self.log_line.emit(
+                        tr("Верификация {0} байт с 0x{1:08X}...").format(len(data), base)
+                    )
+                    ok = bl.verify(base, data)
+                else:
+                    ok = True
+                if not ok:
+                    return False, tr("USB CDC: верификация не прошла (CRC mismatch) — {0}").format(file_path)
+                return True, tr("USB CDC прошивка завершена: {0}").format(file_path)
             finally:
                 try:
                     Path(bin_path).unlink(missing_ok=True)
@@ -919,6 +944,24 @@ class FlashWorker(QThread):
             segments = [(start, data) for start, data in segments if data]
             if not segments:
                 return False, tr("Файл прошивки пуст")
+
+            # Метаданные (APP_METADATA_PAGE_ADDR) — «флаг валидности»
+            # application: сегменты этой страницы пишем последними, чтобы
+            # обрыв обновления не мог оставить загружаемый обрывок кода
+            # (bl_metadata_is_valid в firmware/bootloader).
+            meta_end = APP_METADATA_PAGE_ADDR + APP_METADATA_PAGE_SIZE
+            app_touched = any(
+                start < APP_METADATA_PAGE_ADDR < start + len(data)
+                or (APPLICATION_BASE_ADDR <= start < APP_METADATA_PAGE_ADDR)
+                for start, data in segments
+            )
+            meta_covered = any(
+                start < meta_end and APP_METADATA_PAGE_ADDR < start + len(data)
+                for start, data in segments
+            )
+            segments.sort(
+                key=lambda s: 1 if s[0] < meta_end and APP_METADATA_PAGE_ADDR < s[0] + len(s[1]) else 0
+            )
 
             total_bytes = sum(len(data) for _, data in segments)
             logger.info(
@@ -963,6 +1006,17 @@ class FlashWorker(QThread):
                     preserved_segments.append((start, data))
                 segments = preserved_segments
 
+                if app_touched:
+                    # UPDATE_STARTED: гасим magic метаданных до стирания —
+                    # при обрыве питания bootloader не запустит недописанное
+                    # application (строгая проверка bl_metadata_is_valid).
+                    try:
+                        dfu.download(APP_METADATA_PAGE_ADDR, b"\x00" * 4)
+                        dfu.abort()
+                        self.log_line.emit(tr("USB DFU: приложение помечено незавершённым"))
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("DFU: не удалось инвалидировать метаданные: %s", exc)
+
                 offset = 0
                 self.log_line.emit(tr("USB DFU: стирание Flash..."))
                 for start, data in segments:
@@ -985,6 +1039,30 @@ class FlashWorker(QThread):
                     )
                     dfu.abort()
                     offset += len(data)
+
+                if app_touched and not meta_covered:
+                    # Образ без страницы метаданных — синтезируем запись APP1
+                    # и пишем её последней, иначе строгая проверка bootloader'а
+                    # не запустит обновлённое приложение.
+                    code_seg = next(
+                        (d for s, d in segments if s == APPLICATION_BASE_ADDR), None
+                    )
+                    if code_seg is not None:
+                        meta = build_app_metadata(code_seg)
+                        self.log_line.emit(tr("USB DFU: запись метаданных приложения..."))
+                        dfu.erase_pages(
+                            APP_METADATA_PAGE_ADDR, meta, page_size=page_size, skip_blank=False
+                        )
+                        dfu.download(APP_METADATA_PAGE_ADDR, meta)
+                        dfu.abort()
+                        segments.append((APP_METADATA_PAGE_ADDR, meta))
+                        total_bytes += len(meta)
+                    else:
+                        logger.warning(
+                            "DFU: сегмент application начинается не с 0x%08X — "
+                            "метаданные не синтезированы, bootloader может не запустить образ",
+                            APPLICATION_BASE_ADDR,
+                        )
 
                 ok = True
                 if self._verify:
