@@ -17,3 +17,5 @@ build/
 *.xls
 .ruff_cache/
 /*.hex
+/CURSOR_FIX_PROMPT.md
+/VID_20260901_142110.mp4
