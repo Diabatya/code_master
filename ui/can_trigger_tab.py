@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QRegularExpression, Qt, QTimer
+from PySide6.QtCore import QRegularExpression, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -96,12 +95,21 @@ class _IdValidator:
 class CanTriggerTab(QWidget):
     """Страница управления триггерами CAN."""
 
+    # Срабатывает при любом пользовательском изменении полей триггеров —
+    # окно настроек использует его, чтобы включить кнопку «Сохранить».
+    settings_changed = Signal()
+
     def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._config = Config()
         self._blocks: List[Dict[str, Any]] = []
         self._applying_device_state = False
+        # device_managed[i] == True: триггер i записан во Flash устройства и
+        # исполняется самим МК — приложение не должно дублировать ответ
+        # (иначе на шине были бы двойные фреймы). Сбрасывается при любом
+        # редактировании блока и при отключении порта.
+        self._device_managed = [False] * TRIGGER_COUNT
         self._memory_indicator = MemoryIndicator(self)
 
         self._create_widgets()
@@ -215,6 +223,21 @@ class CanTriggerTab(QWidget):
         header = QHBoxLayout()
         header_label = QLabel(tr("Фреймы ответа"))
         header.addWidget(header_label)
+
+        # RTR — одна кнопка на весь ответ триггера, рядом с заголовком
+        # «Фреймы ответа»: trigger_t хранит единственный tx_rtr, поэтому
+        # флаг общий для всех строк фреймов ответа.
+        rtr = QPushButton(tr("RTR"))
+        rtr.setFixedSize(44, 26)
+        rtr.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+        rtr.setCheckable(True)
+        rtr.setToolTip(tr("Remote Transmission Request"))
+        rtr.setStyleSheet(
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #4A4A6A; }"
+            "QPushButton:checked { background-color: #FF9800; color: #FFFFFF; }"
+        )
+        header.addWidget(rtr)
         header.addStretch()
         add_button = QPushButton("+")
         add_button.setFixedSize(32, 32)
@@ -231,7 +254,8 @@ class CanTriggerTab(QWidget):
         rows_layout.setSpacing(4)
         group_layout.addLayout(rows_layout)
 
-        block = {"group": group, "header_label": header_label, "rows_layout": rows_layout, "add_button": add_button, "rows": []}
+        block = {"group": group, "header_label": header_label, "rows_layout": rows_layout, "add_button": add_button, "rows": [], "rtr": rtr}
+        rtr.toggled.connect(lambda checked, b=block: self._on_block_rtr_toggled(b, checked))
         add_button.clicked.connect(lambda: self._add_response_row(block, font))
         self._add_response_row(block, font)
         return block
@@ -248,20 +272,6 @@ class CanTriggerTab(QWidget):
         can_id = self._make_id_edit(font, bit)
         dlc = self._make_dlc_spin(font)
         data, data_widget = self._make_data_edits(font)
-
-        rtr = QPushButton(tr("RTR"))
-        rtr.setFixedSize(44, 26)
-        rtr.setFont(QFont("Arial", 8, QFont.Weight.Bold))
-        rtr.setCheckable(True)
-        rtr.setToolTip(tr("Remote Transmission Request"))
-        rtr.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
-            "QPushButton:hover { background-color: #4A4A6A; }"
-            "QPushButton:checked { background-color: #FF9800; color: #FFFFFF; }"
-        )
-        rtr.toggled.connect(
-            lambda checked, d=data, w=data_widget, s=dlc: self._on_row_rtr_toggled(checked, d, w, s)
-        )
 
         delay_before_send = self._make_delay_spin(font)
         delay_before_send.setFixedWidth(80)
@@ -302,13 +312,12 @@ class CanTriggerTab(QWidget):
         row_layout.addWidget(delay_between)
         row_layout.addWidget(QLabel(tr("Кол-во")))
         row_layout.addWidget(count)
-        row_layout.addWidget(rtr)
         row_layout.addWidget(remove_button)
 
         dlc.valueChanged.connect(
-            lambda value: self._set_data_enabled(data, 0 if rtr.isChecked() else value)
+            lambda value, b=block: self._set_data_enabled(data, 0 if b["rtr"].isChecked() else value)
         )
-        self._set_data_enabled(data, dlc.value())
+        self._set_data_enabled(data, 0 if block["rtr"].isChecked() else dlc.value())
 
         next_delay = self._make_delay_spin(font)
         next_delay.setFixedWidth(80)
@@ -329,13 +338,14 @@ class CanTriggerTab(QWidget):
             "delay_before_label": delay_before_label,
             "delay_between_label": delay_between_label,
             "count": count,
-            "rtr": rtr,
             "next_delay": next_delay,
             "pause_widget": pause_widget,
             "remove_button": remove_button,
         }
         remove_button.clicked.connect(lambda: self._remove_response_row(block, row))
-        can_id.set_fill_callback(lambda parsed, r=row: self._fill_row_from_packet(r, parsed))
+        can_id.set_fill_callback(
+            lambda parsed, r=row, b=block: self._fill_row_from_packet(r, parsed, b)
+        )
         return row
 
     def _create_pause_widget(self, font: QFont, spin: QSpinBox) -> QWidget:
@@ -369,6 +379,13 @@ class CanTriggerTab(QWidget):
             return
         new_row = self._create_response_row(font, block)
         block["rows"].append(new_row)
+        # Строки, добавленные после _watch_block_signals, подписываем здесь.
+        index = next(
+            (i for i, b in enumerate(self._blocks) if b["response"] is block),
+            None,
+        )
+        if index is not None:
+            self._watch_widget_tree(new_row["widget"], index, [new_row["copy_paste"]])
         self._rebuild_response_rows(block)
         self._update_response_buttons(block)
 
@@ -512,16 +529,17 @@ class CanTriggerTab(QWidget):
             else:
                 edit.setEnabled(True)
 
-    def _on_row_rtr_toggled(
-        self, checked: bool, edits: List[QLineEdit], widget: QWidget, dlc: QSpinBox
-    ) -> None:
-        """RTR в ответе триггера: поле Data блокируется и бледнеет,
+    def _on_block_rtr_toggled(self, block: Dict[str, Any], checked: bool) -> None:
+        """RTR в ответе триггера: поля Data всех строк блокируются и бледнеют,
         редактируемыми остаются только ID и DLC."""
-        self._set_data_enabled(edits, 0 if checked else dlc.value())
-        widget.setEnabled(not checked)
-        self._set_widget_opacity(widget, 0.35 if checked else 1.0)
+        for row in block["rows"]:
+            self._set_data_enabled(row["data"], 0 if checked else row["dlc"].value())
+            row["data_widget"].setEnabled(not checked)
+            self._set_widget_opacity(row["data_widget"], 0.35 if checked else 1.0)
 
-    def _fill_row_from_packet(self, row: Dict[str, Any], parsed: Dict[str, Any]) -> None:
+    def _fill_row_from_packet(
+        self, row: Dict[str, Any], parsed: Dict[str, Any], block: Optional[Dict[str, Any]] = None
+    ) -> None:
         """Заполняет строку (ID, DLC, Data) из распарсенного пакета."""
         can_id = parsed.get("id")
         if can_id is None:
@@ -534,7 +552,8 @@ class CanTriggerTab(QWidget):
         data = parsed.get("data", [])
         for i, edit in enumerate(row["data"]):
             edit.setText(f"{data[i]:02X}" if i < len(data) else "")
-        self._set_data_enabled(row["data"], dlc)
+        rtr = block["rtr"].isChecked() if block is not None and "rtr" in block else False
+        self._set_data_enabled(row["data"], 0 if rtr else dlc)
 
     def _fill_cache_from_packet(self, cache: Dict[str, Any], parsed: Dict[str, Any]) -> None:
         """Заполняет кэш (ID, DLC, From Data) из распарсенного пакета."""
@@ -623,26 +642,80 @@ class CanTriggerTab(QWidget):
         layout.addWidget(scroll)
         layout.addWidget(self._memory_indicator)
 
-        sync_layout = QHBoxLayout()
-        self._read_device_button = QPushButton(tr("Прочитать триггеры из устройства"))
-        self._write_device_button = QPushButton(tr("Записать триггеры в устройство"))
-        self._trigger_stats_button = QPushButton(tr("Диагностика триггеров"))
-        self._compare_device_button = QPushButton(tr("Сравнить с устройством"))
-        self._read_device_button.clicked.connect(self._read_triggers_from_device)
-        self._write_device_button.clicked.connect(self._write_triggers_to_device)
-        self._trigger_stats_button.clicked.connect(self._read_trigger_stats)
-        self._compare_device_button.clicked.connect(self._compare_with_device)
-        sync_layout.addWidget(self._read_device_button)
-        sync_layout.addWidget(self._write_device_button)
-        sync_layout.addWidget(self._trigger_stats_button)
-        sync_layout.addWidget(self._compare_device_button)
-        layout.addLayout(sync_layout)
+        for index in range(TRIGGER_COUNT):
+            self._watch_block_signals(index)
+
+    def _watch_block_signals(self, index: int) -> None:
+        """Подписывает пользовательские изменения всех полей блока на
+        _mark_dirty: снимает флаг device_managed и сообщает окну настроек,
+        что появились несохранённые изменения."""
+        block = self._blocks[index]
+
+        def mark(*_args: object) -> None:
+            self._mark_dirty(index)
+
+        block["group"].toggled.connect(mark)
+        skip = [
+            block["recv"]["copy_paste"],
+            block["cache"]["from_copy_paste"],
+            block["cache"]["to_copy_paste"],
+            *(row["copy_paste"] for row in block["response"]["rows"]),
+        ]
+        self._watch_widget_tree(block["group"], index, skip)
+
+    @staticmethod
+    def _inside_any(widget: QWidget, containers: List[QWidget]) -> bool:
+        parent = widget
+        while parent is not None:
+            if parent in containers:
+                return True
+            parent = parent.parentWidget()
+        return False
+
+    def _watch_widget_tree(
+        self, root: QWidget, index: int, skip: Optional[List[QWidget]] = None
+    ) -> None:
+        """Подписывает на _mark_dirty все поля ввода внутри виджета root,
+        кроме виджетов внутри контейнеров skip (кнопки копипасты)."""
+
+        def mark(*_args: object) -> None:
+            self._mark_dirty(index)
+
+        skip = skip or []
+        for widget in root.findChildren(QComboBox):
+            if not self._inside_any(widget, skip):
+                widget.activated.connect(mark)
+        for widget in root.findChildren(QLineEdit):
+            if not self._inside_any(widget, skip):
+                widget.textEdited.connect(mark)
+        for widget in root.findChildren(QSpinBox):
+            if self._inside_any(widget, skip):
+                continue
+            # valueChanged срабатывает и при программном setValue — считаем
+            # изменение пользовательским только когда спин в фокусе.
+            widget.valueChanged.connect(
+                lambda *_a, w=widget, m=mark: m() if w.hasFocus() else None
+            )
+        for widget in root.findChildren(QCheckBox):
+            if not self._inside_any(widget, skip):
+                widget.clicked.connect(mark)
+        for widget in root.findChildren(QPushButton):
+            if not self._inside_any(widget, skip):
+                widget.clicked.connect(mark)
+
+    def _mark_dirty(self, index: Optional[int] = None) -> None:
+        """Помечает конфигурацию изменённой пользователем."""
+        if self._applying_device_state:
+            return
+        if index is not None:
+            self._device_managed[index] = False
+        self.settings_changed.emit()
 
     def _device_trigger_values(self, index: int) -> Dict[str, Any]:
         block = self._blocks[index]
         recv = block["recv"]
-        if recv["channel"].currentIndex() > 1:
-            raise ValueError(tr("Firmware поддерживает один канал CAN для trigger_t; выберите CAN1 или CAN2"))
+        # rx_channel/tx_channel хранятся 0-based как индекс комбобокса:
+        # 0=CAN1, 1=CAN2, 2=«CAN1 и CAN2» — firmware понимает все три.
         recv_id = self._parse_id(recv["id"].text()) or 0
         rx_extended = recv["bit"].currentIndex()
         rx_mask = 0x1FFFFFFF if rx_extended else 0x7FF
@@ -652,20 +725,17 @@ class CanTriggerTab(QWidget):
 
         response_rows = block["response"]["rows"]
         response = response_rows[0] if response_rows else None
+        tx_rtr = int(block["response"]["rtr"].isChecked())
         if response is None:
             tx_id, tx_channel, tx_extended, tx_dlc = 0, 0, 0, 0
             tx_data = b""
-            tx_rtr = 0
             delay_ms = 0
         else:
-            if response["channel"].currentIndex() > 1:
-                raise ValueError(tr("Firmware поддерживает один канал CAN для ответа; выберите CAN1 или CAN2"))
             tx_id = self._parse_id(response["id"].text()) or 0
             tx_channel = response["channel"].currentIndex()
             tx_extended = response["bit"].currentIndex()
             tx_dlc = response["dlc"].value()
             tx_data = bytes((value or 0) & 0xFF for value in self._parse_data(response["data"]))
-            tx_rtr = int(response["rtr"].isChecked())
             delay_ms = response["delay_before_send"].value()
 
         return {
@@ -720,7 +790,7 @@ class CanTriggerTab(QWidget):
         recv = block["recv"]
         self._applying_device_state = True
         block["group"].setChecked(bool(values["enabled"]))
-        recv["channel"].setCurrentIndex(min(values["rx_channel"], 1))
+        recv["channel"].setCurrentIndex(min(values["rx_channel"], 2))
         recv["bit"].setCurrentIndex(int(values["rx_extended"]))
         recv["id"].setText(int_to_hex(values["rx_id"], 8 if values["rx_extended"] else 3))
         recv["dlc"].setValue(max(1, min(8, values["rx_dlc"] or 8)))
@@ -728,108 +798,105 @@ class CanTriggerTab(QWidget):
             edit.setText(f"{value:02X}")
         self._set_data_enabled(recv["data"], recv["dlc"].value())
 
+        block["response"]["rtr"].setChecked(bool(values.get("tx_rtr", 0)))
         rows = block["response"]["rows"]
         if rows:
             row = rows[0]
-            row["channel"].setCurrentIndex(min(values["tx_channel"], 1))
+            row["channel"].setCurrentIndex(min(values["tx_channel"], 2))
             row["bit"].setCurrentIndex(int(values["tx_extended"]))
             row["id"].setText(int_to_hex(values["tx_id"], 8 if values["tx_extended"] else 3))
             row["dlc"].setValue(min(8, values["tx_dlc"]))
             for edit, value in zip(row["data"], values["tx_data"]):
                 edit.setText(f"{value:02X}")
-            row["rtr"].setChecked(bool(values.get("tx_rtr", 0)))
             row["delay_before_send"].setValue(values["delay_ms"])
-            self._set_data_enabled(row["data"], 0 if row["rtr"].isChecked() else row["dlc"].value())
+            self._set_data_enabled(
+                row["data"], 0 if block["response"]["rtr"].isChecked() else row["dlc"].value()
+            )
         self._applying_device_state = False
         self._set_trigger_status(index, "enabled" if values["enabled"] else "disabled")
 
-    def _read_triggers_from_device(self) -> None:
+    def _is_device_representable(self, block: Dict[str, Any]) -> bool:
+        """True, если триггер целиком выразим одной записью trigger_t на МК.
+
+        Firmware хранит ровно один фрейм ответа с одной задержкой, без
+        повторов и без кэша. Всё, что шире (несколько фреймов ответа,
+        count>1, паузы между пакетами/фреймами, кэш), исполняется только
+        приложением — записывать такое в МК нельзя, иначе устройство
+        продублирует первый фрейм поверх ответов приложения.
+        """
+        if block["cache"]["cache_check"].isChecked():
+            return False
+        rows = block["response"]["rows"]
+        filled = [r for r in rows if self._parse_id(r["id"].text()) is not None]
+        if len(filled) > 1:
+            return False
+        if filled:
+            row = filled[0]
+            if (
+                row["count"].value() > 1
+                or row["delay_between"].value() > 0
+                or row["next_delay"].value() > 0
+            ):
+                return False
+        return True
+
+    def sync_from_device(self) -> None:
+        """Вычитывает все триггеры из устройства (вызывается при подключении).
+
+        Молча применяет состояние в UI и помечает блоки, исполняемые МК,
+        флагом device_managed. Ошибки поднимает наружу — решает вызывающий.
+        """
+        self._applying_device_state = True
         try:
             for index in range(TRIGGER_COUNT):
                 payload = self._serial_manager.request_control(CMD_TRIGGER_READ, bytes((index,)))
                 self._apply_device_trigger(index, unpack_trigger(payload))
+                self._device_managed[index] = self._is_device_representable(self._blocks[index])
             self._save_config()
-            QMessageBox.information(self, tr("Готово"), tr("Триггеры прочитаны из устройства"))
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Ошибка чтения триггеров из устройства")
-            QMessageBox.critical(self, tr("Ошибка"), str(exc))
+        finally:
+            self._applying_device_state = False
 
-    def _compare_with_device(self) -> None:
-        try:
-            different = []
-            for index in range(TRIGGER_COUNT):
-                local_payload = pack_trigger(self._device_trigger_values(index))
-                remote_payload = self._serial_manager.request_control(
-                    CMD_TRIGGER_READ, bytes((index,))
-                )
-                if local_payload != remote_payload:
-                    different.append(str(index + 1))
-                    self._set_trigger_status(index, "differs")
-                else:
-                    self._set_trigger_status(index, "synced")
-            if different:
-                message = tr("Отличаются триггеры: {0}").format(", ".join(different))
-            else:
-                message = tr("Триггеры совпадают с устройством")
-            QMessageBox.information(self, tr("Сравнение триггеров"), message)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, tr("Ошибка"), str(exc))
-
-    def _read_trigger_stats(self) -> None:
-        try:
-            stats = self._serial_manager.read_trigger_stats()
-            QMessageBox.information(
-                self,
-                tr("Диагностика триггеров"),
-                tr("Срабатываний: {0}\nМаксимальное опоздание: {1} мс").format(
-                    stats["fired_count"], stats["max_lateness_ms"]
-                ),
+    def write_to_device(self) -> int:
+        """Записывает текущие триггеры в устройство. Возвращает число
+        изменённых записей. Вызывается кнопкой «Сохранить» окна настроек."""
+        changed = 0
+        for index in range(TRIGGER_COUNT):
+            block = self._blocks[index]
+            representable = self._is_device_representable(block)
+            values = self._device_trigger_values(index)
+            if not representable:
+                # Триггер исполняется приложением — на МК он должен быть
+                # выключен, иначе устройство продолжит отвечать по-старому.
+                values["enabled"] = 0
+            local_payload = pack_trigger(values)
+            remote_payload = self._serial_manager.request_control(
+                CMD_TRIGGER_READ, bytes((index,))
             )
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, tr("Ошибка"), str(exc))
-
-    def _write_triggers_to_device(self) -> None:
-        try:
-            changed = 0
-            for index in range(TRIGGER_COUNT):
-                local_payload = pack_trigger(self._device_trigger_values(index))
-                remote_payload = self._serial_manager.request_control(
-                    CMD_TRIGGER_READ, bytes((index,))
-                )
-                if remote_payload == local_payload:
-                    self._set_trigger_status(index, "synced")
-                    continue
+            if remote_payload == local_payload:
+                self._set_trigger_status(index, "synced")
+            else:
                 self._serial_manager.request_control(
                     CMD_TRIGGER_STAGE, bytes((index,)) + local_payload
                 )
                 self._set_trigger_status(index, "written")
                 changed += 1
-            if changed:
-                self._serial_manager.request_control(CMD_TRIGGER_COMMIT, b"")
-            self._save_config()
-            QMessageBox.information(
-                self,
-                tr("Готово"),
-                tr("Триггеры записаны в устройство: изменено {0}").format(changed),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Ошибка записи триггеров в устройство")
-            QMessageBox.critical(self, tr("Ошибка"), str(exc))
+            self._device_managed[index] = representable
+        if changed:
+            self._serial_manager.request_control(CMD_TRIGGER_COMMIT, b"")
+        self._save_config()
+        return changed
+
+    def clear_device_managed(self) -> None:
+        """Сбрасывает флаги исполнения на МК (при отключении порта)."""
+        self._device_managed = [False] * TRIGGER_COUNT
 
     def _on_trigger_toggled(self, index: int, enabled: bool) -> None:
-        if (
-            self._applying_device_state
-            or not self._serial_manager.is_open()
-            or self._config.get("emulation", False)
-        ):
+        # Запись в устройство теперь происходит только по «Сохранить» —
+        # здесь просто помечаем блок изменённым и обновляем статус.
+        if self._applying_device_state:
             return
-        try:
-            self._serial_manager.set_trigger_enabled(index, enabled)
-            self._save_config()
-            self._set_trigger_status(index, "enabled" if enabled else "disabled")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Не удалось изменить enabled trigger %d: %s", index, exc)
-            QMessageBox.warning(self, tr("Ошибка"), str(exc))
+        self._device_managed[index] = False
+        self._set_trigger_status(index, "enabled" if enabled else "disabled")
 
     def _on_cache_active_changed(self, index: int, state: int) -> None:
         enabled = state == Qt.CheckState.Checked.value
@@ -859,10 +926,6 @@ class CanTriggerTab(QWidget):
 
     def retranslate_ui(self) -> None:
         """Обновляет статические строки вкладки триггеров."""
-        self._read_device_button.setText(tr("Прочитать триггеры из устройства"))
-        self._write_device_button.setText(tr("Записать триггеры в устройство"))
-        self._trigger_stats_button.setText(tr("Диагностика триггеров"))
-        self._compare_device_button.setText(tr("Сравнить с устройством"))
         for i, block in enumerate(self._blocks):
             block["group"].setTitle(tr("Триггер {0}").format(i + 1))
             block["cache"]["cache_check"].setText(tr("Автоматическая запись DATA в Кэш"))
@@ -905,13 +968,16 @@ class CanTriggerTab(QWidget):
                 "recv_data": self._parse_data(block["recv"]["data"]),
                 "recv_channel": block["recv"]["channel"].currentIndex(),
                 "cache": block["cache"]["cache_check"].isChecked(),
-                "responses": self._collect_responses(block["response"]["rows"]),
+                "responses": self._collect_responses(
+                    block["response"]["rows"], block["response"]["rtr"].isChecked()
+                ),
                 "cache_data": self._collect_cache(block["cache"]),
                 "cached_frame": None,
+                "device_managed": self._device_managed[i],
             })
         return triggers
 
-    def _collect_responses(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _collect_responses(self, rows: List[Dict[str, Any]], rtr: bool) -> List[Dict[str, Any]]:
         result: List[Dict[str, Any]] = []
         for row in rows:
             can_id = self._parse_id(row["id"].text())
@@ -922,7 +988,7 @@ class CanTriggerTab(QWidget):
                 "id": can_id,
                 "dlc": row["dlc"].value(),
                 "data": self._parse_data(row["data"]),
-                "rtr": int(row["rtr"].isChecked()),
+                "rtr": int(rtr),
                 "delay_before_send": row["delay_before_send"].value(),
                 "delay_between": row["delay_between"].value(),
                 "count": row["count"].value(),
@@ -962,7 +1028,7 @@ class CanTriggerTab(QWidget):
                     "bit": row["bit"].currentIndex(),
                     "id": row["id"].text(),
                     "dlc": row["dlc"].value(),
-                    "rtr": int(row["rtr"].isChecked()),
+                    "rtr": int(block["response"]["rtr"].isChecked()),
                     "data": " ".join(e.text() for e in row["data"] if e.text()),
                     "delay_before_send": row["delay_before_send"].value(),
                     "delay_between": row["delay_between"].value(),
@@ -992,7 +1058,14 @@ class CanTriggerTab(QWidget):
         return config
 
     def set_config(self, triggers: List[Dict[str, Any]]) -> None:
-        """Загружает конфигурацию триггеров из списка."""
+        """Загружает конфигурацию триггеров из списка.
+
+        Данные пришли из файла — состояние устройства неизвестно, поэтому
+        флаги исполнения на МК сбрасываются (пока пользователь не нажмёт
+        «Сохранить» и не запишет их в устройство, ответы при подключении
+        обрабатывает приложение).
+        """
+        self._device_managed = [False] * TRIGGER_COUNT
         self._applying_device_state = True
         try:
             for i, block in enumerate(self._blocks):
@@ -1021,16 +1094,18 @@ class CanTriggerTab(QWidget):
     def _set_response_rows(self, response_block: Dict[str, Any], responses: List[Dict[str, Any]]) -> None:
         """Заполняет динамический список фреймов ответа из конфигурации."""
         rows = response_block["rows"]
+        rtr = bool(responses[0].get("rtr", 0)) if responses else False
+        response_block["rtr"].setChecked(rtr)
         for r, row in enumerate(rows):
             data = responses[r] if r < len(responses) else {}
-            self._set_response(row, data)
+            self._set_response(row, data, rtr)
         while len(rows) > len(responses) and len(rows) > 1:
             self._remove_response_row(response_block, rows[-1])
         for r in range(len(rows), len(responses)):
             self._add_response_row(response_block, self._font)
-            self._set_response(response_block["rows"][-1], responses[r])
+            self._set_response(response_block["rows"][-1], responses[r], rtr)
 
-    def _set_response(self, response: Dict[str, Any], data: Dict[str, Any]) -> None:
+    def _set_response(self, response: Dict[str, Any], data: Dict[str, Any], rtr: bool = False) -> None:
         response["channel"].setCurrentIndex(int(data.get("channel", 0)))
         response["bit"].setCurrentIndex(int(data.get("bit", 0)))
         response["id"].setText(str(data.get("id", "")))
@@ -1038,8 +1113,7 @@ class CanTriggerTab(QWidget):
         bytes_data = parse_data_bytes(str(data.get("data", "")).split())
         for d, edit in enumerate(response["data"]):
             edit.setText(f"{bytes_data[d]:02X}" if d < len(bytes_data) else "")
-        response["rtr"].setChecked(bool(data.get("rtr", 0)))
-        self._set_data_enabled(response["data"], 0 if response["rtr"].isChecked() else response["dlc"].value())
+        self._set_data_enabled(response["data"], 0 if rtr else response["dlc"].value())
         response["delay_before_send"].setValue(int(data.get("delay_before_send", 0)))
         response["delay_between"].setValue(int(data.get("delay_between", data.get("delay", 0))))
         response["count"].setValue(int(data.get("count", 1)))
@@ -1097,6 +1171,10 @@ class CanTriggerTab(QWidget):
         data = bytes(frame["data"])
 
         for trigger in self._build_internal_triggers():
+            if trigger.get("device_managed"):
+                # Триггер записан во Flash и исполняется самим МК —
+                # не дублируем ответ со стороны приложения.
+                continue
             self._update_cache(trigger, frame_id, frame_channel, data)
             if not self._match_condition(trigger, frame_id, frame_channel, data):
                 continue

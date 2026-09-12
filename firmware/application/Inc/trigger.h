@@ -37,14 +37,14 @@ extern "C" {
 typedef struct __attribute__((packed)) {
   uint32_t magic;
   uint8_t  enabled;
-  uint8_t  rx_channel;      /* 0=CAN1, 1=CAN2 */
+  uint8_t  rx_channel;      /* 0=CAN1, 1=CAN2, 2=любой из двух */
   uint8_t  rx_extended;
   uint32_t rx_id;
   uint32_t rx_id_mask;      /* bits set = must match; bits clear = don't-care */
   uint8_t  rx_dlc;
   uint8_t  rx_data[8];
   uint8_t  rx_data_mask[8]; /* per-byte don't-care mask, 0x00 = ignore byte */
-  uint8_t  tx_channel;
+  uint8_t  tx_channel;      /* 0=CAN1, 1=CAN2, 2=ответ в оба канала */
   uint8_t  tx_extended;
   uint32_t tx_id;
   uint8_t  tx_dlc;

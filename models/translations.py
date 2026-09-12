@@ -619,6 +619,7 @@ class Translator:
                 "Триггеры прочитаны из устройства": "Triggers read from device",
                 "Триггеры записаны в устройство": "Triggers written to device",
                 "Триггеры записаны в устройство: изменено {0}": "Triggers written to device: {0} changed",
+                "Настройки сохранены, триггеры записаны в устройство: изменено {0}": "Settings saved, triggers written to device: {0} changed",
                 "Диагностика триггеров": "Trigger diagnostics",
                 "Сравнить с устройством": "Compare with device",
                 "Отличаются триггеры: {0}": "Different triggers: {0}",

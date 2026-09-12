@@ -135,7 +135,13 @@ def validate_application_vector(data: bytes, base_address: int) -> Tuple[bool, s
         return True, ""
     if len(data) < offset + 8:
         return False, "Файл application короче таблицы векторов"
-    sp = int.from_bytes(data[offset : offset + 4], "little")
+    vector = data[offset : offset + 8]
+    if vector == b"\xFF" * 8:
+        # Образ не содержит application (например, bootloader + config-
+        # страница из _prepare_firmware_with_config): область векторов —
+        # пустая прослойка разреженного HEX, валидировать нечего.
+        return True, ""
+    sp = int.from_bytes(vector[0:4], "little")
     reset = int.from_bytes(data[offset + 4 : offset + 8], "little")
     if not 0x20000000 <= sp <= 0x20010000:
         return False, f"Некорректный MSP: 0x{sp:08X}"

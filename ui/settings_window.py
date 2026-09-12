@@ -6,9 +6,11 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QStandardItemModel, QStandardItem
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QCompleter,
     QFileDialog,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QGroupBox,
     QLabel,
@@ -115,9 +117,9 @@ class ConnectionTab(QWidget):
         self._refresh_ports()
         saved_port = self._config.get("port", "")
         if saved_port:
-            index = self._port_combo.findText(saved_port)
+            index = self._port_combo.findData(saved_port)
             if index < 0:
-                self._port_combo.addItem(saved_port)
+                self._port_combo.addItem(saved_port, saved_port)
                 index = self._port_combo.count() - 1
             self._port_combo.setCurrentIndex(index)
         saved_baud = str(self._config.get("baudrate", 115200))
@@ -126,21 +128,27 @@ class ConnectionTab(QWidget):
             self._baud_combo.setCurrentIndex(index)
 
     def _refresh_ports(self) -> None:
-        current = self._port_combo.currentText()
+        current = self._port_combo.currentData()
         self._port_combo.clear()
-        self._port_combo.addItem(tr("FAKE (эмулятор)"))
+        self._port_combo.addItem(tr("FAKE (эмулятор)"), "FAKE")
         for port_info in comports():
-            self._port_combo.addItem(port_info.device)
+            # Для наших устройств (VID 0483) прошивка отдаёт имя из поля
+            # «Устройство» как USB iProduct — description показывает его
+            # оператору вместо безликого «COMx».
+            text = port_info.description or port_info.device
+            self._port_combo.addItem(text, port_info.device)
         if current:
-            index = self._port_combo.findText(current)
+            index = self._port_combo.findData(current)
+            if index < 0:
+                index = self._port_combo.findText(current)
             if index >= 0:
                 self._port_combo.setCurrentIndex(index)
             else:
                 self._port_combo.setCurrentIndex(0)
 
     def _on_auto_baud(self) -> None:
-        port_text = self._port_combo.currentText()
-        if not port_text or port_text.startswith("FAKE"):
+        port_text = str(self._port_combo.currentData() or "")
+        if not port_text or port_text == "FAKE":
             self._set_status(tr("Выберите реальный COM-порт"), error=True)
             return
         if self._serial_manager.is_open():
@@ -197,12 +205,12 @@ class ConnectionTab(QWidget):
             self._serial_manager.close_port()
             return
         port_text = self._port_combo.currentText()
-        port_name = "FAKE" if port_text.startswith("FAKE") else port_text
+        port_name = str(self._port_combo.currentData() or port_text)
         if not port_name:
             QMessageBox.warning(self, tr("Внимание"), tr("Выберите COM-порт"))
             return
         baudrate = int(self._baud_combo.currentText())
-        emulation = port_text.startswith("FAKE")
+        emulation = port_name == "FAKE" or port_text.startswith("FAKE")
         self._config.set_bulk({"port": port_name, "baudrate": baudrate, "emulation": emulation})
         if self._serial_manager.open_port(port_name, baudrate, emulation=emulation):
             self._set_status(tr("Подключено"), error=False)
@@ -363,6 +371,101 @@ class SettingsWindow(QMainWindow):
 
         self._connect_signals()
 
+        # Отслеживание несохранённых изменений: после вычитки настроек с
+        # устройства «Сохранить» выключена и полупрозрачна, любое изменение
+        # оператора включает её обратно.
+        self._loading = False
+        self._save_opacity = QGraphicsOpacityEffect(self._save_button)
+        self._save_button.setGraphicsEffect(self._save_opacity)
+        self._install_dirty_tracking(self.centralWidget())
+        self._mark_clean()
+
+    def _install_dirty_tracking(self, root: QWidget) -> None:
+        """Подписывает поля ввода на _mark_dirty.
+
+        Используются только «пользовательские» сигналы (activated,
+        textEdited, clicked, toggled у checkable-групп и valueChanged
+        спинов в фокусе), чтобы программное заполнение при вычитке с
+        устройства не считалось изменением.
+        """
+        for widget in root.findChildren(QComboBox):
+            widget.activated.connect(self._mark_dirty)
+        for widget in root.findChildren(QLineEdit):
+            if widget is self._search_edit or widget is self._serial_edit:
+                continue
+            widget.textEdited.connect(self._mark_dirty)
+        for widget in root.findChildren(QSpinBox):
+            widget.valueChanged.connect(
+                lambda *_a, w=widget: self._mark_dirty() if w.hasFocus() else None
+            )
+        for widget in root.findChildren(QCheckBox):
+            widget.clicked.connect(self._mark_dirty)
+        for widget in root.findChildren(QPushButton):
+            if widget.isCheckable():
+                widget.clicked.connect(self._mark_dirty)
+        for widget in root.findChildren(QGroupBox):
+            if widget.isCheckable():
+                widget.toggled.connect(self._on_groupbox_toggled)
+
+    def _on_groupbox_toggled(self, _checked: bool) -> None:
+        if not self._loading:
+            self._mark_dirty()
+
+    def _mark_dirty(self, *_args: object) -> None:
+        """Включает кнопку «Сохранить» — есть незаписанные изменения."""
+        if self._loading:
+            return
+        self._save_opacity.setOpacity(1.0)
+        self._save_button.setEnabled(True)
+
+    def _mark_clean(self) -> None:
+        """Выключает и приглушает кнопку «Сохранить» — изменений нет."""
+        self._save_opacity.setOpacity(0.4)
+        self._save_button.setEnabled(False)
+
+    def _on_connection_changed(self, connected: bool) -> None:
+        if not connected:
+            self._trigger_tab.clear_device_managed()
+            return
+        if self._config.get("emulation", False):
+            return
+        # Небольшая пауза, чтобы завершился обмен CMD_DEVICE_ID при
+        # открытии порта; request_control сам ставит reader на паузу.
+        QTimer.singleShot(400, self._sync_from_device)
+
+    def _sync_from_device(self) -> None:
+        """Автоматически вычитывает настройки устройства при подключении.
+
+        Если есть несохранённые правки (кнопка «Сохранить» активна),
+        вычитку пропускаем — иначе состояние устройства затрёт работу
+        оператора, сделанную до подключения.
+        """
+        if (
+            not self._serial_manager.is_open()
+            or self._config.get("emulation", False)
+            or self._save_button.isEnabled()
+        ):
+            return
+        self._loading = True
+        try:
+            self._trigger_tab.sync_from_device()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось вычитать триггеры из устройства: %s", exc)
+        finally:
+            self._loading = False
+        self._mark_clean()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        """При показе окна с уже открытым портом вычитывает устройство —
+        если нет несохранённых правок (иначе стёрлись бы изменения)."""
+        super().showEvent(event)
+        if (
+            self._serial_manager.is_open()
+            and not self._config.get("emulation", False)
+            and not self._save_button.isEnabled()
+        ):
+            QTimer.singleShot(0, self._sync_from_device)
+
     def _on_device_type_changed(self, index: int) -> None:
         """Сохраняет выбранный тип устройства в конфигурации."""
         device_type = self._device_combo.itemData(index)
@@ -377,6 +480,8 @@ class SettingsWindow(QMainWindow):
             if analog_index < 0:
                 self._analog_tab = AnalogPortsTab(self)
                 self._tabs.addTab(self._analog_tab, "🌊 " + tr("Аналоговые порты"))
+                if hasattr(self, "_save_opacity"):
+                    self._install_dirty_tracking(self._analog_tab)
                 self._build_search_index()
         else:
             if analog_index >= 0:
@@ -490,7 +595,9 @@ class SettingsWindow(QMainWindow):
         self._serial_manager.new_can_frame.connect(self._analyzer_tab.process_frame)
         self._serial_manager.new_can_frame.connect(self._topology_tab.add_frame)
         self._serial_manager.error_occurred.connect(self._on_serial_error)
+        self._serial_manager.connection_changed.connect(self._on_connection_changed)
         self._monitor_tab.create_trigger_requested.connect(self._on_create_trigger)
+        self._trigger_tab.settings_changed.connect(self._mark_dirty)
 
     def _on_create_trigger(self, packet: dict) -> None:
         self._trigger_tab.create_trigger_from_packet(packet)
@@ -772,8 +879,13 @@ class SettingsWindow(QMainWindow):
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось загрузить: {0}").format(exc))
 
     def _save_current_config(self) -> None:
-        """Сохраняет текущую конфигурацию в файл по умолчанию."""
-        # Сохранение настроек не должно требовать физического устройства
+        """Сохраняет настройки в файл и прогружает триггеры в устройство.
+
+        Конфигуратор — «компилятор»: записанные в МК триггеры исполняются
+        устройством автономно, без приложения. Поэтому «Сохранить» —
+        единственная точка записи в устройство (кнопки чтения/записи
+        триггеров убраны).
+        """
         if not self._serial_manager.is_open():
             logger.warning("Сохранение настроек без открытого COM-порта")
         try:
@@ -782,7 +894,16 @@ class SettingsWindow(QMainWindow):
             self._flexible_tab._save_config()
             if hasattr(self._gateway_tab, "_save_config"):
                 self._gateway_tab._save_config()
-            QMessageBox.information(self, tr("Готово"), tr("Настройки сохранены"))
+            if self._serial_manager.is_open() and not self._config.get("emulation", False):
+                changed = self._trigger_tab.write_to_device()
+                QMessageBox.information(
+                    self,
+                    tr("Готово"),
+                    tr("Настройки сохранены, триггеры записаны в устройство: изменено {0}").format(changed),
+                )
+            else:
+                QMessageBox.information(self, tr("Готово"), tr("Настройки сохранены"))
+            self._mark_clean()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить: {0}").format(exc))
 

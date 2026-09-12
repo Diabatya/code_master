@@ -124,7 +124,9 @@ static uint8_t flash_write_all_triggers(void)
 
 static uint8_t trigger_fields_valid(const trigger_t *trig)
 {
-  if (trig == NULL || trig->rx_channel > 1U || trig->tx_channel > 1U
+  /* rx_channel/tx_channel: 0=CAN1, 1=CAN2, 2=оба канала (опция UI
+   * "CAN1 и CAN2" — на приём матчит любой канал, на ответ шлёт в оба). */
+  if (trig == NULL || trig->rx_channel > 2U || trig->tx_channel > 2U
       || trig->rx_extended > 1U || trig->tx_extended > 1U
       || trig->rx_dlc > 8U || trig->tx_dlc > 8U
       || trig->tx_rtr > 1U) {
@@ -194,7 +196,7 @@ static uint8_t frame_matches(const trigger_t *t, const can_frame_t *frame)
   if (!t->enabled) {
     return 0U;
   }
-  if (t->rx_channel != frame->channel) {
+  if (t->rx_channel != 2U && t->rx_channel != frame->channel) {
     return 0U;
   }
   if (t->rx_extended != frame->extended) {
@@ -223,6 +225,32 @@ static void arm_response(uint8_t index, const trigger_t *t)
   s_pending[index].fire_at_tick = HAL_GetTick() + t->delay_ms;
 }
 
+/* Отправляет фрейм ответа триггера. tx_channel: 0=CAN1, 1=CAN2, 2=оба —
+ * хранится 0-based (индекс комбобокса UI), а CanBridge_Transmit ждёт
+ * wire-нумерацию 1/2. Без конверсии ответ на CAN2 уходил в CAN1, а ответ
+ * на CAN1 (0) отбрасывался проверкой диапазона. */
+static uint8_t send_response(const trigger_t *t)
+{
+  can_frame_t resp = {
+    .channel = 0U,
+    .extended = t->tx_extended,
+    .rtr = t->tx_rtr,
+    .id = t->tx_id,
+    .dlc = t->tx_dlc,
+  };
+  memcpy(resp.data, t->tx_data, 8);
+  uint8_t sent = 0U;
+  if (t->tx_channel == 0U || t->tx_channel == 2U) {
+    resp.channel = 1U;
+    sent |= CanBridge_Transmit(&resp);
+  }
+  if (t->tx_channel >= 1U) {
+    resp.channel = 2U;
+    sent |= CanBridge_Transmit(&resp);
+  }
+  return sent;
+}
+
 void Trigger_OnFrame(const can_frame_t *frame)
 {
   for (uint8_t i = 0; i < TRIGGER_COUNT; i++) {
@@ -231,19 +259,7 @@ void Trigger_OnFrame(const can_frame_t *frame)
         /* Zero delay: send immediately, no need to go through the pending
          * list — keeps the "instant echo" case as low-latency as possible
          * (still bounded by CanBridge_Transmit()'s own mailbox wait). */
-        can_frame_t resp = {
-          /* tx_channel в trigger_t хранится 0-based (индекс комбобокса UI:
-           * 0=CAN1, 1=CAN2 — как rx_channel), а CanBridge_Transmit ждёт
-           * wire-нумерацию 1/2. Без +1 ответ на CAN2 уходил в CAN1, а ответ
-           * на CAN1 (0) отбрасывался проверкой диапазона. */
-          .channel = (uint8_t)(s_triggers[i].tx_channel + 1U),
-          .extended = s_triggers[i].tx_extended,
-          .rtr = s_triggers[i].tx_rtr,
-          .id = s_triggers[i].tx_id,
-          .dlc = s_triggers[i].tx_dlc,
-        };
-        memcpy(resp.data, s_triggers[i].tx_data, 8);
-        if (CanBridge_Transmit(&resp)) {
+        if (send_response(&s_triggers[i])) {
           s_fired_count++;
         }
       } else {
@@ -264,16 +280,7 @@ void Trigger_Poll(void)
       }
       s_pending[i].armed = 0U;
       const trigger_t *t = &s_triggers[s_pending[i].trigger_index];
-      can_frame_t resp = {
-        /* См. комментарий в Trigger_OnFrame: храним 0-based, шлём 1-based. */
-        .channel = (uint8_t)(t->tx_channel + 1U),
-        .extended = t->tx_extended,
-        .rtr = t->tx_rtr,
-        .id = t->tx_id,
-        .dlc = t->tx_dlc,
-      };
-      memcpy(resp.data, t->tx_data, 8);
-      if (CanBridge_Transmit(&resp)) {
+      if (send_response(t)) {
         s_fired_count++;
       }
     }

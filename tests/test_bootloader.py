@@ -35,6 +35,19 @@ def test_application_vector_preflight_rejects_invalid_images() -> None:
     assert "Reset vector" in reason
 
 
+def test_application_vector_skips_blank_app_area() -> None:
+    """Образ bootloader+config-страница (разреженный HEX, раздутый 0xFF до
+    config-страницы) не содержит application — область векторов вся 0xFF.
+    Такой файл не должен отваливаться с «Некорректный MSP: 0xFFFFFFFF»."""
+    size = DEVICE_CONFIG_PAGE_SIZE + (0x0803D800 - BOOTLOADER_BASE_ADDR)
+    image = bytearray(b"\xFF" * size)
+    # «Bootloader» в начале + «config» в конце, application — пустота.
+    image[0:4] = (0x20001000).to_bytes(4, "little")
+    image[-16:] = b"\x01" * 16
+    ok, _ = validate_application_vector(bytes(image), BOOTLOADER_BASE_ADDR)
+    assert ok
+
+
 def test_device_config_page_uses_firmware_layout_and_preserves_fields() -> None:
     existing = bytearray(build_device_config_page("OLD", "123"))
     existing[25:27] = (0x1234).to_bytes(2, "little")
