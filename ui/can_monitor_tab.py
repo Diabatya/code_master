@@ -10,11 +10,9 @@ from PySide6.QtCore import QRegularExpression, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
     QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
@@ -265,9 +263,9 @@ class CanChannelMonitor(QWidget):
         self._highlight_interval_ms = 500
 
         self._table = QTableWidget()
-        self._table.setColumnCount(8)
+        self._table.setColumnCount(7)
         self._table.setHorizontalHeaderLabels(
-            [tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("Счётчик"), tr("ASCII"), tr("Пояснение"), tr("RTR")]
+            [tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("Счётчик"), tr("ASCII"), tr("Пояснение")]
         )
         self._table.setFont(font)
         self._table.verticalHeader().setVisible(False)
@@ -282,7 +280,6 @@ class CanChannelMonitor(QWidget):
         self._table.setColumnWidth(4, 80)
         self._table.setColumnWidth(5, 90)
         self._table.setColumnWidth(6, 170)
-        self._table.setColumnWidth(7, 50)
         self._table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
         self._table.setMinimumHeight(200)
         self._table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -656,12 +653,11 @@ class CanChannelMonitor(QWidget):
         return [
             int_to_hex(frame_id, id_width),
             str(dlc),
-            "-" if rtr else " ".join(format_data_bytes(data)),
+            "rtr" if rtr else " ".join(format_data_bytes(data)),
             period,
             str(count),
             "" if rtr else _ascii_from_data(data),
             signals,
-            "R" if rtr else "",
         ]
 
     def add_frame(self, frame: Dict[str, object]) -> None:
@@ -896,7 +892,7 @@ class CanChannelMonitor(QWidget):
         self._clear_button.setText(tr("Очистить"))
         self._search_edit.setPlaceholderText(tr("Поиск по ID или данным…"))
         self._table.setHorizontalHeaderLabels(
-            [tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("Счётчик"), tr("ASCII"), tr("Пояснение"), tr("RTR")]
+            [tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("Счётчик"), tr("ASCII"), tr("Пояснение")]
         )
         self._send_button.setText(tr("Отправить"))
         self._cyclic_button.setToolTip(tr("Циклически"))
@@ -918,11 +914,6 @@ class CanMonitorTab(QWidget):
         self._csv_file: Optional[TextIO] = None
         self._csv_writer: Optional[csv.writer] = None
         self._csv_path: Optional[Path] = None
-        self._trigger_recording = False
-        self._trigger_csv_file: Optional[TextIO] = None
-        self._trigger_csv_writer: Optional[csv.writer] = None
-        self._trigger_csv_path: Optional[Path] = None
-        self._selecting_trigger = False
         self._dbc_manager = DBCManager()
         self._memory_indicator = MemoryIndicator(self)
         self._create_widgets()
@@ -961,9 +952,10 @@ class CanMonitorTab(QWidget):
         self._can1_speed_button.setToolTip(tr("Выбрать из списка"))
         self._can1_speed_button.clicked.connect(self._can1_speed_combo.showPopup)
 
-        self._can1_terminator_check = QCheckBox(tr("120 Ом"))
+        self._can1_terminator_check = QPushButton(tr("120 Ом"))
         self._can1_terminator_check.setToolTip(tr("Включить терминатный резистор 120 Ом"))
         self._can1_terminator_check.setFont(compact_font)
+        self._can1_terminator_check.setCheckable(True)
         self._can1_terminator_check.setChecked(self._config.get("can1_terminator", False))
         self._can1_terminator_check.toggled.connect(self._on_can1_terminator_toggled)
         self._update_terminator_style(self._can1_terminator_check)
@@ -986,9 +978,10 @@ class CanMonitorTab(QWidget):
         self._can2_speed_button.setToolTip(tr("Выбрать из списка"))
         self._can2_speed_button.clicked.connect(self._can2_speed_combo.showPopup)
 
-        self._can2_terminator_check = QCheckBox(tr("120 Ом"))
+        self._can2_terminator_check = QPushButton(tr("120 Ом"))
         self._can2_terminator_check.setToolTip(tr("Включить терминатный резистор 120 Ом"))
         self._can2_terminator_check.setFont(compact_font)
+        self._can2_terminator_check.setCheckable(True)
         self._can2_terminator_check.setChecked(self._config.get("can2_terminator", False))
         self._can2_terminator_check.toggled.connect(self._on_can2_terminator_toggled)
         self._update_terminator_style(self._can2_terminator_check)
@@ -1015,25 +1008,6 @@ class CanMonitorTab(QWidget):
         self._sleep_mode_combo.currentIndexChanged.connect(self._on_sleep_mode_changed)
         self._update_sleep_time_state(self._sleep_mode_combo.currentIndex())
 
-        # Запись по триггеру
-        self._trigger_record_check = QCheckBox(tr("Запись по триггеру"))
-        self._trigger_record_check.setFont(compact_font)
-        self._trigger_record_check.toggled.connect(self._on_trigger_record_toggled)
-
-        self._trigger_id_label = QLabel(tr("ID HEX"))
-        self._trigger_id_label.setFont(compact_font)
-        self._trigger_id_edit = QLineEdit()
-        self._trigger_id_edit.setFont(compact_font)
-        self._trigger_id_edit.setFixedWidth(90)
-        self._trigger_id_edit.setMaxLength(8)
-        self._trigger_id_edit.setEnabled(False)
-        self._trigger_id_edit.textChanged.connect(self._on_trigger_id_changed)
-
-        self._select_trigger_button = QPushButton(tr("Выбрать из таблицы"))
-        self._select_trigger_button.setFont(compact_font)
-        self._select_trigger_button.setEnabled(False)
-        self._select_trigger_button.clicked.connect(self._on_select_trigger_clicked)
-
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._monitor1 = CanChannelMonitor(1, self._serial_manager, self)
@@ -1047,9 +1021,6 @@ class CanMonitorTab(QWidget):
         self._splitter.setSizes([450, 450])
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 1)
-
-        self._monitor1._table.itemClicked.connect(self._on_table_id_selected)
-        self._monitor2._table.itemClicked.connect(self._on_table_id_selected)
 
         self._can1_speed_combo.setCurrentText(self._format_speed(self._config.get("can1_speed", 500000)))
         self._can1_speed_combo.currentIndexChanged.connect(self._on_can1_speed_changed)
@@ -1079,11 +1050,6 @@ class CanMonitorTab(QWidget):
         buttons_layout.addWidget(self._sleep_mode_label)
         buttons_layout.addWidget(self._sleep_time_spin)
         buttons_layout.addWidget(self._sleep_mode_combo)
-        buttons_layout.addSpacing(16)
-        buttons_layout.addWidget(self._trigger_record_check)
-        buttons_layout.addWidget(self._trigger_id_label)
-        buttons_layout.addWidget(self._trigger_id_edit)
-        buttons_layout.addWidget(self._select_trigger_button)
         buttons_layout.addStretch()
         layout.addLayout(buttons_layout)
         layout.addWidget(self._splitter)
@@ -1145,14 +1111,18 @@ class CanMonitorTab(QWidget):
         button.setFixedSize(height, height)
 
     @staticmethod
-    def _update_terminator_style(check: QCheckBox) -> None:
-        """Цветовая индикация включённого терминатора 120 Ом."""
-        if check.isChecked():
-            check.setStyleSheet(
-                "QCheckBox { background-color: #4CAF50; color: #FFFFFF; padding: 2px 6px; border-radius: 4px; }"
+    def _update_terminator_style(button: QPushButton) -> None:
+        """Цветовая индикация включённого терминатора 120 Ом — зелёная кнопка."""
+        if button.isChecked():
+            button.setStyleSheet(
+                "QPushButton { background-color: #4CAF50; color: #FFFFFF; border: none; border-radius: 4px; padding: 4px 10px; }"
+                "QPushButton:hover { background-color: #45A049; }"
             )
         else:
-            check.setStyleSheet("")
+            button.setStyleSheet(
+                "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 4px 10px; }"
+                "QPushButton:hover { background-color: #4A4A6A; }"
+            )
 
     def _on_can1_terminator_toggled(self, checked: bool) -> None:
         self._config.set("can1_terminator", checked)
@@ -1209,7 +1179,6 @@ class CanMonitorTab(QWidget):
         elif channel == 2:
             self._monitor2.add_frame(frame)
         self._write_frame_to_csv(frame)
-        self._write_trigger_frame_to_csv(frame)
 
     def set_dbc(self, dbc) -> None:
         """Уведомляет вкладку о смене DBC."""
@@ -1227,9 +1196,6 @@ class CanMonitorTab(QWidget):
         self._can2_terminator_check.setToolTip(tr("Включить терминатный резистор 120 Ом"))
         self._sleep_mode_label.setText(tr("Переход в режим сна"))
         self._sleep_time_spin.setSuffix(tr(" с"))
-        self._trigger_record_check.setText(tr("Запись по триггеру"))
-        self._trigger_id_label.setText(tr("ID HEX"))
-        self._select_trigger_button.setText(tr("Выбрать из таблицы"))
         index = self._sleep_mode_combo.currentIndex()
         self._sleep_mode_combo.clear()
         self._sleep_mode_combo.addItems([
@@ -1263,82 +1229,6 @@ class CanMonitorTab(QWidget):
             finally:
                 self._csv_file = None
                 self._csv_writer = None
-
-    def _on_trigger_record_toggled(self, checked: bool) -> None:
-        self._trigger_recording = checked
-        self._trigger_id_edit.setEnabled(checked)
-        self._select_trigger_button.setEnabled(checked)
-        if checked:
-            self._open_trigger_csv()
-        else:
-            self._close_trigger_csv()
-
-    def _on_trigger_id_changed(self, text: str) -> None:
-        self._config.set("trigger_record_id", text.upper())
-
-    def _on_select_trigger_clicked(self) -> None:
-        self._selecting_trigger = True
-        self._select_trigger_button.setText(tr("Кликните по строке"))
-
-    def _on_table_id_selected(self, item: QTableWidgetItem) -> None:
-        if not self._selecting_trigger:
-            return
-        self._selecting_trigger = False
-        self._select_trigger_button.setText(tr("Выбрать из таблицы"))
-        table = self.sender()
-        if not isinstance(table, QTableWidget):
-            return
-        id_item = table.item(item.row(), 0)
-        if id_item is None:
-            return
-        self._trigger_id_edit.setText(id_item.text())
-
-    def _open_trigger_csv(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            tr("Сохранить триггерную запись"),
-            "",
-            tr("CSV files (*.csv)"),
-        )
-        if not path:
-            self._trigger_record_check.setChecked(False)
-            return
-        try:
-            self._trigger_csv_path = Path(path)
-            self._trigger_csv_file = open(self._trigger_csv_path, "a", newline="", encoding="utf-8")
-            self._trigger_csv_writer = csv.writer(self._trigger_csv_file)
-            if self._trigger_csv_path.stat().st_size == 0:
-                self._trigger_csv_writer.writerow(["timestamp", "channel", "id", "dlc", "data"])
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Ошибка открытия CSV триггера: %s", exc)
-            QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось открыть файл: {0}").format(exc))
-            self._trigger_record_check.setChecked(False)
-
-    def _close_trigger_csv(self) -> None:
-        if self._trigger_csv_file is not None:
-            try:
-                self._trigger_csv_file.close()
-            except Exception as exc:  # noqa: BLE001
-                logger.error("Ошибка закрытия CSV триггера: %s", exc)
-            finally:
-                self._trigger_csv_file = None
-                self._trigger_csv_writer = None
-
-    def _write_trigger_frame_to_csv(self, frame: Dict[str, object]) -> None:
-        if not self._trigger_recording or self._trigger_csv_writer is None:
-            return
-        trigger_text = self._trigger_id_edit.text().strip()
-        if not trigger_text:
-            return
-        trigger_id = hex_to_int(trigger_text)
-        if trigger_id is None:
-            return
-        frame_id = int(frame["id"])
-        if frame_id != trigger_id:
-            return
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S") + f".{int((time.time() % 1) * 1000):03d}"
-        data = bytes(frame["data"])
-        self._trigger_csv_writer.writerow([timestamp, frame["channel"], int_to_hex(frame_id, 8), len(data), bytes_to_hex_string(data)])
 
     def _write_frame_to_csv(self, frame: Dict[str, object]) -> None:
         if not self._recording or self._csv_writer is None:

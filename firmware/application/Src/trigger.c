@@ -232,7 +232,11 @@ void Trigger_OnFrame(const can_frame_t *frame)
          * list — keeps the "instant echo" case as low-latency as possible
          * (still bounded by CanBridge_Transmit()'s own mailbox wait). */
         can_frame_t resp = {
-          .channel = s_triggers[i].tx_channel,
+          /* tx_channel в trigger_t хранится 0-based (индекс комбобокса UI:
+           * 0=CAN1, 1=CAN2 — как rx_channel), а CanBridge_Transmit ждёт
+           * wire-нумерацию 1/2. Без +1 ответ на CAN2 уходил в CAN1, а ответ
+           * на CAN1 (0) отбрасывался проверкой диапазона. */
+          .channel = (uint8_t)(s_triggers[i].tx_channel + 1U),
           .extended = s_triggers[i].tx_extended,
           .rtr = s_triggers[i].tx_rtr,
           .id = s_triggers[i].tx_id,
@@ -261,7 +265,8 @@ void Trigger_Poll(void)
       s_pending[i].armed = 0U;
       const trigger_t *t = &s_triggers[s_pending[i].trigger_index];
       can_frame_t resp = {
-        .channel = t->tx_channel,
+        /* См. комментарий в Trigger_OnFrame: храним 0-based, шлём 1-based. */
+        .channel = (uint8_t)(t->tx_channel + 1U),
         .extended = t->tx_extended,
         .rtr = t->tx_rtr,
         .id = t->tx_id,

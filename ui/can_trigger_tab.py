@@ -920,6 +920,7 @@ class CanTriggerTab(QWidget):
             result.append({
                 "channel": row["channel"].currentIndex(),
                 "id": can_id,
+                "dlc": row["dlc"].value(),
                 "data": self._parse_data(row["data"]),
                 "rtr": int(row["rtr"].isChecked()),
                 "delay_before_send": row["delay_before_send"].value(),
@@ -961,6 +962,7 @@ class CanTriggerTab(QWidget):
                     "bit": row["bit"].currentIndex(),
                     "id": row["id"].text(),
                     "dlc": row["dlc"].value(),
+                    "rtr": int(row["rtr"].isChecked()),
                     "data": " ".join(e.text() for e in row["data"] if e.text()),
                     "delay_before_send": row["delay_before_send"].value(),
                     "delay_between": row["delay_between"].value(),
@@ -1062,25 +1064,32 @@ class CanTriggerTab(QWidget):
 
     def _data_from_response(self, response: Dict[str, Any]) -> bytes:
         """Формирует байты данных фрейма ответа с учётом DLC."""
-        dlc = response["dlc"].value()
-        parsed = self._parse_data(response["data"])
+        dlc = int(response["dlc"])
+        parsed = response["data"]
         data = bytearray(dlc)
         for i in range(dlc):
             if i < len(parsed) and parsed[i] is not None:
                 data[i] = parsed[i] & 0xFF
         return bytes(data)
 
-    def _send_frame(self, can_id: int, data: bytes, channel_index: int) -> None:
+    def _send_frame(
+        self,
+        can_id: int,
+        data: bytes,
+        channel_index: int,
+        rtr: bool = False,
+        dlc: Optional[int] = None,
+    ) -> None:
         """Отправляет один CAN-кадр в указанный канал."""
         if not self._serial_manager.is_open():
             return
         if channel_index == 0:
-            self._serial_manager.send_data(pack_can_frame(1, can_id, data))
+            self._serial_manager.send_data(pack_can_frame(1, can_id, data, rtr=rtr, dlc=dlc))
         elif channel_index == 1:
-            self._serial_manager.send_data(pack_can_frame(2, can_id, data))
+            self._serial_manager.send_data(pack_can_frame(2, can_id, data, rtr=rtr, dlc=dlc))
         else:
-            self._serial_manager.send_data(pack_can_frame(1, can_id, data))
-            self._serial_manager.send_data(pack_can_frame(2, can_id, data))
+            self._serial_manager.send_data(pack_can_frame(1, can_id, data, rtr=rtr, dlc=dlc))
+            self._serial_manager.send_data(pack_can_frame(2, can_id, data, rtr=rtr, dlc=dlc))
 
     def process_frame(self, frame: Dict[str, Any]) -> None:
         frame_id = int(frame["id"])
@@ -1125,13 +1134,16 @@ class CanTriggerTab(QWidget):
             count = max(1, response["count"])
             can_id = response["id"]
             channel = response["channel"]
+            rtr = bool(response.get("rtr"))
+            dlc = int(response["dlc"])
             for j in range(count):
                 if cumulative == 0:
-                    self._send_frame(can_id, data, channel)
+                    self._send_frame(can_id, data, channel, rtr=rtr, dlc=dlc)
                 else:
                     QTimer.singleShot(
                         cumulative,
-                        lambda cid=can_id, d=data, ch=channel: self._send_frame(cid, d, ch),
+                        lambda cid=can_id, d=data, ch=channel, r=rtr, dl=dlc:
+                            self._send_frame(cid, d, ch, rtr=r, dlc=dl),
                     )
                 if j < count - 1:
                     cumulative += response["delay_between"]
