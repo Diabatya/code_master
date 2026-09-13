@@ -15,7 +15,7 @@ from core.bootloader import Bootloader, BootloaderError
 from core.serial_manager import SerialManager
 from models.config import Config
 from models.logger import setup_logging
-from models.version import VERSION
+from models.version import VERSION, ENGINEERING_BUILD
 from ui.dark_theme import apply_dark_theme, apply_light_theme, apply_starline_theme
 from ui.disclaimer_dialog import DisclaimerDialog
 from ui.main_window import MainWindow
@@ -104,9 +104,12 @@ def main() -> int:
 
     serial_manager = SerialManager()
 
-    disclaimer = DisclaimerDialog()
-    if disclaimer.exec() != QDialog.DialogCode.Accepted:
-        return 0
+    # Юридическое предупреждение — только в пользовательской сборке
+    # (ENGINEERING_BUILD=False в models/version.py).
+    if not ENGINEERING_BUILD:
+        disclaimer = DisclaimerDialog()
+        if disclaimer.exec() != QDialog.DialogCode.Accepted:
+            return 0
 
     if not config.get("setup_completed", False):
         wizard = SetupWizard()

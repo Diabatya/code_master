@@ -36,6 +36,7 @@ from core.can_protocol import (
 from core.fake_serial import FakeSerial
 
 import serial
+from serial.tools.list_ports import comports
 
 from models.config import Config
 from models.logger import get_logger
@@ -661,6 +662,21 @@ class SerialManager(QObject):
                 port_names = dict(self._config.get("port_names", {}) or {})
                 if device_serial and device_name:
                     port_names[device_serial] = device_name
+                if device_name:
+                    # USB-серийник, который видит ОС, может отличаться от
+                    # серийника в странице конфигурации (Windows кэширует
+                    # дескрипторы). Маппим и его — иначе список портов
+                    # покажет «устройство с последовательным интерфейсом».
+                    try:
+                        current = self.current_port_name()
+                        for port_info in comports():
+                            if port_info.device == current:
+                                usb_serial = (port_info.serial_number or "").strip()
+                                if usb_serial and usb_serial != device_serial:
+                                    port_names[usb_serial] = device_name
+                                break
+                    except Exception:  # noqa: BLE001
+                        pass
                 self._config.set_bulk({
                     "device_type": device_type,
                     "device_version": device_version,

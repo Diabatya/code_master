@@ -38,6 +38,22 @@ class HexDataEdit(QLineEdit):
         if event.key() == Qt.Key.Key_Backspace and self.text() == "":
             self._focus_prev()
             return
+        text = event.text()
+        # Поле заполнено и нет выделения: ввод заменяет символ под
+        # курсором (overwrite-режим) — иначе maxLength=2 не давал бы
+        # переписать байт без предварительного стирания.
+        if (
+            len(text) == 1
+            and text in _HEX_CHARS
+            and not self.hasSelectedText()
+            and len(self.text()) == self.maxLength()
+        ):
+            pos = min(self.cursorPosition(), len(self.text()) - 1)
+            new_text = (self.text()[:pos] + text + self.text()[pos + 1 :]).upper()
+            self.setText(new_text)
+            self.setCursorPosition(pos + 1)
+            self._on_text_edited(new_text)
+            return
         super().keyPressEvent(event)
 
     def _focus_next(self) -> None:

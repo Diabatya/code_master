@@ -301,8 +301,12 @@ class CanTriggerTab(QWidget):
         delay_before_label = QLabel(tr("Пауза перед отправкой"))
         delay_between_label = QLabel(tr("Пауза между пакетами"))
 
-        row_layout.addWidget(QLabel(tr("Канал")))
-        row_layout.addWidget(channel)
+        # Все элементы строки прижимаем к нижнему краю — иначе колонка
+        # «Бит» с RTR сверху делала бы ряд выше, и остальные поля
+        # центрировались бы над строкой ввода.
+        bottom = Qt.AlignmentFlag.AlignBottom
+        row_layout.addWidget(QLabel(tr("Канал")), alignment=bottom)
+        row_layout.addWidget(channel, alignment=bottom)
         # Колонка «Бит» с кнопкой RTR над ней (RTR относится к этой
         # строке ответа, а не ко всему триггеру).
         bit_container = QWidget()
@@ -316,24 +320,24 @@ class CanTriggerTab(QWidget):
         bit_row.addWidget(QLabel(tr("Бит")))
         bit_row.addWidget(bit)
         bit_column.addLayout(bit_row)
-        row_layout.addWidget(bit_container)
-        row_layout.addWidget(QLabel(tr("ID")))
-        row_layout.addWidget(can_id)
-        row_layout.addWidget(QLabel(tr("DLC")))
-        row_layout.addWidget(dlc)
-        row_layout.addWidget(data_widget)
+        row_layout.addWidget(bit_container, alignment=bottom)
+        row_layout.addWidget(QLabel(tr("ID")), alignment=bottom)
+        row_layout.addWidget(can_id, alignment=bottom)
+        row_layout.addWidget(QLabel(tr("DLC")), alignment=bottom)
+        row_layout.addWidget(dlc, alignment=bottom)
+        row_layout.addWidget(data_widget, alignment=bottom)
 
         copy_paste = create_clipboard_buttons(self, can_id, dlc, data, bit)
-        row_layout.addWidget(copy_paste)
+        row_layout.addWidget(copy_paste, alignment=bottom)
 
         row_layout.addStretch()
-        row_layout.addWidget(delay_before_label)
-        row_layout.addWidget(delay_before_send)
-        row_layout.addWidget(delay_between_label)
-        row_layout.addWidget(delay_between)
-        row_layout.addWidget(QLabel(tr("Кол-во")))
-        row_layout.addWidget(count)
-        row_layout.addWidget(remove_button)
+        row_layout.addWidget(delay_before_label, alignment=bottom)
+        row_layout.addWidget(delay_before_send, alignment=bottom)
+        row_layout.addWidget(delay_between_label, alignment=bottom)
+        row_layout.addWidget(delay_between, alignment=bottom)
+        row_layout.addWidget(QLabel(tr("Кол-во")), alignment=bottom)
+        row_layout.addWidget(count, alignment=bottom)
+        row_layout.addWidget(remove_button, alignment=bottom)
 
         dlc.valueChanged.connect(
             lambda value: self._set_data_enabled(data, 0 if rtr.isChecked() else value)

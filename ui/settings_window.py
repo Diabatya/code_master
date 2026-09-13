@@ -139,9 +139,18 @@ class ConnectionTab(QWidget):
         # поле «Устройство», берём из карты серийник→имя (её заполняет
         # SerialManager при подключении через CMD_CFG_READ).
         port_names = self._config.get("port_names", {}) or {}
+        connected_port = self._serial_manager.current_port_name()
         for port_info in comports():
             serial = (port_info.serial_number or "").strip()
             name = port_names.get(serial, "")
+            if (
+                not name
+                and port_info.device == connected_port
+                and self._serial_manager.is_open()
+            ):
+                # Подключённый порт: серийник из ОС может не совпадать
+                # с записанным в МК — берём имя прямо из конфигурации.
+                name = self._config.get("device_name", "")
             if not name and port_info.vid is not None:
                 # Fallback по VID/PID: Windows не показывает iProduct, но
                 # оператору важно увидеть, что устройство в режиме
@@ -244,6 +253,17 @@ class ConnectionTab(QWidget):
         self._port_combo.setEnabled(not is_open)
         self._baud_combo.setEnabled(not is_open)
         self._auto_baud_button.setEnabled(not is_open)
+        # Пока устройство подключено, выбор порта/скорости бессмысленен —
+        # прячем всю таблицу, остаётся только статус и кнопка «Отключить».
+        for widget in (
+            self._port_label,
+            self._port_combo,
+            self._refresh_button,
+            self._baud_label,
+            self._baud_combo,
+            self._auto_baud_button,
+        ):
+            widget.setVisible(not is_open)
         if is_open:
             self._set_status(tr("Подключено"), error=False)
         else:
@@ -401,6 +421,19 @@ class SettingsWindow(QMainWindow):
         self._install_dirty_tracking(self.centralWidget())
         self._mark_clean()
 
+        # Оверлей на время вычитки настроек из МК: закрывает все поля,
+        # чтобы оператор не видел устаревшие данные из локального кэша,
+        # пока идёт синхронизация с устройством.
+        self._loading_overlay = QLabel(
+            tr("Загрузка настроек, пожалуйста подождите"), self.centralWidget()
+        )
+        self._loading_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_overlay.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        self._loading_overlay.setStyleSheet(
+            "background-color: rgba(20, 20, 30, 235); color: #FFFFFF;"
+        )
+        self._loading_overlay.hide()
+
     def _install_dirty_tracking(self, root: QWidget) -> None:
         """Подписывает поля ввода на _mark_dirty.
 
@@ -469,8 +502,12 @@ class SettingsWindow(QMainWindow):
         if self._loading:
             return
         changed = self._widgets_signature() != self._baseline_signature
-        self._save_opacity.setOpacity(1.0 if changed else 0.4)
-        self._save_button.setEnabled(changed)
+        # Без связи с устройством сохранять нечего — кнопка выключена
+        # даже при наличии правок; при восстановлении связи состояние
+        # пересчитывается в _on_connection_changed → _mark_dirty.
+        enabled = changed and self._serial_manager.is_open()
+        self._save_opacity.setOpacity(1.0 if enabled else 0.4)
+        self._save_button.setEnabled(enabled)
 
     def _mark_clean(self) -> None:
         """Выключает и приглушает кнопку «Сохранить» — изменений нет."""
@@ -481,7 +518,13 @@ class SettingsWindow(QMainWindow):
     def _on_connection_changed(self, connected: bool) -> None:
         if not connected:
             self._trigger_tab.clear_device_managed()
+            # Связь потеряна — «Сохранить» недоступна, даже если есть
+            # несохранённые правки: писать некуда.
+            self._save_opacity.setOpacity(0.4)
+            self._save_button.setEnabled(False)
             return
+        # Связь восстановлена — вернуть кнопке состояние по снимку полей.
+        self._mark_dirty()
         if self._config.get("emulation", False):
             return
         # Небольшая пауза, чтобы завершился обмен CMD_DEVICE_ID при
@@ -502,11 +545,18 @@ class SettingsWindow(QMainWindow):
         ):
             return
         self._loading = True
+        # Закрываем поля оверлеем, пока идёт вычитка: до завершения там
+        # лежат устаревшие данные локального кэша, а не устройства.
+        self._loading_overlay.setGeometry(self.centralWidget().rect())
+        self._loading_overlay.show()
+        self._loading_overlay.raise_()
+        QApplication.processEvents()
         try:
             self._trigger_tab.sync_from_device()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Не удалось вычитать триггеры из устройства: %s", exc)
         finally:
+            self._loading_overlay.hide()
             self._loading = False
         self._mark_clean()
 

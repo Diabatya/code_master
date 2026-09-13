@@ -277,6 +277,10 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         """Подключает сигналы SerialManager к UI."""
         self._serial_manager.connection_changed.connect(self._update_port_indicator)
+        # Имя устройства приходит после опроса — обновить индикатор.
+        self._serial_manager.device_identified.connect(
+            lambda _info: self._update_port_indicator()
+        )
         self._serial_manager.error_occurred.connect(self._on_serial_error)
         self._serial_manager.heartbeat.connect(self._on_heartbeat)
 
@@ -548,7 +552,13 @@ class MainWindow(QMainWindow):
         base_style = "font-size: 14px; background: transparent;"
         if self._serial_manager.is_open():
             self._port_indicator.setStyleSheet(f"color: #4CAF50; {base_style}")
-            self._port_label.setText(self._serial_manager.current_port_name())
+            # Показываем записанное в устройство имя (поле «Устройство»),
+            # а не системное имя COM-порта.
+            name = (
+                self._config.get("device_name", "")
+                or self._serial_manager.current_port_name()
+            )
+            self._port_label.setText(name)
         elif self._config.get("port"):
             self._port_indicator.setStyleSheet(f"color: #F44336; {base_style}")
             self._port_label.setText(tr("Не подключено"))
