@@ -16,7 +16,11 @@ except Exception:  # noqa: BLE001
     def comports() -> list:
         return []
 
-from core.firmware_utils import load_firmware_bytes, validate_write_region
+from core.firmware_utils import (
+    load_firmware_bytes,
+    trim_to_application_region,
+    validate_write_region,
+)
 from core.stm32_info import (
     APPLICATION_BASE_ADDR,
     APP_METADATA_PAGE_ADDR,
@@ -568,8 +572,17 @@ class Bootloader:
         logger.info("BL diagnostics: версия=0x%02X, ID=0x%08X", version, device_id)
         return {"version": version, "device_id": device_id}
 
-    def _write_region(self, address: int, data: bytes, written: int, total: int) -> int:
+    def _write_region(
+        self, address: int, data: bytes, written: int, total: int,
+        skip_blank: bool = True,
+    ) -> int:
         """Пишет data по адресу блоками BLOCK_SIZE с повторами и прогрессом.
+
+        При skip_blank блоки, целиком состоящие из 0xFF, не отправляются:
+        запись 0xFF в NOR-flash в любом случае ничего не меняет (ячейки
+        умеют только сбрасывать биты 1→0), а в объединённом образе между
+        application и страницей метаданных — десятки КБ «пустого» padding,
+        пропуск которого заметно ускоряет прошивку.
 
         Returns:
             Обновлённое число уже записанных байт (для прогресса).
@@ -579,6 +592,11 @@ class Bootloader:
                 raise BootloaderError("Операция отменена")
             block = data[offset : offset + self.BLOCK_SIZE]
             block_addr = address + offset
+            if skip_blank and all(b == 0xFF for b in block):
+                written += len(block)
+                if self._progress_callback:
+                    self._progress_callback(min(100, int(written / total * 100)))
+                continue
             for attempt in range(self.MAX_RETRIES):
                 try:
                     self.write_memory(block_addr, block)
@@ -635,6 +653,33 @@ class Bootloader:
         if file_base:
             base_address = file_base
 
+        if base_address < APPLICATION_BASE_ADDR:
+            # Объединённый образ (bootloader + application): область
+            # bootloader через AN3155 незаписываема — работающий
+            # загрузчик не может перезаписать сам себя. Отрезаем её и
+            # пишем только application + metadata + config.
+            firmware, base_address = trim_to_application_region(firmware, base_address)
+            if not firmware:
+                raise BootloaderError(
+                    "Образ не содержит application (0x08008000+) — "
+                    "через bootloader записать нечего"
+                )
+            if status_callback:
+                status_callback(
+                    "Область bootloader пропущена (AN3155 пишет только 0x08008000+)"
+                )
+            logger.info("Обрезана область bootloader: base=0x%08X, %d байт", base_address, len(firmware))
+
+        # Объединённый образ с config-страницей (*_конфиг.hex): хвост за
+        # DEVICE_CONFIG_PAGE_ADDR пишем отдельным регионом — прямое
+        # пересечение config-страницы validate_write_region запрещает,
+        # а здесь запись конфигурации явно запрошена оператором.
+        cfg_tail: Optional[bytes] = None
+        cfg_rel = DEVICE_CONFIG_PAGE_ADDR - base_address
+        if 0 < cfg_rel < len(firmware):
+            cfg_tail = firmware[cfg_rel:]
+            firmware = firmware[:cfg_rel]
+
         ok, reason = validate_write_region(base_address, len(firmware))
         if not ok:
             raise BootloaderError(f"Запрещённая область записи: {reason}")
@@ -664,7 +709,20 @@ class Bootloader:
         if 0 <= meta_rel < len(firmware):
             code, meta = firmware[:meta_rel], firmware[meta_rel:]
 
-        is_app_update = base_address == APPLICATION_BASE_ADDR
+        # Разреженный образ может содержать страницу метаданных из одних
+        # 0xFF (config-only hex: padding от application до config-страницы).
+        # Такую «метаданные» считаем отсутствующими — иначе запись 0xFF не
+        # восстановит инвалидированный magic и приложение не загрузится.
+        if meta is not None and not any(b != 0xFF for b in meta):
+            meta = None
+
+        # Обновление application — только когда в образе есть реальный код.
+        # Config-only образ (код целиком 0xFF) не должен трогать метаданные:
+        # инвалидация без последующей записи валидных метаданных убила бы
+        # загрузку приложения.
+        is_app_update = base_address == APPLICATION_BASE_ADDR and any(
+            b != 0xFF for b in code
+        )
         if is_app_update:
             status("Подготовка обновления")
             # UPDATE_STARTED: гасим magic метаданных. Запись нулей работает
@@ -674,19 +732,33 @@ class Bootloader:
             if meta is None:
                 meta = build_app_metadata(code)
 
+        if cfg_tail is not None:
+            existing = self.read_memory(DEVICE_CONFIG_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE)
+            cfg_tail = merge_device_config_page(cfg_tail, existing)
+            logger.info("Config-страница объединена с существующей (VID/PID сохранены)")
+
         status("Стирание Flash")
         self.erase_pages(base_address, code, page_size=page_size, skip_blank=skip_blank)
         if meta is not None:
             self.erase_pages(
                 APP_METADATA_PAGE_ADDR, meta, page_size=page_size, skip_blank=skip_blank
             )
+        if cfg_tail is not None:
+            self.erase_pages(
+                DEVICE_CONFIG_PAGE_ADDR, cfg_tail, page_size=page_size, skip_blank=skip_blank
+            )
 
         status(f"Запись {len(code)} байт с 0x{base_address:08X}")
-        total = len(code) + (len(meta) if meta else 0)
-        written = self._write_region(base_address, code, 0, total)
+        total = len(code) + (len(meta) if meta else 0) + (len(cfg_tail) if cfg_tail else 0)
+        written = self._write_region(base_address, code, 0, total, skip_blank)
+        if cfg_tail is not None:
+            status(f"Запись config-страницы ({len(cfg_tail)} байт)")
+            written = self._write_region(
+                DEVICE_CONFIG_PAGE_ADDR, cfg_tail, written, total, skip_blank
+            )
         if meta is not None:
             status(f"Запись метаданных ({len(meta)} байт)")
-            self._write_region(APP_METADATA_PAGE_ADDR, meta, written, total)
+            self._write_region(APP_METADATA_PAGE_ADDR, meta, written, total, skip_blank)
 
         if self._progress_callback:
             self._progress_callback(100)

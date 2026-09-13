@@ -119,16 +119,14 @@ jobs:
             /tmp/codemaster_app_checked.hex
       - name: Collect firmware artifacts
         run: |
+          # В релиз идёт единый объединённый образ (bootloader + app +
+          # метаданные): оператор работает всегда с одним файлом.
           mkdir firmware-artifacts
           python3 firmware/tools/make_full_image.py \
             firmware/bootloader/build/codemaster_bootloader.hex \
             firmware/application/build/codemaster_app.hex \
             firmware-artifacts/codemaster_full.hex \
             firmware-artifacts/codemaster_full.bin
-          cp firmware/application/build/codemaster_app.hex firmware-artifacts/
-          cp firmware/application/build/codemaster_app.bin firmware-artifacts/
-          cp firmware/bootloader/build/codemaster_bootloader.hex firmware-artifacts/
-          cp firmware/bootloader/build/codemaster_bootloader.bin firmware-artifacts/
           (cd firmware-artifacts && sha256sum * > SHA256SUMS.txt)
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v5
@@ -185,10 +183,6 @@ jobs:
             dist/CodeMaster.exe
             dist/CodeMaster.dmg
             dist/CodeMaster
-            dist/codemaster_app.hex
-            dist/codemaster_app.bin
-            dist/codemaster_bootloader.hex
-            dist/codemaster_bootloader.bin
             dist/codemaster_full.hex
             dist/codemaster_full.bin
             dist/SHA256SUMS.txt
@@ -222,10 +216,6 @@ jobs:
             dist/CodeMaster.exe
             dist/CodeMaster.dmg
             dist/CodeMaster
-            dist/codemaster_app.hex
-            dist/codemaster_app.bin
-            dist/codemaster_bootloader.hex
-            dist/codemaster_bootloader.bin
             dist/codemaster_full.hex
             dist/codemaster_full.bin
             dist/SHA256SUMS.txt

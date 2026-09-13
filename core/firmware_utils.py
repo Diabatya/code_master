@@ -123,6 +123,26 @@ def load_firmware_bytes(file_path: str) -> Tuple[bytes, int]:
     return path.read_bytes(), 0
 
 
+def trim_to_application_region(data: bytes, base: int) -> Tuple[bytes, int]:
+    """Отрезает часть образа ниже 0x08008000 для записи через AN3155.
+
+    Объединённый образ (bootloader + application) через UART/USB-CDC
+    загрузчик прошить целиком нельзя: область bootloader защищена от
+    записи (работающий загрузчик не может перезаписать сам себя). Для
+    ROM DFU / ST-Link / J-Link обрезка не нужна — там пишется всё.
+
+    Возвращает (данные, base) с base >= APPLICATION_BASE_ADDR; если в
+    образе нет application-части — (b"", base)."""
+    from core.stm32_info import APPLICATION_BASE_ADDR
+
+    if base >= APPLICATION_BASE_ADDR:
+        return data, base
+    cut = APPLICATION_BASE_ADDR - base
+    if len(data) <= cut:
+        return b"", base
+    return data[cut:], APPLICATION_BASE_ADDR
+
+
 def validate_application_vector(data: bytes, base_address: int) -> Tuple[bool, str]:
     """Проверяет MSP/reset vector application до начала Flash erase."""
     from core.stm32_info import APPLICATION_BASE_ADDR, BOOTLOADER_BASE_ADDR

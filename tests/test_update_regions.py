@@ -107,7 +107,7 @@ def test_build_app_metadata_layout() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _flash_app(image: bytes) -> list[int]:
+def _flash_app(image: bytes, base_address: int = APPLICATION_BASE_ADDR) -> list[int]:
     """Прогоняет flash_firmware поверх моков и возвращает порядок адресов write_memory."""
     port = MagicMock()
     bl = Bootloader(port)
@@ -127,7 +127,7 @@ def _flash_app(image: bytes) -> list[int]:
         tmp.write(image)
         tmp_path = tmp.name
     try:
-        bl.flash_firmware(tmp_path, base_address=APPLICATION_BASE_ADDR)
+        bl.flash_firmware(tmp_path, base_address=base_address)
     finally:
         Path(tmp_path).unlink(missing_ok=True)
     return write_addrs
@@ -163,6 +163,53 @@ def test_flash_firmware_image_metadata_goes_last() -> None:
 
     assert writes[0] == APP_METADATA_PAGE_ADDR  # invalidate
     assert writes[-1] == APP_METADATA_PAGE_ADDR  # финальная запись metadata
+
+
+def test_flash_firmware_trims_bootloader_region() -> None:
+    """Объединённый образ (full): область bootloader через AN3155 не
+    пишется — запись начинается с 0x08008000."""
+    from core.stm32_info import BOOTLOADER_BASE_ADDR
+
+    image = b"\xBB" * (APPLICATION_BASE_ADDR - BOOTLOADER_BASE_ADDR + 512)
+    writes = _flash_app(image, base_address=BOOTLOADER_BASE_ADDR)
+
+    assert writes, "записей нет"
+    assert all(addr >= APPLICATION_BASE_ADDR for addr in writes)
+
+
+def test_flash_firmware_splits_config_tail() -> None:
+    """Образ app + config-страница: хвост пишется в DEVICE_CONFIG_PAGE_ADDR
+    отдельным регионом (обход запрета пересечения config-страницы)."""
+    code = b"\x22" * 2048
+    meta = build_app_metadata(code)
+    image = (
+        code
+        + b"\xFF" * (APP_METADATA_PAGE_ADDR - APPLICATION_BASE_ADDR - len(code))
+        + meta
+        + b"\xFF" * (DEVICE_CONFIG_PAGE_ADDR - APP_METADATA_PAGE_ADDR - len(meta))
+        + build_device_config_page("GATE", "SN1")
+        + b"\xFF" * (DEVICE_CONFIG_PAGE_SIZE - 32)
+    )
+    writes = _flash_app(image)
+
+    assert DEVICE_CONFIG_PAGE_ADDR in writes
+    # metadata всё равно последняя (пишется блоками по BLOCK_SIZE)
+    assert APP_METADATA_PAGE_ADDR <= writes[-1] < DEVICE_CONFIG_PAGE_ADDR
+
+
+def test_flash_firmware_config_only_keeps_metadata() -> None:
+    """Разреженный config-only образ (padding 0xFF + config-страница):
+    метаданные приложения не инвалидируются и не перезаписываются —
+    иначе приложение перестало бы загружаться."""
+    image = (
+        b"\xFF" * (DEVICE_CONFIG_PAGE_ADDR - APPLICATION_BASE_ADDR)
+        + build_device_config_page("GATE", "SN1")
+        + b"\xFF" * (DEVICE_CONFIG_PAGE_SIZE - 32)
+    )
+    writes = _flash_app(image)
+
+    assert writes, "config-страница должна записываться"
+    assert all(addr >= DEVICE_CONFIG_PAGE_ADDR for addr in writes)
 
 
 def test_flash_firmware_rejects_forbidden_region(tmp_path) -> None:

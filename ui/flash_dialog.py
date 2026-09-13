@@ -50,7 +50,12 @@ from PySide6.QtWidgets import (
 )
 
 from core.bootloader import Bootloader
-from core.firmware_utils import _save_intel_hex, load_firmware_bytes, validate_application_vector
+from core.firmware_utils import (
+    _save_intel_hex,
+    load_firmware_bytes,
+    trim_to_application_region,
+    validate_application_vector,
+)
 from core.can_protocol import (
     CMD_CFG_READ,
     CMD_CFG_WRITE,
@@ -815,8 +820,12 @@ class FlashWorker(QThread):
             data, base = load_firmware_bytes(file_path)
             if not base:
                 base = APPLICATION_BASE_ADDR
+            # Объединённый образ: через AN3155 область bootloader не
+            # записывается — обрезаем её сразу, чтобы верификация
+            # сравнивала только реально записанное.
+            data, base = trim_to_application_region(data, base)
             if not data:
-                return False, tr("Файл прошивки пуст")
+                return False, tr("Образ не содержит application (0x08008000+)")
             with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
                 tmp.write(data)
                 bin_path = tmp.name
@@ -874,8 +883,11 @@ class FlashWorker(QThread):
             data, base = load_firmware_bytes(file_path)
             if not base:
                 base = APPLICATION_BASE_ADDR
+            # Как в UART-пути: область bootloader через AN3155
+            # незаписываема — обрезаем до верификации.
+            data, base = trim_to_application_region(data, base)
             if not data:
-                return False, tr("Файл прошивки пуст")
+                return False, tr("Образ не содержит application (0x08008000+)")
             with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
                 tmp.write(data)
                 bin_path = tmp.name
@@ -1913,53 +1925,11 @@ class FlashDialog(QDialog):
             True, если можно продолжать прошивку (риска нет или пользователь
             подтвердил), False — если пользователь отменил операцию.
         """
-        # DFU/ST-Link/J-Link can program any address (bootloader + app in one go),
-        # so no address mismatch warning for those methods. Only warn for the
-        # in-app bootloader protocol (UART/USB CDC) where writing to the
-        # bootloader area would corrupt the running bootloader.
-        if method not in ("uart", "usb_cdc"):
-            return True
-
-        risky_files: List[Tuple[str, int]] = []
-        for file_path in files:
-            try:
-                _, base = load_firmware_bytes(file_path)
-            except Exception:  # noqa: BLE001
-                continue
-            if not base:
-                continue
-            if base == BOOTLOADER_BASE_ADDR:
-                risky_files.append((file_path, base))
-
-        if not risky_files:
-            return True
-
-        names = "\n".join(f"  {Path(p).name} (0x{b:08X})" for p, b in risky_files)
-        if method in ("uart", "usb_cdc"):
-            text = tr(
-                "Файл(ы) начинаются с адреса бутлоадера (0x{0:08X}):\n{1}\n\n"
-                "UART/USB CDC используют bootloader-протокол устройства и обычно "
-                "предназначены для прошивки области приложения. Запись по этому "
-                "адресу перезапишет сам bootloader на устройстве. Продолжить?"
-            ).format(BOOTLOADER_BASE_ADDR, names)
-        else:
-            text = tr(
-                "Файл(ы) начинаются с адреса приложения (0x{0:08X}), а не с адреса "
-                "бутлоадера (0x{1:08X}):\n{2}\n\n"
-                "Выбранный способ (ST-Link/J-Link/USB DFU) обычно используется для "
-                "прошивки полного образа Flash, включая bootloader. Если вы не "
-                "собираетесь перезаписывать весь образ — убедитесь, что это "
-                "ожидаемо. Продолжить?"
-            ).format(APPLICATION_BASE_ADDR, BOOTLOADER_BASE_ADDR, names)
-
-        answer = QMessageBox.warning(
-            self,
-            tr("Внимание: адрес прошивки"),
-            text,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        return answer == QMessageBox.StandardButton.Yes
+        # Раньше здесь предупреждали, что файл с базой 0x08000000 перезапишет
+        # bootloader через UART/USB CDC. Теперь область bootloader
+        # автоматически обрезается (trim_to_application_region) — AN3155 её
+        # всё равно не записывает, поэтому объединённый образ безопасен.
+        return True
 
     def _try_direct_config_write(self, method: str) -> bool:
         """Пишет конфигурацию через C1 без входа в bootloader/DFU.
