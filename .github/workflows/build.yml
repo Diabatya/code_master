@@ -170,7 +170,9 @@ jobs:
           cp artifacts/CodeMaster-firmware/* dist/
           chmod +x dist/CodeMaster
       - name: Create/Update latest release
+        id: release_latest
         if: steps.release_info.outputs.is_tag == 'false'
+        continue-on-error: true
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -190,6 +192,25 @@ jobs:
             dist/codemaster_full.hex
             dist/codemaster_full.bin
             dist/SHA256SUMS.txt
+      - name: Fallback release upload (gh CLI)
+        if: steps.release_latest.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          if ! gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            for i in 1 2 3; do
+              gh release create latest --repo "$GITHUB_REPOSITORY" \
+                --title "Latest build" --prerelease --target "${GITHUB_SHA}" && break
+              [ "$i" = 3 ] && exit 1
+              sleep 15
+            done
+          fi
+          for i in 1 2 3; do
+            gh release upload latest dist/* --clobber --repo "$GITHUB_REPOSITORY" && exit 0
+            [ "$i" = 3 ] && exit 1
+            sleep 15
+          done
       - name: Create versioned release
         if: steps.release_info.outputs.is_tag == 'true'
         uses: softprops/action-gh-release@v2
