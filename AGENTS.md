@@ -8,7 +8,7 @@
 - This environment has `arm-none-eabi-gcc` installed (e.g., `/Applications/ArmGNUToolchain/15.2.rel1` via `/opt/homebrew/bin/arm-none-eabi-gcc`).
 - Bootloader memory: `0x0800_0000`–`0x0800_7FFF` (32 KB)
 - Application memory: `0x0800_8000`–`0x0803_FFFF` (224 KB)
-- To enter bootloader from application, write `0xDEADBEEF` to `0x2000_4FF0` and call `NVIC_SystemReset()`.
+- To enter bootloader from application, write `0xBEEF` to `BKP->DR1` (backup register, survives system reset, cleared on power loss) and call `NVIC_SystemReset()`. The app also writes the legacy `0xDEADBEEF` to `0x2000_4FF0` for bootloaders already flashed on shipped boards; that RAM address aliases the app's CAN ring buffer, so new bootloaders only honor the BKP flag.
 - USB IDs:
   - Bootloader: `VID=0483`, `PID=5741`
   - Application: `VID=0483`, `PID=5740`

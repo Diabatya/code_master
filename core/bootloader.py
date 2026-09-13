@@ -6,7 +6,7 @@
 """
 
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import serial
 
@@ -17,6 +17,7 @@ except Exception:  # noqa: BLE001
         return []
 
 from core.firmware_utils import (
+    guess_firmware_base,
     load_firmware_bytes,
     trim_to_application_region,
     validate_write_region,
@@ -471,21 +472,47 @@ class Bootloader:
         if response != ACK:
             raise BootloaderError(f"Ошибка записи блока (ответ 0x{response:02X})")
 
-    def verify(self, address: int, data: bytes) -> bool:
+    def go(self, address: int = APPLICATION_BASE_ADDR) -> None:
+        """Отправляет команду Go (0x21) — запускает application из bootloader.
+
+        Устройство сразу пере-энumerируется как application (PID 5740) —
+        не нужно передёргивать питание после прошивки. Если образ
+        невалиден, bootloader молча остаётся в режиме прошивки
+        (bl_app_is_valid), что само по себе сигнал о неудачной записи.
+        """
+        self._send_command(0x21)
+        addr_bytes = address.to_bytes(4, "big")
+        checksum = 0
+        for b in addr_bytes:
+            checksum ^= b
+        self.port.write(addr_bytes + bytes([checksum]))
+        response = self._read_byte()
+        if response != ACK:
+            raise BootloaderError(f"Команда запуска не подтверждена (ответ 0x{response:02X})")
+        logger.info("GO 0x%08X: запуск application", address)
+
+    def verify(self, address: int, data: bytes, skip_blank: bool = True) -> bool:
         """Сравнивает данные в памяти STM32 с ожидаемыми.
 
-        Args:
-            address: Адрес для чтения.
-            data: Ожидаемые байты.
+        При skip_blank блоки, целиком состоящие из 0xFF, не проверяются:
+        такие страницы разреженного образа не стирались и не
+        записывались — там может лежать прежнее содержимое, и строгое
+        сравнение давало бы ложное «верификация не прошла».
 
         Returns:
             True, если данные совпадают, иначе False.
         """
         logger.info("BL verify: адрес 0x%08X, %d байт", address, len(data))
-        read_data = self.read_memory(address, len(data))
-        ok = read_data == data
-        logger.info("BL verify: %s", "OK" if ok else "FAIL")
-        return ok
+        for offset in range(0, len(data), self.BLOCK_SIZE):
+            block = data[offset : offset + self.BLOCK_SIZE]
+            if skip_blank and all(b == 0xFF for b in block):
+                continue
+            read_back = self.read_memory(address + offset, len(block))
+            if read_back != block:
+                logger.warning("BL verify: mismatch at 0x%08X", address + offset)
+                return False
+        logger.info("BL verify: OK")
+        return True
 
     def _read_memory_chunk(self, address: int, length: int) -> bytes:
         """Читает один блок памяти длиной до 256 байт."""
@@ -621,10 +648,14 @@ class Bootloader:
         page_size: int = 2048,
         skip_blank: bool = True,
         status_callback: Optional[Callable[[str], None]] = None,
-    ) -> None:
+    ) -> List[Tuple[int, bytes]]:
         """Записывает файл прошивки в память STM32.
 
         Поддерживает .bin, .hex (Intel HEX) и .elf.
+        Возвращает список фактически записанных регионов (адрес, данные) —
+        для верификации: config-страница могла быть объединена с
+        существующей, а метаданные — синтезированы на ПК, поэтому
+        сравнивать с исходным образом нельзя.
 
         Порядок обновления application (base_address == APPLICATION_BASE_ADDR):
           1. инвалидация метаданных (запись 4 нулевых байт) — при обрыве
@@ -652,6 +683,18 @@ class Bootloader:
             raise BootloaderError("Файл прошивки пуст")
         if file_base:
             base_address = file_base
+        elif base_address == APPLICATION_BASE_ADDR:
+            # .bin без адреса: если образ начинается с векторов
+            # bootloader'а — это полный образ с 0x08000000, а не
+            # application. Иначе запись со смещением +0x8000 убила бы
+            # таблицу векторов приложения.
+            guessed = guess_firmware_base(firmware)
+            if guessed != base_address:
+                logger.info(
+                    "BIN без адреса: по reset-вектору база=0x%08X, а не 0x%08X",
+                    guessed, base_address,
+                )
+                base_address = guessed
 
         if base_address < APPLICATION_BASE_ADDR:
             # Объединённый образ (bootloader + application): область
@@ -738,7 +781,17 @@ class Bootloader:
             logger.info("Config-страница объединена с существующей (VID/PID сохранены)")
 
         status("Стирание Flash")
-        self.erase_pages(base_address, code, page_size=page_size, skip_blank=skip_blank)
+        # При обновлении application страницы кода стираем полностью:
+        # пропущенная «пустая» (0xFF) страница сохранила бы старые данные,
+        # а верификация и CRC метаданных покрывают весь диапазон — иначе
+        # ложный провал верификации или невалидный образ после reboot.
+        # Config-only запись (is_app_update=False) стирать код нельзя.
+        self.erase_pages(
+            base_address,
+            code,
+            page_size=page_size,
+            skip_blank=skip_blank and not is_app_update,
+        )
         if meta is not None:
             self.erase_pages(
                 APP_METADATA_PAGE_ADDR, meta, page_size=page_size, skip_blank=skip_blank
@@ -751,15 +804,19 @@ class Bootloader:
         status(f"Запись {len(code)} байт с 0x{base_address:08X}")
         total = len(code) + (len(meta) if meta else 0) + (len(cfg_tail) if cfg_tail else 0)
         written = self._write_region(base_address, code, 0, total, skip_blank)
+        regions: List[Tuple[int, bytes]] = [(base_address, code)]
         if cfg_tail is not None:
             status(f"Запись config-страницы ({len(cfg_tail)} байт)")
             written = self._write_region(
                 DEVICE_CONFIG_PAGE_ADDR, cfg_tail, written, total, skip_blank
             )
+            regions.append((DEVICE_CONFIG_PAGE_ADDR, cfg_tail))
         if meta is not None:
             status(f"Запись метаданных ({len(meta)} байт)")
             self._write_region(APP_METADATA_PAGE_ADDR, meta, written, total, skip_blank)
+            regions.append((APP_METADATA_PAGE_ADDR, meta))
 
         if self._progress_callback:
             self._progress_callback(100)
         logger.info("Прошивка завершена успешно")
+        return regions

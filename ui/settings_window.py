@@ -142,6 +142,14 @@ class ConnectionTab(QWidget):
         for port_info in comports():
             serial = (port_info.serial_number or "").strip()
             name = port_names.get(serial, "")
+            if not name and port_info.vid is not None:
+                # Fallback по VID/PID: Windows не показывает iProduct, но
+                # оператору важно увидеть, что устройство в режиме
+                # прошивки (bootloader), а не в рабочем приложении.
+                if (port_info.vid, port_info.pid) == (0x0483, 0x5741):
+                    name = tr("CodeMaster Bootloader (режим прошивки)")
+                elif (port_info.vid, port_info.pid) == (0x0483, 0x5740):
+                    name = "CodeMaster"
             text = name or (port_info.description or port_info.device)
             index = self._port_combo.count()
             self._port_combo.addItem(text, port_info.device)

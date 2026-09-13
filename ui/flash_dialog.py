@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 from core.bootloader import Bootloader
 from core.firmware_utils import (
     _save_intel_hex,
+    guess_firmware_base,
     load_firmware_bytes,
     trim_to_application_region,
     validate_application_vector,
@@ -819,7 +820,7 @@ class FlashWorker(QThread):
         try:
             data, base = load_firmware_bytes(file_path)
             if not base:
-                base = APPLICATION_BASE_ADDR
+                base = guess_firmware_base(data)
             # Объединённый образ: через AN3155 область bootloader не
             # записывается — обрезаем её сразу, чтобы верификация
             # сравнивала только реально записанное.
@@ -841,7 +842,7 @@ class FlashWorker(QThread):
                     "UART прошивка: %s, base=0x%08X, размер=%d, page_size=%d, skip_blank=%s",
                     file_path, base, len(data), page_size, skip_blank,
                 )
-                bl.flash_firmware(
+                regions = bl.flash_firmware(
                     bin_path, base, page_size=page_size, skip_blank=skip_blank,
                     status_callback=self.log_line.emit,
                 )
@@ -849,11 +850,19 @@ class FlashWorker(QThread):
                     self.log_line.emit(
                         tr("Верификация {0} байт с 0x{1:08X}...").format(len(data), base)
                     )
-                    ok = bl.verify(base, data)
+                    # По фактически записанным регионам: config-страница
+                    # объединена с существующей на устройстве, метаданные
+                    # могли быть синтезированы — исходный образ не эталон.
+                    ok = all(bl.verify(addr, seg) for addr, seg in regions)
                 else:
                     ok = True
                 if not ok:
                     return False, tr("UART: верификация не прошла (CRC mismatch) — {0}").format(file_path)
+                try:
+                    bl.go()
+                    self.log_line.emit(tr("Запуск application..."))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("GO после UART-прошивки не удался: %s", exc)
                 return True, tr("UART прошивка завершена: {0}").format(file_path)
             finally:
                 try:
@@ -882,7 +891,7 @@ class FlashWorker(QThread):
         try:
             data, base = load_firmware_bytes(file_path)
             if not base:
-                base = APPLICATION_BASE_ADDR
+                base = guess_firmware_base(data)
             # Как в UART-пути: область bootloader через AN3155
             # незаписываема — обрезаем до верификации.
             data, base = trim_to_application_region(data, base)
@@ -900,7 +909,7 @@ class FlashWorker(QThread):
                     "USB CDC прошивка: %s, base=0x%08X, размер=%d, page_size=%d, skip_blank=%s",
                     file_path, base, len(data), page_size, skip_blank,
                 )
-                bl.flash_firmware(
+                regions = bl.flash_firmware(
                     bin_path, base, page_size=page_size, skip_blank=skip_blank,
                     status_callback=self.log_line.emit,
                 )
@@ -908,11 +917,16 @@ class FlashWorker(QThread):
                     self.log_line.emit(
                         tr("Верификация {0} байт с 0x{1:08X}...").format(len(data), base)
                     )
-                    ok = bl.verify(base, data)
+                    ok = all(bl.verify(addr, seg) for addr, seg in regions)
                 else:
                     ok = True
                 if not ok:
                     return False, tr("USB CDC: верификация не прошла (CRC mismatch) — {0}").format(file_path)
+                try:
+                    bl.go()
+                    self.log_line.emit(tr("Запуск application..."))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("GO после USB CDC-прошивки не удался: %s", exc)
                 return True, tr("USB CDC прошивка завершена: {0}").format(file_path)
             finally:
                 try:
@@ -951,7 +965,7 @@ class FlashWorker(QThread):
             else:
                 data, base = load_firmware_bytes(file_path)
                 if not base:
-                    base = BOOTLOADER_BASE_ADDR
+                    base = guess_firmware_base(data)
                 segments = [(base, data)]
             segments = [(start, data) for start, data in segments if data]
             if not segments:
@@ -1892,7 +1906,7 @@ class FlashDialog(QDialog):
 
         data, base = load_firmware_bytes(file_path)
         if base == 0:
-            base = BOOTLOADER_BASE_ADDR
+            base = guess_firmware_base(data)
         flash_size = flash_size_kb * 1024
         firmware_offset = base - BOOTLOADER_BASE_ADDR
         if firmware_offset < 0 or firmware_offset + len(data) > flash_size:

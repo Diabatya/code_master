@@ -65,8 +65,33 @@ void Protocol_Init(uint8_t device_type, uint8_t device_version)
 
 static void reboot_to_bootloader(void)
 {
+  /* Backup-domain flag first: it survives the reset and cannot be
+   * overwritten by an RX IRQ in the window before NVIC_SystemReset —
+   * the legacy RAM word below aliases the CAN ring buffer. */
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_RCC_BKP_CLK_ENABLE();
+  PWR->CR |= PWR_CR_DBP;
+  BKP->DR1 = BOOTLOADER_BKP_VALUE;
+
+  /* Legacy RAM flag: bootloaders already flashed on shipped boards only
+   * check this address, so keep writing it for compatibility. */
   uint32_t *flag = (uint32_t *)BOOTLOADER_FLAG_ADDRESS;
   *flag = BOOTLOADER_FLAG_VALUE;
+  NVIC_SystemReset();
+}
+
+/* Software reset back into the application (config re-enumeration,
+ * factory reset): no bootloader-stay flag may survive — BKP DR1 for new
+ * bootloaders and the legacy RAM word for ones already flashed (that
+ * address aliases the CAN ring buffer, so bus traffic could have left a
+ * stray 0xDEADBEEF there and latched the bootloader). */
+static void reboot_to_application(void)
+{
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_RCC_BKP_CLK_ENABLE();
+  PWR->CR |= PWR_CR_DBP;
+  BKP->DR1 = 0U;
+  *(uint32_t *)BOOTLOADER_FLAG_ADDRESS = 0U;
   NVIC_SystemReset();
 }
 
@@ -201,7 +226,7 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
          * via the same bootloader-flag mechanism would also work but
          * would unnecessarily route through the bootloader. */
         HAL_Delay(50);
-        NVIC_SystemReset();
+        reboot_to_application();
       }
       break;
     }
@@ -211,7 +236,7 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
       if (ok) {
         HAL_Delay(50);
-        NVIC_SystemReset();
+        reboot_to_application();
       }
       break;
     }

@@ -21,6 +21,14 @@ extern "C" {
 #define BOOTLOADER_FLAG_ADDRESS 0x20004FF0U
 #define BOOTLOADER_FLAG_VALUE   0xDEADBEEFU
 
+/* Primary handoff flag lives in backup register BKP->DR1 (see the
+ * matching note in firmware/bootloader/Inc/main.h): immune to RAM
+ * content — the legacy address above sits inside the CAN ring buffer,
+ * so a received frame could overwrite the flag before the reset runs,
+ * or leave a stray magic that would latch the bootloader after an
+ * unrelated software reset (e.g. the CMD_CFG_WRITE re-enumeration). */
+#define BOOTLOADER_BKP_VALUE    0xBEEFU
+
 /* ---- Board pinout for the custom CAN1/CAN2 TJA1050 board ----------------- */
 
 /* CAN1: remapped to PB8/PB9 (see AFIO remap in can_bridge.c) */

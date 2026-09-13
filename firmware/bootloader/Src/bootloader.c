@@ -188,6 +188,10 @@ static bool bl_app_is_valid(uint32_t address)
 
 void Bootloader_RequestStay(void)
 {
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_RCC_BKP_CLK_ENABLE();
+  PWR->CR |= PWR_CR_DBP;
+  BKP->DR1 = BOOTLOADER_BKP_VALUE;
   *(__IO uint32_t *)BOOTLOADER_FLAG_ADDRESS = BOOTLOADER_FLAG_VALUE;
 }
 
@@ -196,12 +200,22 @@ bool Bootloader_ShouldStay(void)
   bool software_reset = (RCC->CSR & RCC_CSR_SFTRSTF) != 0U;
   bool stay = false;
 
-  if (software_reset &&
-      (*(__IO uint32_t *)BOOTLOADER_FLAG_ADDRESS == BOOTLOADER_FLAG_VALUE)) {
+  /* The handoff flag lives in the backup domain: it survives a system
+   * reset but not a real power cycle, and — unlike the legacy RAM word,
+   * which aliases the application's CAN ring buffer — cannot be forged
+   * by incoming bus traffic. */
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_RCC_BKP_CLK_ENABLE();
+  PWR->CR |= PWR_CR_DBP;
+
+  if (software_reset && (BKP->DR1 == BOOTLOADER_BKP_VALUE)) {
     stay = true;
   }
 
-  /* Clear flag and reset flags */
+  /* Clear flag and reset flags. The legacy RAM word is always cleared as
+   * well so a stray 0xDEADBEEF left by CAN data cannot survive into a
+   * boot where an older application checks only that address. */
+  BKP->DR1 = 0U;
   *(__IO uint32_t *)BOOTLOADER_FLAG_ADDRESS = 0U;
   RCC->CSR |= RCC_CSR_RMVF;
 

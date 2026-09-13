@@ -123,6 +123,26 @@ def load_firmware_bytes(file_path: str) -> Tuple[bytes, int]:
     return path.read_bytes(), 0
 
 
+def guess_firmware_base(data: bytes) -> int:
+    """Определяет базовый адрес .bin-образа по таблице векторов.
+
+    У .bin нет адресной информации. Единственный надёжный признак —
+    reset-вектор (data[4:8], Thumb): у объединённого образа там точка
+    входа bootloader'а (< 0x08008000), у образа приложения — его
+    собственные векторы (>= 0x08008000). Раньше любой .bin считался
+    application-образом: при прошивке codemaster_full.bin через
+    UART/USB CDC весь блоб писался со смещением +0x8000, векторы
+    приложения оказывались кодом bootloader'а и МК не запускался.
+    """
+    from core.stm32_info import APPLICATION_BASE_ADDR, BOOTLOADER_BASE_ADDR
+
+    if len(data) >= 8:
+        reset = int.from_bytes(data[4:8], "little") & ~1
+        if BOOTLOADER_BASE_ADDR <= reset < APPLICATION_BASE_ADDR:
+            return BOOTLOADER_BASE_ADDR
+    return APPLICATION_BASE_ADDR
+
+
 def trim_to_application_region(data: bytes, base: int) -> Tuple[bytes, int]:
     """Отрезает часть образа ниже 0x08008000 для записи через AN3155.
 
