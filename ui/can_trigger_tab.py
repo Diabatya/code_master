@@ -1,4 +1,4 @@
-"""Страница «Триггеры» с 10 расширенными блоками условий и ответов."""
+"""Страница «Триггеры» — блоки условий и ответов, слоты во Flash МК."""
 
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -28,7 +28,12 @@ from core.can_protocol import (
     pack_can_frame,
 )
 from core.serial_manager import SerialManager
-from core.trigger_protocol import pack_trigger, unpack_trigger
+from core.trigger_protocol import (
+    TRIGGER_MAX_SLOTS,
+    count_configured_triggers,
+    pack_trigger,
+    unpack_trigger,
+)
 from models.config import Config
 from models.logger import get_logger
 from models.translations import _ as tr
@@ -40,7 +45,10 @@ from ui.packet_clipboard import create_clipboard_buttons
 
 logger = get_logger(__name__)
 
-TRIGGER_COUNT = 10
+# Слотов триггеров в странице Flash 0x0803E000 (2 КБ / 54 Б на запись).
+# Старшие прошивки (TRIGGER_COUNT=10) просто отклоняют индексы >= 10 —
+# sync/write обрабатывают это как конец списка.
+TRIGGER_COUNT = TRIGGER_MAX_SLOTS
 MAX_RESPONSE_FRAMES = 5
 CHANNELS = [tr("CAN1"), tr("CAN2"), tr("CAN1 и CAN2")]
 BIT_RATES = [tr("11 бит"), tr("29 бит")]
@@ -223,21 +231,6 @@ class CanTriggerTab(QWidget):
         header = QHBoxLayout()
         header_label = QLabel(tr("Фреймы ответа"))
         header.addWidget(header_label)
-
-        # RTR — одна кнопка на весь ответ триггера, рядом с заголовком
-        # «Фреймы ответа»: trigger_t хранит единственный tx_rtr, поэтому
-        # флаг общий для всех строк фреймов ответа.
-        rtr = QPushButton(tr("RTR"))
-        rtr.setFixedSize(44, 26)
-        rtr.setFont(QFont("Arial", 8, QFont.Weight.Bold))
-        rtr.setCheckable(True)
-        rtr.setToolTip(tr("Remote Transmission Request"))
-        rtr.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
-            "QPushButton:hover { background-color: #4A4A6A; }"
-            "QPushButton:checked { background-color: #FF9800; color: #FFFFFF; }"
-        )
-        header.addWidget(rtr)
         header.addStretch()
         add_button = QPushButton("+")
         add_button.setFixedSize(32, 32)
@@ -254,8 +247,7 @@ class CanTriggerTab(QWidget):
         rows_layout.setSpacing(4)
         group_layout.addLayout(rows_layout)
 
-        block = {"group": group, "header_label": header_label, "rows_layout": rows_layout, "add_button": add_button, "rows": [], "rtr": rtr}
-        rtr.toggled.connect(lambda checked, b=block: self._on_block_rtr_toggled(b, checked))
+        block = {"group": group, "header_label": header_label, "rows_layout": rows_layout, "add_button": add_button, "rows": []}
         add_button.clicked.connect(lambda: self._add_response_row(block, font))
         self._add_response_row(block, font)
         return block
@@ -272,6 +264,23 @@ class CanTriggerTab(QWidget):
         can_id = self._make_id_edit(font, bit)
         dlc = self._make_dlc_spin(font)
         data, data_widget = self._make_data_edits(font)
+
+        # RTR — на каждый фрейм ответа свой, над колонкой «Бит». При
+        # включении поле Data этой строки блокируется и бледнеет, активны
+        # только ID и DLC.
+        rtr = QPushButton(tr("RTR"))
+        rtr.setFixedSize(64, 20)
+        rtr.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        rtr.setCheckable(True)
+        rtr.setToolTip(tr("Remote Transmission Request"))
+        rtr.setStyleSheet(
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
+            "QPushButton:hover { background-color: #4A4A6A; }"
+            "QPushButton:checked { background-color: #FF9800; color: #FFFFFF; }"
+        )
+        rtr.toggled.connect(
+            lambda checked, d=data, w=data_widget, s=dlc: self._on_row_rtr_toggled(checked, d, w, s)
+        )
 
         delay_before_send = self._make_delay_spin(font)
         delay_before_send.setFixedWidth(80)
@@ -294,8 +303,20 @@ class CanTriggerTab(QWidget):
 
         row_layout.addWidget(QLabel(tr("Канал")))
         row_layout.addWidget(channel)
-        row_layout.addWidget(QLabel(tr("Бит")))
-        row_layout.addWidget(bit)
+        # Колонка «Бит» с кнопкой RTR над ней (RTR относится к этой
+        # строке ответа, а не ко всему триггеру).
+        bit_container = QWidget()
+        bit_column = QVBoxLayout(bit_container)
+        bit_column.setSpacing(1)
+        bit_column.setContentsMargins(0, 0, 0, 0)
+        bit_column.addWidget(rtr, alignment=Qt.AlignmentFlag.AlignHCenter)
+        bit_row = QHBoxLayout()
+        bit_row.setSpacing(2)
+        bit_row.setContentsMargins(0, 0, 0, 0)
+        bit_row.addWidget(QLabel(tr("Бит")))
+        bit_row.addWidget(bit)
+        bit_column.addLayout(bit_row)
+        row_layout.addWidget(bit_container)
         row_layout.addWidget(QLabel(tr("ID")))
         row_layout.addWidget(can_id)
         row_layout.addWidget(QLabel(tr("DLC")))
@@ -315,9 +336,9 @@ class CanTriggerTab(QWidget):
         row_layout.addWidget(remove_button)
 
         dlc.valueChanged.connect(
-            lambda value, b=block: self._set_data_enabled(data, 0 if b["rtr"].isChecked() else value)
+            lambda value: self._set_data_enabled(data, 0 if rtr.isChecked() else value)
         )
-        self._set_data_enabled(data, 0 if block["rtr"].isChecked() else dlc.value())
+        self._set_data_enabled(data, dlc.value())
 
         next_delay = self._make_delay_spin(font)
         next_delay.setFixedWidth(80)
@@ -338,14 +359,13 @@ class CanTriggerTab(QWidget):
             "delay_before_label": delay_before_label,
             "delay_between_label": delay_between_label,
             "count": count,
+            "rtr": rtr,
             "next_delay": next_delay,
             "pause_widget": pause_widget,
             "remove_button": remove_button,
         }
         remove_button.clicked.connect(lambda: self._remove_response_row(block, row))
-        can_id.set_fill_callback(
-            lambda parsed, r=row, b=block: self._fill_row_from_packet(r, parsed, b)
-        )
+        can_id.set_fill_callback(lambda parsed, r=row: self._fill_row_from_packet(r, parsed))
         return row
 
     def _create_pause_widget(self, font: QFont, spin: QSpinBox) -> QWidget:
@@ -529,17 +549,16 @@ class CanTriggerTab(QWidget):
             else:
                 edit.setEnabled(True)
 
-    def _on_block_rtr_toggled(self, block: Dict[str, Any], checked: bool) -> None:
-        """RTR в ответе триггера: поля Data всех строк блокируются и бледнеют,
-        редактируемыми остаются только ID и DLC."""
-        for row in block["rows"]:
-            self._set_data_enabled(row["data"], 0 if checked else row["dlc"].value())
-            row["data_widget"].setEnabled(not checked)
-            self._set_widget_opacity(row["data_widget"], 0.35 if checked else 1.0)
-
-    def _fill_row_from_packet(
-        self, row: Dict[str, Any], parsed: Dict[str, Any], block: Optional[Dict[str, Any]] = None
+    def _on_row_rtr_toggled(
+        self, checked: bool, edits: List[QLineEdit], widget: QWidget, dlc: QSpinBox
     ) -> None:
+        """RTR в строке ответа триггера: поле Data этой строки блокируется и
+        бледнеет, редактируемыми остаются только ID и DLC."""
+        self._set_data_enabled(edits, 0 if checked else dlc.value())
+        widget.setEnabled(not checked)
+        self._set_widget_opacity(widget, 0.35 if checked else 1.0)
+
+    def _fill_row_from_packet(self, row: Dict[str, Any], parsed: Dict[str, Any]) -> None:
         """Заполняет строку (ID, DLC, Data) из распарсенного пакета."""
         can_id = parsed.get("id")
         if can_id is None:
@@ -552,7 +571,7 @@ class CanTriggerTab(QWidget):
         data = parsed.get("data", [])
         for i, edit in enumerate(row["data"]):
             edit.setText(f"{data[i]:02X}" if i < len(data) else "")
-        rtr = block["rtr"].isChecked() if block is not None and "rtr" in block else False
+        rtr = row["rtr"].isChecked() if "rtr" in row else False
         self._set_data_enabled(row["data"], 0 if rtr else dlc)
 
     def _fill_cache_from_packet(self, cache: Dict[str, Any], parsed: Dict[str, Any]) -> None:
@@ -574,31 +593,86 @@ class CanTriggerTab(QWidget):
         self._set_data_enabled(cache["to_data"], dlc)
 
     def _create_widgets(self) -> None:
-        font = QFont("Segoe UI", 9)
-        self._font = font
+        self._font = QFont("Segoe UI", 9)
+        # Блоки триггеров создаются лениво: кнопкой «Добавить триггер»,
+        # загрузкой конфига или синхронизацией с устройством. Заводское
+        # состояние — один пустой блок.
 
-        for i in range(TRIGGER_COUNT):
-            group = QGroupBox(tr("Триггер {0}").format(i + 1))
-            group.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-            group.setCheckable(True)
-            group.setChecked(False)
+    def _create_trigger_block(self, index: int) -> Dict[str, Any]:
+        """Создаёт виджеты одного блока триггера (слот = index)."""
+        font = self._font
+        group = QGroupBox(tr("Триггер {0}").format(index + 1))
+        group.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        group.setCheckable(True)
+        group.setChecked(False)
 
-            status = QLabel(tr("Статус: не читался"))
-            status.setFont(font)
-            status.setStyleSheet("color: #9E9E9E;")
+        status = QLabel(tr("Статус: не читался"))
+        status.setFont(font)
+        status.setStyleSheet("color: #9E9E9E;")
 
-            recv = self._create_receive_row(font, tr("Приём"))
-            response = self._create_response_block(font)
-            cache = self._create_cache_block(font, i)
+        recv = self._create_receive_row(font, tr("Приём"))
+        response = self._create_response_block(font)
+        cache = self._create_cache_block(font, index)
 
-            block = {
-                "group": group,
-                "status": status,
-                "recv": recv,
-                "response": response,
-                "cache": cache,
-            }
-            self._blocks.append(block)
+        return {
+            "group": group,
+            "status": status,
+            "recv": recv,
+            "response": response,
+            "cache": cache,
+        }
+
+    def _layout_trigger_block(self, block: Dict[str, Any], index: int) -> None:
+        """Собирает layout блока и добавляет его в контейнер."""
+        group_layout = QVBoxLayout(block["group"])
+        group_layout.setSpacing(5)
+        group_layout.setContentsMargins(6, 6, 6, 6)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setSpacing(5)
+        content_layout.setContentsMargins(6, 6, 6, 6)
+
+        content_layout.addLayout(block["recv"]["layout"])
+        content_layout.addWidget(block["response"]["group"])
+        content_layout.addWidget(block["cache"]["group"])
+        self._set_cache_enabled(block, False)
+        block["cache"]["cache_check"].setEnabled(True)
+
+        group_layout.addWidget(block["status"])
+        group_layout.addWidget(content)
+        block["group"].toggled.connect(lambda checked, c=content: c.setVisible(checked))
+        block["group"].toggled.connect(lambda checked, b=block: self._on_trigger_toggled(self._blocks.index(b), checked))
+        block["content"] = content
+
+        self._blocks_layout.addWidget(block["group"])
+
+    def _add_trigger_block(self) -> Optional[int]:
+        """Добавляет блок триггера. Лимит — только память Flash страницы
+        триггеров (TRIGGER_COUNT слотов по 54 байта в 2 КБ)."""
+        if len(self._blocks) >= TRIGGER_COUNT:
+            return None
+        index = len(self._blocks)
+        block = self._create_trigger_block(index)
+        self._blocks.append(block)
+        if hasattr(self, "_blocks_layout"):
+            self._layout_trigger_block(block, index)
+            self._watch_block_signals(index)
+            self._update_add_trigger_button()
+        return index
+
+    def _update_add_trigger_button(self) -> None:
+        full = len(self._blocks) >= TRIGGER_COUNT
+        self._add_trigger_button.setEnabled(not full)
+        self._add_trigger_button.setToolTip(
+            tr("Страница триггеров заполнена ({0}/{1})").format(len(self._blocks), TRIGGER_COUNT)
+            if full
+            else tr("Добавить триггер")
+        )
+
+    def _on_add_trigger_clicked(self) -> None:
+        if self._add_trigger_block() is not None:
+            self._mark_dirty(len(self._blocks) - 1)
 
     def _build_layout(self) -> None:
         container = QWidget()
@@ -606,31 +680,20 @@ class CanTriggerTab(QWidget):
         container_layout.setSpacing(10)
         container_layout.setContentsMargins(8, 8, 8, 8)
 
-        for block in self._blocks:
-            group_layout = QVBoxLayout(block["group"])
-            group_layout.setSpacing(5)
-            group_layout.setContentsMargins(6, 6, 6, 6)
+        self._blocks_layout = QVBoxLayout()
+        self._blocks_layout.setSpacing(10)
+        container_layout.addLayout(self._blocks_layout)
 
-            content = QWidget()
-            content_layout = QVBoxLayout(content)
-            content_layout.setSpacing(5)
-            content_layout.setContentsMargins(6, 6, 6, 6)
-
-            content_layout.addLayout(block["recv"]["layout"])
-
-            content_layout.addWidget(block["response"]["group"])
-
-            content_layout.addWidget(block["cache"]["group"])
-            self._set_cache_enabled(block, False)
-            block["cache"]["cache_check"].setEnabled(True)
-
-            group_layout.addWidget(block["status"])
-            group_layout.addWidget(content)
-            block["group"].toggled.connect(lambda checked, content=content: content.setVisible(checked))
-            block["group"].toggled.connect(lambda checked, idx=self._blocks.index(block): self._on_trigger_toggled(idx, checked))
-            block["content"] = content
-
-            container_layout.addWidget(block["group"])
+        self._add_trigger_button = QPushButton(tr("Добавить триггер"))
+        self._add_trigger_button.setFont(QFont("Segoe UI", 9))
+        self._add_trigger_button.setStyleSheet(
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 6px 14px; }"
+            "QPushButton:hover { background-color: #4A4A6A; }"
+            "QPushButton:disabled { color: #777777; }"
+        )
+        self._add_trigger_button.clicked.connect(self._on_add_trigger_clicked)
+        container_layout.addWidget(self._add_trigger_button)
+        container_layout.addStretch()
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -642,8 +705,9 @@ class CanTriggerTab(QWidget):
         layout.addWidget(scroll)
         layout.addWidget(self._memory_indicator)
 
-        for index in range(TRIGGER_COUNT):
-            self._watch_block_signals(index)
+        # Заводское состояние — один пустой блок; остальные добавляются
+        # оператором кнопкой «Добавить триггер» (лимит — память Flash).
+        self._add_trigger_block()
 
     def _watch_block_signals(self, index: int) -> None:
         """Подписывает пользовательские изменения всех полей блока на
@@ -725,8 +789,8 @@ class CanTriggerTab(QWidget):
 
         response_rows = block["response"]["rows"]
         response = response_rows[0] if response_rows else None
-        tx_rtr = int(block["response"]["rtr"].isChecked())
         if response is None:
+            tx_rtr = 0
             tx_id, tx_channel, tx_extended, tx_dlc = 0, 0, 0, 0
             tx_data = b""
             delay_ms = 0
@@ -736,6 +800,7 @@ class CanTriggerTab(QWidget):
             tx_extended = response["bit"].currentIndex()
             tx_dlc = response["dlc"].value()
             tx_data = bytes((value or 0) & 0xFF for value in self._parse_data(response["data"]))
+            tx_rtr = int(response["rtr"].isChecked())
             delay_ms = response["delay_before_send"].value()
 
         return {
@@ -798,7 +863,6 @@ class CanTriggerTab(QWidget):
             edit.setText(f"{value:02X}")
         self._set_data_enabled(recv["data"], recv["dlc"].value())
 
-        block["response"]["rtr"].setChecked(bool(values.get("tx_rtr", 0)))
         rows = block["response"]["rows"]
         if rows:
             row = rows[0]
@@ -808,10 +872,9 @@ class CanTriggerTab(QWidget):
             row["dlc"].setValue(min(8, values["tx_dlc"]))
             for edit, value in zip(row["data"], values["tx_data"]):
                 edit.setText(f"{value:02X}")
+            row["rtr"].setChecked(bool(values.get("tx_rtr", 0)))
             row["delay_before_send"].setValue(values["delay_ms"])
-            self._set_data_enabled(
-                row["data"], 0 if block["response"]["rtr"].isChecked() else row["dlc"].value()
-            )
+            self._set_data_enabled(row["data"], 0 if row["rtr"].isChecked() else row["dlc"].value())
         self._applying_device_state = False
         self._set_trigger_status(index, "enabled" if values["enabled"] else "disabled")
 
@@ -840,17 +903,70 @@ class CanTriggerTab(QWidget):
                 return False
         return True
 
+    @staticmethod
+    def _is_empty_trigger(values: Dict[str, Any]) -> bool:
+        """True, если слот устройства «заводской» — не был настроен."""
+        return (
+            not values["enabled"]
+            and values["rx_id"] == 0
+            and values["tx_id"] == 0
+            and not any(values["rx_data"])
+            and not any(values["tx_data"])
+        )
+
+    def _clear_block(self, index: int) -> None:
+        """Полностью очищает блок (пустой слот устройства — не оставляем
+        в полях старые данные из кэша конфигурации)."""
+        block = self._blocks[index]
+        block["group"].setChecked(False)
+        block["cache"]["cache_check"].setChecked(False)
+        self._on_cache_active_changed(index, Qt.CheckState.Unchecked.value)
+        self._set_row(block["recv"], {}, "recv")
+        self._set_response_rows(block["response"], [])
+        self._set_cache(block["cache"], {})
+        self._set_trigger_status(index, "disabled")
+
+    def _ensure_blocks(self, count: int) -> None:
+        """Создаёт блоки до count включительно (для синхронизации/конфига)."""
+        while len(self._blocks) < min(count, TRIGGER_COUNT):
+            self._add_trigger_block()
+
     def sync_from_device(self) -> None:
         """Вычитывает все триггеры из устройства (вызывается при подключении).
 
         Молча применяет состояние в UI и помечает блоки, исполняемые МК,
-        флагом device_managed. Ошибки поднимает наружу — решает вызывающий.
+        флагом device_managed. Слот, который не читается, пропускается —
+        остальные синхронизируются. Пустые слоты очищают поля блока:
+        в прошитом заново МК триггеров нет, и оператор должен видеть
+        пустые поля, а не старые данные из кэша конфигурации.
         """
+        values_by_index: Dict[int, Optional[Dict[str, Any]]] = {}
+        last_nonempty = -1
+        for index in range(TRIGGER_COUNT):
+            try:
+                payload = self._serial_manager.request_control(CMD_TRIGGER_READ, bytes((index,)))
+                values = unpack_trigger(payload)
+            except RuntimeError as exc:
+                if "0x01" in str(exc):
+                    break  # старшая прошивка: слотов меньше — конец списка
+                values = None  # ошибка слота — не рвём синхронизацию
+            except Exception:
+                values = None
+            values_by_index[index] = values
+            if values is not None and not self._is_empty_trigger(values):
+                last_nonempty = index
+
         self._applying_device_state = True
         try:
-            for index in range(TRIGGER_COUNT):
-                payload = self._serial_manager.request_control(CMD_TRIGGER_READ, bytes((index,)))
-                self._apply_device_trigger(index, unpack_trigger(payload))
+            self._ensure_blocks(last_nonempty + 1)
+            for index, values in values_by_index.items():
+                if index >= len(self._blocks):
+                    break
+                if values is None or self._is_empty_trigger(values):
+                    self._clear_block(index)
+                    self._device_managed[index] = False
+                    continue
+                self._apply_device_trigger(index, values)
                 self._device_managed[index] = self._is_device_representable(self._blocks[index])
             self._save_config()
         finally:
@@ -858,31 +974,69 @@ class CanTriggerTab(QWidget):
 
     def write_to_device(self) -> int:
         """Записывает текущие триггеры в устройство. Возвращает число
-        изменённых записей. Вызывается кнопкой «Сохранить» окна настроек."""
+        изменённых записей. Вызывается кнопкой «Сохранить» окна настроек.
+
+        После COMMIT записанные слоты перечитываются и сравниваются:
+        если прошивка не зафиксировала запись во Flash (стирание/запись
+        оборвались), оператор получает ошибку сразу, а не после
+        выключения питания.
+        """
         changed = 0
+        staged: List[Tuple[int, bytes]] = []
+        default_payload = pack_trigger({})
         for index in range(TRIGGER_COUNT):
-            block = self._blocks[index]
-            representable = self._is_device_representable(block)
-            values = self._device_trigger_values(index)
-            if not representable:
-                # Триггер исполняется приложением — на МК он должен быть
-                # выключен, иначе устройство продолжит отвечать по-старому.
-                values["enabled"] = 0
-            local_payload = pack_trigger(values)
-            remote_payload = self._serial_manager.request_control(
-                CMD_TRIGGER_READ, bytes((index,))
-            )
-            if remote_payload == local_payload:
-                self._set_trigger_status(index, "synced")
-            else:
-                self._serial_manager.request_control(
-                    CMD_TRIGGER_STAGE, bytes((index,)) + local_payload
+            try:
+                remote_payload = self._serial_manager.request_control(
+                    CMD_TRIGGER_READ, bytes((index,))
                 )
-                self._set_trigger_status(index, "written")
-                changed += 1
-            self._device_managed[index] = representable
+            except RuntimeError as exc:
+                if "0x01" in str(exc):
+                    break  # старшая прошивка: дальше слотов нет
+                raise
+            if index < len(self._blocks):
+                block = self._blocks[index]
+                representable = self._is_device_representable(block)
+                values = self._device_trigger_values(index)
+                if not representable:
+                    # Триггер исполняется приложением — на МК он должен
+                    # быть выключен, иначе устройство продублирует ответ.
+                    values["enabled"] = 0
+                local_payload = pack_trigger(values)
+                if remote_payload == local_payload:
+                    self._set_trigger_status(index, "synced")
+                else:
+                    self._serial_manager.request_control(
+                        CMD_TRIGGER_STAGE, bytes((index,)) + local_payload
+                    )
+                    staged.append((index, local_payload))
+                    self._set_trigger_status(index, "written")
+                    changed += 1
+                self._device_managed[index] = representable
+            else:
+                # Слота нет в UI, но в устройстве мог остаться триггер —
+                # гасим его, чтобы «невидимая» запись не срабатывала.
+                # Сравнение семантическое (пустой ≠ пустой записи
+                # побайтово): иначе каждый «Сохранить» жёг бы цикл Flash.
+                try:
+                    remote_empty = self._is_empty_trigger(unpack_trigger(remote_payload))
+                except (ValueError, RuntimeError):
+                    remote_empty = False
+                if not remote_empty:
+                    self._serial_manager.request_control(
+                        CMD_TRIGGER_STAGE, bytes((index,)) + default_payload
+                    )
+                    staged.append((index, default_payload))
+                    changed += 1
+                self._device_managed[index] = False
         if changed:
             self._serial_manager.request_control(CMD_TRIGGER_COMMIT, b"")
+            for index, expected in staged:
+                actual = self._serial_manager.request_control(CMD_TRIGGER_READ, bytes((index,)))
+                if actual != expected:
+                    self._set_trigger_status(index, "differs")
+                    raise RuntimeError(
+                        tr("Триггер {0}: проверка записи во Flash не пройдена").format(index + 1)
+                    )
         self._save_config()
         return changed
 
@@ -968,16 +1122,14 @@ class CanTriggerTab(QWidget):
                 "recv_data": self._parse_data(block["recv"]["data"]),
                 "recv_channel": block["recv"]["channel"].currentIndex(),
                 "cache": block["cache"]["cache_check"].isChecked(),
-                "responses": self._collect_responses(
-                    block["response"]["rows"], block["response"]["rtr"].isChecked()
-                ),
+                "responses": self._collect_responses(block["response"]["rows"]),
                 "cache_data": self._collect_cache(block["cache"]),
                 "cached_frame": None,
                 "device_managed": self._device_managed[i],
             })
         return triggers
 
-    def _collect_responses(self, rows: List[Dict[str, Any]], rtr: bool) -> List[Dict[str, Any]]:
+    def _collect_responses(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         result: List[Dict[str, Any]] = []
         for row in rows:
             can_id = self._parse_id(row["id"].text())
@@ -988,7 +1140,7 @@ class CanTriggerTab(QWidget):
                 "id": can_id,
                 "dlc": row["dlc"].value(),
                 "data": self._parse_data(row["data"]),
-                "rtr": int(rtr),
+                "rtr": int(row["rtr"].isChecked()),
                 "delay_before_send": row["delay_before_send"].value(),
                 "delay_between": row["delay_between"].value(),
                 "count": row["count"].value(),
@@ -1016,7 +1168,7 @@ class CanTriggerTab(QWidget):
     def _save_config(self) -> None:
         triggers = self._collect_config()
         self._config.set("triggers", triggers)
-        self._memory_indicator.update_usage(self._memory_indicator.estimate_triggers(triggers))
+        self._memory_indicator.show_trigger_usage(count_configured_triggers(triggers))
 
     def _collect_config(self) -> List[Dict[str, Any]]:
         config = []
@@ -1028,7 +1180,7 @@ class CanTriggerTab(QWidget):
                     "bit": row["bit"].currentIndex(),
                     "id": row["id"].text(),
                     "dlc": row["dlc"].value(),
-                    "rtr": int(block["response"]["rtr"].isChecked()),
+                    "rtr": int(row["rtr"].isChecked()),
                     "data": " ".join(e.text() for e in row["data"] if e.text()),
                     "delay_before_send": row["delay_before_send"].value(),
                     "delay_between": row["delay_between"].value(),
@@ -1068,6 +1220,8 @@ class CanTriggerTab(QWidget):
         self._device_managed = [False] * TRIGGER_COUNT
         self._applying_device_state = True
         try:
+            # Блоков должно хватить на все сохранённые триггеры
+            self._ensure_blocks(len(triggers))
             for i, block in enumerate(self._blocks):
                 trigger = triggers[i] if i < len(triggers) else {}
                 block["group"].setChecked(bool(trigger.get("active", False)))
@@ -1094,18 +1248,16 @@ class CanTriggerTab(QWidget):
     def _set_response_rows(self, response_block: Dict[str, Any], responses: List[Dict[str, Any]]) -> None:
         """Заполняет динамический список фреймов ответа из конфигурации."""
         rows = response_block["rows"]
-        rtr = bool(responses[0].get("rtr", 0)) if responses else False
-        response_block["rtr"].setChecked(rtr)
         for r, row in enumerate(rows):
             data = responses[r] if r < len(responses) else {}
-            self._set_response(row, data, rtr)
+            self._set_response(row, data)
         while len(rows) > len(responses) and len(rows) > 1:
             self._remove_response_row(response_block, rows[-1])
         for r in range(len(rows), len(responses)):
             self._add_response_row(response_block, self._font)
-            self._set_response(response_block["rows"][-1], responses[r], rtr)
+            self._set_response(response_block["rows"][-1], responses[r])
 
-    def _set_response(self, response: Dict[str, Any], data: Dict[str, Any], rtr: bool = False) -> None:
+    def _set_response(self, response: Dict[str, Any], data: Dict[str, Any]) -> None:
         response["channel"].setCurrentIndex(int(data.get("channel", 0)))
         response["bit"].setCurrentIndex(int(data.get("bit", 0)))
         response["id"].setText(str(data.get("id", "")))
@@ -1113,7 +1265,8 @@ class CanTriggerTab(QWidget):
         bytes_data = parse_data_bytes(str(data.get("data", "")).split())
         for d, edit in enumerate(response["data"]):
             edit.setText(f"{bytes_data[d]:02X}" if d < len(bytes_data) else "")
-        self._set_data_enabled(response["data"], 0 if rtr else response["dlc"].value())
+        response["rtr"].setChecked(bool(data.get("rtr", 0)))
+        self._set_data_enabled(response["data"], 0 if response["rtr"].isChecked() else response["dlc"].value())
         response["delay_before_send"].setValue(int(data.get("delay_before_send", 0)))
         response["delay_between"].setValue(int(data.get("delay_between", data.get("delay", 0))))
         response["count"].setValue(int(data.get("count", 1)))
@@ -1290,7 +1443,8 @@ class CanTriggerTab(QWidget):
     def create_trigger_from_packet(self, packet: Dict[str, object]) -> None:
         """Создаёт первый триггер из пакета мониторинга."""
         if not self._blocks:
-            return
+            if self._add_trigger_block() is None:
+                return
         block = self._blocks[0]
         block["group"].setChecked(True)
         can_id = int(packet["id"])

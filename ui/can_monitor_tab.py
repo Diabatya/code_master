@@ -4,10 +4,10 @@ import csv
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, TextIO
+from typing import Any, Dict, List, Optional, Set, TextIO, Tuple
 
 from PySide6.QtCore import QRegularExpression, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QRegularExpressionValidator
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QSlider,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -111,6 +112,192 @@ class DataVariantsDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
+
+
+def _data_percent(data: bytes, dlc: int) -> float:
+    """DATA как процент заполнения: 00..00 → 0%, FF..FF → 100%."""
+    dlc = max(0, min(int(dlc), len(data)))
+    if dlc == 0:
+        return 0.0
+    value = int.from_bytes(data[:dlc], "big")
+    maximum = (1 << (dlc * 8)) - 1
+    return value * 100.0 / maximum if maximum else 0.0
+
+
+class _PercentGraph(QWidget):
+    """Живой график значения DATA в процентах: ось Y — %, ось X — время.
+
+    Бегунок «развёртка» задаёт ширину окна в секундах, «инвертирование»
+    переворачивает ось Y (FF..FF внизу, 00..00 вверху).
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._samples: List[Tuple[float, float]] = []  # (time, percent)
+        self._window_s = 30.0
+        self._inverted = False
+        self.setMinimumHeight(150)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_window(self, seconds: float) -> None:
+        self._window_s = max(1.0, float(seconds))
+        self.update()
+
+    def set_inverted(self, inverted: bool) -> None:
+        self._inverted = inverted
+        self.update()
+
+    def add_sample(self, t: float, percent: float) -> None:
+        self._samples.append((t, percent))
+        if len(self._samples) > 10_000:
+            del self._samples[: len(self._samples) - 10_000]
+        self.update()
+
+    def set_samples(self, samples: List[Tuple[float, float]]) -> None:
+        self._samples = list(samples)
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#232338"))
+        rect = self.rect().adjusted(38, 10, -10, -24)
+        painter.setPen(QPen(QColor("#5A5A7A"), 1))
+        painter.drawRect(rect)
+        if rect.width() <= 0 or rect.height() <= 0:
+            painter.end()
+            return
+
+        font = painter.font()
+        font.setPointSize(7)
+        painter.setFont(font)
+        # Сетка и подписи процентов (инверсия переворачивает шкалу)
+        for pct in (0, 25, 50, 75, 100):
+            shown = 100 - pct if self._inverted else pct
+            y = rect.bottom() - rect.height() * shown / 100.0
+            painter.setPen(QPen(QColor("#3A3A5A"), 1, Qt.PenStyle.DotLine))
+            painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
+            painter.setPen(QColor("#9E9E9E"))
+            painter.drawText(2, int(y) + 4, f"{pct}%")
+
+        now = time.time()
+        start = now - self._window_s
+        pts = [(t, v) for t, v in self._samples if t >= start]
+        if len(pts) >= 2:
+            painter.setPen(QPen(QColor("#4CAF50"), 2))
+            prev = pts[0]
+            for t, v in pts[1:]:
+                x1 = rect.left() + rect.width() * (prev[0] - start) / self._window_s
+                y1 = rect.bottom() - rect.height() * prev[1] / 100.0
+                x2 = rect.left() + rect.width() * (t - start) / self._window_s
+                y2 = rect.bottom() - rect.height() * v / 100.0
+                painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+                prev = (t, v)
+        painter.setPen(QColor("#9E9E9E"))
+        painter.drawText(int(rect.left()), self.rect().bottom() - 6, f"-{int(self._window_s)}с")
+        painter.drawText(int(rect.right()) - 24, self.rect().bottom() - 6, tr("сейчас"))
+        painter.end()
+
+
+class IdHistoryDialog(QDialog):
+    """История одного CAN ID: таблица «время → data» + живой график %."""
+
+    MAX_ROWS = 2000
+
+    def __init__(
+        self,
+        can_id: int,
+        channel: int,
+        samples: List[Tuple[float, bytes, bool, int]],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.can_id = can_id
+        self.setWindowTitle(tr("История ID 0x{0:X} — CAN{1}").format(can_id, channel))
+        self.resize(640, 480)
+
+        font = QFont("Segoe UI", 9)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+
+        self._table = QTableWidget()
+        self._table.setColumnCount(3)
+        self._table.setHorizontalHeaderLabels([tr("Время"), tr("DLC"), tr("Data")])
+        self._table.setFont(font)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+
+        self._percent_label = QLabel("0%")
+        self._percent_label.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+
+        self._graph = _PercentGraph(self)
+
+        self._zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self._zoom_slider.setRange(5, 300)
+        self._zoom_slider.setValue(30)
+        self._zoom_label = QLabel(tr("Развёртка: 30 с"))
+        self._zoom_label.setFont(font)
+        self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
+
+        self._invert_button = QPushButton(tr("Инвертирование"))
+        self._invert_button.setFont(font)
+        self._invert_button.setCheckable(True)
+        self._invert_button.setToolTip(tr("FF..FF = 0% внизу, 00..00 = 100% вверху"))
+        self._invert_button.toggled.connect(self._on_invert_toggled)
+
+        bottom = QHBoxLayout()
+        bottom.addWidget(self._percent_label)
+        bottom.addSpacing(16)
+        bottom.addWidget(self._zoom_label)
+        bottom.addWidget(self._zoom_slider, 1)
+        bottom.addWidget(self._invert_button)
+
+        layout.addWidget(self._table, 1)
+        layout.addWidget(self._graph)
+        layout.addLayout(bottom)
+
+        for sample in samples:
+            self._append_row(*sample, repaint=False)
+        self._graph.update()
+
+        # Периодический repaint — «ползущее» окно времени
+        self._repaint_timer = QTimer(self)
+        self._repaint_timer.timeout.connect(self._graph.update)
+        self._repaint_timer.start(250)
+
+    def _append_row(self, t: float, data: bytes, rtr: bool, dlc: int, repaint: bool = True) -> None:
+        if self._table.rowCount() >= self.MAX_ROWS:
+            self._table.removeRow(0)
+        row = self._table.rowCount()
+        self._table.insertRow(row)
+        timestamp = time.strftime("%H:%M:%S", time.localtime(t)) + f".{int((t % 1) * 1000):03d}"
+        data_text = "rtr" if rtr else " ".join(format_data_bytes(data))
+        for col, text in enumerate((timestamp, str(dlc), data_text)):
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._table.setItem(row, col, item)
+        pct = _data_percent(data, dlc) if not rtr else 0.0
+        self._graph.add_sample(t, pct)
+        if repaint:
+            shown = 100.0 - pct if self._invert_button.isChecked() else pct
+            self._percent_label.setText(f"{shown:.1f}%")
+            self._table.scrollToBottom()
+
+    def add_sample(self, t: float, data: bytes, rtr: bool, dlc: int) -> None:
+        """Вызывается монитором при новом фрейме с этим ID."""
+        self._append_row(t, data, rtr, dlc)
+
+    def _on_zoom_changed(self, value: int) -> None:
+        self._zoom_label.setText(tr("Развёртка: {0} с").format(value))
+        self._graph.set_window(float(value))
+
+    def _on_invert_toggled(self, checked: bool) -> None:
+        self._graph.set_inverted(checked)
+        # Пересчитываем текущий процент и график с учётом инверсии
+        if self._graph._samples:
+            _t, pct = self._graph._samples[-1]
+            self._percent_label.setText(f"{(100.0 - pct) if checked else pct:.1f}%")
 
 
 class BitmapDialog(QDialog):
@@ -217,6 +404,10 @@ class CanChannelMonitor(QWidget):
         self._id_to_row: Dict[int, int] = {}
         self._id_stats: Dict[int, Dict[str, Any]] = {}
         self._id_data_variants: Dict[int, Set[bytes]] = {}
+        # История фреймов по каждому ID (время, data, rtr, dlc) — для
+        # диалога «История ID» из контекстного меню таблицы.
+        self._id_history: Dict[int, deque] = {}
+        self._history_dialogs: List[IdHistoryDialog] = []
         self._highlight_timers: Dict[int, QTimer] = {}
         self._ignored_ids: set[int] = set()
         # Предыдущие значения счётчиков ошибок — для визуальных предупреждений
@@ -272,6 +463,8 @@ class CanChannelMonitor(QWidget):
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
+        # Двойной правый клик по строке ID → сразу «История ID» (без меню)
+        self._table.viewport().installEventFilter(self)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.setColumnWidth(0, 90)
         self._table.setColumnWidth(1, 50)
@@ -511,6 +704,7 @@ class CanChannelMonitor(QWidget):
         self._id_to_row.clear()
         self._id_stats.clear()
         self._id_data_variants.clear()
+        self._id_history.clear()
         for timer in self._highlight_timers.values():
             timer.stop()
         self._highlight_timers.clear()
@@ -734,6 +928,10 @@ class CanChannelMonitor(QWidget):
         stats["last_receive_time"] = now
         stats["last_data"] = data
         self._id_data_variants.setdefault(frame_id, set()).add(data)
+        self._id_history.setdefault(frame_id, deque(maxlen=2000)).append((now, data, rtr, dlc))
+        for dialog in self._history_dialogs:
+            if dialog.can_id == frame_id:
+                dialog.add_sample(now, data, rtr, dlc)
 
         self._table.scrollToBottom()
 
@@ -810,6 +1008,21 @@ class CanChannelMonitor(QWidget):
     def _show_filter_dialog(self) -> None:
         """Переключено на глобальное управление фильтром в CanMonitorTab."""
 
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        """Двойной клик ПКМ по строке таблицы открывает историю ID."""
+        from PySide6.QtCore import QEvent
+
+        if (
+            watched is self._table.viewport()
+            and event.type() == QEvent.Type.MouseButtonDblClick
+            and event.button() == Qt.MouseButton.RightButton
+        ):
+            row = self._table.rowAt(event.position().toPoint().y())
+            if row >= 0:
+                self._show_id_history(row)
+                return True
+        return super().eventFilter(watched, event)
+
     def _show_context_menu(self, position) -> None:
         row = self._table.currentRow()
         if row < 0:
@@ -821,6 +1034,7 @@ class CanChannelMonitor(QWidget):
         menu.addAction(tr("Создать триггер"), lambda: self._create_trigger_from_row(row))
         menu.addAction(tr("Показать варианты данных"), lambda: self._show_data_variants(row))
         menu.addAction(tr("Битовая карта"), lambda: self._show_bitmap(row))
+        menu.addAction(tr("История ID…"), lambda: self._show_id_history(row))
         menu.exec(self._table.viewport().mapToGlobal(position))
 
     def _copy_selected_id(self, row: int) -> None:
@@ -858,6 +1072,23 @@ class CanChannelMonitor(QWidget):
             return
         dialog = DataVariantsDialog(can_id, variants, self)
         dialog.exec()
+
+    def _show_id_history(self, row: int) -> None:
+        """Открывает диалог истории по ID из строки таблицы."""
+        id_item = self._table.item(row, 0)
+        if id_item is None:
+            return
+        can_id = hex_to_int(id_item.text())
+        if can_id is None:
+            return
+        samples = list(self._id_history.get(can_id, ()))
+        dialog = IdHistoryDialog(can_id, self._channel, samples, self)
+        self._history_dialogs.append(dialog)
+        dialog.finished.connect(
+            lambda *_a, d=dialog: self._history_dialogs.remove(d)
+            if d in self._history_dialogs else None
+        )
+        dialog.show()
 
     def _show_bitmap(self, row: int) -> None:
         id_item = self._table.item(row, 0)
@@ -1069,7 +1300,20 @@ class CanMonitorTab(QWidget):
         interval = self._highlight_interval_spin.value()
         self._monitor1.set_filter(result["enabled"], result["rules"], result["ignored_ids"], interval)
         self._monitor2.set_filter(result["enabled"], result["rules"], result["ignored_ids"], interval)
-        self._memory_indicator.update_usage(self._memory_indicator.estimate_rules(result["rules"]))
+        self._refresh_memory_indicator()
+
+    def _refresh_memory_indicator(self) -> None:
+        """«Память» показывает долю Flash-страницы триггеров — как во
+        вкладке «Триггеры», чтобы в мониторинге не было ложного 0%."""
+        from core.trigger_protocol import count_configured_triggers
+
+        self._memory_indicator.show_trigger_usage(
+            count_configured_triggers(self._config.get("triggers", []))
+        )
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._refresh_memory_indicator()
 
     def _get_known_ids(self) -> List[int]:
         return list(set(self._monitor1.get_known_ids() + self._monitor2.get_known_ids()))

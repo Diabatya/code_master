@@ -46,6 +46,28 @@ class MemoryIndicator(QWidget):
         self._progress.setValue(percent)
         self._progress.setFormat(f"{percent}%")
 
+    def show_trigger_usage(self, used_slots: int) -> None:
+        """Процент занятой страницы Flash триггеров (2 КБ, слоты по 54 Б).
+
+        Одинаковый смысл во всех вкладках: доля области 0x0803E000,
+        занятая настроенными триггерами.
+        """
+        from core.trigger_protocol import (
+            TRIGGER_MAX_SLOTS,
+            TRIGGER_PAGE_SIZE,
+            TRIGGER_SLOT_SIZE,
+            trigger_usage_percent,
+        )
+
+        percent = trigger_usage_percent(used_slots)
+        self._progress.setValue(percent)
+        self._progress.setFormat(f"{percent}%")
+        self._progress.setToolTip(
+            tr("Триггеров: {0}/{1} ({2} из {3} Б Flash)").format(
+                used_slots, TRIGGER_MAX_SLOTS, used_slots * TRIGGER_SLOT_SIZE, TRIGGER_PAGE_SIZE
+            )
+        )
+
     def estimate_bytes(self, data: Any) -> int:
         """Оценивает размер JSON-совместимой структуры в байтах."""
         try:

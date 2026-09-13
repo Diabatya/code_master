@@ -67,6 +67,9 @@ class ConnectionTab(QWidget):
         self._load_defaults()
         self._update_ui_state()
         self._serial_manager.connection_changed.connect(self._update_ui_state)
+        # После идентификации (CMD_CFG_READ) в карте серийник→имя может
+        # появиться запись — обновляем подписи портов.
+        self._serial_manager.device_identified.connect(lambda *_a: self._refresh_ports())
 
     def _init_ui(self) -> None:
         font = QFont("Segoe UI", 10)
@@ -131,12 +134,21 @@ class ConnectionTab(QWidget):
         current = self._port_combo.currentData()
         self._port_combo.clear()
         self._port_combo.addItem(tr("FAKE (эмулятор)"), "FAKE")
+        # Windows показывает CDC-порт как «Устройство с последовательным
+        # интерфейсом» независимо от iProduct — поэтому имя, записанное в
+        # поле «Устройство», берём из карты серийник→имя (её заполняет
+        # SerialManager при подключении через CMD_CFG_READ).
+        port_names = self._config.get("port_names", {}) or {}
         for port_info in comports():
-            # Для наших устройств (VID 0483) прошивка отдаёт имя из поля
-            # «Устройство» как USB iProduct — description показывает его
-            # оператору вместо безликого «COMx».
-            text = port_info.description or port_info.device
+            serial = (port_info.serial_number or "").strip()
+            name = port_names.get(serial, "")
+            text = name or (port_info.description or port_info.device)
+            index = self._port_combo.count()
             self._port_combo.addItem(text, port_info.device)
+            if name:
+                self._port_combo.setItemData(
+                    index, port_info.device, Qt.ItemDataRole.ToolTipRole
+                )
         if current:
             index = self._port_combo.findData(current)
             if index < 0:
@@ -375,6 +387,7 @@ class SettingsWindow(QMainWindow):
         # устройства «Сохранить» выключена и полупрозрачна, любое изменение
         # оператора включает её обратно.
         self._loading = False
+        self._baseline_signature: tuple = ()
         self._save_opacity = QGraphicsOpacityEffect(self._save_button)
         self._save_button.setGraphicsEffect(self._save_opacity)
         self._install_dirty_tracking(self.centralWidget())
@@ -411,15 +424,49 @@ class SettingsWindow(QMainWindow):
         if not self._loading:
             self._mark_dirty()
 
+    def _widgets_signature(self) -> tuple:
+        """Снимок всех редактируемых полей окна — эталон для «Сохранить».
+
+        Кнопка активна, только если текущий снимок отличается от
+        зафиксированного при последнем сохранении/вычитке устройства:
+        оператор мог вернуть значение обратно — тогда изменений нет.
+        """
+        sig = []
+        root = self.centralWidget()
+        for widget in root.findChildren(QComboBox):
+            sig.append(("combo", widget.currentIndex(), widget.currentText()))
+        for widget in root.findChildren(QLineEdit):
+            if widget is self._search_edit or widget is self._serial_edit:
+                continue
+            sig.append(("edit", widget.text()))
+        for widget in root.findChildren(QSpinBox):
+            sig.append(("spin", widget.value()))
+        for widget in root.findChildren(QCheckBox):
+            sig.append(("check", widget.isChecked()))
+        for widget in root.findChildren(QPushButton):
+            if widget.isCheckable():
+                sig.append(("button", widget.isChecked()))
+        for widget in root.findChildren(QGroupBox):
+            if widget.isCheckable():
+                sig.append(("group", widget.isChecked()))
+        return tuple(sig)
+
     def _mark_dirty(self, *_args: object) -> None:
-        """Включает кнопку «Сохранить» — есть незаписанные изменения."""
+        """Обновляет кнопку «Сохранить» по снимку полей.
+
+        Активна, только когда введённые значения отличаются от последней
+        прогруженной конфигурации — стёртое и возвращённое обратно поле
+        изменением не считается.
+        """
         if self._loading:
             return
-        self._save_opacity.setOpacity(1.0)
-        self._save_button.setEnabled(True)
+        changed = self._widgets_signature() != self._baseline_signature
+        self._save_opacity.setOpacity(1.0 if changed else 0.4)
+        self._save_button.setEnabled(changed)
 
     def _mark_clean(self) -> None:
         """Выключает и приглушает кнопку «Сохранить» — изменений нет."""
+        self._baseline_signature = self._widgets_signature()
         self._save_opacity.setOpacity(0.4)
         self._save_button.setEnabled(False)
 

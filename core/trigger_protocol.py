@@ -10,6 +10,40 @@ TRIGGER_FORMAT_VERSION = 1
 TRIGGER_SIZE = 54
 _TRIGGER_FORMAT = "<IBBBIIB8s8sBBIB8sH2sBBB"
 
+# Область хранения триггеров во Flash устройства (см. firmware/PROTOCOL.md
+# и Inc/trigger.h — значения обязаны совпадать): одна страница 2 КБ по
+# адресу 0x0803E000, записи по 54 байта → максимум 37 слотов.
+TRIGGER_PAGE_ADDR = 0x0803E000
+TRIGGER_PAGE_SIZE = 2048
+TRIGGER_SLOT_SIZE = 54
+TRIGGER_MAX_SLOTS = TRIGGER_PAGE_SIZE // TRIGGER_SLOT_SIZE  # 37
+
+
+def trigger_usage_percent(used_slots: int) -> int:
+    """Процент занятой памяти страницы триггеров для индикатора «Память»."""
+    used = max(0, min(TRIGGER_MAX_SLOTS, int(used_slots))) * TRIGGER_SLOT_SIZE
+    return min(100, round(used * 100 / TRIGGER_PAGE_SIZE))
+
+
+def count_configured_triggers(triggers: list) -> int:
+    """Сколько слотов конфигурации реально занято (для «Память»).
+
+    Слот считается занятым, если триггер включён или в нём заполнены
+    поля приёма/ответа — пустые блоки память не занимают.
+    """
+    count = 0
+    for trigger in triggers or []:
+        if not isinstance(trigger, dict):
+            continue
+        responses = trigger.get("responses") or []
+        if (
+            trigger.get("active")
+            or str(trigger.get("recv_id", "")).strip()
+            or any(str(r.get("id", "")).strip() for r in responses if isinstance(r, dict))
+        ):
+            count += 1
+    return count
+
 
 def crc8(data: bytes) -> int:
     value = 0

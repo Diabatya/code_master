@@ -19,12 +19,19 @@ from core.can_protocol import (
     CMD_TRIGGER_STATS,
     CMD_SYSTEM_INFO,
     CMD_USB_STATS,
+    CMD_CFG_READ,
     CMD_DEVICE_ID,
     CMD_DEVICE_ID_RESP,
     CMD_DEVICE_INFO,
     CMD_DEVICE_INFO_RESP,
     DEVICE_TYPE_BASIC,
+    MARKER_RX,
+    MARKER_RX_EXT,
+    MARKER_RX_RTR,
+    MARKER_RX_RTR_EXT,
     parse_all_frames,
+    unpack_can_frame,
+    xor_checksum,
 )
 from core.fake_serial import FakeSerial
 
@@ -40,6 +47,75 @@ SerialPort = Union[serial.Serial, FakeSerial]
 
 # Предохранитель от бесконечного роста буфера при потоке мусора без валидных кадров
 MAX_BUFFER_SIZE = 65536
+
+# Маркеры кадров МК→ПК — request_control пропускает их при ожидании ответа
+# на управляющую команду (см. wire-формат в core/can_protocol.py).
+_RX_FRAME_MARKERS = frozenset(
+    (MARKER_RX, MARKER_RX_EXT, MARKER_RX_RTR, MARKER_RX_RTR_EXT)
+)
+
+
+def _parse_cfg_read_payload(data: bytes) -> "tuple[str, str]":
+    """Разбирает payload ответа CMD_CFG_READ → (device_name, serial)."""
+    name, serial = "", ""
+    try:
+        p = 0
+        name_len = data[p]
+        p += 1
+        name = data[p : p + name_len].decode("utf-8", errors="ignore").strip()
+        p += name_len
+        serial_len = data[p]
+        p += 1
+        serial = data[p : p + serial_len].decode("utf-8", errors="ignore").strip()
+    except (IndexError, UnicodeError):
+        pass
+    return name, serial
+
+
+def _rx_frame_wire_len(buf: Union[bytes, bytearray]) -> Optional[int]:
+    """Длина CAN-кадра МК→ПК в начале буфера, байт.
+
+    None — кадр ещё не собран (ждать данные); -1 — маркер есть, но кадр
+    заведомо битый (DLC>8 или неверная контрольная сумма) — пропустить
+    один байт для ре-синхронизации.
+    """
+    marker = buf[0]
+    extended = marker in (MARKER_RX_EXT, MARKER_RX_RTR_EXT)
+    rtr = marker in (MARKER_RX_RTR, MARKER_RX_RTR_EXT)
+    header = 7 if extended else 5  # marker + channel + id + dlc
+    if len(buf) < header:
+        return None
+    dlc = buf[header - 1]
+    if dlc > 8:
+        return -1
+    total = header + (0 if rtr else dlc) + 1  # +1 = checksum
+    if len(buf) < total:
+        return None
+    if xor_checksum(buf[: total - 1]) != buf[total - 1]:
+        return -1
+    return total
+
+
+def _scan_for_response(buffer: bytearray, marker: int) -> bool:
+    """Прокручивает буфер до маркера ответа, пропуская CAN-кадры МК→ПК.
+
+    Возвращает True, когда marker оказался в buffer[0] (ответ можно
+    разбирать). Ложный маркер внутри данных CAN-кадра не срабатывает —
+    кадры пропускаются целиком с проверкой контрольной суммы.
+    """
+    while buffer:
+        first = buffer[0]
+        if first in _RX_FRAME_MARKERS:
+            wire_len = _rx_frame_wire_len(buffer)
+            if wire_len is None:
+                return False  # неполный кадр — ждём остаток
+            del buffer[: max(wire_len, 1)]
+            continue
+        if first != marker:
+            del buffer[0]
+            continue
+        return True
+    return False
 
 
 class SerialReader(QThread):
@@ -333,24 +409,41 @@ class SerialManager(QObject):
                     available = self._port_in_waiting()
                     if available:
                         buffer.extend(self._port.read(available))
-                        while len(buffer) >= 3:
-                            try:
-                                index = buffer.index(response_marker)
-                            except ValueError:
-                                del buffer[:-2]
-                                break
-                            if index:
-                                del buffer[:index]
-                            if len(buffer) < 3:
-                                break
-                            length = buffer[2]
-                            if len(buffer) < 3 + length:
-                                break
-                            status = buffer[1]
-                            result = bytes(buffer[3 : 3 + length])
-                            if status != 0:
-                                raise RuntimeError(f"Устройство отклонило команду 0x{command:02X}: статус 0x{status:02X}")
-                            return result
+                    # Разбираем поток по кадрам: CAN-кадры МК→ПК пропускаем
+                    # целиком — иначе байт внутри данных кадра, совпавший с
+                    # маркером ответа, давал ложное срабатывание, и хост ждал
+                    # «ответ» мусорной длины до таймаута (наблюдалось как
+                    # «Таймаут ответа на команду 0xCA» на живой шине CAN).
+                    while buffer:
+                        first = buffer[0]
+                        if first in _RX_FRAME_MARKERS:
+                            wire_len = _rx_frame_wire_len(buffer)
+                            if wire_len is None:
+                                break  # неполный кадр — ждём остаток
+                            if wire_len > 0:
+                                # Кадр не теряем: мониторинг и триггеры
+                                # продолжают видеть шину во время команды.
+                                frame = unpack_can_frame(bytes(buffer[:wire_len]))
+                                if frame is not None:
+                                    self.new_can_frame.emit(frame)
+                            del buffer[: max(wire_len, 1)]  # -1 → resync на 1 байт
+                            continue
+                        if first != response_marker:
+                            del buffer[0]
+                            continue
+                        if len(buffer) < 3:
+                            break
+                        status = buffer[1]
+                        if status > 0x03:
+                            del buffer[0]  # ложный маркер — у протокола статусы 0..3
+                            continue
+                        length = buffer[2]
+                        if len(buffer) < 3 + length:
+                            break  # неполный ответ — ждём остаток
+                        result = bytes(buffer[3 : 3 + length])
+                        if status != 0:
+                            raise RuntimeError(f"Устройство отклонило команду 0x{command:02X}: статус 0x{status:02X}")
+                        return result
                     time.sleep(0.005)
                 raise TimeoutError(f"Таймаут ответа на команду 0x{command:02X}")
             finally:
@@ -377,7 +470,9 @@ class SerialManager(QObject):
 
     def set_trigger_enabled(self, index: int, enabled: bool) -> None:
         """Включает/выключает trigger без перезаписи всей структуры."""
-        if not 0 <= index < 10:
+        from core.trigger_protocol import TRIGGER_MAX_SLOTS
+
+        if not 0 <= index < TRIGGER_MAX_SLOTS:
             raise ValueError("Некорректный индекс trigger")
         self.request_control(CMD_TRIGGER_ENABLE, bytes((index, int(enabled))))
 
@@ -451,7 +546,7 @@ class SerialManager(QObject):
                     available = self._port_in_waiting()
                     if available:
                         buffer.extend(self._port.read(available))
-                        if CMD_DEVICE_ID_RESP in buffer:
+                        if _scan_for_response(buffer, CMD_DEVICE_ID_RESP):
                             return True
                     time.sleep(0.01)
                 return False
@@ -494,7 +589,10 @@ class SerialManager(QObject):
                 device_serial = ""
                 memory_kb = 0
 
-                # 1. Запрос типа/версии
+                # 1. Запрос типа/версии. Сканируем поток по кадрам:
+                # байт-маркер внутри данных CAN-кадра не должен давать
+                # ложное срабатывание (шина может быть живая при
+                # подключении).
                 self._port.reset_input_buffer()
                 self._port.write(bytes([CMD_DEVICE_ID]))
                 deadline = time.time() + 0.5
@@ -503,12 +601,10 @@ class SerialManager(QObject):
                     available = self._port_in_waiting()
                     if available:
                         buffer.extend(self._port.read(available))
-                        if CMD_DEVICE_ID_RESP in buffer:
-                            idx = buffer.index(CMD_DEVICE_ID_RESP)
-                            if idx + 3 <= len(buffer):
-                                device_type = buffer[idx + 1]
-                                device_version = buffer[idx + 2]
-                                break
+                        if _scan_for_response(buffer, CMD_DEVICE_ID_RESP) and len(buffer) >= 3:
+                            device_type = buffer[1]
+                            device_version = buffer[2]
+                            break
                     time.sleep(0.01)
 
                 # 2. Запрос серийного номера и объёма памяти
@@ -520,25 +616,58 @@ class SerialManager(QObject):
                     available = self._port_in_waiting()
                     if available:
                         buffer.extend(self._port.read(available))
-                        if CMD_DEVICE_INFO_RESP in buffer:
-                            idx = buffer.index(CMD_DEVICE_INFO_RESP)
-                            if idx + 2 < len(buffer):
-                                serial_len = buffer[idx + 1]
-                                expected = idx + 2 + serial_len + 2
-                                if expected <= len(buffer):
-                                    serial_bytes = bytes(buffer[idx + 2 : idx + 2 + serial_len])
-                                    device_serial = serial_bytes.decode("utf-8", errors="ignore").strip()
-                                    device_type = buffer[idx + 2 + serial_len]
-                                    memory_kb = buffer[idx + 2 + serial_len + 1]
-                                    break
+                        if _scan_for_response(buffer, CMD_DEVICE_INFO_RESP) and len(buffer) >= 2:
+                            serial_len = buffer[1]
+                            expected = 2 + serial_len + 2
+                            if len(buffer) >= expected:
+                                serial_bytes = bytes(buffer[2 : 2 + serial_len])
+                                device_serial = serial_bytes.decode("utf-8", errors="ignore").strip()
+                                device_type = buffer[2 + serial_len]
+                                memory_kb = buffer[2 + serial_len + 1]
+                                break
+                    time.sleep(0.01)
+
+                # 3. Имя устройства из страницы конфигурации (CMD_CFG_READ).
+                # Ответ: [0xD0, status, len, name_len, name, serial_len,
+                # serial, vid_lo, vid_hi, pid_lo, pid_hi]. Windows показывает
+                # CDC-порт как «Устройство с последовательным интерфейсом»
+                # независимо от iProduct — поэтому имя берём с самого МК и
+                # запоминаем в карте серийник→имя для списка портов.
+                device_name = ""
+                self._port.reset_input_buffer()
+                self._port.write(bytes([CMD_CFG_READ]))
+                cfg_marker = (CMD_CFG_READ | 0x10) & 0xFF
+                deadline = time.time() + 0.5
+                buffer = bytearray()
+                while time.time() < deadline:
+                    available = self._port_in_waiting()
+                    if available:
+                        buffer.extend(self._port.read(available))
+                        if _scan_for_response(buffer, cfg_marker) and len(buffer) >= 3:
+                            status = buffer[1]
+                            length = buffer[2]
+                            if status != 0:
+                                del buffer[0]
+                                continue
+                            if len(buffer) >= 3 + length:
+                                data = bytes(buffer[3 : 3 + length])
+                                device_name, cfg_serial = _parse_cfg_read_payload(data)
+                                if cfg_serial:
+                                    device_serial = cfg_serial
+                                break
                     time.sleep(0.01)
 
                 total_memory = memory_kb * 1024 if memory_kb else 65536
+                port_names = dict(self._config.get("port_names", {}) or {})
+                if device_serial and device_name:
+                    port_names[device_serial] = device_name
                 self._config.set_bulk({
                     "device_type": device_type,
                     "device_version": device_version,
                     "device_serial": device_serial,
                     "serial_number": device_serial,
+                    "device_name": device_name,
+                    "port_names": port_names,
                     "total_memory": total_memory,
                 })
                 self.device_identified.emit(device_type, device_version)
@@ -571,14 +700,12 @@ class SerialManager(QObject):
                     available = self._port_in_waiting()
                     if available:
                         buffer.extend(self._port.read(available))
-                        if CMD_AUTO_SPEED_RESP in buffer:
-                            idx = buffer.index(CMD_AUTO_SPEED_RESP)
-                            if idx + 2 < len(buffer):
-                                speed = (buffer[idx + 1] << 8) | buffer[idx + 2]
-                                self._config.set("can_speed_auto", True)
-                                self.can_speed_detected.emit(speed)
-                                logger.info("Скорость CAN определена: %d кбит/с", speed)
-                                return speed
+                        if _scan_for_response(buffer, CMD_AUTO_SPEED_RESP) and len(buffer) >= 3:
+                            speed = (buffer[1] << 8) | buffer[2]
+                            self._config.set("can_speed_auto", True)
+                            self.can_speed_detected.emit(speed)
+                            logger.info("Скорость CAN определена: %d кбит/с", speed)
+                            return speed
                     time.sleep(0.01)
                 logger.info("Автоопределение скорости не дало результата")
                 return None

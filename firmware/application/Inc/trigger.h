@@ -1,5 +1,6 @@
-/* Trigger engine: up to 10 independently configurable triggers (ТЗ 10.2 —
- * 10 tabs / unified selector 1-10), each with a receive condition
+/* Trigger engine: up to TRIGGER_COUNT independently configurable triggers
+ * (ТЗ 10.2; количество ограничено только местом в странице Flash), each
+ * with a receive condition
  * (ID/mask/data/data-mask on a given channel) and a response (CAN frame +
  * delay). Storage is Flash-backed (see firmware/PROTOCOL.md Part 3, trigger
  * page 0x0803E000). Field set is a superset inferred from the existing
@@ -27,9 +28,13 @@ extern "C" {
 #include <stdint.h>
 #include "can_bridge.h"
 
-#define TRIGGER_COUNT        10U
+/* 37 slots × 54 bytes = 1998 B — максимум, что влезает в одну страницу
+ * Flash (2048 B) с выделенной под триггеры области 0x0803E000. Лимит
+ * оператора — только свободная память страницы (UI показывает её
+ * заполненность индикатором «Память»). */
+#define TRIGGER_COUNT        37U
 #define TRIGGER_PAGE_ADDR    0x0803E000U
-#define TRIGGER_PAGE_SIZE    2048U /* one page holds all 10 slots, see layout below */
+#define TRIGGER_PAGE_SIZE    2048U /* one page holds all slots, see layout below */
 #define TRIGGER_MAGIC         0x54524731U /* "TRG1" */
 #define TRIGGER_FORMAT_VERSION 1U
 #define TRIGGER_RECORD_SIZE    54U
@@ -54,9 +59,9 @@ typedef struct __attribute__((packed)) {
   uint8_t  tx_rtr;          /* 0=data response, 1=Remote Transmission Request */
   uint8_t  reserved_pad;    /* keeps sizeof(trigger_t) even */
   uint8_t  crc8;
-} trigger_t; /* 54 bytes, fits 10x in the 2KB page with room to spare */
+} trigger_t; /* 54 bytes, 37 records fill the 2KB page (1998 B) */
 
-/* Loads all 10 triggers from Flash into RAM (call once at boot). Any slot
+/* Loads all triggers from Flash into RAM (call once at boot). Any slot
  * with a bad magic/CRC is treated as "disabled, all zero". */
 void Trigger_Init(void);
 

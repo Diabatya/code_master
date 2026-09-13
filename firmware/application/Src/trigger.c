@@ -16,10 +16,14 @@ _Static_assert((TRIGGER_COUNT * sizeof(trigger_t)) <= TRIGGER_PAGE_SIZE, "trigge
 
 static trigger_t s_triggers[TRIGGER_COUNT];
 static trigger_t s_staged[TRIGGER_COUNT];
-static uint16_t s_stage_mask;
+static uint8_t s_stage_flags[TRIGGER_COUNT]; /* per-slot staged mark —
+ * битовой маски uint16_t хватало на 16 слотов, а TRIGGER_COUNT=37 */
+/* Rollback-копия для Commit — статическая: 37×54=1998 Б на стеке при
+ * гарантированных 2 КБ (_Min_Stack_Size=0x800) привели бы к переполнению. */
+static trigger_t s_commit_backup[TRIGGER_COUNT];
 
 /* Pending deferred responses (delay_ms > 0). A small fixed-size list is
- * enough since there are at most TRIGGER_COUNT=10 triggers and each can
+ * enough since there are at most TRIGGER_COUNT triggers and each can
  * have at most one response in flight at a time (a new match on the same
  * trigger while one is already pending simply re-arms it). */
 typedef struct {
@@ -60,7 +64,7 @@ void Trigger_Init(void)
 {
   memset(s_pending, 0, sizeof(s_pending));
   memset(s_staged, 0, sizeof(s_staged));
-  s_stage_mask = 0U;
+  memset(s_stage_flags, 0, sizeof(s_stage_flags));
   s_fired_count = 0U;
   s_max_lateness_ms = 0U;
 
@@ -149,27 +153,33 @@ uint8_t Trigger_Stage(uint8_t index, const trigger_t *trig)
   staged.reserved[1] = TRIGGER_RECORD_SIZE;
   staged.crc8 = crc8((const uint8_t *)&staged, offsetof(trigger_t, crc8));
   s_staged[index] = staged;
-  s_stage_mask |= (uint16_t)(1U << index);
+  s_stage_flags[index] = 1U;
   return 1U;
 }
 
 uint8_t Trigger_Commit(void)
 {
-  if (s_stage_mask == 0U) {
+  uint8_t any_staged = 0U;
+  for (uint8_t i = 0U; i < TRIGGER_COUNT; i++) {
+    if (s_stage_flags[i] != 0U) {
+      any_staged = 1U;
+      break;
+    }
+  }
+  if (any_staged == 0U) {
     return 1U;
   }
-  trigger_t backup[TRIGGER_COUNT];
-  memcpy(backup, s_triggers, sizeof(backup));
+  memcpy(s_commit_backup, s_triggers, sizeof(s_commit_backup));
   for (uint8_t i = 0U; i < TRIGGER_COUNT; i++) {
-    if ((s_stage_mask & (uint16_t)(1U << i)) != 0U) {
+    if (s_stage_flags[i] != 0U) {
       s_triggers[i] = s_staged[i];
     }
   }
   if (!flash_write_all_triggers()) {
-    memcpy(s_triggers, backup, sizeof(s_triggers));
+    memcpy(s_triggers, s_commit_backup, sizeof(s_triggers));
     return 0U;
   }
-  s_stage_mask = 0U;
+  memset(s_stage_flags, 0, sizeof(s_stage_flags));
   return 1U;
 }
 

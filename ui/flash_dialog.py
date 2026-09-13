@@ -1469,7 +1469,7 @@ class FlashDialog(QDialog):
         self._read_size_edit = QComboBox()
         self._read_size_edit.setEditable(True)
         self._read_size_edit.addItems(["16", "32", "64", "128", "256", "512", "1024", "2048", "4096", "8192", "16384", "32768"])
-        self._read_size_edit.setCurrentText("64")
+        self._read_size_edit.setCurrentText("256")
         self._read_size_edit.setMaximumWidth(90)
 
         self._config_button = QPushButton(tr("Записать конфигурацию устройства"))
@@ -1887,6 +1887,11 @@ class FlashDialog(QDialog):
             raise ValueError(tr("Прошивка не помещается в выбранный размер Flash"))
 
         page = build_device_config_page(name, serial)
+        # Запоминаем имя для списка портов: после прошивки устройство
+        # пере-энумерируется с iSerial = serial.
+        port_names = dict(self._config.get("port_names", {}) or {})
+        port_names[serial] = name
+        self._config.set("port_names", port_names)
 
         image = IntelHex()
         image.puts(base, data)
@@ -1974,6 +1979,12 @@ class FlashDialog(QDialog):
         payload += bytes((0x83, 0x04, 0x40, 0x57))
         try:
             self._serial_manager.request_control(CMD_CFG_WRITE, payload)
+            # После пере-энумерации iSerial = записанный серийник —
+            # запоминаем имя для отображения в списке портов.
+            if name:
+                port_names = dict(self._config.get("port_names", {}) or {})
+                port_names[serial.decode("ascii", errors="ignore")] = name.decode("ascii", errors="ignore")
+                self._config.set("port_names", port_names)
             self._mark_operation_disconnected()
             message = tr("Конфигурация записана без перепрошивки Flash")
             self._log(message)

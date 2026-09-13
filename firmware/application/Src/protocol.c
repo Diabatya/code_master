@@ -132,7 +132,20 @@ static void send_new_cmd_response(uint8_t cmd, uint8_t status, const uint8_t *pa
   if (len > 0U && payload != NULL) {
     memcpy(&buf[3], payload, len);
   }
-  CDC_Transmit_FS(buf, (uint16_t)(3U + len));
+  /* Command responses must NOT be silently dropped: under a busy CAN bus
+   * forwarded frames keep the CDC IN endpoint busy, CDC_Transmit_FS()
+   * gives up after ~100ms and the PC then reports a command timeout
+   * (e.g. "Таймаут ответа на команду 0xCA" during trigger writes — which
+   * also aborted multi-command STAGE+COMMIT sequences halfway, leaving
+   * Flash unwritten). CAN frames are best-effort and may drop, control
+   * answers may not: retry with a wider bound. Worst case the CAN ring
+   * buffers absorb traffic while we wait inside Protocol_Poll. */
+  uint32_t start = HAL_GetTick();
+  while (CDC_Transmit_FS(buf, (uint16_t)(3U + len)) != 0U) {
+    if ((HAL_GetTick() - start) >= 500U) {
+      break; /* still inside the PC's 1s command timeout */
+    }
+  }
 }
 
 /* Handles one fully-received new-protocol command (0xC0-0xC5), consuming
