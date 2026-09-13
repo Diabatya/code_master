@@ -246,8 +246,16 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
         send_new_cmd_response(cmd, 0x01U, NULL, 0U);
         break;
       }
+      /* Читаем запись прямо из Flash, а не из RAM-зеркала s_triggers:
+       * тогда верификация после COMMIT и синхронизация при подключении
+       * отражают реально сохранённое содержимое, а не оперативную копию
+       * (зеркало и так совпадает после успешного commit — он сам себя
+       * верифицирует memcmp'ом). */
       trigger_t t;
-      Trigger_Get(payload[0], &t);
+      memcpy(&t,
+             (const void *)(TRIGGER_PAGE_ADDR
+                            + (uint32_t)payload[0] * (uint32_t)sizeof(trigger_t)),
+             sizeof(t));
       send_new_cmd_response(cmd, 0x00U, (const uint8_t *)&t, (uint8_t)sizeof(t));
       break;
     }
@@ -324,9 +332,17 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       uint32_t fired_count = 0U;
       uint32_t max_lateness_ms = 0U;
       Trigger_GetStats(&fired_count, &max_lateness_ms);
-      uint8_t out[8];
+      /* [0:4]=fired, [4:8]=max_lateness, [8]=flash_valid_count — сколько
+       * включённых триггеров реально прочитано из Flash при старте.
+       * Если после power cycle здесь 0 при сохранённых триггерах —
+       * страницы не пережили перезапуск (диагностика для поддержки). */
+      uint8_t out[12];
       memcpy(&out[0], &fired_count, 4U);
       memcpy(&out[4], &max_lateness_ms, 4U);
+      out[8] = Trigger_FlashValidCount();
+      out[9] = DeviceConfig_IsValid();
+      out[10] = 0U;
+      out[11] = 0U;
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
     }

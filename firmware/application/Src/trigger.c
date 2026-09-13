@@ -46,6 +46,8 @@ typedef struct {
 static pending_response_t s_pending[TRIGGER_COUNT];
 static uint32_t s_fired_count;
 static uint32_t s_max_lateness_ms;
+static uint8_t s_flash_valid_count; /* включённых записей, прочитанных
+  из Flash при старте — диагностика «триггеры пропали после питания» */
 
 static uint8_t trigger_fields_valid(const trigger_t *trig);
 
@@ -82,6 +84,7 @@ void Trigger_Init(void)
   s_max_lateness_ms = 0U;
 
   const uint8_t *page = (const uint8_t *)TRIGGER_PAGE_ADDR;
+  s_flash_valid_count = 0U;
   for (uint8_t i = 0; i < TRIGGER_COUNT; i++) {
     const trigger_t *flash_t = (const trigger_t *)(page + (uint32_t)i * sizeof(trigger_t));
     if (flash_t->magic == TRIGGER_MAGIC) {
@@ -92,6 +95,11 @@ void Trigger_Init(void)
                   && flash_t->reserved[1] == TRIGGER_RECORD_SIZE))
           && trigger_fields_valid(flash_t)) {
         memcpy(&s_triggers[i], flash_t, sizeof(trigger_t));
+        /* Диагностика стойкости хранения: сколько включённых записей
+         * реально пережили перезапуск (отдаётся в CMD_TRIGGER_STATS). */
+        if (flash_t->enabled) {
+          s_flash_valid_count++;
+        }
         continue;
       }
     }
@@ -136,7 +144,15 @@ static uint8_t flash_write_all_triggers(void)
   }
 
   HAL_FLASH_Lock();
-  return 1U;
+  /* HAL_OK на каждый halfword не гарантирует содержимое страницы (обрыв
+   * питания/brown-out в середине записи даёт частично прошитую страницу).
+   * Сверяем Flash с зеркалом в RAM — иначе ошибка проявилась бы только
+   * после следующего включения: триггеры «исчезли», хотя «Сохранить»
+   * отчиталось об успехе. */
+  return (memcmp((const void *)TRIGGER_PAGE_ADDR, s_triggers,
+                 sizeof(s_triggers)) == 0)
+             ? 1U
+             : 0U;
 }
 
 static uint8_t trigger_fields_valid(const trigger_t *trig)
@@ -382,4 +398,9 @@ void Trigger_GetStats(uint32_t *fired_count, uint32_t *max_lateness_ms)
   if (max_lateness_ms != NULL) {
     *max_lateness_ms = s_max_lateness_ms;
   }
+}
+
+uint8_t Trigger_FlashValidCount(void)
+{
+  return s_flash_valid_count;
 }

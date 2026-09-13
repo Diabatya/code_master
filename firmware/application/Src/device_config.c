@@ -102,7 +102,13 @@ static uint8_t flash_write_config(const device_config_t *cfg)
   }
 
   HAL_FLASH_Lock();
-  return 1U;
+  /* Сверяем реальное содержимое страницы: частично прошитая запись
+   * (brown-out во время программирования) иначе всплывала бы только
+   * после следующего включения — устройство теряло имя/серийник. */
+  return (memcmp((const void *)DEVICE_CONFIG_PAGE_ADDR, cfg,
+                 sizeof(device_config_t)) == 0)
+             ? 1U
+             : 0U;
 }
 
 uint8_t DeviceConfig_Write(const uint8_t *device_name, uint8_t device_name_len,

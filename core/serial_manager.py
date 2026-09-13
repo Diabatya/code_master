@@ -56,6 +56,36 @@ _RX_FRAME_MARKERS = frozenset(
 )
 
 
+class _ControlSession:
+    """Пачка управляющих команд с одной остановкой reader'а.
+
+    Создаётся через SerialManager.control_session(). Пока сеанс активен,
+    request_control не гоняет QThread stop/start на каждый запрос —
+    это десятки миллисекунд на команду, которые на 49 слотах триггеров
+    складывались в десятки секунд ожидания оператора.
+    """
+
+    def __init__(self, manager: "SerialManager") -> None:
+        self._manager = manager
+
+    def __enter__(self) -> "_ControlSession":
+        manager = self._manager
+        with manager._lock:
+            if manager._port is None or not manager.is_open():
+                raise RuntimeError("Порт не подключен")
+            manager._closing = True
+            manager._stop_reader()
+            manager._control_session_active = True
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        manager = self._manager
+        with manager._lock:
+            manager._control_session_active = False
+            manager._start_reader()
+            manager._closing = False
+
+
 def _parse_cfg_read_payload(data: bytes) -> "tuple[str, str]":
     """Разбирает payload ответа CMD_CFG_READ → (device_name, serial)."""
     name, serial = "", ""
@@ -261,6 +291,11 @@ class SerialManager(QObject):
         self._last_emulation = False
         self._closing = False
         self._replay_path: Optional[str] = None
+        # Пачка управляющих команд делит одну остановку reader'а
+        # (см. control_session) — без этого каждый request_control
+        # гонял бы QThread stop/start, и вычитка 49 слотов триггеров
+        # занимала десятки секунд.
+        self._control_session_active = False
 
     def is_open(self) -> bool:
         """Возвращает True, если порт открыт."""
@@ -387,6 +422,21 @@ class SerialManager(QObject):
                 self.error_occurred.emit(f"Ошибка отправки: {exc}")
                 return False
 
+    def control_session(self):
+        """Контекстный менеджер: одна остановка reader'а на пачку команд.
+
+        Использование::
+
+            with serial_manager.control_session():
+                for i in range(49):
+                    serial_manager.request_control(CMD_TRIGGER_READ, bytes((i,)))
+
+        Без сеанса каждый request_control останавливает и пересоздаёт
+        поток чтения (QThread stop/start) — вычитка всех слотов триггеров
+        занимала десятки секунд. Внутри сеанса reader остановлен один раз.
+        """
+        return _ControlSession(self)
+
     def request_control(self, command: int, payload: bytes = b"", timeout: float = 1.0) -> bytes:
         """Выполняет синхронную команду конфигурационного протокола C0-C6.
 
@@ -398,8 +448,11 @@ class SerialManager(QObject):
         with self._lock:
             if self._port is None or not self.is_open():
                 raise RuntimeError("Порт не подключен")
-            self._closing = True
-            self._stop_reader()
+            owns_session = not self._control_session_active
+            if owns_session:
+                self._closing = True
+                self._stop_reader()
+                self._control_session_active = True
             try:
                 self._port.reset_input_buffer()
                 self._port.write(bytes((command & 0xFF, len(payload))) + payload)
@@ -448,8 +501,10 @@ class SerialManager(QObject):
                     time.sleep(0.005)
                 raise TimeoutError(f"Таймаут ответа на команду 0x{command:02X}")
             finally:
-                self._start_reader()
-                self._closing = False
+                if owns_session:
+                    self._control_session_active = False
+                    self._start_reader()
+                    self._closing = False
 
     def read_can_stats(self, channel: int) -> dict[str, int]:
         """Возвращает накопительные RX/TX/lost-счётчики CAN-канала.
@@ -485,14 +540,23 @@ class SerialManager(QObject):
         self.request_control(CMD_CAN_MODE, bytes((channel & 0xFF, mode & 0xFF, int(terminator))))
 
     def read_trigger_stats(self) -> dict[str, int]:
-        """Возвращает счётчик срабатываний и максимальную задержку trigger."""
+        """Возвращает счётчик срабатываний и максимальную задержку trigger.
+
+        Расширенные прошивки отдают 12 байт: [8]=сколько включённых
+        триггеров прочитано из Flash при старте, [9]=валидность страницы
+        конфигурации — диагностика «настройки пропали после питания».
+        """
         payload = self.request_control(CMD_TRIGGER_STATS, b"")
-        if len(payload) != 8:
+        if len(payload) < 8:
             raise RuntimeError("Некорректный ответ CMD_TRIGGER_STATS")
-        return {
+        stats = {
             "fired_count": int.from_bytes(payload[0:4], "little"),
             "max_lateness_ms": int.from_bytes(payload[4:8], "little"),
         }
+        if len(payload) >= 10:
+            stats["flash_valid_count"] = payload[8]
+            stats["config_valid"] = payload[9]
+        return stats
 
     def read_usb_stats(self) -> dict[str, int]:
         """Возвращает количество потерянных USB CDC TX-передач."""
@@ -635,28 +699,34 @@ class SerialManager(QObject):
                 # независимо от iProduct — поэтому имя берём с самого МК и
                 # запоминаем в карте серийник→имя для списка портов.
                 device_name = ""
-                self._port.reset_input_buffer()
-                self._port.write(bytes([CMD_CFG_READ]))
                 cfg_marker = (CMD_CFG_READ | 0x10) & 0xFF
-                deadline = time.time() + 0.5
-                buffer = bytearray()
-                while time.time() < deadline:
-                    available = self._port_in_waiting()
-                    if available:
-                        buffer.extend(self._port.read(available))
-                        if _scan_for_response(buffer, cfg_marker) and len(buffer) >= 3:
-                            status = buffer[1]
-                            length = buffer[2]
-                            if status != 0:
-                                del buffer[0]
-                                continue
-                            if len(buffer) >= 3 + length:
-                                data = bytes(buffer[3 : 3 + length])
-                                device_name, cfg_serial = _parse_cfg_read_payload(data)
-                                if cfg_serial:
-                                    device_serial = cfg_serial
-                                break
-                    time.sleep(0.01)
+                # После power cycle/рестарта приложению нужно время на
+                # инициализацию до ответа — одна повторная попытка спасает
+                # от потери имени устройства при спешке первого опроса.
+                for _attempt in range(2):
+                    if device_name:
+                        break
+                    self._port.reset_input_buffer()
+                    self._port.write(bytes([CMD_CFG_READ]))
+                    deadline = time.time() + 0.6
+                    buffer = bytearray()
+                    while time.time() < deadline:
+                        available = self._port_in_waiting()
+                        if available:
+                            buffer.extend(self._port.read(available))
+                            if _scan_for_response(buffer, cfg_marker) and len(buffer) >= 3:
+                                status = buffer[1]
+                                length = buffer[2]
+                                if status != 0:
+                                    del buffer[0]
+                                    continue
+                                if len(buffer) >= 3 + length:
+                                    data = bytes(buffer[3 : 3 + length])
+                                    device_name, cfg_serial = _parse_cfg_read_payload(data)
+                                    if cfg_serial:
+                                        device_serial = cfg_serial
+                                    break
+                        time.sleep(0.01)
 
                 total_memory = memory_kb * 1024 if memory_kb else 65536
                 port_names = dict(self._config.get("port_names", {}) or {})

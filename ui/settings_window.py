@@ -2,7 +2,7 @@
 
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QStandardItemModel, QStandardItem
 from PySide6.QtWidgets import (
     QApplication,
@@ -433,6 +433,18 @@ class SettingsWindow(QMainWindow):
             "background-color: rgba(20, 20, 30, 235); color: #FFFFFF;"
         )
         self._loading_overlay.hide()
+        # Пульсация яркости текста ~3 Гц: 100% → 30% → 100% за ~333 мс.
+        # Оператор видит живую анимацию и понимает, что идёт чтение
+        # настроек, а не зависание.
+        self._loading_opacity = QGraphicsOpacityEffect(self._loading_overlay)
+        self._loading_overlay.setGraphicsEffect(self._loading_opacity)
+        self._loading_anim = QPropertyAnimation(self._loading_opacity, b"opacity", self)
+        self._loading_anim.setDuration(333)
+        self._loading_anim.setStartValue(1.0)
+        self._loading_anim.setKeyValueAt(0.5, 0.3)
+        self._loading_anim.setEndValue(1.0)
+        self._loading_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        self._loading_anim.setLoopCount(-1)
 
     def _install_dirty_tracking(self, root: QWidget) -> None:
         """Подписывает поля ввода на _mark_dirty.
@@ -550,12 +562,15 @@ class SettingsWindow(QMainWindow):
         self._loading_overlay.setGeometry(self.centralWidget().rect())
         self._loading_overlay.show()
         self._loading_overlay.raise_()
+        self._loading_anim.start()
         QApplication.processEvents()
         try:
             self._trigger_tab.sync_from_device()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Не удалось вычитать триггеры из устройства: %s", exc)
         finally:
+            self._loading_anim.stop()
+            self._loading_opacity.setOpacity(1.0)
             self._loading_overlay.hide()
             self._loading = False
         self._mark_clean()

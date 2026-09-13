@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from PySide6.QtCore import QRegularExpression, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QRegularExpressionValidator
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFrame,
@@ -1026,19 +1027,27 @@ class CanTriggerTab(QWidget):
         """
         values_by_index: Dict[int, Optional[Dict[str, Any]]] = {}
         last_nonempty = -1
-        for index in range(TRIGGER_COUNT):
-            try:
-                payload = self._serial_manager.request_control(CMD_TRIGGER_READ, bytes((index,)))
-                values = unpack_trigger(payload)
-            except RuntimeError as exc:
-                if "0x01" in str(exc):
-                    break  # старшая прошивка: слотов меньше — конец списка
-                values = None  # ошибка слота — не рвём синхронизацию
-            except Exception:
-                values = None
-            values_by_index[index] = values
-            if values is not None and not self._is_empty_trigger(values):
-                last_nonempty = index
+        # Один сеанс на все 49 чтений: reader останавливается один раз,
+        # иначе stop/start QThread на каждый запрос растягивал вычитку
+        # до десятков секунд.
+        with self._serial_manager.control_session():
+            for index in range(TRIGGER_COUNT):
+                # Вычитка блокирует UI-поток — прокачиваем события между
+                # слотами, чтобы оверлей «Загрузка настроек» пульсировал,
+                # а не выглядел зависшим.
+                QApplication.processEvents()
+                try:
+                    payload = self._serial_manager.request_control(CMD_TRIGGER_READ, bytes((index,)))
+                    values = unpack_trigger(payload)
+                except RuntimeError as exc:
+                    if "0x01" in str(exc):
+                        break  # старшая прошивка: слотов меньше — конец списка
+                    values = None  # ошибка слота — не рвём синхронизацию
+                except Exception:
+                    values = None
+                values_by_index[index] = values
+                if values is not None and not self._is_empty_trigger(values):
+                    last_nonempty = index
 
         self._applying_device_state = True
         try:
@@ -1068,6 +1077,17 @@ class CanTriggerTab(QWidget):
         changed = 0
         staged: List[Tuple[int, bytes]] = []
         default_payload = pack_trigger({})
+        with self._serial_manager.control_session():
+            changed = self._write_to_device_locked(default_payload, staged)
+        self._save_config()
+        return changed
+
+    def _write_to_device_locked(
+        self, default_payload: bytes, staged: List[Tuple[int, bytes]]
+    ) -> int:
+        """Тело write_to_device внутри control_session: все команды
+        STAGE/READ/COMMIT идут при однократно остановленном reader'е."""
+        changed = 0
         for index in range(TRIGGER_COUNT):
             try:
                 remote_payload = self._serial_manager.request_control(
@@ -1121,7 +1141,6 @@ class CanTriggerTab(QWidget):
                     raise RuntimeError(
                         tr("Триггер {0}: проверка записи во Flash не пройдена").format(index + 1)
                     )
-        self._save_config()
         return changed
 
     def clear_device_managed(self) -> None:
