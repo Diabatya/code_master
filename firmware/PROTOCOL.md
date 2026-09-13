@@ -194,7 +194,7 @@ Flash и восстанавливает значения по умолчанию
 
 ### 2.4 CMD_TRIGGER_READ (0xC3) — чтение одного триггера
 
-Запрос: `[0xC3][0x01][index:1]` (`index` 0–9, соответствует вкладкам 1–10 из ТЗ 10.2).
+Запрос: `[0xC3][0x01][index:1]` (`index` 0–48).
 
 Ответ: `[0xD3][status][len][trigger_payload]` — формат `trigger_payload` см. Часть 3
 (структура `trigger_t`). Если ТЗ 8 (поля триггера) станет доступен, формат следует
@@ -212,11 +212,41 @@ Flash и восстанавливает значения по умолчанию
 Запрос: `[0xC5][0x02][index:1][enabled:1]`. Ответ: `[0xD5][status][0x00]`.
 
 **Нумерация каналов в `trigger_t`** — 0-based, как индекс комбобокса UI:
-`rx_channel`/`tx_channel`: `0` = CAN1, `1` = CAN2, `2` = «CAN1 и CAN2»
-(на приём матчит кадр с любого канала, на ответ шлёт фрейм в оба канала).
-Это отличается от wire-нумерации CAN-кадров (1/2) — `CanBridge` внутри
-прошивки хранит кадры с 0-based каналом, а конверсия в wire-формат
-происходит только при отправке ответа триггера.
+`rx_channel`/`tx_channel`/`src_channel`: `0` = CAN1, `1` = CAN2,
+`2` = «CAN1 и CAN2» (на приём матчит кадр с любого канала, на ответ шлёт
+фрейм в оба канала). Это отличается от wire-нумерации CAN-кадров (1/2) —
+`CanBridge` внутри прошивки хранит кадры с 0-based каналом, а конверсия
+в wire-формат происходит только при отправке ответа триггера.
+
+**Формат `trigger_t` v2 (82 байта, magic "TRG2")** — см. `Inc/trigger.h`:
+
+```text
+offset 0   magic (uint32 "TRG2")          offset 47  delay_ms (uint16 LE)
+offset 4   enabled (u8)                   offset 49  reserved[2] = ver,size
+offset 5   rx_channel (u8)                offset 51  tx_rtr (u8)
+offset 6   rx_extended (u8)               offset 52  cache_enabled (u8)
+offset 7   rx_id (uint32 LE)              offset 53  src_channel (u8)
+offset 11  rx_id_mask (uint32 LE)         offset 54  src_extended (u8)
+offset 15  rx_dlc (u8)                    offset 55  src_id (uint32 LE)
+offset 16  rx_data[8]                     offset 59  src_dlc (u8)
+offset 24  rx_data_mask[8]                offset 60  src_from[8]
+offset 32  tx_channel (u8)                offset 68  src_to[8]
+offset 33  tx_extended (u8)               offset 76  tx_interval_ms (u16 LE)
+offset 34  tx_id (uint32 LE)              offset 78  tx_count (u8)
+offset 38  tx_dlc (u8)                    offset 79  reserved_pad[2]
+offset 39  tx_data[8]                     offset 81  crc8
+```
+
+**Режим «автоматическая запись DATA в кэш»** (`cache_enabled=1`):
+МК постоянно проверяет шину матчером «Откуда читаем» (`src_channel`,
+`src_extended`, `src_id` — точное совпадение, `src_dlc` байт Data как
+big-endian целое в диапазоне `src_from..src_to`; `src_dlc=0` — без
+проверки Data). Каждый подошедший кадр перезаписывает кэш слота в RAM
+(не во Flash — ресурс стираний страницы ~10k циклов). При кадре,
+подошедшем под «Приём» (`rx_*`), отправляется последний закэшированный
+кадр на канал `tx_channel` («Куда отправляем») с паузой `delay_ms`,
+`tx_count` повторами и паузой `tx_interval_ms` между ними; каждый повтор
+шлёт уже свежие данные кэша. Если кэш ещё пуст — отправки нет.
 
 ### 2.7 CMD_CAN_ERROR_STATUS (0xC6) — статус ошибок/bus-off шины CAN
 
@@ -265,7 +295,7 @@ Host должен принимать и старый 12-байтный отве�
 
 ### 2.9 CMD_TRIGGER_STAGE (0xCA) и CMD_TRIGGER_COMMIT (0xCB)
 
-`CMD_TRIGGER_STAGE` принимает `[index:1][trigger_t:54]`, проверяет запись и
+`CMD_TRIGGER_STAGE` принимает `[index:1][trigger_t:82]`, проверяет запись и
 сохраняет её только в RAM. `CMD_TRIGGER_COMMIT` принимает пустой payload и
 одной операцией стирает/записывает trigger page со всеми staged-изменениями.
 При ошибке Flash RAM-состояние откатывается к предыдущей копии.
@@ -322,7 +352,7 @@ offset 48 git_commit:          8 байт ASCII (короткий hash, с ну�
 | `0x08008000`–`0x0803CFFF` | 212 KB (стр. 16–122) | Приложение (код) |
 | `0x0803D000`–`0x0803D7FF` | 2 KB (стр. 122) | Метаданные целостности application (CRC32/размер) |
 | `0x0803D800`–`0x0803DFFF` | 2 KB (стр. 123) | **Конфигурация устройства** (имя/serial/VID/PID) |
-| `0x0803E000`–`0x0803FFFF` | 8 KB (стр. 124–127) | Триггеры: сейчас одна страница 0x0803E000 — 37 записей × 54 байта, остальные 3 страницы — запас |
+| `0x0803E000`–`0x0803FFFF` | 8 KB (стр. 124–127) | Триггеры: страницы 0x0803E000 и 0x0803F000 — 49 записей × 82 байта (формат v2 с полями кэш-режима), остальные 2 страницы — запас |
 
 Первые 212 KB после bootloader отданы под код application. Следующая
 страница зарезервирована под метаданные целостности: bootloader хранит там

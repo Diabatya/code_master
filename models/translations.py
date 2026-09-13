@@ -279,6 +279,8 @@ class Translator:
                 "11 бит": "11 bit",
                 "Приём": "Receive",
                 "Ответ": "Response",
+                "Откуда читаем": "Read from",
+                "Куда отправляем": "Send to",
                 "Кол-во отправляемых пакетов": "Number of packets to send",
                 "CAN1": "CAN1",
                 "CAN2": "CAN2",

@@ -5,18 +5,18 @@ from __future__ import annotations
 import struct
 from typing import Dict, Any
 
-TRIGGER_MAGIC = 0x54524731
-TRIGGER_FORMAT_VERSION = 1
-TRIGGER_SIZE = 54
-_TRIGGER_FORMAT = "<IBBBIIB8s8sBBIB8sH2sBBB"
+TRIGGER_MAGIC = 0x54524732
+TRIGGER_FORMAT_VERSION = 2
+TRIGGER_SIZE = 82
+_TRIGGER_FORMAT = "<IBBBIIB8s8sBBIB8sH2sBBBBIB8s8sHB2sB"
 
 # Область хранения триггеров во Flash устройства (см. firmware/PROTOCOL.md
-# и Inc/trigger.h — значения обязаны совпадать): одна страница 2 КБ по
-# адресу 0x0803E000, записи по 54 байта → максимум 37 слотов.
+# и Inc/trigger.h — значения обязаны совпадать): две страницы по 2 КБ
+# с адреса 0x0803E000, записи по 82 байта → максимум 49 слотов.
 TRIGGER_PAGE_ADDR = 0x0803E000
-TRIGGER_PAGE_SIZE = 2048
-TRIGGER_SLOT_SIZE = 54
-TRIGGER_MAX_SLOTS = TRIGGER_PAGE_SIZE // TRIGGER_SLOT_SIZE  # 37
+TRIGGER_PAGE_SIZE = 4096
+TRIGGER_SLOT_SIZE = 82
+TRIGGER_MAX_SLOTS = TRIGGER_PAGE_SIZE // TRIGGER_SLOT_SIZE  # 49
 
 
 def trigger_usage_percent(used_slots: int) -> int:
@@ -39,6 +39,7 @@ def count_configured_triggers(triggers: list) -> int:
         if (
             trigger.get("active")
             or str(trigger.get("recv_id", "")).strip()
+            or str(trigger.get("cache_id", "")).strip()
             or any(str(r.get("id", "")).strip() for r in responses if isinstance(r, dict))
         ):
             count += 1
@@ -76,7 +77,16 @@ def pack_trigger(values: Dict[str, Any]) -> bytes:
             int(values.get("delay_ms", 0)) & 0xFFFF,
             bytes((TRIGGER_FORMAT_VERSION, TRIGGER_SIZE)),
             int(values.get("tx_rtr", 0)) & 0xFF,
-            0,
+            int(values.get("cache_enabled", 0)) & 0xFF,
+            int(values.get("src_channel", 0)) & 0xFF,
+            int(values.get("src_extended", 0)) & 0xFF,
+            int(values.get("src_id", 0)) & 0x1FFFFFFF,
+            int(values.get("src_dlc", 0)) & 0xFF,
+            bytes(values.get("src_from", b""))[:8].ljust(8, b"\x00"),
+            bytes(values.get("src_to", b"\xff" * 8))[:8].ljust(8, b"\xff"),
+            int(values.get("tx_interval_ms", 0)) & 0xFFFF,
+            int(values.get("tx_count", 0)) & 0xFF,
+            b"\x00\x00",
             0,
         )
     )
@@ -114,4 +124,13 @@ def unpack_trigger(payload: bytes) -> Dict[str, Any]:
         "tx_data": values[13],
         "delay_ms": values[14],
         "tx_rtr": values[16],
+        "cache_enabled": values[17],
+        "src_channel": values[18],
+        "src_extended": values[19],
+        "src_id": values[20],
+        "src_dlc": values[21],
+        "src_from": values[22],
+        "src_to": values[23],
+        "tx_interval_ms": values[24],
+        "tx_count": values[25],
     }

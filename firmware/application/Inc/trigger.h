@@ -28,38 +28,50 @@ extern "C" {
 #include <stdint.h>
 #include "can_bridge.h"
 
-/* 37 slots × 54 bytes = 1998 B — максимум, что влезает в одну страницу
- * Flash (2048 B) с выделенной под триггеры области 0x0803E000. Лимит
- * оператора — только свободная память страницы (UI показывает её
- * заполненность индикатором «Память»). */
-#define TRIGGER_COUNT        37U
+/* 49 slots × 82 bytes = 4018 B — две страницы Flash (4096 B) выделенной
+ * под триггеры области 0x0803E000–0x0803FFFF (8 KB, см. PROTOCOL.md).
+ * Лимит оператора — только свободная память области (UI показывает её
+ * заполненность индикатором «Память»). Формат v2: добавлен режим
+ * «автоматическая запись DATA в кэш» (src-матчер + параметры повторов) —
+ * записи v1 (54 Б, magic "TRG1") не читаются, слоты сбрасываются в
+ * заводское состояние. */
+#define TRIGGER_COUNT        49U
 #define TRIGGER_PAGE_ADDR    0x0803E000U
-#define TRIGGER_PAGE_SIZE    2048U /* one page holds all slots, see layout below */
-#define TRIGGER_MAGIC         0x54524731U /* "TRG1" */
-#define TRIGGER_FORMAT_VERSION 1U
-#define TRIGGER_RECORD_SIZE    54U
+#define TRIGGER_PAGE_SIZE    4096U /* two pages hold all slots, see layout below */
+#define TRIGGER_MAGIC         0x54524732U /* "TRG2" */
+#define TRIGGER_FORMAT_VERSION 2U
+#define TRIGGER_RECORD_SIZE    82U
 
 typedef struct __attribute__((packed)) {
   uint32_t magic;
   uint8_t  enabled;
-  uint8_t  rx_channel;      /* 0=CAN1, 1=CAN2, 2=любой из двух */
+  uint8_t  rx_channel;      /* «Приём»: 0=CAN1, 1=CAN2, 2=любой из двух */
   uint8_t  rx_extended;
   uint32_t rx_id;
   uint32_t rx_id_mask;      /* bits set = must match; bits clear = don't-care */
   uint8_t  rx_dlc;
   uint8_t  rx_data[8];
   uint8_t  rx_data_mask[8]; /* per-byte don't-care mask, 0x00 = ignore byte */
-  uint8_t  tx_channel;      /* 0=CAN1, 1=CAN2, 2=ответ в оба канала */
+  uint8_t  tx_channel;      /* «Куда отправляем»: 0=CAN1, 1=CAN2, 2=оба */
   uint8_t  tx_extended;
   uint32_t tx_id;
   uint8_t  tx_dlc;
   uint8_t  tx_data[8];
-  uint16_t delay_ms;        /* response delay, 0..~65s */
+  uint16_t delay_ms;        /* пауза перед отправкой, 0..~65s */
   uint8_t  reserved[2];     /* [0]=FORMAT_VERSION, [1]=RECORD_SIZE */
   uint8_t  tx_rtr;          /* 0=data response, 1=Remote Transmission Request */
-  uint8_t  reserved_pad;    /* keeps sizeof(trigger_t) even */
+  uint8_t  cache_enabled;   /* режим «автоматическая запись DATA в кэш» */
+  uint8_t  src_channel;     /* «Откуда читаем»: 0=CAN1, 1=CAN2, 2=любой */
+  uint8_t  src_extended;
+  uint32_t src_id;          /* кадр кэшируется при точном совпадении ID */
+  uint8_t  src_dlc;
+  uint8_t  src_from[8];     /* нижняя граница Data (big-endian, src_dlc байт) */
+  uint8_t  src_to[8];       /* верхняя граница Data */
+  uint16_t tx_interval_ms;  /* пауза между повторными отправками */
+  uint8_t  tx_count;        /* кол-во отправок (0 трактуется как 1) */
+  uint8_t  reserved_pad[2];
   uint8_t  crc8;
-} trigger_t; /* 54 bytes, 37 records fill the 2KB page (1998 B) */
+} trigger_t; /* 82 bytes, 49 records fill the 4KB region (4018 B) */
 
 /* Loads all triggers from Flash into RAM (call once at boot). Any slot
  * with a bad magic/CRC is treated as "disabled, all zero". */
@@ -79,14 +91,16 @@ void Trigger_GetStats(uint32_t *fired_count, uint32_t *max_lateness_ms);
  * be called from the main loop only, never from IRQ context. */
 void Trigger_OnFrame(const can_frame_t *frame);
 
-/* Read one trigger slot (index 0..9) into *out. Returns 1 if index valid. */
+/* Read one trigger slot (index 0..TRIGGER_COUNT-1) into *out. Returns 1
+ * if index valid. */
 uint8_t Trigger_Get(uint8_t index, trigger_t *out);
 
 /* Validates and writes one trigger slot to Flash + RAM. Returns 1 on
- * success. NOTE: like device_config, this erases and reprograms the whole
- * 2KB trigger page (all 10 slots), since STM32F1 Flash cannot erase less
- * than a full page — callers should batch multiple trigger edits together
- * where possible to minimize erase/reprogram cycles. */
+ * success. NOTE: like device_config, this erases and reprograms the
+ * whole trigger region (all TRIGGER_COUNT slots), since STM32F1 Flash
+ * cannot erase less than a full page — callers should batch multiple
+ * trigger edits together where possible to minimize erase/reprogram
+ * cycles. */
 uint8_t Trigger_Set(uint8_t index, const trigger_t *trig);
 
 /* Stages one trigger in RAM and commits all staged records in one Flash erase. */

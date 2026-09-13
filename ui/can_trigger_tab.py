@@ -45,9 +45,9 @@ from ui.packet_clipboard import create_clipboard_buttons
 
 logger = get_logger(__name__)
 
-# Слотов триггеров в странице Flash 0x0803E000 (2 КБ / 54 Б на запись).
-# Старшие прошивки (TRIGGER_COUNT=10) просто отклоняют индексы >= 10 —
-# sync/write обрабатывают это как конец списка.
+# Слотов триггеров в регионе Flash 0x0803E000 (4 КБ / 82 Б на запись).
+# Старшие прошивки (TRIGGER_COUNT=10/37) просто отклоняют большие
+# индексы — sync/write обрабатывают это как конец списка.
 TRIGGER_COUNT = TRIGGER_MAX_SLOTS
 MAX_RESPONSE_FRAMES = 5
 CHANNELS = [tr("CAN1"), tr("CAN2"), tr("CAN1 и CAN2")]
@@ -462,7 +462,8 @@ class CanTriggerTab(QWidget):
 
         row1 = QHBoxLayout()
         row1.setSpacing(4)
-        row1.addWidget(QLabel(tr("Канал")))
+        src_label = QLabel(tr("Откуда читаем"))
+        row1.addWidget(src_label)
         channel = self._make_channel_combo(font)
         row1.addWidget(channel)
         row1.addWidget(QLabel(tr("Бит")))
@@ -474,23 +475,6 @@ class CanTriggerTab(QWidget):
         row1.addWidget(QLabel(tr("DLC")))
         dlc = self._make_dlc_spin(font)
         row1.addWidget(dlc)
-        delay_before_label = QLabel(tr("Пауза перед отправкой"))
-        delay_between_label = QLabel(tr("Пауза между пакетами"))
-        row1.addWidget(delay_before_label)
-        delay_before_send = self._make_delay_spin(font)
-        delay_before_send.setSuffix("")
-        delay_before_send.setFixedWidth(80)
-        row1.addWidget(delay_before_send)
-        row1.addWidget(delay_between_label)
-        delay_between = self._make_delay_spin(font)
-        delay_between.setSuffix("")
-        delay_between.setFixedWidth(80)
-        row1.addWidget(delay_between)
-        row1.addWidget(QLabel(tr("Кол-во отправок")))
-        count = self._make_count_spin(font, 999)
-        count.setSuffix("")
-        count.setFixedWidth(60)
-        row1.addWidget(count)
         row1.addStretch()
 
         row2 = QHBoxLayout()
@@ -508,6 +492,31 @@ class CanTriggerTab(QWidget):
         row2.addWidget(to_copy_paste)
         row2.addStretch()
 
+        row3 = QHBoxLayout()
+        row3.setSpacing(4)
+        dst_label = QLabel(tr("Куда отправляем"))
+        row3.addWidget(dst_label)
+        tx_channel = self._make_channel_combo(font)
+        row3.addWidget(tx_channel)
+        delay_before_label = QLabel(tr("Пауза перед отправкой"))
+        delay_between_label = QLabel(tr("Пауза между пакетами"))
+        row3.addWidget(delay_before_label)
+        delay_before_send = self._make_delay_spin(font)
+        delay_before_send.setSuffix("")
+        delay_before_send.setFixedWidth(80)
+        row3.addWidget(delay_before_send)
+        row3.addWidget(delay_between_label)
+        delay_between = self._make_delay_spin(font)
+        delay_between.setSuffix("")
+        delay_between.setFixedWidth(80)
+        row3.addWidget(delay_between)
+        row3.addWidget(QLabel(tr("Кол-во отправок")))
+        count = self._make_count_spin(font, 255)
+        count.setSuffix("")
+        count.setFixedWidth(60)
+        row3.addWidget(count)
+        row3.addStretch()
+
         dlc.valueChanged.connect(lambda value: self._set_data_enabled(from_data, value))
         dlc.valueChanged.connect(lambda value: self._set_data_enabled(to_data, value))
         self._set_data_enabled(from_data, dlc.value())
@@ -515,6 +524,7 @@ class CanTriggerTab(QWidget):
 
         fields_layout.addLayout(row1)
         fields_layout.addLayout(row2)
+        fields_layout.addLayout(row3)
         group_layout.addWidget(fields_widget)
 
         cache = {
@@ -522,7 +532,10 @@ class CanTriggerTab(QWidget):
             "cache_check": cache_check,
             "fields_widget": fields_widget,
             "row2_layout": row2,
+            "src_label": src_label,
+            "dst_label": dst_label,
             "channel": channel,
+            "tx_channel": tx_channel,
             "bit": bit,
             "id": can_id,
             "dlc": dlc,
@@ -787,21 +800,54 @@ class CanTriggerTab(QWidget):
         rx_data = bytes((value or 0) & 0xFF for value in rx_values)
         rx_data_mask = bytes(0xFF if value is not None else 0 for value in rx_values)
 
-        response_rows = block["response"]["rows"]
-        response = response_rows[0] if response_rows else None
-        if response is None:
-            tx_rtr = 0
-            tx_id, tx_channel, tx_extended, tx_dlc = 0, 0, 0, 0
+        cache = block["cache"]
+        cache_enabled = int(cache["cache_check"].isChecked())
+        if cache_enabled:
+            # Кэш-режим: ответ — последний закэшированный кадр, поля
+            # tx_id/dlc/data/rtr записи не используются прошивкой.
+            # «Куда отправляем» → tx_channel; паузы/повторы — из блока кэша.
+            tx_id, tx_extended, tx_dlc, tx_rtr = 0, 0, 0, 0
             tx_data = b""
-            delay_ms = 0
+            tx_channel = cache["tx_channel"].currentIndex()
+            delay_ms = cache["delay_before_send"].value()
+            tx_interval_ms = cache["delay_between"].value()
+            tx_count = cache["count"].value()
+            src_channel = cache["channel"].currentIndex()
+            src_extended = cache["bit"].currentIndex()
+            src_id = self._parse_id(cache["id"].text()) or 0
+            src_dlc = cache["dlc"].value()
+            src_from = bytes(
+                (v & 0xFF) if v is not None else 0x00
+                for v in self._parse_data(cache["from_data"])
+            )
+            src_to = bytes(
+                (v & 0xFF) if v is not None else 0xFF
+                for v in self._parse_data(cache["to_data"])
+            )
         else:
-            tx_id = self._parse_id(response["id"].text()) or 0
-            tx_channel = response["channel"].currentIndex()
-            tx_extended = response["bit"].currentIndex()
-            tx_dlc = response["dlc"].value()
-            tx_data = bytes((value or 0) & 0xFF for value in self._parse_data(response["data"]))
-            tx_rtr = int(response["rtr"].isChecked())
-            delay_ms = response["delay_before_send"].value()
+            response_rows = block["response"]["rows"]
+            response = response_rows[0] if response_rows else None
+            if response is None:
+                tx_rtr = 0
+                tx_id, tx_channel, tx_extended, tx_dlc = 0, 0, 0, 0
+                tx_data = b""
+                delay_ms = 0
+                tx_interval_ms = 0
+                tx_count = 0
+            else:
+                tx_id = self._parse_id(response["id"].text()) or 0
+                tx_channel = response["channel"].currentIndex()
+                tx_extended = response["bit"].currentIndex()
+                tx_dlc = response["dlc"].value()
+                tx_data = bytes((value or 0) & 0xFF for value in self._parse_data(response["data"]))
+                tx_rtr = int(response["rtr"].isChecked())
+                delay_ms = response["delay_before_send"].value()
+                tx_interval_ms = response["delay_between"].value()
+                tx_count = response["count"].value()
+            src_channel = src_extended = src_dlc = 0
+            src_id = 0
+            src_from = b""
+            src_to = b""
 
         return {
             "enabled": int(block["group"].isChecked()),
@@ -819,6 +865,15 @@ class CanTriggerTab(QWidget):
             "tx_data": tx_data,
             "tx_rtr": tx_rtr,
             "delay_ms": delay_ms,
+            "cache_enabled": cache_enabled,
+            "src_channel": src_channel,
+            "src_extended": src_extended,
+            "src_id": src_id,
+            "src_dlc": src_dlc,
+            "src_from": src_from,
+            "src_to": src_to,
+            "tx_interval_ms": tx_interval_ms,
+            "tx_count": tx_count,
         }
 
     def _set_trigger_status(self, index: int, state: str) -> None:
@@ -863,43 +918,66 @@ class CanTriggerTab(QWidget):
             edit.setText(f"{value:02X}")
         self._set_data_enabled(recv["data"], recv["dlc"].value())
 
-        rows = block["response"]["rows"]
-        if rows:
-            row = rows[0]
-            row["channel"].setCurrentIndex(min(values["tx_channel"], 2))
-            row["bit"].setCurrentIndex(int(values["tx_extended"]))
-            row["id"].setText(int_to_hex(values["tx_id"], 8 if values["tx_extended"] else 3))
-            row["dlc"].setValue(min(8, values["tx_dlc"]))
-            for edit, value in zip(row["data"], values["tx_data"]):
+        cache = block["cache"]
+        cache_enabled = bool(values.get("cache_enabled", 0))
+        if cache_enabled:
+            cache["channel"].setCurrentIndex(min(values.get("src_channel", 0), 2))
+            cache["bit"].setCurrentIndex(int(values.get("src_extended", 0)))
+            cache["id"].setText(
+                int_to_hex(values.get("src_id", 0), 8 if values.get("src_extended") else 3)
+            )
+            cache["dlc"].setValue(max(1, min(8, values.get("src_dlc", 0) or 8)))
+            for edit, value in zip(cache["from_data"], values.get("src_from", b"")):
                 edit.setText(f"{value:02X}")
-            row["rtr"].setChecked(bool(values.get("tx_rtr", 0)))
-            row["delay_before_send"].setValue(values["delay_ms"])
-            self._set_data_enabled(row["data"], 0 if row["rtr"].isChecked() else row["dlc"].value())
+            for edit, value in zip(cache["to_data"], values.get("src_to", b"")):
+                edit.setText(f"{value:02X}")
+            cache["tx_channel"].setCurrentIndex(min(values["tx_channel"], 2))
+            cache["delay_before_send"].setValue(values["delay_ms"])
+            cache["delay_between"].setValue(values.get("tx_interval_ms", 0))
+            cache["count"].setValue(max(1, values.get("tx_count", 0) or 1))
+            self._set_data_enabled(cache["from_data"], cache["dlc"].value())
+            self._set_data_enabled(cache["to_data"], cache["dlc"].value())
+        else:
+            rows = block["response"]["rows"]
+            if rows:
+                row = rows[0]
+                row["channel"].setCurrentIndex(min(values["tx_channel"], 2))
+                row["bit"].setCurrentIndex(int(values["tx_extended"]))
+                row["id"].setText(int_to_hex(values["tx_id"], 8 if values["tx_extended"] else 3))
+                row["dlc"].setValue(min(8, values["tx_dlc"]))
+                for edit, value in zip(row["data"], values["tx_data"]):
+                    edit.setText(f"{value:02X}")
+                row["rtr"].setChecked(bool(values.get("tx_rtr", 0)))
+                row["delay_before_send"].setValue(values["delay_ms"])
+                row["delay_between"].setValue(values.get("tx_interval_ms", 0))
+                row["count"].setValue(max(1, values.get("tx_count", 0) or 1))
+                self._set_data_enabled(row["data"], 0 if row["rtr"].isChecked() else row["dlc"].value())
+        cache["cache_check"].setChecked(cache_enabled)
+        self._on_cache_active_changed(index, Qt.CheckState.Checked.value if cache_enabled else Qt.CheckState.Unchecked.value)
         self._applying_device_state = False
         self._set_trigger_status(index, "enabled" if values["enabled"] else "disabled")
 
     def _is_device_representable(self, block: Dict[str, Any]) -> bool:
         """True, если триггер целиком выразим одной записью trigger_t на МК.
 
-        Firmware хранит ровно один фрейм ответа с одной задержкой, без
-        повторов и без кэша. Всё, что шире (несколько фреймов ответа,
-        count>1, паузы между пакетами/фреймами, кэш), исполняется только
-        приложением — записывать такое в МК нельзя, иначе устройство
-        продублирует первый фрейм поверх ответов приложения.
+        Firmware хранит ровно один фрейм ответа (в кэш-режиме — параметры
+        «Откуда читаем»/«Куда отправляем») с паузой перед отправкой,
+        паузой между повторами и счётчиком отправок. Всё, что шире
+        (несколько фреймов ответа, пауза перед следующим фреймом,
+        count>255), исполняется только приложением — записывать такое в
+        МК нельзя, иначе устройство продублирует первый фрейм поверх
+        ответов приложения.
         """
         if block["cache"]["cache_check"].isChecked():
-            return False
+            # Кэш-режим целиком поддержан прошивкой (формат v2).
+            return True
         rows = block["response"]["rows"]
         filled = [r for r in rows if self._parse_id(r["id"].text()) is not None]
         if len(filled) > 1:
             return False
         if filled:
             row = filled[0]
-            if (
-                row["count"].value() > 1
-                or row["delay_between"].value() > 0
-                or row["next_delay"].value() > 0
-            ):
+            if row["count"].value() > 255 or row["next_delay"].value() > 0:
                 return False
         return True
 
@@ -910,6 +988,8 @@ class CanTriggerTab(QWidget):
             not values["enabled"]
             and values["rx_id"] == 0
             and values["tx_id"] == 0
+            and values.get("src_id", 0) == 0
+            and not values.get("cache_enabled", 0)
             and not any(values["rx_data"])
             and not any(values["tx_data"])
         )
@@ -1090,6 +1170,8 @@ class CanTriggerTab(QWidget):
                 row["remove_button"].setToolTip(tr("Удалить фрейм"))
                 row["delay_before_label"].setText(tr("Пауза перед отправкой"))
                 row["delay_between_label"].setText(tr("Пауза между пакетами"))
+            block["cache"]["src_label"].setText(tr("Откуда читаем"))
+            block["cache"]["dst_label"].setText(tr("Куда отправляем"))
             block["cache"]["delay_before_label"].setText(tr("Пауза перед отправкой"))
             block["cache"]["delay_between_label"].setText(tr("Пауза между пакетами"))
             block["cache"]["group"].setTitle(tr("Кэш"))
@@ -1153,6 +1235,8 @@ class CanTriggerTab(QWidget):
         return {
             "id": can_id,
             "channel": cache["channel"].currentIndex(),
+            "tx_channel": cache["tx_channel"].currentIndex(),
+            "extended": cache["bit"].currentIndex(),
             "data_from": self._parse_data(cache["from_data"]),
             "data_to": self._parse_data(cache["to_data"]),
             "dlc": cache["dlc"].value(),
@@ -1201,6 +1285,7 @@ class CanTriggerTab(QWidget):
                 "cache_bit": cache["bit"].currentIndex(),
                 "cache_id": cache["id"].text(),
                 "cache_dlc": cache["dlc"].value(),
+                "cache_tx_channel": cache["tx_channel"].currentIndex(),
                 "cache_from_data": " ".join(e.text() for e in cache["from_data"] if e.text()),
                 "cache_to_data": " ".join(e.text() for e in cache["to_data"] if e.text()),
                 "cache_delay_before_send": cache["delay_before_send"].value(),
@@ -1274,6 +1359,7 @@ class CanTriggerTab(QWidget):
 
     def _set_cache(self, cache: Dict[str, Any], data: Dict[str, Any]) -> None:
         cache["channel"].setCurrentIndex(int(data.get("cache_channel", 0)))
+        cache["tx_channel"].setCurrentIndex(int(data.get("cache_tx_channel", 0)))
         cache["bit"].setCurrentIndex(int(data.get("cache_bit", 0)))
         cache["id"].setText(str(data.get("cache_id", "")))
         cache["dlc"].setValue(int(data.get("cache_dlc", 8)))
@@ -1323,19 +1409,25 @@ class CanTriggerTab(QWidget):
         frame_channel = int(frame["channel"])
         data = bytes(frame["data"])
 
-        for trigger in self._build_internal_triggers():
+        triggers = self._build_internal_triggers()
+        for trigger in triggers:
+            # Кэш пополняется у всех триггеров независимо от «Приём» —
+            # кадр может быть источником данных для одного триггера и
+            # условием срабатывания для другого.
+            self._update_cache(
+                trigger, frame_id, frame_channel, data, bool(frame.get("extended"))
+            )
+        for trigger in triggers:
             if trigger.get("device_managed"):
                 # Триггер записан во Flash и исполняется самим МК —
                 # не дублируем ответ со стороны приложения.
                 continue
-            self._update_cache(trigger, frame_id, frame_channel, data)
             if not self._match_condition(trigger, frame_id, frame_channel, data):
                 continue
             if trigger["cache"]:
                 self._send_cached_frame(trigger)
             else:
                 self._send_responses(trigger)
-            break
 
     def _match_condition(
         self,
@@ -1387,7 +1479,7 @@ class CanTriggerTab(QWidget):
         if cached is None:
             return
         cache = trigger["cache_data"]
-        channel = cache["channel"]
+        channel = cache["tx_channel"]
         delay_before = cache["delay_before_send"]
         delay_between = cache["delay_between"]
         count = max(1, cache["count"])
@@ -1403,12 +1495,25 @@ class CanTriggerTab(QWidget):
             if j < count - 1:
                 cumulative += delay_between
 
-    def _update_cache(self, trigger: Dict[str, Any], frame_id: int, frame_channel: int, data: bytes) -> None:
-        """Сохраняет кадр в кэш, если он попадает в заданный диапазон."""
+    def _update_cache(
+        self,
+        trigger: Dict[str, Any],
+        frame_id: int,
+        frame_channel: int,
+        data: bytes,
+        extended: bool = False,
+    ) -> None:
+        """Сохраняет кадр в кэш, если он пришёл на канал «Откуда читаем»,
+        совпадает по битности/ID и его Data попадает в заданный диапазон."""
         if not trigger["cache"]:
             return
         cache = trigger["cache_data"]
         if cache["id"] is None or cache["id"] != frame_id:
+            return
+        if bool(cache.get("extended", 0)) != extended:
+            return
+        src_channel = int(cache["channel"])
+        if src_channel != 2 and src_channel + 1 != frame_channel:
             return
         if not self._data_in_range(data, cache["data_from"], cache["data_to"], cache["dlc"]):
             return

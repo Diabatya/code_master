@@ -58,17 +58,47 @@ def test_trigger_channel_2_both_cans() -> None:
 
 
 def test_trigger_max_slots_fit_page() -> None:
-    """37 слотов по 54 байта помещаются в страницу 2 КБ (0x0803E000)."""
-    assert TRIGGER_SLOT_SIZE == TRIGGER_SIZE == 54
-    assert TRIGGER_MAX_SLOTS == 37
+    """49 слотов по 82 байта помещаются в регион 4 КБ (0x0803E000)."""
+    assert TRIGGER_SLOT_SIZE == TRIGGER_SIZE == 82
+    assert TRIGGER_MAX_SLOTS == 49
     assert TRIGGER_MAX_SLOTS * TRIGGER_SLOT_SIZE <= TRIGGER_PAGE_SIZE
 
 
 def test_trigger_usage_percent() -> None:
     assert trigger_usage_percent(0) == 0
-    assert trigger_usage_percent(10) == round(10 * 54 * 100 / 2048)  # 26%
-    assert trigger_usage_percent(37) == 98  # 1998/2048 = 97.6% → 98
-    assert trigger_usage_percent(100) == 98  # слоты клампятся до 37
+    assert trigger_usage_percent(10) == round(10 * 82 * 100 / 4096)  # 20%
+    assert trigger_usage_percent(49) == 98  # 4018/4096 = 98.1% → 98
+    assert trigger_usage_percent(100) == 98  # слоты клампятся до 49
+
+
+def test_trigger_cache_fields_round_trip() -> None:
+    """Поля кэш-режима (формат v2): src-матчер + параметры повторов."""
+    payload = pack_trigger({
+        "enabled": 1,
+        "rx_channel": 0,
+        "rx_id": 0x100,
+        "rx_id_mask": 0x7FF,
+        "tx_channel": 1,
+        "cache_enabled": 1,
+        "src_channel": 2,
+        "src_extended": 1,
+        "src_id": 0x1ABCDEF,
+        "src_dlc": 4,
+        "src_from": b"\x00\x00\x00\x00",
+        "src_to": b"\xFF\xFF\xFF\xFF",
+        "tx_interval_ms": 50,
+        "tx_count": 5,
+        "delay_ms": 10,
+    })
+    decoded = unpack_trigger(payload)
+    assert decoded["cache_enabled"] == 1
+    assert decoded["src_channel"] == 2
+    assert decoded["src_id"] == 0x1ABCDEF
+    assert decoded["src_from"] == b"\x00\x00\x00\x00\x00\x00\x00\x00"
+    assert decoded["src_to"] == b"\xFF" * 8
+    assert decoded["tx_interval_ms"] == 50
+    assert decoded["tx_count"] == 5
+    assert decoded["delay_ms"] == 10
 
 
 def test_count_configured_triggers() -> None:
