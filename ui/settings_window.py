@@ -424,20 +424,25 @@ class SettingsWindow(QMainWindow):
         # Оверлей на время вычитки настроек из МК: закрывает все поля,
         # чтобы оператор не видел устаревшие данные из локального кэша,
         # пока идёт синхронизация с устройством.
-        self._loading_overlay = QLabel(
-            tr("Загрузка настроек, пожалуйста подождите"), self.centralWidget()
-        )
-        self._loading_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._loading_overlay.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        self._loading_overlay = QWidget(self.centralWidget())
         self._loading_overlay.setStyleSheet(
-            "background-color: rgba(20, 20, 30, 235); color: #FFFFFF;"
+            "background-color: rgba(20, 20, 30, 235);"
         )
+        overlay_layout = QVBoxLayout(self._loading_overlay)
+        overlay_layout.setContentsMargins(0, 0, 0, 0)
+        # Текст — отдельный виджет: эффект прозрачности действует только
+        # на буквы, а не на всю шторку — плавно меняется именно заливка
+        # цвета текста (100% → 30% → 100% за ~333 мс, ~3 Гц).
+        self._loading_text = QLabel(
+            tr("Загрузка настроек, пожалуйста подождите"), self._loading_overlay
+        )
+        self._loading_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_text.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        self._loading_text.setStyleSheet("color: #FFFFFF;")
+        overlay_layout.addWidget(self._loading_text)
         self._loading_overlay.hide()
-        # Пульсация яркости текста ~3 Гц: 100% → 30% → 100% за ~333 мс.
-        # Оператор видит живую анимацию и понимает, что идёт чтение
-        # настроек, а не зависание.
-        self._loading_opacity = QGraphicsOpacityEffect(self._loading_overlay)
-        self._loading_overlay.setGraphicsEffect(self._loading_opacity)
+        self._loading_opacity = QGraphicsOpacityEffect(self._loading_text)
+        self._loading_text.setGraphicsEffect(self._loading_opacity)
         self._loading_anim = QPropertyAnimation(self._loading_opacity, b"opacity", self)
         self._loading_anim.setDuration(333)
         self._loading_anim.setStartValue(1.0)
@@ -527,8 +532,37 @@ class SettingsWindow(QMainWindow):
         self._save_opacity.setOpacity(0.4)
         self._save_button.setEnabled(False)
 
+    def _show_loading_overlay(self) -> None:
+        """Закрывает поля оверлеем «Загрузка настроек» и запускает пульсацию."""
+        self._loading_overlay.setGeometry(self.centralWidget().rect())
+        self._loading_overlay.show()
+        self._loading_overlay.raise_()
+        self._loading_anim.start()
+        # Мгновенная перерисовка: вызывается и из блокирующего GUI-поток
+        # connect() (идентификация ~1-2 с) — без processEvents оверлей
+        # появился бы только после завершения опроса устройства.
+        QApplication.processEvents()
+
+    def _hide_loading_overlay(self) -> None:
+        self._loading_anim.stop()
+        self._loading_opacity.setOpacity(1.0)
+        self._loading_overlay.hide()
+
+    def _on_connecting(self) -> None:
+        """Порт открыт, идёт идентификация — сразу закрываем поля оверлеем,
+        чтобы оператор не видел устаревшие данные, пока идёт опрос МК и
+        последующая вычитка настроек."""
+        if (
+            not self.isVisible()
+            or self._config.get("emulation", False)
+            or self._save_button.isEnabled()
+        ):
+            return
+        self._show_loading_overlay()
+
     def _on_connection_changed(self, connected: bool) -> None:
         if not connected:
+            self._hide_loading_overlay()
             self._trigger_tab.clear_device_managed()
             # Связь потеряна — «Сохранить» недоступна, даже если есть
             # несохранённые правки: писать некуда.
@@ -538,6 +572,7 @@ class SettingsWindow(QMainWindow):
         # Связь восстановлена — вернуть кнопке состояние по снимку полей.
         self._mark_dirty()
         if self._config.get("emulation", False):
+            self._hide_loading_overlay()
             return
         # Небольшая пауза, чтобы завершился обмен CMD_DEVICE_ID при
         # открытии порта; request_control сам ставит reader на паузу.
@@ -555,23 +590,18 @@ class SettingsWindow(QMainWindow):
             or self._config.get("emulation", False)
             or self._save_button.isEnabled()
         ):
+            # Вычитки не будет — оверлей, показанный на connecting,
+            # нужно снять, иначе он зависнет поверх полей.
+            self._hide_loading_overlay()
             return
         self._loading = True
-        # Закрываем поля оверлеем, пока идёт вычитка: до завершения там
-        # лежат устаревшие данные локального кэша, а не устройства.
-        self._loading_overlay.setGeometry(self.centralWidget().rect())
-        self._loading_overlay.show()
-        self._loading_overlay.raise_()
-        self._loading_anim.start()
-        QApplication.processEvents()
+        self._show_loading_overlay()
         try:
             self._trigger_tab.sync_from_device()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Не удалось вычитать триггеры из устройства: %s", exc)
         finally:
-            self._loading_anim.stop()
-            self._loading_opacity.setOpacity(1.0)
-            self._loading_overlay.hide()
+            self._hide_loading_overlay()
             self._loading = False
         self._mark_clean()
 
@@ -716,6 +746,7 @@ class SettingsWindow(QMainWindow):
         self._serial_manager.new_can_frame.connect(self._topology_tab.add_frame)
         self._serial_manager.error_occurred.connect(self._on_serial_error)
         self._serial_manager.connection_changed.connect(self._on_connection_changed)
+        self._serial_manager.connecting.connect(self._on_connecting)
         self._monitor_tab.create_trigger_requested.connect(self._on_create_trigger)
         self._trigger_tab.settings_changed.connect(self._mark_dirty)
 

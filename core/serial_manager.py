@@ -273,6 +273,11 @@ class SerialManager(QObject):
     raw_tx = Signal(bytes, float)
     error_occurred = Signal(str)
     connection_changed = Signal(bool)
+    # Порт открыт, началась идентификация устройства (CMD_DEVICE_ID/
+    # CFG_READ занимают ~1-2 с и блокируют вызывающий поток). UI показывает
+    # по этому сигналу оверлей «Загрузка настроек» — иначе до
+    # connection_changed оператор видит устаревшие данные.
+    connecting = Signal()
     heartbeat = Signal()
     device_identified = Signal(int, int)
     can_speed_detected = Signal(int)
@@ -355,6 +360,11 @@ class SerialManager(QObject):
                     logger.info("Открыт реальный порт %s на скорости %d (dtr=%s, rts=%s)", port_name, baudrate, self._port.dtr, self._port.rts)
 
                 self._start_reader()
+                # Сообщаем UI, что порт открыт и началась идентификация —
+                # пока она идёт (и потом, пока идёт вычитка настроек),
+                # оператор должен видеть «Загрузка настроек», а не
+                # устаревшие поля из локального кэша.
+                self.connecting.emit()
                 self._detect_device_id()
                 self._config.set_bulk(
                     {"port": port_name, "baudrate": baudrate, "emulation": emulation, "auto_reconnect": auto_reconnect, "error_probability": error_probability}
@@ -707,7 +717,12 @@ class SerialManager(QObject):
                     if device_name:
                         break
                     self._port.reset_input_buffer()
-                    self._port.write(bytes([CMD_CFG_READ]))
+                    # Формат нового протокола [cmd][len][payload] — голый
+                    # 0xC0 без байта длины вешает парсер МК: он ждёт len,
+                    # а потом считает payload_len=0xC0 и поглощает ~190
+                    # байт следующих команд (чтения триггеров тонули
+                    # в таймаутах и слоты показывались пустыми).
+                    self._port.write(bytes((CMD_CFG_READ, 0)))
                     deadline = time.time() + 0.6
                     buffer = bytearray()
                     while time.time() < deadline:

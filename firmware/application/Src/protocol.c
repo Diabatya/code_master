@@ -577,8 +577,8 @@ static uint16_t try_parse_one(void)
     return 1U;
   }
 
-  /* --- New commands (0xC0-0xC5), see PROTOCOL.md Part 2 --- */
-  if (marker >= 0xC0U && marker <= 0xCCU) {
+  /* --- New commands (0xC0-0xCD), see PROTOCOL.md Part 2 --- */
+  if (marker >= 0xC0U && marker <= 0xCDU) {
     if (avail < 2U) {
       return 0U;
     }
