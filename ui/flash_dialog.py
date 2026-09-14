@@ -1044,13 +1044,21 @@ class FlashWorker(QThread):
                         logger.warning("DFU: не удалось инвалидировать метаданные: %s", exc)
 
                 offset = 0
-                self.log_line.emit(tr("USB DFU: стирание Flash..."))
+                # Стираем КАЖДУЮ страницу, накрытую образом (skip_blank=False):
+                # «пустые» участки образа (0xFF) без стирания оставляли бы в
+                # Flash старые данные — и верификация/CRC метаданных ловили
+                # мусор из прошлой прошивки.
+                total_pages = sum(
+                    (start + len(data) - 1) // page_size - start // page_size + 1
+                    for start, data in segments
+                )
+                self.log_line.emit(tr("USB DFU: стирание {0} страниц Flash...").format(total_pages))
                 for start, data in segments:
                     dfu.erase_pages(
                         start,
                         data,
                         page_size=page_size,
-                        skip_blank=True,
+                        skip_blank=False,
                         progress=_progress_for_segment(0, 15, offset),
                     )
                     offset += len(data)

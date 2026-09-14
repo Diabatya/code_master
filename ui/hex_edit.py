@@ -19,6 +19,9 @@ class HexDataEdit(QLineEdit):
         self.setValidator(QRegularExpressionValidator(QRegularExpression("[0-9A-Fa-f]{0,2}")))
         self.textEdited.connect(self._on_text_edited)
         self._siblings: List[QLineEdit] = []
+        # Флаг подавляет автопереход на следующий байт при перезаписи
+        # первого символа — курсор шагает посимвольно, а не побайтно.
+        self._suppress_autofocus = False
 
     def set_siblings(self, siblings: List[QLineEdit]) -> None:
         """Задаёт список соседних полей Data для перехода фокуса."""
@@ -31,7 +34,11 @@ class HexDataEdit(QLineEdit):
             self.setText(upper)
             self.blockSignals(False)
             text = upper
-        if len(text) == 2 and all(ch in _HEX_CHARS for ch in text):
+        if (
+            len(text) == 2
+            and all(ch in _HEX_CHARS for ch in text)
+            and not self._suppress_autofocus
+        ):
             self._focus_next()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -50,9 +57,18 @@ class HexDataEdit(QLineEdit):
         ):
             pos = min(self.cursorPosition(), len(self.text()) - 1)
             new_text = (self.text()[:pos] + text + self.text()[pos + 1 :]).upper()
-            self.setText(new_text)
-            self.setCursorPosition(pos + 1)
-            self._on_text_edited(new_text)
+            # Посимвольный шаг: заменили первый символ байта — курсор
+            # остаётся в этом поле на позиции 2; переход к следующему
+            # байту только после второго символа (при DLC=8 курсор
+            # перескакивает 16 раз). textEdited испускаем сигналом —
+            # иначе dirty-tracking («Сохранить») не видел перезапись.
+            self._suppress_autofocus = pos + 1 < self.maxLength()
+            try:
+                self.setText(new_text)
+                self.setCursorPosition(pos + 1)
+                self.textEdited.emit(new_text)
+            finally:
+                self._suppress_autofocus = False
             return
         super().keyPressEvent(event)
 

@@ -1046,14 +1046,9 @@ class SettingsWindow(QMainWindow):
             if hasattr(self._gateway_tab, "_save_config"):
                 self._gateway_tab._save_config()
             if self._serial_manager.is_open() and not self._config.get("emulation", False):
-                changed = self._trigger_tab.write_to_device()
-                QMessageBox.information(
-                    self,
-                    tr("Готово"),
-                    tr("Настройки сохранены, триггеры записаны в устройство: изменено {0}").format(changed),
-                )
-            else:
-                QMessageBox.information(self, tr("Готово"), tr("Настройки сохранены"))
+                self._trigger_tab.write_to_device()
+            # Успешное сохранение подтверждается погасшей кнопкой
+            # «Сохранить» — отдельное окно оператору не нужно.
             self._mark_clean()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить: {0}").format(exc))
