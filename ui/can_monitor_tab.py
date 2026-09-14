@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QSplitter,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -187,10 +188,14 @@ class _PercentGraph(QWidget):
             painter.setPen(QPen(QColor("#4CAF50"), 2))
             prev = pts[0]
             for t, v in pts[1:]:
+                # Линия должна следовать инверсии шкалы: FF..FF = 0%
+                # внизу при включённом «Инвертировании», иначе 100% вверху.
+                v1 = 100.0 - prev[1] if self._inverted else prev[1]
+                v2 = 100.0 - v if self._inverted else v
                 x1 = rect.left() + rect.width() * (prev[0] - start) / self._window_s
-                y1 = rect.bottom() - rect.height() * prev[1] / 100.0
+                y1 = rect.bottom() - rect.height() * v1 / 100.0
                 x2 = rect.left() + rect.width() * (t - start) / self._window_s
-                y2 = rect.bottom() - rect.height() * v / 100.0
+                y2 = rect.bottom() - rect.height() * v2 / 100.0
                 painter.drawLine(int(x1), int(y1), int(x2), int(y2))
                 prev = (t, v)
         painter.setPen(QColor("#9E9E9E"))
@@ -259,6 +264,13 @@ class IdHistoryDialog(QDialog):
 
         for sample in samples:
             self._append_row(*sample, repaint=False)
+        # Счётчик процентов сразу показывает последнее известное значение,
+        # а не «0%» до прихода нового кадра.
+        if samples:
+            _t, data, rtr, dlc = samples[-1]
+            pct = _data_percent(data, dlc) if not rtr else 0.0
+            self._percent_label.setText(f"{pct:.1f}%")
+            self._table.scrollToBottom()
         self._graph.update()
 
         # Периодический repaint — «ползущее» окно времени
@@ -884,7 +896,6 @@ class CanChannelMonitor(QWidget):
 
         if frame_id in self._id_to_row:
             row = self._id_to_row[frame_id]
-            old_data = stats["last_data"]
             for col, text in enumerate(items):
                 item = self._table.item(row, col)
                 if item is None:
@@ -895,9 +906,12 @@ class CanChannelMonitor(QWidget):
                     item.setText(text)
                 if tooltip:
                     item.setToolTip(tooltip)
-            if old_data != data and prev_receive_time is not None:
+            # Подсветка частого ID: период следования меньше заданного
+            # интервала → фон ячейки Data светлее на 0.5 с. Содержимое
+            # Data роли не играет — важны только ID и тайминг.
+            if prev_receive_time is not None and self._highlight_interval_ms > 0:
                 elapsed_ms = int((now - prev_receive_time) * 1000)
-                if elapsed_ms > self._highlight_interval_ms:
+                if elapsed_ms < self._highlight_interval_ms:
                     self._highlight_data_cell(row)
         else:
             if self._table.rowCount() >= MAX_TABLE_ROWS:
@@ -992,7 +1006,7 @@ class CanChannelMonitor(QWidget):
         data_item = self._table.item(row, 2)
         if data_item is None:
             return
-        data_item.setBackground(QColor("#FF4444"))
+        data_item.setBackground(QColor("#464672"))
         timer = QTimer(self)
         timer.setSingleShot(True)
         timer.timeout.connect(lambda r=row: self._reset_data_background(r))
@@ -1177,8 +1191,10 @@ class CanMonitorTab(QWidget):
         self._can1_speed_combo.lineEdit().setValidator(QDoubleValidator(0.1, 10000.0, 1, self))
         self._can1_speed_combo.lineEdit().setPlaceholderText(tr("кбит/с"))
 
-        self._can1_speed_button = QPushButton("▼")
-        self._can1_speed_button.setFont(compact_font)
+        self._can1_speed_button = QPushButton()
+        self._can1_speed_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
+        )
         self._fit_speed_button(self._can1_speed_button, self._can1_speed_combo)
         self._can1_speed_button.setToolTip(tr("Выбрать из списка"))
         self._can1_speed_button.clicked.connect(self._can1_speed_combo.showPopup)
@@ -1203,8 +1219,10 @@ class CanMonitorTab(QWidget):
         self._can2_speed_combo.lineEdit().setValidator(QDoubleValidator(0.1, 10000.0, 1, self))
         self._can2_speed_combo.lineEdit().setPlaceholderText(tr("кбит/с"))
 
-        self._can2_speed_button = QPushButton("▼")
-        self._can2_speed_button.setFont(compact_font)
+        self._can2_speed_button = QPushButton()
+        self._can2_speed_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
+        )
         self._fit_speed_button(self._can2_speed_button, self._can2_speed_combo)
         self._can2_speed_button.setToolTip(tr("Выбрать из списка"))
         self._can2_speed_button.clicked.connect(self._can2_speed_combo.showPopup)
@@ -1348,11 +1366,13 @@ class CanMonitorTab(QWidget):
 
     @staticmethod
     def _fit_speed_button(button: QPushButton, combo: QComboBox) -> None:
-        """Кнопка списка скоростей: высота = высоте поля, ширина = высоте (квадрат)."""
+        """Кнопка списка скоростей со значком «стрелка вниз»: чуть ниже
+        поля ввода, ширина с запасом под иконку."""
         height = combo.sizeHint().height()
         if height <= 0:
             height = 26
-        button.setFixedSize(height, height)
+        height = max(18, height - 6)
+        button.setFixedSize(height + 8, height)
 
     @staticmethod
     def _update_terminator_style(button: QPushButton) -> None:

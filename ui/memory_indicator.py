@@ -47,14 +47,15 @@ class MemoryIndicator(QWidget):
         self._progress.setFormat(f"{percent}%")
 
     def show_trigger_usage(self, used_slots: int) -> None:
-        """Процент занятой страницы Flash триггеров (2 КБ, слоты по 54 Б).
+        """Процент занятого пула Flash триггеров (8 КБ над config).
 
-        Одинаковый смысл во всех вкладках: доля области 0x0803E000,
-        занятая настроенными триггерами.
+        Одинаковый смысл во всех вкладках: доля пула 0x0803E000–0x0803FFFF,
+        занятая настроенными триггерами; пустое устройство — 0%.
         """
         from core.trigger_protocol import (
+            TRIGGER_HEADER_SIZE,
             TRIGGER_MAX_SLOTS,
-            TRIGGER_PAGE_SIZE,
+            TRIGGER_POOL_SIZE,
             TRIGGER_SLOT_SIZE,
             trigger_usage_percent,
         )
@@ -64,7 +65,10 @@ class MemoryIndicator(QWidget):
         self._progress.setFormat(f"{percent}%")
         self._progress.setToolTip(
             tr("Триггеров: {0}/{1} ({2} из {3} Б Flash)").format(
-                used_slots, TRIGGER_MAX_SLOTS, used_slots * TRIGGER_SLOT_SIZE, TRIGGER_PAGE_SIZE
+                used_slots,
+                TRIGGER_MAX_SLOTS,
+                used_slots * TRIGGER_SLOT_SIZE + TRIGGER_HEADER_SIZE if used_slots else 0,
+                TRIGGER_POOL_SIZE,
             )
         )
 

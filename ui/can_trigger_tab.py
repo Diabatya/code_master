@@ -46,8 +46,9 @@ from ui.packet_clipboard import create_clipboard_buttons
 
 logger = get_logger(__name__)
 
-# Слотов триггеров в регионе Flash 0x0803E000 (4 КБ / 82 Б на запись).
-# Старшие прошивки (TRIGGER_COUNT=10/37) просто отклоняют большие
+# Ёмкость списка триггеров: пул Flash 0x0803E000–0x0803FFFF (8 КБ,
+# запись 82 Б), предел по RAM прошивки — TRIGGER_MAX_SLOTS.
+# Старшие прошивки (TRIGGER_COUNT=10/37/49) просто отклоняют большие
 # индексы — sync/write обрабатывают это как конец списка.
 TRIGGER_COUNT = TRIGGER_MAX_SLOTS
 MAX_RESPONSE_FRAMES = 5
@@ -116,9 +117,10 @@ class CanTriggerTab(QWidget):
         self._applying_device_state = False
         # device_managed[i] == True: триггер i записан во Flash устройства и
         # исполняется самим МК — приложение не должно дублировать ответ
-        # (иначе на шине были бы двойные фреймы). Сбрасывается при любом
+        # (иначе на шине были бы двойные фреймы). Список параллелен
+        # _blocks и растёт/сжимается вместе с ним. Сбрасывается при любом
         # редактировании блока и при отключении порта.
-        self._device_managed = [False] * TRIGGER_COUNT
+        self._device_managed: List[bool] = []
         self._memory_indicator = MemoryIndicator(self)
 
         self._create_widgets()
@@ -200,12 +202,30 @@ class CanTriggerTab(QWidget):
         data, data_widget = self._make_data_edits(font)
         layout.addWidget(data_widget)
 
+        rtr = QPushButton(tr("RTR"))
+        rtr.setFixedSize(38, 24)
+        rtr.setFont(QFont("Arial", 7, QFont.Weight.Bold))
+        rtr.setStyleSheet(
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #4A4A6A; }"
+            "QPushButton:checked { background-color: #4CAF50; }"
+        )
+        rtr.setCheckable(True)
+        rtr.setToolTip(tr("Срабатывать только на RTR-запрос (Remote Transmission Request)"))
+        layout.addWidget(rtr)
+
         copy_paste = create_clipboard_buttons(self, can_id, dlc, data, bit)
         layout.addWidget(copy_paste)
 
         layout.addStretch()
 
-        dlc.valueChanged.connect(lambda value: self._set_data_enabled(data, value))
+        def _on_dlc_or_rtr(*_args: object) -> None:
+            # В RTR-режиме приёма кадр не несёт данных — поля Data
+            # блокируются (матч идёт по каналу/битности/ID/DLC).
+            self._set_data_enabled(data, 0 if rtr.isChecked() else dlc.value())
+
+        dlc.valueChanged.connect(_on_dlc_or_rtr)
+        rtr.toggled.connect(_on_dlc_or_rtr)
         self._set_data_enabled(data, dlc.value())
 
         row = {
@@ -216,6 +236,7 @@ class CanTriggerTab(QWidget):
             "dlc": dlc,
             "data": data,
             "data_widget": data_widget,
+            "rtr": rtr,
             "copy_paste": copy_paste,
         }
         can_id.set_fill_callback(lambda parsed, r=row: self._fill_row_from_packet(r, parsed))
@@ -617,7 +638,7 @@ class CanTriggerTab(QWidget):
         # состояние — один пустой блок.
 
     def _create_trigger_block(self, index: int) -> Dict[str, Any]:
-        """Создаёт виджеты одного блока триггера (слот = index)."""
+        """Создаёт виджеты одного блока триггера (позиция = index)."""
         font = self._font
         group = QGroupBox(tr("Триггер {0}").format(index + 1))
         group.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
@@ -632,12 +653,25 @@ class CanTriggerTab(QWidget):
         response = self._create_response_block(font)
         cache = self._create_cache_block(font, index)
 
+        # Крестик удаления в правом верхнем углу блока — снимает триггер
+        # из списка (при «Сохранить» он перестанет занимать Flash).
+        delete_button = QPushButton("✕", group)
+        delete_button.setFixedSize(22, 22)
+        delete_button.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        delete_button.setStyleSheet(
+            "QPushButton { background-color: transparent; color: #9E9E9E; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #5A2A2A; color: #FFFFFF; }"
+        )
+        delete_button.setToolTip(tr("Удалить триггер"))
+        delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
+
         return {
             "group": group,
             "status": status,
             "recv": recv,
             "response": response,
             "cache": cache,
+            "delete_button": delete_button,
         }
 
     def _layout_trigger_block(self, block: Dict[str, Any], index: int) -> None:
@@ -660,22 +694,69 @@ class CanTriggerTab(QWidget):
         group_layout.addWidget(block["status"])
         group_layout.addWidget(content)
         block["group"].toggled.connect(lambda checked, c=content: c.setVisible(checked))
-        block["group"].toggled.connect(lambda checked, b=block: self._on_trigger_toggled(self._blocks.index(b), checked))
+        block["group"].toggled.connect(lambda checked, b=block: self._on_trigger_toggled_by_block(b, checked))
         block["content"] = content
+
+        delete_button = block["delete_button"]
+        delete_button.clicked.connect(lambda _c=False, b=block: self._remove_trigger_block(b))
+        block["group"].installEventFilter(self)
+        self._place_delete_button(block)
 
         self._blocks_layout.addWidget(block["group"])
 
+    def _place_delete_button(self, block: Dict[str, Any]) -> None:
+        """Крестик прижат к правому верхнему углу QGroupBox."""
+        group = block["group"]
+        btn = block["delete_button"]
+        btn.move(max(0, group.width() - btn.width() - 4), 2)
+        btn.raise_()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        """Крестик удаления следует за правым краем при ресайзе блока."""
+        from PySide6.QtCore import QEvent
+
+        if event.type() == QEvent.Type.Resize:
+            for block in self._blocks:
+                if block["group"] is watched:
+                    self._place_delete_button(block)
+                    break
+        return super().eventFilter(watched, event)
+
+    def _remove_block_at(self, index: int) -> None:
+        """Внутреннее удаление блока по позиции (крестик/синхронизация)."""
+        block = self._blocks.pop(index)
+        self._device_managed.pop(index)
+        self._blocks_layout.removeWidget(block["group"])
+        block["group"].deleteLater()
+
+    def _remove_trigger_block(self, block: Dict[str, Any]) -> None:
+        """Удаляет блок триггера из UI и из будущей записи в устройство."""
+        if self._applying_device_state:
+            return
+        try:
+            index = self._blocks.index(block)
+        except ValueError:
+            return
+        self._remove_block_at(index)
+        # Перенумеровываем заголовки оставшихся блоков.
+        for i, b in enumerate(self._blocks):
+            b["group"].setTitle(tr("Триггер {0}").format(i + 1))
+        self._update_add_trigger_button()
+        self._mark_dirty()
+        self._save_config()
+
     def _add_trigger_block(self) -> Optional[int]:
-        """Добавляет блок триггера. Лимит — только память Flash страницы
-        триггеров (TRIGGER_COUNT слотов по 54 байта в 2 КБ)."""
+        """Добавляет блок триггера. Лимит — ёмкость пула Flash
+        (TRIGGER_COUNT записей по 82 Б + заголовок в 8 КБ над config)."""
         if len(self._blocks) >= TRIGGER_COUNT:
             return None
         index = len(self._blocks)
         block = self._create_trigger_block(index)
         self._blocks.append(block)
+        self._device_managed.append(False)
         if hasattr(self, "_blocks_layout"):
             self._layout_trigger_block(block, index)
-            self._watch_block_signals(index)
+            self._watch_block_signals(block)
             self._update_add_trigger_button()
         return index
 
@@ -723,18 +804,21 @@ class CanTriggerTab(QWidget):
         layout.addWidget(scroll)
         layout.addWidget(self._memory_indicator)
 
-        # Заводское состояние — один пустой блок; остальные добавляются
-        # оператором кнопкой «Добавить триггер» (лимит — память Flash).
-        self._add_trigger_block()
+        # Пустое устройство — ноль блоков: блоки появляются кнопкой
+        # «Добавить триггер», загрузкой конфига или вычиткой из МК.
+        self._update_add_trigger_button()
 
-    def _watch_block_signals(self, index: int) -> None:
+    def _watch_block_signals(self, block: Dict[str, Any]) -> None:
         """Подписывает пользовательские изменения всех полей блока на
         _mark_dirty: снимает флаг device_managed и сообщает окну настроек,
-        что появились несохранённые изменения."""
-        block = self._blocks[index]
+        что появились несохранённые изменения. Индекс блока вычисляется
+        в момент срабатывания — удаление не ломает подписки."""
 
         def mark(*_args: object) -> None:
-            self._mark_dirty(index)
+            try:
+                self._mark_dirty(self._blocks.index(block))
+            except ValueError:
+                self._mark_dirty()
 
         block["group"].toggled.connect(mark)
         skip = [
@@ -743,7 +827,7 @@ class CanTriggerTab(QWidget):
             block["cache"]["to_copy_paste"],
             *(row["copy_paste"] for row in block["response"]["rows"]),
         ]
-        self._watch_widget_tree(block["group"], index, skip)
+        self._watch_widget_tree(block["group"], block, skip)
 
     @staticmethod
     def _inside_any(widget: QWidget, containers: List[QWidget]) -> bool:
@@ -755,13 +839,16 @@ class CanTriggerTab(QWidget):
         return False
 
     def _watch_widget_tree(
-        self, root: QWidget, index: int, skip: Optional[List[QWidget]] = None
+        self, root: QWidget, block: Dict[str, Any], skip: Optional[List[QWidget]] = None
     ) -> None:
         """Подписывает на _mark_dirty все поля ввода внутри виджета root,
         кроме виджетов внутри контейнеров skip (кнопки копипасты)."""
 
         def mark(*_args: object) -> None:
-            self._mark_dirty(index)
+            try:
+                self._mark_dirty(self._blocks.index(block))
+            except ValueError:
+                self._mark_dirty()
 
         skip = skip or []
         for widget in root.findChildren(QComboBox):
@@ -789,7 +876,7 @@ class CanTriggerTab(QWidget):
         """Помечает конфигурацию изменённой пользователем."""
         if self._applying_device_state:
             return
-        if index is not None:
+        if index is not None and 0 <= index < len(self._device_managed):
             self._device_managed[index] = False
         self.settings_changed.emit()
 
@@ -863,6 +950,8 @@ class CanTriggerTab(QWidget):
             "rx_dlc": recv["dlc"].value(),
             "rx_data": rx_data,
             "rx_data_mask": rx_data_mask,
+            # rx_rtr: 1 = срабатывать только на RTR-запрос, 0 = любой кадр.
+            "rx_rtr": int(recv["rtr"].isChecked()),
             "tx_channel": tx_channel,
             "tx_extended": tx_extended,
             "tx_id": tx_id,
@@ -921,7 +1010,10 @@ class CanTriggerTab(QWidget):
         recv["dlc"].setValue(max(1, min(8, values["rx_dlc"] or 8)))
         for edit, value in zip(recv["data"], values["rx_data"]):
             edit.setText(f"{value:02X}")
-        self._set_data_enabled(recv["data"], recv["dlc"].value())
+        recv["rtr"].setChecked(values.get("rx_rtr", 0) == 1)
+        self._set_data_enabled(
+            recv["data"], 0 if recv["rtr"].isChecked() else recv["dlc"].value()
+        )
 
         cache = block["cache"]
         cache_enabled = bool(values.get("cache_enabled", 0))
@@ -988,13 +1080,14 @@ class CanTriggerTab(QWidget):
 
     @staticmethod
     def _is_empty_trigger(values: Dict[str, Any]) -> bool:
-        """True, если слот устройства «заводской» — не был настроен."""
+        """True, если запись устройства «заводская» — не была настроена."""
         return (
             not values["enabled"]
             and values["rx_id"] == 0
             and values["tx_id"] == 0
             and values.get("src_id", 0) == 0
             and not values.get("cache_enabled", 0)
+            and not values.get("rx_rtr", 0)
             and not any(values["rx_data"])
             and not any(values["tx_data"])
         )
@@ -1016,24 +1109,19 @@ class CanTriggerTab(QWidget):
         while len(self._blocks) < min(count, TRIGGER_COUNT):
             self._add_trigger_block()
 
-    def sync_from_device(self) -> None:
-        """Вычитывает все триггеры из устройства (вызывается при подключении).
-
-        Молча применяет состояние в UI и помечает блоки, исполняемые МК,
-        флагом device_managed. Слот, который не читается, пропускается —
-        остальные синхронизируются. Пустые слоты очищают поля блока:
-        в прошитом заново МК триггеров нет, и оператор должен видеть
-        пустые поля, а не старые данные из кэша конфигурации.
-        """
-        values_by_index: Dict[int, Optional[Dict[str, Any]]] = {}
-        last_nonempty = -1
-        # Один сеанс на все 49 чтений: reader останавливается один раз,
+    def _read_device_triggers(self) -> List[Dict[str, Any]]:
+        """Читает упакованный список триггеров устройства до ответа 0x01
+        («за границей списка») — на пустом устройстве вернёт пустой
+        список. Пустые записи (старшая прошивка с фиксированными слотами)
+        пропускаются, блоки под них не создаются."""
+        records: List[Dict[str, Any]] = []
+        # Один сеанс на все чтения: reader останавливается один раз,
         # иначе stop/start QThread на каждый запрос растягивал вычитку
         # до десятков секунд.
         with self._serial_manager.control_session():
             for index in range(TRIGGER_COUNT):
                 # Вычитка блокирует UI-поток — прокачиваем события между
-                # слотами, чтобы оверлей «Загрузка настроек» пульсировал,
+                # записями, чтобы оверлей «Загрузка настроек» пульсировал,
                 # а не выглядел зависшим.
                 QApplication.processEvents()
                 try:
@@ -1041,24 +1129,29 @@ class CanTriggerTab(QWidget):
                     values = unpack_trigger(payload)
                 except RuntimeError as exc:
                     if "0x01" in str(exc):
-                        break  # старшая прошивка: слотов меньше — конец списка
-                    values = None  # ошибка слота — не рвём синхронизацию
+                        break  # конец списка устройства
+                    continue  # ошибка записи — не рвём синхронизацию
                 except Exception:
-                    values = None
-                values_by_index[index] = values
-                if values is not None and not self._is_empty_trigger(values):
-                    last_nonempty = index
+                    continue
+                if self._is_empty_trigger(values):
+                    continue
+                records.append(values)
+        return records
+
+    def sync_from_device(self) -> None:
+        """Вычитывает триггеры из устройства (вызывается при подключении).
+
+        Блоков ровно столько, сколько записей в устройстве — пустое
+        устройство показывает ноль блоков. Блоки, исполняемые МК,
+        помечаются device_managed."""
+        records = self._read_device_triggers()
 
         self._applying_device_state = True
         try:
-            self._ensure_blocks(last_nonempty + 1)
-            for index, values in values_by_index.items():
-                if index >= len(self._blocks):
-                    break
-                if values is None or self._is_empty_trigger(values):
-                    self._clear_block(index)
-                    self._device_managed[index] = False
-                    continue
+            self._ensure_blocks(len(records))
+            while len(self._blocks) > len(records):
+                self._remove_block_at(len(self._blocks) - 1)
+            for index, values in enumerate(records):
                 self._apply_device_trigger(index, values)
                 self._device_managed[index] = self._is_device_representable(self._blocks[index])
             self._save_config()
@@ -1086,58 +1179,75 @@ class CanTriggerTab(QWidget):
         self, default_payload: bytes, staged: List[Tuple[int, bytes]]
     ) -> int:
         """Тело write_to_device внутри control_session: все команды
-        STAGE/READ/COMMIT идут при однократно остановленном reader'е."""
+        STAGE/READ/COMMIT идут при однократно остановленном reader'е.
+
+        Список на устройстве упакован: пустые блоки в него не попадают
+        и Flash не занимают; удалённый оператором триггер исчезает из
+        области за счёт итоговой длины в COMMIT. Для старшей прошивки с
+        фиксированными слотами хвост гасится пустыми записями."""
         changed = 0
+        # Реальный список устройства (до ответа 0x01 «за границей»).
+        device: List[bytes] = []
         for index in range(TRIGGER_COUNT):
             try:
-                remote_payload = self._serial_manager.request_control(
-                    CMD_TRIGGER_READ, bytes((index,))
+                device.append(
+                    self._serial_manager.request_control(CMD_TRIGGER_READ, bytes((index,)))
                 )
             except RuntimeError as exc:
                 if "0x01" in str(exc):
-                    break  # старшая прошивка: дальше слотов нет
+                    break
                 raise
-            if index < len(self._blocks):
-                block = self._blocks[index]
-                representable = self._is_device_representable(block)
-                values = self._device_trigger_values(index)
-                if not representable:
-                    # Триггер исполняется приложением — на МК он должен
-                    # быть выключен, иначе устройство продублирует ответ.
-                    values["enabled"] = 0
-                local_payload = pack_trigger(values)
-                if remote_payload == local_payload:
-                    self._set_trigger_status(index, "synced")
-                else:
-                    self._serial_manager.request_control(
-                        CMD_TRIGGER_STAGE, bytes((index,)) + local_payload
-                    )
-                    staged.append((index, local_payload))
-                    self._set_trigger_status(index, "written")
-                    changed += 1
-                self._device_managed[index] = representable
+
+        # Целевой список: только настроенные (непустые) блоки.
+        target: List[Tuple[int, bytes]] = []
+        for block_index, block in enumerate(self._blocks):
+            representable = self._is_device_representable(block)
+            values = self._device_trigger_values(block_index)
+            if not representable:
+                # Триггер исполняется приложением — на МК он должен
+                # быть выключен, иначе устройство продублирует ответ.
+                values["enabled"] = 0
+            self._device_managed[block_index] = representable
+            if self._is_empty_trigger(values):
+                continue
+            target.append((block_index, pack_trigger(values)))
+
+        for new_index, (block_index, local_payload) in enumerate(target):
+            remote_payload = device[new_index] if new_index < len(device) else None
+            if remote_payload == local_payload:
+                self._set_trigger_status(block_index, "synced")
             else:
-                # Слота нет в UI, но в устройстве мог остаться триггер —
-                # гасим его, чтобы «невидимая» запись не срабатывала.
-                # Сравнение семантическое (пустой ≠ пустой записи
-                # побайтово): иначе каждый «Сохранить» жёг бы цикл Flash.
-                try:
-                    remote_empty = self._is_empty_trigger(unpack_trigger(remote_payload))
-                except (ValueError, RuntimeError):
-                    remote_empty = False
-                if not remote_empty:
-                    self._serial_manager.request_control(
-                        CMD_TRIGGER_STAGE, bytes((index,)) + default_payload
-                    )
-                    staged.append((index, default_payload))
-                    changed += 1
-                self._device_managed[index] = False
-        if changed:
-            self._serial_manager.request_control(CMD_TRIGGER_COMMIT, b"")
+                self._serial_manager.request_control(
+                    CMD_TRIGGER_STAGE, bytes((new_index,)) + local_payload
+                )
+                staged.append((new_index, local_payload))
+                self._set_trigger_status(block_index, "written")
+                changed += 1
+
+        # Хвост устройства за пределами целевого списка: для старой
+        # прошивки гасим слоты пустыми записями, новая отбросит их по
+        # длине списка в COMMIT.
+        for i in range(len(target), len(device)):
+            try:
+                remote_empty = self._is_empty_trigger(unpack_trigger(device[i]))
+            except (ValueError, RuntimeError):
+                remote_empty = False
+            if not remote_empty:
+                self._serial_manager.request_control(
+                    CMD_TRIGGER_STAGE, bytes((i,)) + default_payload
+                )
+                changed += 1
+
+        if changed or len(device) != len(target):
+            self._serial_manager.request_control(
+                CMD_TRIGGER_COMMIT, bytes((len(target),))
+            )
             for index, expected in staged:
                 actual = self._serial_manager.request_control(CMD_TRIGGER_READ, bytes((index,)))
                 if actual != expected:
-                    self._set_trigger_status(index, "differs")
+                    block_index = target[index][0] if index < len(target) else index
+                    if block_index < len(self._blocks):
+                        self._set_trigger_status(block_index, "differs")
                     raise RuntimeError(
                         tr("Триггер {0}: проверка записи во Flash не пройдена").format(index + 1)
                     )
@@ -1145,12 +1255,19 @@ class CanTriggerTab(QWidget):
 
     def clear_device_managed(self) -> None:
         """Сбрасывает флаги исполнения на МК (при отключении порта)."""
-        self._device_managed = [False] * TRIGGER_COUNT
+        self._device_managed = [False] * len(self._blocks)
+
+    def _on_trigger_toggled_by_block(self, block: Dict[str, Any], enabled: bool) -> None:
+        try:
+            index = self._blocks.index(block)
+        except ValueError:
+            return
+        self._on_trigger_toggled(index, enabled)
 
     def _on_trigger_toggled(self, index: int, enabled: bool) -> None:
         # Запись в устройство теперь происходит только по «Сохранить» —
         # здесь просто помечаем блок изменённым и обновляем статус.
-        if self._applying_device_state:
+        if self._applying_device_state or index >= len(self._blocks):
             return
         self._device_managed[index] = False
         self._set_trigger_status(index, "enabled" if enabled else "disabled")
@@ -1224,6 +1341,7 @@ class CanTriggerTab(QWidget):
             triggers.append({
                 "index": i,
                 "recv_id": recv_id,
+                "recv_rtr": int(block["recv"]["rtr"].isChecked()),
                 "recv_data": self._parse_data(block["recv"]["data"]),
                 "recv_channel": block["recv"]["channel"].currentIndex(),
                 "cache": block["cache"]["cache_check"].isChecked(),
@@ -1302,6 +1420,7 @@ class CanTriggerTab(QWidget):
                 "recv_bit": block["recv"]["bit"].currentIndex(),
                 "recv_id": block["recv"]["id"].text(),
                 "recv_dlc": block["recv"]["dlc"].value(),
+                "recv_rtr": int(block["recv"]["rtr"].isChecked()),
                 "recv_data": " ".join(e.text() for e in block["recv"]["data"] if e.text()),
                 "responses": responses,
                 "cache_channel": cache["channel"].currentIndex(),
@@ -1325,11 +1444,14 @@ class CanTriggerTab(QWidget):
         «Сохранить» и не запишет их в устройство, ответы при подключении
         обрабатывает приложение).
         """
-        self._device_managed = [False] * TRIGGER_COUNT
         self._applying_device_state = True
         try:
-            # Блоков должно хватить на все сохранённые триггеры
+            # Блоков ровно столько, сколько триггеров в конфигурации —
+            # лишние удаляются (пустой список = ноль блоков).
+            while len(self._blocks) > len(triggers):
+                self._remove_block_at(len(self._blocks) - 1)
             self._ensure_blocks(len(triggers))
+            self._device_managed = [False] * len(self._blocks)
             for i, block in enumerate(self._blocks):
                 trigger = triggers[i] if i < len(triggers) else {}
                 block["group"].setChecked(bool(trigger.get("active", False)))
@@ -1338,10 +1460,17 @@ class CanTriggerTab(QWidget):
                 self._on_cache_active_changed(i, Qt.CheckState.Checked.value if cache_active else Qt.CheckState.Unchecked.value)
 
                 self._set_row(block["recv"], trigger, "recv")
+                recv_rtr = int(trigger.get("recv_rtr", 0))
+                block["recv"]["rtr"].setChecked(bool(recv_rtr))
+                self._set_data_enabled(
+                    block["recv"]["data"], 0 if recv_rtr else block["recv"]["dlc"].value()
+                )
                 self._set_response_rows(block["response"], trigger.get("responses", []))
                 self._set_cache(block["cache"], trigger)
         finally:
             self._applying_device_state = False
+        self._update_add_trigger_button()
+        self._memory_indicator.show_trigger_usage(count_configured_triggers(triggers))
 
     def _set_row(self, row: Dict[str, Any], data: Dict[str, Any], prefix: str) -> None:
         row["channel"].setCurrentIndex(int(data.get(f"{prefix}_channel", 0)))
@@ -1445,7 +1574,9 @@ class CanTriggerTab(QWidget):
                 # Триггер записан во Flash и исполняется самим МК —
                 # не дублируем ответ со стороны приложения.
                 continue
-            if not self._match_condition(trigger, frame_id, frame_channel, data):
+            if not self._match_condition(
+                trigger, frame_id, frame_channel, data, bool(frame.get("rtr"))
+            ):
                 continue
             if trigger["cache"]:
                 self._send_cached_frame(trigger)
@@ -1458,12 +1589,18 @@ class CanTriggerTab(QWidget):
         frame_id: int,
         frame_channel: int,
         data: bytes,
+        frame_rtr: bool = False,
     ) -> bool:
         if trigger["recv_id"] != frame_id:
+            return False
+        if trigger.get("recv_rtr") and not frame_rtr:
+            # Режим «только RTR-запрос»: обычные кадры не срабатывают.
             return False
         recv_channel = int(trigger["recv_channel"])
         if recv_channel != 2 and recv_channel + 1 != frame_channel:
             return False
+        if trigger.get("recv_rtr"):
+            return True  # RTR-кадр не несёт Data — сравнивать нечего
         for idx, expected in enumerate(trigger["recv_data"]):
             if expected is None:
                 continue

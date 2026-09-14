@@ -8,21 +8,36 @@ from typing import Dict, Any
 TRIGGER_MAGIC = 0x54524732
 TRIGGER_FORMAT_VERSION = 2
 TRIGGER_SIZE = 82
-_TRIGGER_FORMAT = "<IBBBIIB8s8sBBIB8sH2sBBBBIB8s8sHB2sB"
+# Хвост записи: tx_interval_ms(H), tx_count(B), rx_rtr(B), pad(B), crc8(B).
+# rx_rtr занимает бывший байт reserved_pad — размер записи остался 82 Б.
+# rx_rtr: 0 = любой кадр (как раньше), 1 = только RTR-запрос,
+# 2 = только кадр с данными.
+_TRIGGER_FORMAT = "<IBBBIIB8s8sBBIB8sH2sBBBBIB8s8sHBBBB"
 
-# Область хранения триггеров во Flash устройства (см. firmware/PROTOCOL.md
-# и Inc/trigger.h — значения обязаны совпадать): две страницы по 2 КБ
-# с адреса 0x0803E000, записи по 82 байта → максимум 49 слотов.
-TRIGGER_PAGE_ADDR = 0x0803E000
-TRIGGER_PAGE_SIZE = 4096
+# Хранилище триггеров v3 (см. firmware/PROTOCOL.md и Inc/trigger.h):
+# записи упакованы в суффикс пула страниц над config-страницей
+# (0x0803E000..0x08040000) и привязаны к ВЕРХУ Flash — область растёт
+# вниз по мере добавления, пустое устройство занимает 0 страниц.
+# Заголовок "TRGH" (16 байт) в начале области позволяет прошивке найти
+# хранилище сканированием — фиксированной области нет.
+TRIGGER_POOL_BASE = 0x0803E000
+TRIGGER_POOL_SIZE = 0x08040000 - TRIGGER_POOL_BASE  # 8192
+TRIGGER_HEADER_SIZE = 16
 TRIGGER_SLOT_SIZE = 82
-TRIGGER_MAX_SLOTS = TRIGGER_PAGE_SIZE // TRIGGER_SLOT_SIZE  # 49
+# Лимит по RAM прошивки (70 записей), а не по пулу — см. Inc/trigger.h.
+TRIGGER_MAX_SLOTS = 70
 
 
 def trigger_usage_percent(used_slots: int) -> int:
-    """Процент занятой памяти страницы триггеров для индикатора «Память»."""
-    used = max(0, min(TRIGGER_MAX_SLOTS, int(used_slots))) * TRIGGER_SLOT_SIZE
-    return min(100, round(used * 100 / TRIGGER_PAGE_SIZE))
+    """Процент занятой памяти пула триггеров для индикатора «Память».
+
+    Пустое устройство = 0%; каждая запись добавляет свои 82 байта плюс
+    заголовок области. Потолок — пул над config-страницей (8 КБ)."""
+    used = int(used_slots)
+    if used <= 0:
+        return 0
+    used_bytes = TRIGGER_HEADER_SIZE + min(used, TRIGGER_MAX_SLOTS) * TRIGGER_SLOT_SIZE
+    return min(100, round(used_bytes * 100 / TRIGGER_POOL_SIZE))
 
 
 def count_configured_triggers(triggers: list) -> int:
@@ -86,7 +101,8 @@ def pack_trigger(values: Dict[str, Any]) -> bytes:
             bytes(values.get("src_to", b"\xff" * 8))[:8].ljust(8, b"\xff"),
             int(values.get("tx_interval_ms", 0)) & 0xFFFF,
             int(values.get("tx_count", 0)) & 0xFF,
-            b"\x00\x00",
+            int(values.get("rx_rtr", 0)) & 0xFF,
+            0,
             0,
         )
     )
@@ -133,4 +149,5 @@ def unpack_trigger(payload: bytes) -> Dict[str, Any]:
         "src_to": values[23],
         "tx_interval_ms": values[24],
         "tx_count": values[25],
+        "rx_rtr": values[26],
     }

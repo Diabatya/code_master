@@ -7,28 +7,26 @@
 #include "trigger.h"
 
 /* sizeof(trigger_t) must be a multiple of 2 (half-word) so that
- * flash_write_all_triggers()'s halfword-by-halfword HAL_FLASH_Program()
+ * flash_write_store()'s halfword-by-halfword HAL_FLASH_Program()
  * loop below never truncates the last byte, and so that the write step
- * (sizeof(trigger_t)) matches the read step used by Trigger_Init(). Also
- * make sure all TRIGGER_COUNT slots still fit in the trigger Flash
- * region. */
+ * (sizeof(trigger_t)) matches the read step used by Trigger_Init(). */
 _Static_assert((sizeof(trigger_t) % 2U) == 0U, "trigger_t size must be halfword-aligned");
 _Static_assert(sizeof(trigger_t) == TRIGGER_RECORD_SIZE, "trigger_t must match wire record size");
-_Static_assert((TRIGGER_COUNT * sizeof(trigger_t)) <= TRIGGER_PAGE_SIZE, "triggers must fit in the trigger Flash region");
+_Static_assert(sizeof(trigger_header_t) == TRIGGER_HEADER_SIZE, "trigger_header_t must be 16 bytes");
 
-static trigger_t s_triggers[TRIGGER_COUNT];
-static trigger_t s_staged[TRIGGER_COUNT];
-static uint8_t s_stage_flags[TRIGGER_COUNT]; /* per-slot staged mark —
- * битовой маски uint16_t хватало на 16 слотов, а TRIGGER_COUNT=49 */
-/* Rollback-копия для Commit — статическая: 49×82=4018 Б на стеке при
- * гарантированных 2 КБ (_Min_Stack_Size=0x800) привели бы к переполнению. */
-static trigger_t s_commit_backup[TRIGGER_COUNT];
+static trigger_t s_triggers[TRIGGER_MAX_RECORDS];
+static trigger_t s_staged[TRIGGER_MAX_RECORDS];
+static uint8_t s_stage_flags[TRIGGER_MAX_RECORDS];
+static uint8_t s_staged_max;    /* наибольший staged-индекс +1 */
+static uint8_t s_count;         /* активных записей в списке */
+static uint32_t s_store_base;   /* адрес заголовка области в пуле, 0 — нет */
+static uint32_t s_generation;   /* generation последнего коммита */
 
 /* Кэш режима «автоматическая запись DATA»: последний кадр, попавший в
  * фильтр «Откуда читаем». Хранится в RAM, не во Flash — перезапись
  * страницы на каждый кадр исчерпала бы ресурс стираний (~10k циклов). */
-static can_frame_t s_cache[TRIGGER_COUNT];
-static uint8_t s_cache_valid[TRIGGER_COUNT];
+static can_frame_t s_cache[TRIGGER_MAX_RECORDS];
+static uint8_t s_cache_valid[TRIGGER_MAX_RECORDS];
 
 /* Pending deferred responses (delay_ms > 0 or repeat count > 1). A
  * fixed-size list is enough since there are at most TRIGGER_COUNT
@@ -43,7 +41,7 @@ typedef struct {
   uint16_t interval_ms;    /* пауза между отправками (tx_interval_ms) */
 } pending_response_t;
 
-static pending_response_t s_pending[TRIGGER_COUNT];
+static pending_response_t s_pending[TRIGGER_MAX_RECORDS];
 static uint32_t s_fired_count;
 static uint32_t s_max_lateness_ms;
 static uint8_t s_flash_valid_count; /* включённых записей, прочитанных
@@ -73,6 +71,62 @@ static void load_default(trigger_t *t)
   t->crc8 = crc8((const uint8_t *)t, offsetof(trigger_t, crc8));
 }
 
+/* Запись триггера валидна, если magic/CRC/версия и поля корректны.
+ * Версия заголовка формата лежит в reserved[0..1]: 0/0 — старые записи
+ * до версионирования, 2/82 — формат v2 (rx_rtr сидит в бывшем
+ * reserved_pad и у старых записей равен 0 = «любой кадр»). */
+static uint8_t record_valid(const trigger_t *flash_t)
+{
+  if (flash_t->magic != TRIGGER_MAGIC) {
+    return 0U;
+  }
+  if (crc8((const uint8_t *)flash_t, offsetof(trigger_t, crc8)) != flash_t->crc8) {
+    return 0U;
+  }
+  if (!((flash_t->reserved[0] == 0U && flash_t->reserved[1] == 0U)
+        || (flash_t->reserved[0] == TRIGGER_FORMAT_VERSION
+            && flash_t->reserved[1] == TRIGGER_RECORD_SIZE))) {
+    return 0U;
+  }
+  return trigger_fields_valid(flash_t);
+}
+
+/* Поиск активной области хранилища: страница пула, начинающаяся с
+ * валидного заголовка "TRGH". Если таких несколько (оборванная запись
+ * оставила старую область ниже), выбирается больший generation. */
+static uint32_t find_store(uint8_t *count_out, uint32_t *gen_out)
+{
+  uint32_t best = 0U;
+  uint32_t best_gen = 0U;
+  for (uint32_t page = TRIGGER_POOL_BASE; page < TRIGGER_FLASH_END;
+       page += TRIGGER_FLASH_PAGE) {
+    const trigger_header_t *h = (const trigger_header_t *)page;
+    if (h->magic != TRIGGER_HEADER_MAGIC || h->version != TRIGGER_STORE_VERSION) {
+      continue;
+    }
+    if (h->count > TRIGGER_MAX_RECORDS) {
+      continue;
+    }
+    if (page + TRIGGER_HEADER_SIZE + (uint32_t)h->count * sizeof(trigger_t)
+        > TRIGGER_FLASH_END) {
+      continue;
+    }
+    if (crc8((const uint8_t *)h, offsetof(trigger_header_t, crc8)) != h->crc8) {
+      continue;
+    }
+    if (best == 0U || h->generation >= best_gen) {
+      best = page;
+      best_gen = h->generation;
+    }
+  }
+  if (best != 0U) {
+    const trigger_header_t *h = (const trigger_header_t *)best;
+    *count_out = h->count;
+    *gen_out = best_gen;
+  }
+  return best;
+}
+
 void Trigger_Init(void)
 {
   memset(s_pending, 0, sizeof(s_pending));
@@ -82,77 +136,162 @@ void Trigger_Init(void)
   memset(s_cache_valid, 0, sizeof(s_cache_valid));
   s_fired_count = 0U;
   s_max_lateness_ms = 0U;
-
-  const uint8_t *page = (const uint8_t *)TRIGGER_PAGE_ADDR;
+  s_count = 0U;
+  s_staged_max = 0U;
+  s_store_base = 0U;
+  s_generation = 0U;
   s_flash_valid_count = 0U;
-  for (uint8_t i = 0; i < TRIGGER_COUNT; i++) {
-    const trigger_t *flash_t = (const trigger_t *)(page + (uint32_t)i * sizeof(trigger_t));
-    if (flash_t->magic == TRIGGER_MAGIC) {
-      uint8_t computed = crc8((const uint8_t *)flash_t, offsetof(trigger_t, crc8));
-      if (computed == flash_t->crc8
-          && ((flash_t->reserved[0] == 0U && flash_t->reserved[1] == 0U)
-              || (flash_t->reserved[0] == TRIGGER_FORMAT_VERSION
-                  && flash_t->reserved[1] == TRIGGER_RECORD_SIZE))
-          && trigger_fields_valid(flash_t)) {
-        memcpy(&s_triggers[i], flash_t, sizeof(trigger_t));
-        /* Диагностика стойкости хранения: сколько включённых записей
-         * реально пережили перезапуск (отдаётся в CMD_TRIGGER_STATS). */
+
+  uint8_t count = 0U;
+  uint32_t gen = 0U;
+  uint32_t base = find_store(&count, &gen);
+  if (base != 0U) {
+    /* v3-хранилище: записи идут сплошным списком за заголовком. Битая
+     * запись (обрыв записи/повреждение) просто пропускается — остальные
+     * остаются рабочими. */
+    const uint8_t *p = (const uint8_t *)(base + TRIGGER_HEADER_SIZE);
+    for (uint8_t i = 0U; i < count; i++) {
+      const trigger_t *flash_t = (const trigger_t *)(p + (uint32_t)i * sizeof(trigger_t));
+      if (record_valid(flash_t)) {
+        memcpy(&s_triggers[s_count], flash_t, sizeof(trigger_t));
+        s_count++;
         if (flash_t->enabled) {
           s_flash_valid_count++;
         }
-        continue;
       }
     }
-    load_default(&s_triggers[i]);
+    s_store_base = base;
+    s_generation = gen;
+    return;
+  }
+
+  /* Миграция v2: старый фиксированный регион 0x0803E000, 49 слотов.
+   * Записи поднимаются в RAM и работают сразу; во Flash они переезжают
+   * в новый формат при ближайшем COMMIT. */
+  const uint8_t *legacy = (const uint8_t *)TRIGGER_LEGACY_ADDR;
+  for (uint8_t i = 0U; i < TRIGGER_LEGACY_COUNT; i++) {
+    const trigger_t *flash_t =
+        (const trigger_t *)(legacy + (uint32_t)i * sizeof(trigger_t));
+    if (record_valid(flash_t) && s_count < TRIGGER_MAX_RECORDS) {
+      memcpy(&s_triggers[s_count], flash_t, sizeof(trigger_t));
+      s_count++;
+      if (flash_t->enabled) {
+        s_flash_valid_count++;
+      }
+    }
   }
 }
 
 uint8_t Trigger_Get(uint8_t index, trigger_t *out)
 {
-  if (index >= TRIGGER_COUNT) {
+  if (index >= s_count) {
     return 0U;
   }
   *out = s_triggers[index];
   return 1U;
 }
 
-static uint8_t flash_write_all_triggers(void)
+uint8_t Trigger_Count(void)
+{
+  return s_count;
+}
+
+/* Страница целиком стёрта (все 0xFF) — её можно программировать без
+ * стирания и она не занимает память в пуле. */
+static uint8_t page_is_blank(uint32_t addr)
+{
+  const uint32_t *p = (const uint32_t *)addr;
+  for (uint32_t i = 0U; i < TRIGGER_FLASH_PAGE / 4U; i++) {
+    if (p[i] != 0xFFFFFFFFUL) {
+      return 0U;
+    }
+  }
+  return 1U;
+}
+
+/* Стирает все непустые страницы пула триггеров. */
+static uint8_t erase_pool(void)
 {
   HAL_FLASH_Unlock();
-
-  FLASH_EraseInitTypeDef erase_init = {
-    .TypeErase   = FLASH_TYPEERASE_PAGES,
-    .PageAddress = TRIGGER_PAGE_ADDR,
-    .NbPages     = TRIGGER_PAGE_SIZE / 2048U,
-  };
-  uint32_t page_error = 0U;
-  if (HAL_FLASHEx_Erase(&erase_init, &page_error) != HAL_OK) {
-    HAL_FLASH_Lock();
-    return 0U;
+  for (uint32_t page = TRIGGER_POOL_BASE; page < TRIGGER_FLASH_END;
+       page += TRIGGER_FLASH_PAGE) {
+    if (page_is_blank(page)) {
+      continue;
+    }
+    FLASH_EraseInitTypeDef erase_init = {
+      .TypeErase   = FLASH_TYPEERASE_PAGES,
+      .PageAddress = page,
+      .NbPages     = 1U,
+    };
+    uint32_t page_error = 0U;
+    if (HAL_FLASHEx_Erase(&erase_init, &page_error) != HAL_OK) {
+      HAL_FLASH_Lock();
+      return 0U;
+    }
   }
+  HAL_FLASH_Lock();
+  return 1U;
+}
 
-  uint32_t addr = TRIGGER_PAGE_ADDR;
-  for (uint8_t i = 0; i < TRIGGER_COUNT; i++) {
-    const uint16_t *src = (const uint16_t *)&s_triggers[i];
-    for (uint32_t w = 0; w < (sizeof(trigger_t) / 2U); w++) {
-      if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, src[w]) != HAL_OK) {
+/* Пишет заголовок + записи в область [base, FLASH_END) — пул уже стёрт.
+ * src[j] указывает на запись для позиции j (staged или текущая). */
+static uint8_t program_store(uint32_t base, uint32_t generation, uint8_t total,
+                             const trigger_t **src)
+{
+  trigger_header_t h;
+  memset(&h, 0, sizeof(h));
+  h.magic = TRIGGER_HEADER_MAGIC;
+  h.version = TRIGGER_STORE_VERSION;
+  h.count = total;
+  h.generation = generation;
+  h.crc8 = crc8((const uint8_t *)&h, offsetof(trigger_header_t, crc8));
+
+  HAL_FLASH_Unlock();
+  uint32_t addr = base;
+  const uint16_t *hw = (const uint16_t *)&h;
+  for (uint32_t w = 0U; w < sizeof(h) / 2U; w++) {
+    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, hw[w]) != HAL_OK) {
+      HAL_FLASH_Lock();
+      return 0U;
+    }
+    addr += 2U;
+  }
+  for (uint8_t j = 0U; j < total; j++) {
+    const uint16_t *src16 = (const uint16_t *)src[j];
+    for (uint32_t w = 0U; w < sizeof(trigger_t) / 2U; w++) {
+      if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, src16[w]) != HAL_OK) {
         HAL_FLASH_Lock();
         return 0U;
       }
       addr += 2U;
     }
   }
-
   HAL_FLASH_Lock();
-  /* HAL_OK на каждый halfword не гарантирует содержимое страницы (обрыв
-   * питания/brown-out в середине записи даёт частично прошитую страницу).
-   * Сверяем Flash с зеркалом в RAM — иначе ошибка проявилась бы только
-   * после следующего включения: триггеры «исчезли», хотя «Сохранить»
-   * отчиталось об успехе. */
-  return (memcmp((const void *)TRIGGER_PAGE_ADDR, s_triggers,
-                 sizeof(s_triggers)) == 0)
-             ? 1U
-             : 0U;
+
+  /* HAL_OK на halfword не гарантирует содержимое (обрыв питания даёт
+   * частично прошитую страницу) — сверяем записанное с источником. */
+  if (memcmp((const void *)base, &h, sizeof(h)) != 0) {
+    return 0U;
+  }
+  const uint8_t *p = (const uint8_t *)(base + TRIGGER_HEADER_SIZE);
+  for (uint8_t j = 0U; j < total; j++) {
+    if (memcmp(p + (uint32_t)j * sizeof(trigger_t), src[j], sizeof(trigger_t)) != 0) {
+      return 0U;
+    }
+  }
+  return 1U;
+}
+
+void Trigger_ClearAll(void)
+{
+  erase_pool();
+  s_count = 0U;
+  s_staged_max = 0U;
+  s_store_base = 0U;
+  s_flash_valid_count = 0U;
+  memset(s_stage_flags, 0, sizeof(s_stage_flags));
+  memset(s_pending, 0, sizeof(s_pending));
+  memset(s_cache_valid, 0, sizeof(s_cache_valid));
 }
 
 static uint8_t trigger_fields_valid(const trigger_t *trig)
@@ -163,7 +302,7 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
   if (trig == NULL || trig->rx_channel > 2U || trig->tx_channel > 2U
       || trig->rx_extended > 1U || trig->tx_extended > 1U
       || trig->rx_dlc > 8U || trig->tx_dlc > 8U
-      || trig->tx_rtr > 1U || trig->cache_enabled > 1U
+      || trig->tx_rtr > 1U || trig->rx_rtr > 2U || trig->cache_enabled > 1U
       || trig->src_channel > 2U || trig->src_extended > 1U
       || trig->src_dlc > 8U) {
     return 0U;
@@ -177,7 +316,7 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
 
 uint8_t Trigger_Stage(uint8_t index, const trigger_t *trig)
 {
-  if (index >= TRIGGER_COUNT || !trigger_fields_valid(trig)) {
+  if (index >= TRIGGER_MAX_RECORDS || !trigger_fields_valid(trig)) {
     return 0U;
   }
   trigger_t staged = *trig;
@@ -187,34 +326,77 @@ uint8_t Trigger_Stage(uint8_t index, const trigger_t *trig)
   staged.crc8 = crc8((const uint8_t *)&staged, offsetof(trigger_t, crc8));
   s_staged[index] = staged;
   s_stage_flags[index] = 1U;
+  if (index >= s_staged_max) {
+    s_staged_max = (uint8_t)(index + 1U);
+  }
   return 1U;
 }
 
-uint8_t Trigger_Commit(void)
+uint8_t Trigger_Commit(uint8_t total)
 {
-  uint8_t any_staged = 0U;
-  for (uint8_t i = 0U; i < TRIGGER_COUNT; i++) {
-    if (s_stage_flags[i] != 0U) {
-      any_staged = 1U;
-      break;
-    }
+  /* total == 0xFF — «как было»: старый хост шлёт COMMIT без длины —
+   * список сохраняет размер, staged-позиции накладываются позиционно.
+   * Иначе staged-записи за пределами total игнорируются (хост для
+   * совместимости может гасить хвост пустыми записями — старая
+   * прошивка запишет их в слоты, новая отбросит по длине списка). */
+  if (total == 0xFFU) {
+    total = s_count > s_staged_max ? s_count : s_staged_max;
   }
-  if (any_staged == 0U) {
-    return 1U;
-  }
-  memcpy(s_commit_backup, s_triggers, sizeof(s_commit_backup));
-  for (uint8_t i = 0U; i < TRIGGER_COUNT; i++) {
-    if (s_stage_flags[i] != 0U) {
-      s_triggers[i] = s_staged[i];
-    }
-  }
-  if (!flash_write_all_triggers()) {
-    memcpy(s_triggers, s_commit_backup, sizeof(s_triggers));
+  if (total > TRIGGER_MAX_RECORDS) {
     return 0U;
   }
+  if (s_staged_max == 0U && total == s_count) {
+    return 1U; /* нечего коммитить */
+  }
+
+  /* Новый список: позиция = staged-запись или текущая; хвост за total
+   * отбрасывается. Позиции ни staged, ни текущей — пустые записи
+   * (занимают место, но не срабатывают). */
+  static trigger_t empty_rec;
+  load_default(&empty_rec);
+  const trigger_t *src[TRIGGER_MAX_RECORDS];
+  for (uint8_t j = 0U; j < total; j++) {
+    if (s_stage_flags[j] != 0U) {
+      src[j] = &s_staged[j];
+    } else if (j < s_count) {
+      src[j] = &s_triggers[j];
+    } else {
+      src[j] = &empty_rec;
+    }
+  }
+
+  /* Область привязана к верху Flash: растёт вниз по мере добавления.
+   * 0 записей — 0 страниц: хранилище отсутствует, память свободна. */
+  uint32_t size = (total != 0U)
+      ? TRIGGER_HEADER_SIZE + (uint32_t)total * sizeof(trigger_t)
+      : 0U;
+  uint32_t pages = (size + TRIGGER_FLASH_PAGE - 1U) / TRIGGER_FLASH_PAGE;
+  uint32_t base = TRIGGER_FLASH_END - pages * TRIGGER_FLASH_PAGE;
+  if (total != 0U && base < TRIGGER_POOL_BASE) {
+    return 0U; /* не помещается даже во весь пул */
+  }
+
+  /* Стёртые страницы программируются без стирания; остальные —
+   * отработавшие области старого хранилища и легаси-регион — стираем,
+   * чтобы скан при следующем старте не нашёл зомби-заголовок. */
+  if (!erase_pool()) {
+    return 0U;
+  }
+  if (total != 0U && !program_store(base, s_generation + 1U, total, src)) {
+    return 0U; /* RAM-список не трогаем: на Flash старое/мусор */
+  }
+
+  for (uint8_t j = 0U; j < total; j++) {
+    s_triggers[j] = *src[j];
+  }
+  s_count = total;
+  s_store_base = (total != 0U) ? base : 0U;
+  s_generation++;
+  s_staged_max = 0U;
   memset(s_stage_flags, 0, sizeof(s_stage_flags));
-  /* Перезаписанные слоты не должны использовать кэш, собранный по
-   * старым критериям «Откуда читаем». */
+  /* Слоты выше новой длины больше не исполняются — кэш/отложенные
+   * отправки по ним надо сбросить, а по перезаписанным — обновить. */
+  memset(s_pending, 0, sizeof(s_pending));
   memset(s_cache_valid, 0, sizeof(s_cache_valid));
   return 1U;
 }
@@ -224,12 +406,16 @@ uint8_t Trigger_Set(uint8_t index, const trigger_t *trig)
   if (!Trigger_Stage(index, trig)) {
     return 0U;
   }
-  return Trigger_Commit();
+  uint8_t total = s_count;
+  if (index >= total) {
+    total = (uint8_t)(index + 1U);
+  }
+  return Trigger_Commit(total);
 }
 
 uint8_t Trigger_SetEnabled(uint8_t index, uint8_t enabled)
 {
-  if (index >= TRIGGER_COUNT) {
+  if (index >= s_count) {
     return 0U;
   }
   trigger_t updated = s_triggers[index];
@@ -240,6 +426,14 @@ uint8_t Trigger_SetEnabled(uint8_t index, uint8_t enabled)
 static uint8_t frame_matches(const trigger_t *t, const can_frame_t *frame)
 {
   if (!t->enabled) {
+    return 0U;
+  }
+  /* rx_rtr: 0 = любой кадр (старое поведение), 1 = только RTR-запрос,
+   * 2 = только кадр с данными. */
+  if (t->rx_rtr == 1U && frame->rtr == 0U) {
+    return 0U;
+  }
+  if (t->rx_rtr == 2U && frame->rtr != 0U) {
     return 0U;
   }
   if (t->rx_channel != 2U && t->rx_channel != frame->channel) {
@@ -256,9 +450,13 @@ static uint8_t frame_matches(const trigger_t *t, const can_frame_t *frame)
      * treatment of an unset/zero length as "don't care"). */
     return 0U;
   }
-  for (uint8_t i = 0; i < frame->dlc && i < 8U; i++) {
-    if ((t->rx_data[i] & t->rx_data_mask[i]) != (frame->data[i] & t->rx_data_mask[i])) {
-      return 0U;
+  if (t->rx_rtr != 1U) {
+    /* В RTR-режиме кадр не несёт данных — сравнение по Data не имеет
+     * смысла и пропускается. */
+    for (uint8_t i = 0; i < frame->dlc && i < 8U; i++) {
+      if ((t->rx_data[i] & t->rx_data_mask[i]) != (frame->data[i] & t->rx_data_mask[i])) {
+        return 0U;
+      }
     }
   }
   return 1U;
@@ -336,7 +534,7 @@ static uint8_t send_response(const trigger_t *t, uint8_t index)
 
 void Trigger_OnFrame(const can_frame_t *frame)
 {
-  for (uint8_t i = 0; i < TRIGGER_COUNT; i++) {
+  for (uint8_t i = 0; i < s_count; i++) {
     const trigger_t *t = &s_triggers[i];
     /* Кэш пополняется независимо от условия «Приём» — триггер постоянно
      * переписывает Data последнего подходящего кадра. Обновление идёт
@@ -366,7 +564,7 @@ void Trigger_OnFrame(const can_frame_t *frame)
 void Trigger_Poll(void)
 {
   uint32_t now = HAL_GetTick();
-  for (uint8_t i = 0; i < TRIGGER_COUNT; i++) {
+  for (uint8_t i = 0; i < TRIGGER_MAX_RECORDS; i++) {
     if (s_pending[i].armed && (int32_t)(now - s_pending[i].fire_at_tick) >= 0) {
       uint32_t lateness = now - s_pending[i].fire_at_tick;
       if (lateness > s_max_lateness_ms) {

@@ -28,19 +28,46 @@ extern "C" {
 #include <stdint.h>
 #include "can_bridge.h"
 
-/* 49 slots × 82 bytes = 4018 B — две страницы Flash (4096 B) выделенной
- * под триггеры области 0x0803E000–0x0803FFFF (8 KB, см. PROTOCOL.md).
- * Лимит оператора — только свободная память области (UI показывает её
- * заполненность индикатором «Память»). Формат v2: добавлен режим
- * «автоматическая запись DATA в кэш» (src-матчер + параметры повторов) —
- * записи v1 (54 Б, magic "TRG1") не читаются, слоты сбрасываются в
- * заводское состояние. */
-#define TRIGGER_COUNT        49U
-#define TRIGGER_PAGE_ADDR    0x0803E000U
-#define TRIGGER_PAGE_SIZE    4096U /* two pages hold all slots, see layout below */
+/* Хранилище триггеров v3 — динамическое: записи упакованы в суффикс
+ * пула страниц над config-страницей (0x0803E000..0x0803FFFF) и
+ * привязаны к ВЕРХУ Flash. Пустое устройство не занимает ни страницы;
+ * область растёт вниз по мере добавления триггеров (1 страница на
+ * каждые ~24 записи + заголовок). Заголовок "TRGH" в начале области
+ * находится сканированием при старте — фиксированного адреса области
+ * больше нет, прошивка может расти, не сдвигая формат хранения.
+ * Записи v2 из старой фиксированной области 0x0803E000 импортируются
+ * при первой загрузке и переписываются в новый формат при ближайшем
+ * COMMIT. Запись по-прежнему 82 Б (rx_rtr занял байт reserved_pad):
+ * 0 = матч любого кадра (как раньше), 1 = только RTR-запрос,
+ * 2 = только кадр с данными. */
+#define TRIGGER_POOL_BASE     0x0803E000U /* первая страница над config */
+#define TRIGGER_FLASH_END     0x08040000U /* конец Flash F105RCT6 */
+#define TRIGGER_FLASH_PAGE    2048U
+#define TRIGGER_POOL_PAGES    ((TRIGGER_FLASH_END - TRIGGER_POOL_BASE) / TRIGGER_FLASH_PAGE)
+#define TRIGGER_HEADER_MAGIC  0x54524748U /* "TRGH" */
+#define TRIGGER_HEADER_SIZE   16U
+#define TRIGGER_STORE_VERSION 3U
 #define TRIGGER_MAGIC         0x54524732U /* "TRG2" */
 #define TRIGGER_FORMAT_VERSION 2U
 #define TRIGGER_RECORD_SIZE    82U
+/* Предел по RAM, а не по пулу: триггеры, staging-буфер и кэши живут в
+ * ОЗУ — 70 записей ≈ 3 страницы пула из 4 (четвёртая остаётся запасом
+ * на рост записи/пула). При росте RAM-бюджета можно поднять до 99. */
+#define TRIGGER_MAX_RECORDS   70U
+/* Легаси-регион v2: 49 слотов × 82 Б с 0x0803E000 (читается один раз
+ * при миграции, затем страницы возвращаются в пул). */
+#define TRIGGER_LEGACY_ADDR   0x0803E000U
+#define TRIGGER_LEGACY_COUNT  49U
+
+typedef struct __attribute__((packed)) {
+  uint32_t magic;       /* "TRGH" */
+  uint8_t  version;     /* TRIGGER_STORE_VERSION */
+  uint8_t  count;       /* число записей, идущих следом */
+  uint8_t  flags;       /* зарезервировано, 0 */
+  uint32_t generation;  /* монотонный счётчик — выбор новейшей области */
+  uint32_t reserved;
+  uint8_t  crc8;        /* crc8 байт 0..14 */
+} trigger_header_t; /* 16 B */
 
 typedef struct __attribute__((packed)) {
   uint32_t magic;
@@ -69,9 +96,10 @@ typedef struct __attribute__((packed)) {
   uint8_t  src_to[8];       /* верхняя граница Data */
   uint16_t tx_interval_ms;  /* пауза между повторными отправками */
   uint8_t  tx_count;        /* кол-во отправок (0 трактуется как 1) */
-  uint8_t  reserved_pad[2];
+  uint8_t  rx_rtr;          /* приём: 0=любой кадр, 1=только RTR, 2=только data */
+  uint8_t  reserved_pad;
   uint8_t  crc8;
-} trigger_t; /* 82 bytes, 49 records fill the 4KB region (4018 B) */
+} trigger_t; /* 82 bytes */
 
 /* Loads all triggers from Flash into RAM (call once at boot). Any slot
  * with a bad magic/CRC is treated as "disabled, all zero". */
@@ -95,24 +123,31 @@ uint8_t Trigger_FlashValidCount(void);
  * be called from the main loop only, never from IRQ context. */
 void Trigger_OnFrame(const can_frame_t *frame);
 
-/* Read one trigger slot (index 0..TRIGGER_COUNT-1) into *out. Returns 1
+/* Read one trigger slot (index 0..Trigger_Count()-1) into *out. Returns 1
  * if index valid. */
 uint8_t Trigger_Get(uint8_t index, trigger_t *out);
 
+/* Число записей в активном списке триггеров (0 на пустом устройстве). */
+uint8_t Trigger_Count(void);
+
 /* Validates and writes one trigger slot to Flash + RAM. Returns 1 on
- * success. NOTE: like device_config, this erases and reprograms the
- * whole trigger region (all TRIGGER_COUNT slots), since STM32F1 Flash
- * cannot erase less than a full page — callers should batch multiple
- * trigger edits together where possible to minimize erase/reprogram
- * cycles. */
+ * success. NOTE: STM32F1 Flash стирается только постранично — запись
+ * переписывает весь активный список, но только реально занятые страницы
+ * (пустые страницы пула не стираются). */
 uint8_t Trigger_Set(uint8_t index, const trigger_t *trig);
 
-/* Stages one trigger in RAM and commits all staged records in one Flash erase. */
+/* Stages one trigger in RAM and commits the list in one Flash pass.
+ * COMMIT принимает итоговую длину списка: позиции без staged-записи
+ * берутся из текущего списка, хвост за total отбрасывается — так
+ * выражается и изменение, и удаление, и добавление. */
 uint8_t Trigger_Stage(uint8_t index, const trigger_t *trig);
-uint8_t Trigger_Commit(void);
+uint8_t Trigger_Commit(uint8_t total);
 
-/* Enables/disables a trigger without touching its other fields (still
- * requires a full page rewrite per the note above). */
+/* Полностью стирает хранилище триггеров (все страницы пула) и очищает
+ * RAM-список — для «Заводских настроек». */
+void Trigger_ClearAll(void);
+
+/* Enables/disables a trigger without touching its other fields. */
 uint8_t Trigger_SetEnabled(uint8_t index, uint8_t enabled);
 
 #ifdef __cplusplus

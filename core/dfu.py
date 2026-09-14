@@ -250,9 +250,20 @@ class DfuDevice:
         payload = bytes([0x41])
         self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, payload, timeout=30000)
         self._wait(status_timeout=60000)
+        # Команду 0x41 ROM-загрузчик исполняет только из dfuIDLE; после
+        # стирания устройство остаётся в dfuDNLOAD_IDLE, где следующий
+        # блок-0 трактуется как данные — возвращаем автомат в IDLE.
+        self.abort()
 
     def page_erase(self, address: int, timeout_ms: int = 5000) -> None:
-        """Стирает одну страницу flash по адресу (DfuSe/STM32)."""
+        """Стирает одну страницу flash по адресу (DfuSe/STM32).
+
+        Блок-0 команды (0x21/0x41) STM32 ROM DFU декодирует только в
+        состоянии dfuIDLE: после первого стирания устройство переходит
+        в dfuDNLOAD_IDLE и дальнейшие команды молча проглатываются как
+        данные — физически страницы не стираются. Поэтому перед командой
+        гарантируем dfuIDLE и после неё возвращаемся туда же через ABORT.
+        """
         payload = bytes([
             0x41,
             address & 0xFF,
@@ -261,8 +272,28 @@ class DfuDevice:
             (address >> 24) & 0xFF,
         ])
         logger.debug("DFU page erase: 0x%08X", address)
+        self._ensure_idle()
         self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, payload, timeout=max(timeout_ms, 5000))
         self._wait(status_timeout=timeout_ms)
+        self.abort()
+
+    def _ensure_idle(self) -> None:
+        """Возвращает DFU-автомат в dfuIDLE, если он ушёл в DNLOAD/UPLOAD-IDLE.
+
+        Без этого блок-0 команды, отправленные из dfuDNLOAD_IDLE, ROM
+        воспринимает как обычные данные и «стирание» существует только
+        в логе. ABORT из dfuIDLE безопасен — состояние не меняется.
+        """
+        try:
+            status = self._status(timeout=5000)
+        except usb.core.USBError:
+            return
+        if len(status) >= 6 and status[4] != STATE_DFU_IDLE:
+            try:
+                self._ctrl(DFU_REQUEST_SEND, DFU_ABORT, timeout=5000)
+                time.sleep(0.005)
+            except usb.core.USBError:
+                pass
 
     def abort(self) -> None:
         """Прерывает текущую DFU-операцию и возвращает устройство в dfuIDLE."""
@@ -312,6 +343,7 @@ class DfuDevice:
 
     def _set_address(self, address: int) -> None:
         """Устанавливает Address Pointer (LSB first, 5 байт, без checksum)."""
+        self._ensure_idle()
         payload = bytes([0x21]) + address.to_bytes(4, "little")
         logger.debug("DFU set address: 0x%08X -> %s", address, payload.hex())
         self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, payload, timeout=10000)

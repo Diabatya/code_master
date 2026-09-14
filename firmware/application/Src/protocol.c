@@ -232,6 +232,10 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     }
 
     case CMD_CFG_FACTORY_RESET: {
+      /* Заводские настройки стирают и хранилище триггеров — иначе
+       * записи оставались во Flash, продолжали срабатывать и занимать
+       * память после «сброса». */
+      Trigger_ClearAll();
       uint8_t ok = DeviceConfig_FactoryReset();
       send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
       if (ok) {
@@ -242,26 +246,23 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     }
 
     case CMD_TRIGGER_READ: {
-      if (payload_len < 1U || payload[0] >= TRIGGER_COUNT) {
+      /* Список упакован: чтение за границей Trigger_Count() отвечает
+       * 0x01 — так хост узнаёт реальное число записей на устройстве. */
+      if (payload_len < 1U) {
         send_new_cmd_response(cmd, 0x01U, NULL, 0U);
         break;
       }
-      /* Читаем запись прямо из Flash, а не из RAM-зеркала s_triggers:
-       * тогда верификация после COMMIT и синхронизация при подключении
-       * отражают реально сохранённое содержимое, а не оперативную копию
-       * (зеркало и так совпадает после успешного commit — он сам себя
-       * верифицирует memcmp'ом). */
       trigger_t t;
-      memcpy(&t,
-             (const void *)(TRIGGER_PAGE_ADDR
-                            + (uint32_t)payload[0] * (uint32_t)sizeof(trigger_t)),
-             sizeof(t));
+      if (!Trigger_Get(payload[0], &t)) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
       send_new_cmd_response(cmd, 0x00U, (const uint8_t *)&t, (uint8_t)sizeof(t));
       break;
     }
 
     case CMD_TRIGGER_WRITE: {
-      if (payload_len < 1U + sizeof(trigger_t) || payload[0] >= TRIGGER_COUNT) {
+      if (payload_len < 1U + sizeof(trigger_t) || payload[0] >= TRIGGER_MAX_RECORDS) {
         send_new_cmd_response(cmd, 0x01U, NULL, 0U);
         break;
       }
@@ -273,7 +274,7 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     }
 
     case CMD_TRIGGER_ENABLE: {
-      if (payload_len < 2U || payload[0] >= TRIGGER_COUNT) {
+      if (payload_len < 2U || payload[0] >= TRIGGER_MAX_RECORDS) {
         send_new_cmd_response(cmd, 0x01U, NULL, 0U);
         break;
       }
@@ -341,14 +342,14 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       memcpy(&out[4], &max_lateness_ms, 4U);
       out[8] = Trigger_FlashValidCount();
       out[9] = DeviceConfig_IsValid();
-      out[10] = 0U;
-      out[11] = 0U;
+      out[10] = Trigger_Count();        /* записей в списке сейчас */
+      out[11] = TRIGGER_MAX_RECORDS;    /* ёмкость пула */
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
     }
 
     case CMD_TRIGGER_STAGE: {
-      if (payload_len < 1U + sizeof(trigger_t) || payload[0] >= TRIGGER_COUNT) {
+      if (payload_len < 1U + sizeof(trigger_t) || payload[0] >= TRIGGER_MAX_RECORDS) {
         send_new_cmd_response(cmd, 0x01U, NULL, 0U);
         break;
       }
@@ -360,11 +361,15 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     }
 
     case CMD_TRIGGER_COMMIT: {
-      if (payload_len != 0U) {
+      /* payload[0] — итоговая длина списка триггеров (упакованного,
+       * без пустых слотов). Пустой payload — старое поведение: список
+       * сохраняет прежний размер, staged-записи накладываются. */
+      if (payload_len > 1U) {
         send_new_cmd_response(cmd, 0x01U, NULL, 0U);
         break;
       }
-      uint8_t ok = Trigger_Commit();
+      uint8_t total = payload_len ? payload[0] : 0xFFU;
+      uint8_t ok = Trigger_Commit(total);
       send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
       break;
     }

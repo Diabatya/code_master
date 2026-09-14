@@ -1063,6 +1063,20 @@ class FlashWorker(QThread):
                     )
                     offset += len(data)
 
+                # Контроль стирания: читаем первую страницу каждого
+                # сегмента обратно — если ROM-загрузчик проигнорировал
+                # команду 0x41 (не из dfuIDLE, защита страницы), здесь
+                # это всплывёт сразу, а не «успешной» записью поверх
+                # старых данных.
+                self.log_line.emit(tr("USB DFU: проверка стирания..."))
+                for start, data in segments:
+                    check_len = min(page_size, len(data))
+                    erased = dfu.upload(start, check_len)
+                    if len(erased) != check_len or any(b != 0xFF for b in erased):
+                        return False, tr(
+                            "USB DFU: стирание не выполнено — страница 0x{0:08X} не пуста"
+                        ).format(start)
+
                 self.log_line.emit(tr("USB DFU: запись {0} байт...").format(total_bytes))
                 offset = 0
                 for start, data in segments:

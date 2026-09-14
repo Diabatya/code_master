@@ -1,8 +1,9 @@
 """Host-side trigger_t wire-format tests."""
 
 from core.trigger_protocol import (
+    TRIGGER_HEADER_SIZE,
     TRIGGER_MAX_SLOTS,
-    TRIGGER_PAGE_SIZE,
+    TRIGGER_POOL_SIZE,
     TRIGGER_SIZE,
     TRIGGER_SLOT_SIZE,
     count_configured_triggers,
@@ -57,18 +58,19 @@ def test_trigger_channel_2_both_cans() -> None:
     assert decoded["tx_data"] == b"\x01\x02\x03\x04\x05\x06\x07\x08"
 
 
-def test_trigger_max_slots_fit_page() -> None:
-    """49 слотов по 82 байта помещаются в регион 4 КБ (0x0803E000)."""
+def test_trigger_max_slots_fit_pool() -> None:
+    """70 записей по 82 байта + заголовок помещаются в пул 8 КБ."""
     assert TRIGGER_SLOT_SIZE == TRIGGER_SIZE == 82
-    assert TRIGGER_MAX_SLOTS == 49
-    assert TRIGGER_MAX_SLOTS * TRIGGER_SLOT_SIZE <= TRIGGER_PAGE_SIZE
+    assert TRIGGER_MAX_SLOTS == 70
+    assert TRIGGER_HEADER_SIZE + TRIGGER_MAX_SLOTS * TRIGGER_SLOT_SIZE <= TRIGGER_POOL_SIZE
 
 
 def test_trigger_usage_percent() -> None:
     assert trigger_usage_percent(0) == 0
-    assert trigger_usage_percent(10) == round(10 * 82 * 100 / 4096)  # 20%
-    assert trigger_usage_percent(49) == 98  # 4018/4096 = 98.1% → 98
-    assert trigger_usage_percent(100) == 98  # слоты клампятся до 49
+    # 16 + 10*82 = 836 байт из 8192 → 10%
+    assert trigger_usage_percent(10) == round(836 * 100 / 8192)
+    assert trigger_usage_percent(70) == 70  # 5756/8192 = 70.3% → 70
+    assert trigger_usage_percent(100) == 70  # записи клампятся до 70
 
 
 def test_trigger_cache_fields_round_trip() -> None:
@@ -99,6 +101,21 @@ def test_trigger_cache_fields_round_trip() -> None:
     assert decoded["tx_interval_ms"] == 50
     assert decoded["tx_count"] == 5
     assert decoded["delay_ms"] == 10
+
+
+def test_trigger_rx_rtr_round_trip() -> None:
+    """rx_rtr живёт в бывшем байте reserved_pad — размер записи 82 Б."""
+    payload = pack_trigger({
+        "enabled": 1,
+        "rx_id": 0x100,
+        "rx_id_mask": 0x7FF,
+        "rx_rtr": 1,
+        "tx_id": 0x200,
+    })
+    assert len(payload) == TRIGGER_SIZE
+    decoded = unpack_trigger(payload)
+    assert decoded["rx_rtr"] == 1
+    assert decoded["tx_rtr"] == 0
 
 
 def test_count_configured_triggers() -> None:

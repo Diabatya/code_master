@@ -20,12 +20,18 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from core.can_protocol import DEVICE_TYPE_ANALOG, DEVICE_TYPE_BASIC, DEVICE_TYPE_CAN_FD
+from core.can_protocol import (
+    CMD_CFG_FACTORY_RESET,
+    DEVICE_TYPE_ANALOG,
+    DEVICE_TYPE_BASIC,
+    DEVICE_TYPE_CAN_FD,
+)
 
 from core.serial_manager import SerialManager
 from models.config import Config
@@ -304,6 +310,16 @@ class SettingsWindow(QMainWindow):
         self._device_combo.addItem(tr("2 CAN FD"), DEVICE_TYPE_CAN_FD)
         self._device_combo.currentIndexChanged.connect(self._on_device_type_changed)
 
+        # При подключении слева вверху показываем имя, записанное в МК
+        # при программировании («Устройство» в окне прошивки), а не
+        # тип. Без соединения — прежний выбор типа устройства.
+        self._device_name_label = QLabel()
+        self._device_name_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._device_name_label.setMinimumWidth(180)
+        self._device_stack = QStackedWidget()
+        self._device_stack.addWidget(self._device_combo)
+        self._device_stack.addWidget(self._device_name_label)
+
         self._serial_label = QLabel(tr("Серийный номер"))
         self._serial_label.setFont(font)
         self._serial_edit = QLineEdit()
@@ -320,7 +336,7 @@ class SettingsWindow(QMainWindow):
         device_layout = QHBoxLayout()
         device_layout.setSpacing(8)
         device_layout.addWidget(self._device_label)
-        device_layout.addWidget(self._device_combo)
+        device_layout.addWidget(self._device_stack)
         device_layout.addWidget(self._serial_label)
         device_layout.addWidget(self._serial_edit)
         device_layout.addWidget(self._copy_id_button)
@@ -563,6 +579,7 @@ class SettingsWindow(QMainWindow):
     def _on_connection_changed(self, connected: bool) -> None:
         if not connected:
             self._hide_loading_overlay()
+            self._device_stack.setCurrentWidget(self._device_combo)
             self._trigger_tab.clear_device_managed()
             # Связь потеряна — «Сохранить» недоступна, даже если есть
             # несохранённые правки: писать некуда.
@@ -646,6 +663,14 @@ class SettingsWindow(QMainWindow):
         serial = self._config.get("device_serial", "")
         if not serial:
             serial = self._config.get("serial_number", "")
+        # Слева вверху — имя устройства из страницы конфигурации МК
+        # (при подключении); без соединения — выбор типа устройства.
+        if self._serial_manager.is_open():
+            name = self._config.get("device_name", "") or tr("Без имени")
+            self._device_name_label.setText(name)
+            self._device_stack.setCurrentWidget(self._device_name_label)
+        else:
+            self._device_stack.setCurrentWidget(self._device_combo)
         index = self._device_combo.findData(device_type)
         if index >= 0:
             self._device_combo.blockSignals(True)
@@ -1065,6 +1090,14 @@ class SettingsWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
+            # Сначала стираем само устройство: страницу конфигурации и
+            # хранилище триггеров во Flash (прошивка перезагружается
+            # после команды — соединение может кратковременно пропасть).
+            if self._serial_manager.is_open() and not self._config.get("emulation", False):
+                try:
+                    self._serial_manager.request_control(CMD_CFG_FACTORY_RESET, b"")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("CMD_CFG_FACTORY_RESET не подтверждён устройством: %s", exc)
             self._config.reset_to_defaults()
             self._config.save()
             self._trigger_tab.set_config(self._config.get("triggers", []))
