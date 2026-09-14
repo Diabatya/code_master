@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -203,12 +204,14 @@ class CanTriggerTab(QWidget):
         layout.addWidget(data_widget)
 
         rtr = QPushButton(tr("RTR"))
-        rtr.setFixedSize(38, 24)
-        rtr.setFont(QFont("Arial", 7, QFont.Weight.Bold))
+        # Те же размеры/стиль, что у кнопки RTR в строке «Ответ»
+        # (64x20, Segoe UI 8) — в 38x24 надпись обрезалась.
+        rtr.setFixedSize(64, 20)
+        rtr.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         rtr.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
             "QPushButton:hover { background-color: #4A4A6A; }"
-            "QPushButton:checked { background-color: #4CAF50; }"
+            "QPushButton:checked { background-color: #FF9800; color: #FFFFFF; }"
         )
         rtr.setCheckable(True)
         rtr.setToolTip(tr("Срабатывать только на RTR-запрос (Remote Transmission Request)"))
@@ -653,14 +656,17 @@ class CanTriggerTab(QWidget):
         response = self._create_response_block(font)
         cache = self._create_cache_block(font, index)
 
-        # Крестик удаления в правом верхнем углу блока — снимает триггер
-        # из списка (при «Сохранить» он перестанет занимать Flash).
-        delete_button = QPushButton("✕", group)
-        delete_button.setFixedSize(22, 22)
-        delete_button.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        # Крестик удаления — в шапке блока (верхний правый угол).
+        # Символ «✕» в части шрифтов не рендерится, поэтому берём
+        # стандартную иконку закрытия окна — она есть в любой теме.
+        delete_button = QPushButton()
+        delete_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton)
+        )
+        delete_button.setFixedSize(24, 24)
         delete_button.setStyleSheet(
-            "QPushButton { background-color: transparent; color: #9E9E9E; border: none; border-radius: 4px; }"
-            "QPushButton:hover { background-color: #5A2A2A; color: #FFFFFF; }"
+            "QPushButton { background-color: transparent; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #5A2A2A; }"
         )
         delete_button.setToolTip(tr("Удалить триггер"))
         delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -691,7 +697,16 @@ class CanTriggerTab(QWidget):
         self._set_cache_enabled(block, False)
         block["cache"]["cache_check"].setEnabled(True)
 
-        group_layout.addWidget(block["status"])
+        # Шапка блока: статус слева, крестик удаления справа вверху.
+        # Ручное позиционирование поверх QGroupBox оказалось ненадёжным
+        # (до первого resize крестик уезжал за заголовок) — кладём его
+        # в обычный layout первой строки.
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.addWidget(block["status"])
+        header_row.addStretch()
+        header_row.addWidget(block["delete_button"])
+        group_layout.addLayout(header_row)
         group_layout.addWidget(content)
         block["group"].toggled.connect(lambda checked, c=content: c.setVisible(checked))
         block["group"].toggled.connect(lambda checked, b=block: self._on_trigger_toggled_by_block(b, checked))
@@ -699,28 +714,8 @@ class CanTriggerTab(QWidget):
 
         delete_button = block["delete_button"]
         delete_button.clicked.connect(lambda _c=False, b=block: self._remove_trigger_block(b))
-        block["group"].installEventFilter(self)
-        self._place_delete_button(block)
 
         self._blocks_layout.addWidget(block["group"])
-
-    def _place_delete_button(self, block: Dict[str, Any]) -> None:
-        """Крестик прижат к правому верхнему углу QGroupBox."""
-        group = block["group"]
-        btn = block["delete_button"]
-        btn.move(max(0, group.width() - btn.width() - 4), 2)
-        btn.raise_()
-
-    def eventFilter(self, watched, event) -> bool:  # noqa: N802
-        """Крестик удаления следует за правым краем при ресайзе блока."""
-        from PySide6.QtCore import QEvent
-
-        if event.type() == QEvent.Type.Resize:
-            for block in self._blocks:
-                if block["group"] is watched:
-                    self._place_delete_button(block)
-                    break
-        return super().eventFilter(watched, event)
 
     def _remove_block_at(self, index: int) -> None:
         """Внутреннее удаление блока по позиции (крестик/синхронизация)."""

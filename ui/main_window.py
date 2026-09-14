@@ -390,10 +390,16 @@ class MainWindow(QMainWindow):
         # Храним ссылку, иначе диалог исчезнет сразу после return:
         # локальная переменная удалится, и Qt-объект без родителя соберёт GC.
         self._connection_dialog = dialog
-        # После закрытия чистим ссылку, иначе GC обернётся мёртвым объектом
-        dialog.finished.connect(lambda _result: self._on_connection_finished())
-        # Выключаем фоновый поток автоопределения перед удалением диалога
-        dialog.destroyed.connect(lambda: connection.shutdown())
+        # После закрытия чистим ссылку, иначе GC обернётся мёртвым объектом,
+        # и гасим вкладку: останавливаем автоопределение и отписываем её от
+        # сигналов SerialManager — иначе device_identified/connection_changed
+        # вызывали бы слоты уже удалённого диалога (падение при повторном
+        # входе в настройки: «QComboBox already deleted»).
+        def _finish(_result: int) -> None:
+            connection.shutdown()
+            self._on_connection_finished()
+
+        dialog.finished.connect(_finish)
         dialog.accepted.connect(self._open_settings_window)
         dialog.show()
         dialog.raise_()
@@ -556,6 +562,7 @@ class MainWindow(QMainWindow):
             # а не системное имя COM-порта.
             name = (
                 self._config.get("device_name", "")
+                or self._config.get("device_type_name", "")
                 or self._serial_manager.current_port_name()
             )
             self._port_label.setText(name)

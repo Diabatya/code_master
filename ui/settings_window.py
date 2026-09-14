@@ -1,5 +1,7 @@
 """Окно настроек и рабочего CAN-пространства."""
 
+import os
+from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal, QPropertyAnimation, QEasingCurve
@@ -20,7 +22,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
-    QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -34,7 +35,7 @@ from core.can_protocol import (
 )
 
 from core.serial_manager import SerialManager
-from models.config import Config
+from models.config import CONFIG_FILE_FILTER, Config, unpack_config_file
 from models.logger import get_logger
 from models.translations import _ as tr, get_all_translations
 from ui.ui_utils import setup_button
@@ -74,8 +75,11 @@ class ConnectionTab(QWidget):
         self._update_ui_state()
         self._serial_manager.connection_changed.connect(self._update_ui_state)
         # После идентификации (CMD_CFG_READ) в карте серийник→имя может
-        # появиться запись — обновляем подписи портов.
-        self._serial_manager.device_identified.connect(lambda *_a: self._refresh_ports())
+        # появиться запись — обновляем подписи портов. Слот храним:
+        # shutdown() отписывает его при удалении вкладки, иначе сигнал
+        # дёргал бы мёртвый виджет («QComboBox already deleted»).
+        self._identified_slot = lambda *_a: self._refresh_ports()
+        self._serial_manager.device_identified.connect(self._identified_slot)
 
     def _init_ui(self) -> None:
         font = QFont("Segoe UI", 10)
@@ -197,12 +201,24 @@ class ConnectionTab(QWidget):
         self._baud_detector.start()
 
     def shutdown(self) -> None:
-        """Гасит фоновый поток автоопределения.
+        """Гасит фоновый поток автоопределения и отписывается от
+        SerialManager.
 
         Вызывается владельцем вкладки перед её удалением: иначе QThread
-        уничтожается вместе с родителем на ходу и роняет приложение.
+        уничтожается вместе с родителем на ходу и роняет приложение, а
+        сигналы connection_changed/device_identified продолжали бы
+        вызывать слоты уже удалённого виджета («Internal C++ object
+        QComboBox already deleted» при повторном входе в настройки).
         """
         self._stop_baud_detector()
+        for signal, slot in (
+            (self._serial_manager.connection_changed, self._update_ui_state),
+            (self._serial_manager.device_identified, self._identified_slot),
+        ):
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
 
     def _stop_baud_detector(self) -> None:
         """Останавливает предыдущий поток автоопределения, если он ещё жив."""
@@ -302,31 +318,19 @@ class SettingsWindow(QMainWindow):
         font = QFont("Segoe UI", 10)
         self._device_label = QLabel(tr("Устройство"))
         self._device_label.setFont(font)
-        self._device_combo = QComboBox()
-        self._device_combo.setFont(font)
-        self._device_combo.setMinimumWidth(180)
-        self._device_combo.addItem(tr("2 CAN"), DEVICE_TYPE_BASIC)
-        self._device_combo.addItem(tr("2 CAN +"), DEVICE_TYPE_ANALOG)
-        self._device_combo.addItem(tr("2 CAN FD"), DEVICE_TYPE_CAN_FD)
-        self._device_combo.currentIndexChanged.connect(self._on_device_type_changed)
-
-        # При подключении слева вверху показываем имя, записанное в МК
-        # при программировании («Устройство» в окне прошивки), а не
-        # тип. Без соединения — прежний выбор типа устройства.
+        # «Устройство» и «Серийный номер» — только отображение: значения
+        # записываются при программировании МК (диалог прошивки) и здесь
+        # не редактируются.
         self._device_name_label = QLabel()
         self._device_name_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         self._device_name_label.setMinimumWidth(180)
-        self._device_stack = QStackedWidget()
-        self._device_stack.addWidget(self._device_combo)
-        self._device_stack.addWidget(self._device_name_label)
 
         self._serial_label = QLabel(tr("Серийный номер"))
         self._serial_label.setFont(font)
-        self._serial_edit = QLineEdit()
-        self._serial_edit.setFont(font)
-        self._serial_edit.setReadOnly(True)
-        self._serial_edit.setMinimumWidth(200)
-        self._serial_edit.setPlaceholderText(tr("Неизвестно"))
+        self._serial_value = QLabel()
+        self._serial_value.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._serial_value.setMinimumWidth(120)
+        self._serial_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._system_info_label = QLabel(tr("Firmware: не определена"))
         self._system_info_label.setFont(QFont("Segoe UI", 9))
         self._copy_id_button = QPushButton(tr("Копировать ID"))
@@ -336,9 +340,9 @@ class SettingsWindow(QMainWindow):
         device_layout = QHBoxLayout()
         device_layout.setSpacing(8)
         device_layout.addWidget(self._device_label)
-        device_layout.addWidget(self._device_stack)
+        device_layout.addWidget(self._device_name_label)
         device_layout.addWidget(self._serial_label)
-        device_layout.addWidget(self._serial_edit)
+        device_layout.addWidget(self._serial_value)
         device_layout.addWidget(self._copy_id_button)
         device_layout.addWidget(self._system_info_label)
         device_layout.addStretch()
@@ -410,6 +414,10 @@ class SettingsWindow(QMainWindow):
         setup_button(self._save_config_button, height=32)
         self._save_config_button.clicked.connect(self._save_config)
 
+        self._load_config_button = QPushButton(tr("Загрузить конфигурацию"))
+        setup_button(self._load_config_button, height=32)
+        self._load_config_button.clicked.connect(self._load_config)
+
         self._factory_reset_button = QPushButton(tr("Заводские настройки"))
         setup_button(self._factory_reset_button, height=32)
         self._factory_reset_button.clicked.connect(self._factory_reset)
@@ -421,6 +429,7 @@ class SettingsWindow(QMainWindow):
         bottom_layout.addStretch()
         bottom_layout.addWidget(self._save_button)
         bottom_layout.addWidget(self._save_config_button)
+        bottom_layout.addWidget(self._load_config_button)
         bottom_layout.addWidget(self._factory_reset_button)
         bottom_layout.addWidget(self._back_button)
         layout.addLayout(bottom_layout)
@@ -478,7 +487,7 @@ class SettingsWindow(QMainWindow):
         for widget in root.findChildren(QComboBox):
             widget.activated.connect(self._mark_dirty)
         for widget in root.findChildren(QLineEdit):
-            if widget is self._search_edit or widget is self._serial_edit:
+            if widget is self._search_edit:
                 continue
             widget.textEdited.connect(self._mark_dirty)
         for widget in root.findChildren(QSpinBox):
@@ -510,7 +519,7 @@ class SettingsWindow(QMainWindow):
         for widget in root.findChildren(QComboBox):
             sig.append(("combo", widget.currentIndex(), widget.currentText()))
         for widget in root.findChildren(QLineEdit):
-            if widget is self._search_edit or widget is self._serial_edit:
+            if widget is self._search_edit:
                 continue
             sig.append(("edit", widget.text()))
         for widget in root.findChildren(QSpinBox):
@@ -579,7 +588,6 @@ class SettingsWindow(QMainWindow):
     def _on_connection_changed(self, connected: bool) -> None:
         if not connected:
             self._hide_loading_overlay()
-            self._device_stack.setCurrentWidget(self._device_combo)
             self._trigger_tab.clear_device_managed()
             # Связь потеряна — «Сохранить» недоступна, даже если есть
             # несохранённые правки: писать некуда.
@@ -626,19 +634,15 @@ class SettingsWindow(QMainWindow):
         """При показе окна с уже открытым портом вычитывает устройство —
         если нет несохранённых правок (иначе стёрлись бы изменения)."""
         super().showEvent(event)
+        # Имя/серийник могли обновиться (пере-энумерация, программирование),
+        # пока окно было скрыто — показываем актуальные значения.
+        self._update_device_info()
         if (
             self._serial_manager.is_open()
             and not self._config.get("emulation", False)
             and not self._save_button.isEnabled()
         ):
             QTimer.singleShot(0, self._sync_from_device)
-
-    def _on_device_type_changed(self, index: int) -> None:
-        """Сохраняет выбранный тип устройства в конфигурации."""
-        device_type = self._device_combo.itemData(index)
-        if device_type is not None:
-            self._config.set("device_type", device_type)
-            self._update_analog_tab()
 
     def _update_analog_tab(self) -> None:
         """Добавляет или удаляет вкладку аналоговых портов в зависимости от типа устройства."""
@@ -656,27 +660,28 @@ class SettingsWindow(QMainWindow):
                 self._analog_tab = None
                 self._build_search_index()
 
+    _DEVICE_TYPE_NAMES = {
+        DEVICE_TYPE_BASIC: "2 CAN",
+        DEVICE_TYPE_ANALOG: "2 CAN +",
+        DEVICE_TYPE_CAN_FD: "2 CAN FD",
+    }
+
     def _update_device_info(self, device_type: int = 0, device_version: int = 0) -> None:
-        """Обновляет выпадающий список типа и поле серийного номера."""
+        """Обновляет отображаемые имя устройства и серийный номер."""
         _ = device_version
         device_type = self._config.get("device_type", device_type)
         serial = self._config.get("device_serial", "")
         if not serial:
             serial = self._config.get("serial_number", "")
-        # Слева вверху — имя устройства из страницы конфигурации МК
-        # (при подключении); без соединения — выбор типа устройства.
-        if self._serial_manager.is_open():
-            name = self._config.get("device_name", "") or tr("Без имени")
-            self._device_name_label.setText(name)
-            self._device_stack.setCurrentWidget(self._device_name_label)
-        else:
-            self._device_stack.setCurrentWidget(self._device_combo)
-        index = self._device_combo.findData(device_type)
-        if index >= 0:
-            self._device_combo.blockSignals(True)
-            self._device_combo.setCurrentIndex(index)
-            self._device_combo.blockSignals(False)
-        self._serial_edit.setText(serial)
+        # Слева вверху — имя устройства, записанное в МК при
+        # программировании. Если имени нет — тип устройства.
+        name = (
+            self._config.get("device_name", "")
+            or self._config.get("device_type_name", "")
+            or self._DEVICE_TYPE_NAMES.get(device_type, tr("Без имени"))
+        )
+        self._device_name_label.setText(name)
+        self._serial_value.setText(serial or tr("Неизвестно"))
         try:
             if self._serial_manager.is_open() and not self._config.get("emulation", False):
                 info = self._serial_manager.read_system_info()
@@ -710,7 +715,7 @@ class SettingsWindow(QMainWindow):
                 uid = str(self._serial_manager.read_system_info().get("mcu_uid") or "")
         except Exception:  # noqa: BLE001
             pass
-        text = uid or self._serial_edit.text()
+        text = uid or self._serial_value.text()
         if text:
             QApplication.clipboard().setText(text)
 
@@ -719,15 +724,6 @@ class SettingsWindow(QMainWindow):
         self.setWindowTitle(tr("Настройки — Код Мастер"))
         self._device_label.setText(tr("Устройство"))
         self._serial_label.setText(tr("Серийный номер"))
-        current_type = self._device_combo.currentData()
-        self._device_combo.clear()
-        self._device_combo.addItem(tr("2 CAN"), DEVICE_TYPE_BASIC)
-        self._device_combo.addItem(tr("2 CAN +"), DEVICE_TYPE_ANALOG)
-        self._device_combo.addItem(tr("2 CAN FD"), DEVICE_TYPE_CAN_FD)
-        if current_type is not None:
-            index = self._device_combo.findData(current_type)
-            if index >= 0:
-                self._device_combo.setCurrentIndex(index)
         self._search_edit.setPlaceholderText(tr("Поиск по разделам..."))
         titles = {
             self._connection_tab: "🔌 " + tr("Подключение"),
@@ -748,6 +744,7 @@ class SettingsWindow(QMainWindow):
         self._build_search_index()
         self._save_button.setText(tr("Сохранить"))
         self._save_config_button.setText(tr("Сохранить конфигурацию"))
+        self._load_config_button.setText(tr("Загрузить конфигурацию"))
         self._factory_reset_button.setText(tr("Заводские настройки"))
         self._back_button.setText(tr("Назад"))
         for tab in (
@@ -1009,6 +1006,17 @@ class SettingsWindow(QMainWindow):
         logger.error("Ошибка COM-порта: %s", message)
 
     def _device_name_for_filename(self) -> str:
+        # Имя файла — от имени устройства, записанного при
+        # программировании (поле «Устройство»), а не от типа.
+        name = (
+            self._config.get("device_name", "")
+            or self._config.get("device_type_name", "")
+        ).strip()
+        if name:
+            # Убираем символы, недопустимые в именах файлов.
+            name = "".join(c if c.isalnum() or c in "._-" else "_" for c in name)
+            if name:
+                return name
         device_type = self._config.get("device_type", DEVICE_TYPE_BASIC)
         if device_type == DEVICE_TYPE_ANALOG:
             return "2CAN_Plus"
@@ -1017,32 +1025,72 @@ class SettingsWindow(QMainWindow):
         return "2CAN"
 
     def _save_config(self) -> None:
-        default_name = f"{self._device_name_for_filename()}_config.cfg"
+        start_dir = self._config.get("last_config_dir", "") or ""
+        default_name = os.path.join(
+            start_dir, f"{self._device_name_for_filename()}_config.kmc"
+        )
         path, _ = QFileDialog.getSaveFileName(
             self,
             tr("Сохранить конфигурацию"),
             default_name,
-            "JSON files (*.json)",
+            CONFIG_FILE_FILTER,
         )
         if not path:
             return
         try:
             self._config.save_to_file(path)
+            self._config.set("last_config_dir", os.path.dirname(path))
             QMessageBox.information(self, tr("Готово"), tr("Конфигурация сохранена"))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить: {0}").format(exc))
 
     def _load_config(self) -> None:
+        """Загружает файл конфигурации, сверяет с устройством и прогружает в МК."""
+        start_dir = self._config.get("last_config_dir", "") or ""
         path, _ = QFileDialog.getOpenFileName(
             self,
             tr("Загрузить конфигурацию"),
-            "",
-            "JSON files (*.json)",
+            start_dir,
+            CONFIG_FILE_FILTER + ";;JSON files (*.json)",
         )
         if not path:
             return
         try:
-            self._config.load_from_file(path)
+            payload, file_name, file_serial = unpack_config_file(Path(path).read_bytes())
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось загрузить: {0}").format(exc))
+            return
+
+        # Сверяем идентичность файла с подключённым устройством до
+        # применения настроек — файл мог быть выгружен с другого
+        # экземпляра.
+        if self._serial_manager.is_open() and not self._config.get("emulation", False):
+            dev_name = self._config.get("device_name", "") or self._config.get("device_type_name", "")
+            dev_serial = self._config.get("device_serial", "") or self._config.get("serial_number", "")
+            if (file_name or file_serial) and (
+                (file_name and file_name != dev_name)
+                or (file_serial and file_serial != dev_serial)
+            ):
+                answer = QMessageBox.question(
+                    self,
+                    tr("Загрузить конфигурацию"),
+                    tr(
+                        "Файл записан для устройства «{0}» (s/n {1}), "
+                        "подключено «{2}» (s/n {3}). Загрузить всё равно?"
+                    ).format(
+                        file_name or "—",
+                        file_serial or "—",
+                        dev_name or "—",
+                        dev_serial or "—",
+                    ),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+        try:
+            self._config.import_data(payload)
+            self._config.set("last_config_dir", os.path.dirname(path))
             self._trigger_tab.set_config(self._config.get("triggers", []))
             self._flexible_tab.set_config(self._config.get("flexible_rules", []))
             if hasattr(self._gateway_tab, "set_config"):
@@ -1050,6 +1098,11 @@ class SettingsWindow(QMainWindow):
                     self._config.get("gateway_rules", []),
                     self._config.get("gateway_ignore", []),
                 )
+            self._update_device_info()
+            self._update_analog_tab()
+            # Прогружаем загруженную конфигурацию в МК — та же точка
+            # записи, что у кнопки «Сохранить».
+            self._save_current_config()
             QMessageBox.information(self, tr("Готово"), tr("Конфигурация загружена"))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось загрузить: {0}").format(exc))

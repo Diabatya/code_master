@@ -7,7 +7,9 @@
 
 import json
 import os
+import struct
 import threading
+import zlib
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,74 @@ from platformdirs import user_data_dir
 from models.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Бинарный формат экспорта конфигурации (*.kmc):
+#   magic 6Б | name_len 1Б | name | serial_len 1Б | serial |
+#   payload_len u32 LE | payload (JSON utf-8) | crc32 u32 LE
+# Имя и серийный номер вынесены в заголовок отдельно от payload — при
+# загрузке программа сверяет их с подключённым устройством до применения
+# настроек, даже если структура payload изменится между версиями.
+CONFIG_FILE_MAGIC = b"KMCFG\x01"
+CONFIG_FILE_FILTER = "CodeMaster config (*.kmc)"
+
+
+def pack_config_file(data: dict, device_name: str, device_serial: str) -> bytes:
+    """Упаковывает настройки в бинарный файл конфигурации."""
+    payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    name = str(device_name or "").encode("utf-8")[:255]
+    serial = str(device_serial or "").encode("utf-8")[:255]
+    body = (
+        CONFIG_FILE_MAGIC
+        + bytes((len(name),)) + name
+        + bytes((len(serial),)) + serial
+        + struct.pack("<I", len(payload))
+        + payload
+    )
+    return body + struct.pack("<I", zlib.crc32(body) & 0xFFFFFFFF)
+
+
+def unpack_config_file(raw: bytes) -> "tuple[dict, str, str]":
+    """Разбирает бинарный файл конфигурации → (payload, имя, серийник).
+
+    Старые экспорты были чистым JSON без заголовка — их тоже принимаем,
+    идентичность тогда достаётся из ключей самого payload.
+    """
+    if not raw.startswith(CONFIG_FILE_MAGIC):
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("файл конфигурации не содержит объект настроек")
+        name = str(payload.get("device_name") or payload.get("device_type_name") or "")
+        serial = str(payload.get("device_serial") or payload.get("serial_number") or "")
+        return payload, name, serial
+
+    pos = len(CONFIG_FILE_MAGIC)
+    if len(raw) < pos + 1:
+        raise ValueError("повреждённый файл конфигурации")
+    name_len = raw[pos]
+    pos += 1
+    if len(raw) < pos + name_len + 1:
+        raise ValueError("повреждённый файл конфигурации")
+    name = raw[pos : pos + name_len].decode("utf-8", errors="replace")
+    pos += name_len
+    serial_len = raw[pos]
+    pos += 1
+    if len(raw) < pos + serial_len + 8:
+        raise ValueError("повреждённый файл конфигурации")
+    serial = raw[pos : pos + serial_len].decode("utf-8", errors="replace")
+    pos += serial_len
+    payload_len = struct.unpack_from("<I", raw, pos)[0]
+    pos += 4
+    if len(raw) < pos + payload_len + 4:
+        raise ValueError("повреждённый файл конфигурации")
+    payload_raw = raw[pos : pos + payload_len]
+    pos += payload_len
+    crc = struct.unpack_from("<I", raw, pos)[0]
+    if (zlib.crc32(raw[:pos]) & 0xFFFFFFFF) != crc:
+        raise ValueError("контрольная сумма файла конфигурации не сошлась")
+    payload = json.loads(payload_raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("файл конфигурации не содержит объект настроек")
+    return payload, name, serial
 
 
 class Config:
@@ -50,6 +120,7 @@ class Config:
         "sleep_mode": 0,
         "setup_completed": False,
         "theme": "dark",
+        "last_config_dir": "",
     }
 
     def max_data_bytes(self) -> int:
@@ -123,17 +194,54 @@ class Config:
         return deepcopy(self._data)
 
     def save_to_file(self, path: str) -> None:
-        """Экспортирует текущие настройки в указанный JSON-файл."""
-        with Path(path).open("w", encoding="utf-8") as file:
-            json.dump(self._data, file, ensure_ascii=False, indent=2)
+        """Экспортирует настройки в бинарный файл конфигурации (*.kmc)."""
+        name = self._data.get("device_name") or self._data.get("device_type_name") or ""
+        serial = self._data.get("device_serial") or self._data.get("serial_number") or ""
+        Path(path).write_bytes(pack_config_file(self._data, name, serial))
 
-    def load_from_file(self, path: str) -> None:
-        """Загружает настройки из указанного JSON-файла и сохраняет их."""
-        with Path(path).open("r", encoding="utf-8") as file:
-            self._data = json.load(file)
+    def load_from_file(self, path: str) -> "tuple[str, str]":
+        """Загружает файл конфигурации и возвращает (имя, серийник) из него.
+
+        Идентичность текущего устройства сохраняется: файл может быть
+        выгружен с другого экземпляра — его имя/серийник используются
+        только для сверки, а не подменяют прошитые значения.
+        """
+        payload, _name, _serial = unpack_config_file(Path(path).read_bytes())
+        self.import_data(payload)
+        return _name, _serial
+
+    def import_data(self, payload: dict) -> None:
+        """Применяет настройки из payload, сохраняя идентичность устройства."""
+        for key in self._RESET_PRESERVE_KEYS:
+            if key in self._data:
+                payload[key] = deepcopy(self._data[key])
+        self._data.update(payload)
         self.save()
 
+    # Идентичность устройства и параметры связи «Заводские настройки»
+    # не трогают: имя/серийник/тип прошиваются при программировании и не
+    # являются настройкой оператора.
+    _RESET_PRESERVE_KEYS = (
+        "device_name",
+        "device_type_name",
+        "device_serial",
+        "serial_number",
+        "device_type",
+        "device_version",
+        "port_names",
+        "total_memory",
+        "port",
+        "baudrate",
+        "emulation",
+    )
+
     def reset_to_defaults(self) -> None:
-        """Сбрасывает настройки к значениям по умолчанию и сохраняет."""
+        """Сбрасывает настройки к значениям по умолчанию и сохраняет.
+
+        Имя устройства, серийный номер и тип сохраняются — они заданы при
+        программировании МК и не относятся к пользовательским настройкам.
+        """
+        preserved = {k: deepcopy(self._data[k]) for k in self._RESET_PRESERVE_KEYS if k in self._data}
         self._data = deepcopy(self.DEFAULT_CONFIG)
+        self._data.update(preserved)
         self.save()

@@ -232,16 +232,15 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     }
 
     case CMD_CFG_FACTORY_RESET: {
-      /* Заводские настройки стирают и хранилище триггеров — иначе
-       * записи оставались во Flash, продолжали срабатывать и занимать
-       * память после «сброса». */
+      /* Заводские настройки стирают хранилище триггеров — иначе записи
+       * оставались во Flash и продолжали срабатывать после «сброса».
+       * Страницу конфигурации (имя/серийный номер/VID/PID) команда НЕ
+       * трогает: идентичность задаётся при программировании и не
+       * является пользовательской настройкой. */
       Trigger_ClearAll();
-      uint8_t ok = DeviceConfig_FactoryReset();
-      send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
-      if (ok) {
-        HAL_Delay(50);
-        reboot_to_application();
-      }
+      send_new_cmd_response(cmd, 0x00U, NULL, 0U);
+      HAL_Delay(50);
+      reboot_to_application();
       break;
     }
 

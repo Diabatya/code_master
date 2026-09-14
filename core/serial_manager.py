@@ -762,6 +762,14 @@ class SerialManager(QObject):
                                 break
                     except Exception:  # noqa: BLE001
                         pass
+                # Имя, заданное при программировании, хранится и в
+                # device_type_name: не затираем device_name пустым
+                # значением, если вычитка со страницы конфигурации не
+                # удалась (старая прошивка без CMD_CFG_READ, таймаут и т.п.).
+                if not device_name:
+                    device_name = self._config.get("device_name", "") or self._config.get(
+                        "device_type_name", ""
+                    )
                 self._config.set_bulk({
                     "device_type": device_type,
                     "device_version": device_version,

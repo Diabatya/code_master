@@ -73,9 +73,11 @@ from core.stm32_info import (
     DEVICE_CONFIG_PAGE_ADDR,
     DEVICE_CONFIG_PAGE_SIZE,
     DEVICE_CONFIG_NAME_MAX,
+    FLASH_END_ADDR,
     LEGACY_CONFIG_PAGE_ADDR,
     STM32_FLASH_SIZES,
     STM32_PAGE_SIZES,
+    TRIGGER_REGION_ADDR,
     build_app_metadata,
     build_device_config_page,
     merge_device_config_page,
@@ -1044,24 +1046,67 @@ class FlashWorker(QThread):
                         logger.warning("DFU: не удалось инвалидировать метаданные: %s", exc)
 
                 offset = 0
-                # Стираем КАЖДУЮ страницу, накрытую образом (skip_blank=False):
-                # «пустые» участки образа (0xFF) без стирания оставляли бы в
-                # Flash старые данные — и верификация/CRC метаданных ловили
-                # мусор из прошлой прошивки.
-                total_pages = sum(
-                    (start + len(data) - 1) // page_size - start // page_size + 1
-                    for start, data in segments
-                )
-                self.log_line.emit(tr("USB DFU: стирание {0} страниц Flash...").format(total_pages))
-                for start, data in segments:
-                    dfu.erase_pages(
-                        start,
-                        data,
-                        page_size=page_size,
-                        skip_blank=False,
-                        progress=_progress_for_segment(0, 15, offset),
+                if app_touched:
+                    # Постраничное стирание AN3155 на части устройств
+                    # молча игнорируется — пишем через то же mass erase,
+                    # что делает рабочая кнопка «Стереть Flash». Оно сносит
+                    # ВСЮ Flash, поэтому сначала сохраняем области, которых
+                    # нет в образе: наш USB-CDC bootloader (без него МК не
+                    # стартует application), страницу конфигурации (имя/
+                    # серийник/VID/PID) и пул триггеров.
+                    preserve = (
+                        (BOOTLOADER_BASE_ADDR, APPLICATION_BASE_ADDR - BOOTLOADER_BASE_ADDR),
+                        (DEVICE_CONFIG_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE),
+                        (TRIGGER_REGION_ADDR, FLASH_END_ADDR - TRIGGER_REGION_ADDR),
                     )
-                    offset += len(data)
+                    saved_regions = []
+                    self.log_line.emit(
+                        tr("USB DFU: сохранение bootloader/config/триггеров...")
+                    )
+                    for p_addr, p_size in preserve:
+                        covered = any(
+                            start < p_addr + p_size and p_addr < start + len(data)
+                            for start, data in segments
+                        )
+                        if covered:
+                            continue  # область поставляет сам образ
+                        try:
+                            blob = bytes(dfu.upload(p_addr, p_size))
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "DFU: не удалось сохранить область 0x%08X: %s",
+                                p_addr,
+                                exc,
+                            )
+                            continue
+                        if any(b != 0xFF for b in blob):
+                            saved_regions.append((p_addr, blob))
+
+                    self.log_line.emit(
+                        tr("USB DFU: полное стирание Flash (mass erase)...")
+                    )
+                    dfu.mass_erase()
+                else:
+                    # Запись только config-страницы и пр. — mass erase не
+                    # нужен и опасен: стираем КАЖДУЮ страницу, накрытую
+                    # образом (skip_blank=False), иначе «пустые» участки
+                    # образа (0xFF) оставили бы в Flash старые данные.
+                    total_pages = sum(
+                        (start + len(data) - 1) // page_size - start // page_size + 1
+                        for start, data in segments
+                    )
+                    self.log_line.emit(
+                        tr("USB DFU: стирание {0} страниц Flash...").format(total_pages)
+                    )
+                    for start, data in segments:
+                        dfu.erase_pages(
+                            start,
+                            data,
+                            page_size=page_size,
+                            skip_blank=False,
+                            progress=_progress_for_segment(0, 15, offset),
+                        )
+                        offset += len(data)
 
                 # Контроль стирания: читаем первую страницу каждого
                 # сегмента обратно — если ROM-загрузчик проигнорировал
@@ -1076,6 +1121,18 @@ class FlashWorker(QThread):
                         return False, tr(
                             "USB DFU: стирание не выполнено — страница 0x{0:08X} не пуста"
                         ).format(start)
+
+                if app_touched:
+                    # Возвращаем сохранённые области, которых нет в образе.
+                    for p_addr, blob in saved_regions:
+                        dfu.download(p_addr, blob)
+                        dfu.abort()
+                    if saved_regions:
+                        self.log_line.emit(
+                            tr("USB DFU: восстановлено областей: {0}").format(
+                                len(saved_regions)
+                            )
+                        )
 
                 self.log_line.emit(tr("USB DFU: запись {0} байт...").format(total_bytes))
                 offset = 0
@@ -1646,7 +1703,10 @@ class FlashDialog(QDialog):
         )
 
         self._device_name_edit.editingFinished.connect(
-            lambda: self._config.set("device_type_name", self._device_name_edit.text().strip())
+            lambda: self._config.set_bulk({
+                "device_type_name": self._device_name_edit.text().strip(),
+                "device_name": self._device_name_edit.text().strip(),
+            })
         )
         self._serial_edit.editingFinished.connect(
             lambda: self._config.set_bulk({
@@ -1677,7 +1737,9 @@ class FlashDialog(QDialog):
         total_kb = self._config.get("total_memory", STM32_FLASH_SIZES.get("STM32F105RCT6", 256) * 1024) // 1024
         if total_kb > 0:
             self._read_size_edit.setCurrentText(str(total_kb))
-        self._device_name_edit.setText(self._config.get("device_type_name", ""))
+        self._device_name_edit.setText(
+            self._config.get("device_name", "") or self._config.get("device_type_name", "")
+        )
         self._update_power_button()
         self._on_method_changed(self._method_combo.currentIndex())
 
@@ -1985,12 +2047,20 @@ class FlashDialog(QDialog):
         payload += bytes((0x83, 0x04, 0x40, 0x57))
         try:
             self._serial_manager.request_control(CMD_CFG_WRITE, payload)
+            name_str = name.decode("ascii", errors="ignore")
+            serial_str = serial.decode("ascii", errors="ignore")
             # После пере-энумерации iSerial = записанный серийник —
-            # запоминаем имя для отображения в списке портов.
+            # запоминаем имя для отображения в списке портов и в шапке.
             if name:
                 port_names = dict(self._config.get("port_names", {}) or {})
-                port_names[serial.decode("ascii", errors="ignore")] = name.decode("ascii", errors="ignore")
-                self._config.set("port_names", port_names)
+                port_names[serial_str] = name_str
+                self._config.set_bulk({
+                    "port_names": port_names,
+                    "device_name": name_str,
+                    "device_type_name": name_str,
+                    "device_serial": serial_str,
+                    "serial_number": serial_str,
+                })
             self._mark_operation_disconnected()
             message = tr("Конфигурация записана без перепрошивки Flash")
             self._log(message)
@@ -2161,6 +2231,7 @@ class FlashDialog(QDialog):
             self._serial_edit.setText(serial)
             self._config.set_bulk({
                 "device_type_name": name,
+                "device_name": name,
                 "device_serial": serial,
                 "serial_number": serial,
             })
@@ -2226,6 +2297,7 @@ class FlashDialog(QDialog):
             self._serial_edit.setText(serial)
             self._config.set_bulk({
                 "device_type_name": name,
+                "device_name": name,
                 "device_serial": serial,
                 "serial_number": serial,
             })
