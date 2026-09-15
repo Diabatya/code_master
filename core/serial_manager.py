@@ -484,7 +484,27 @@ class SerialManager(QObject):
     def _control_roundtrip(self, command: int, payload: bytes, timeout: float) -> bytes:
         """Одна попытка команда→ответ. Ответ: [command|0x10, status, len, data]."""
         self._port.reset_input_buffer()
-        self._port.write(bytes((command & 0xFF, len(payload))) + payload)
+        # pyserial.write() при занятом USB-канале может вернуть меньше
+        # байт, чем попросили — обрезанная команда навсегда клала парсер
+        # МК (ждал «ещё байты» бесконечно, все команды за ней уходили в
+        # таймаут до физического переподключения порта). Дописываем до
+        # конца, чтобы устройство видело только целые структуры.
+        data = bytes((command & 0xFF, len(payload))) + payload
+        written = 0
+        write_deadline = time.time() + timeout
+        while written < len(data):
+            try:
+                chunk = self._port.write(data[written:])
+            except serial.SerialTimeoutException:
+                chunk = 0
+            if chunk is None:
+                chunk = len(data) - written  # некоторые порты возвращают None
+            if chunk == 0:
+                if time.time() > write_deadline:
+                    raise TimeoutError(f"Таймаут записи команды 0x{command:02X}")
+                time.sleep(0.005)
+                continue
+            written += chunk
         deadline = time.time() + timeout
         response_marker = (command | 0x10) & 0xFF
         buffer = bytearray()

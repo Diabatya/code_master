@@ -438,6 +438,29 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
   }
 }
 
+/* HAL tick, когда структура в голове RX FIFO стала неполной. Нужен,
+ * чтобы обрезанная команда/кадр не клала парсер навсегда: до этого фикса
+ * «wait for more» ждал бесконечно, FIFO вставал насмерть — все команды
+ * хоста уходили в таймаут, а приоритетный выход из CAN-drain глушил и
+ * Trigger_OnFrame; устройство «не работало по программе» до физического
+ * переподключения USB (CDC_Init_FS обнуляет FIFO). */
+static uint32_t s_rx_wait_start;
+
+static uint16_t wait_more_or_resync(void)
+{
+  uint32_t now = HAL_GetTick();
+  if (s_rx_wait_start == 0U) {
+    s_rx_wait_start = now;
+    return 0U;
+  }
+  /* Целая команда приходит за ~2 мс; 500 мс — с огромным запасом. */
+  if ((now - s_rx_wait_start) >= 500U) {
+    s_rx_wait_start = 0U;
+    return 1U; /* неполная структура застряла — бросаем байт, ре-синк */
+  }
+  return 0U;
+}
+
 /* Attempts to parse and consume exactly one structure starting at FIFO
  * offset 0. Returns the number of bytes to discard from the FIFO for this
  * attempt: >0 if a structure (valid or invalid-but-resynchronized) was
@@ -446,6 +469,7 @@ static uint16_t try_parse_one(void)
 {
   uint16_t avail = CDC_GetRxAvailable();
   if (avail == 0U) {
+    s_rx_wait_start = 0U;
     return 0U;
   }
 
@@ -474,7 +498,7 @@ static uint16_t try_parse_one(void)
       if (avail >= REBOOT_MAGIC_LEN) {
         reboot_to_bootloader(); /* never returns */
       }
-      return 0U; /* still a valid prefix, wait for the rest */
+      return wait_more_or_resync(); /* still a valid prefix, wait for the rest */
     }
   }
 
@@ -491,7 +515,7 @@ static uint16_t try_parse_one(void)
      * byte too long — fixed. */
     uint32_t header_len = extended ? 7U : 5U;
     if (avail < header_len) {
-      return 0U; /* wait for more bytes */
+      return wait_more_or_resync(); /* wait for more bytes */
     }
     uint8_t channel;
     CDC_PeekRxByte(1, &channel);
@@ -512,7 +536,7 @@ static uint16_t try_parse_one(void)
      * For RTR the dlc byte is the requested length, but there are no data bytes. */
     uint32_t total_len = header_len + (rtr ? 0U : (uint32_t)dlc) + 1U;
     if (avail < total_len) {
-      return 0U; /* wait for the rest */
+      return wait_more_or_resync(); /* wait for the rest */
     }
 
     /* Worst case total_len is 16 (ext, dlc=8); sized to 16 exactly, not 13
@@ -584,13 +608,13 @@ static uint16_t try_parse_one(void)
   /* --- New commands (0xC0-0xCD), see PROTOCOL.md Part 2 --- */
   if (marker >= 0xC0U && marker <= 0xCDU) {
     if (avail < 2U) {
-      return 0U;
+      return wait_more_or_resync();
     }
     uint8_t payload_len;
     CDC_PeekRxByte(1, &payload_len);
     uint32_t total_len = 2U + payload_len;
     if (avail < total_len) {
-      return 0U;
+      return wait_more_or_resync();
     }
     uint8_t payload[255];
     for (uint32_t i = 0; i < payload_len; i++) {
@@ -615,6 +639,7 @@ void Protocol_Poll(void)
     if (consumed == 0U) {
       break;
     }
+    s_rx_wait_start = 0U; /* структура разобрана — отсчёт неполной заново */
     for (uint16_t i = 0; i < consumed; i++) {
       (void)CDC_ReadRxByte();
     }
