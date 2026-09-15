@@ -464,57 +464,71 @@ class SerialManager(QObject):
                 self._stop_reader()
                 self._control_session_active = True
             try:
-                self._port.reset_input_buffer()
-                self._port.write(bytes((command & 0xFF, len(payload))) + payload)
-                deadline = time.time() + timeout
-                response_marker = (command | 0x10) & 0xFF
-                buffer = bytearray()
-                while time.time() < deadline:
-                    available = self._port_in_waiting()
-                    if available:
-                        buffer.extend(self._port.read(available))
-                    # Разбираем поток по кадрам: CAN-кадры МК→ПК пропускаем
-                    # целиком — иначе байт внутри данных кадра, совпавший с
-                    # маркером ответа, давал ложное срабатывание, и хост ждал
-                    # «ответ» мусорной длины до таймаута (наблюдалось как
-                    # «Таймаут ответа на команду 0xCA» на живой шине CAN).
-                    while buffer:
-                        first = buffer[0]
-                        if first in _RX_FRAME_MARKERS:
-                            wire_len = _rx_frame_wire_len(buffer)
-                            if wire_len is None:
-                                break  # неполный кадр — ждём остаток
-                            if wire_len > 0:
-                                # Кадр не теряем: мониторинг и триггеры
-                                # продолжают видеть шину во время команды.
-                                frame = unpack_can_frame(bytes(buffer[:wire_len]))
-                                if frame is not None:
-                                    self.new_can_frame.emit(frame)
-                            del buffer[: max(wire_len, 1)]  # -1 → resync на 1 байт
-                            continue
-                        if first != response_marker:
-                            del buffer[0]
-                            continue
-                        if len(buffer) < 3:
-                            break
-                        status = buffer[1]
-                        if status > 0x03:
-                            del buffer[0]  # ложный маркер — у протокола статусы 0..3
-                            continue
-                        length = buffer[2]
-                        if len(buffer) < 3 + length:
-                            break  # неполный ответ — ждём остаток
-                        result = bytes(buffer[3 : 3 + length])
-                        if status != 0:
-                            raise RuntimeError(f"Устройство отклонило команду 0x{command:02X}: статус 0x{status:02X}")
-                        return result
-                    time.sleep(0.005)
-                raise TimeoutError(f"Таймаут ответа на команду 0x{command:02X}")
+                # Одна повторная попытка: сразу после переподключения USB
+                # устройство может ещё доинициализироваться и проглотить
+                # первую команду молча — вместо «Таймаут ответа на 0xCA»
+                # повтор запроса спасает цикл сохранения.
+                last_timeout: Optional[TimeoutError] = None
+                for _attempt in range(2):
+                    try:
+                        return self._control_roundtrip(command, payload, timeout)
+                    except TimeoutError as exc:
+                        last_timeout = exc
+                raise last_timeout  # type: ignore[misc]
             finally:
                 if owns_session:
                     self._control_session_active = False
                     self._start_reader()
                     self._closing = False
+
+    def _control_roundtrip(self, command: int, payload: bytes, timeout: float) -> bytes:
+        """Одна попытка команда→ответ. Ответ: [command|0x10, status, len, data]."""
+        self._port.reset_input_buffer()
+        self._port.write(bytes((command & 0xFF, len(payload))) + payload)
+        deadline = time.time() + timeout
+        response_marker = (command | 0x10) & 0xFF
+        buffer = bytearray()
+        while time.time() < deadline:
+            available = self._port_in_waiting()
+            if available:
+                buffer.extend(self._port.read(available))
+            # Разбираем поток по кадрам: CAN-кадры МК→ПК пропускаем
+            # целиком — иначе байт внутри данных кадра, совпавший с
+            # маркером ответа, давал ложное срабатывание, и хост ждал
+            # «ответ» мусорной длины до таймаута (наблюдалось как
+            # «Таймаут ответа на команду 0xCA» на живой шине CAN).
+            while buffer:
+                first = buffer[0]
+                if first in _RX_FRAME_MARKERS:
+                    wire_len = _rx_frame_wire_len(buffer)
+                    if wire_len is None:
+                        break  # неполный кадр — ждём остаток
+                    if wire_len > 0:
+                        # Кадр не теряем: мониторинг и триггеры
+                        # продолжают видеть шину во время команды.
+                        frame = unpack_can_frame(bytes(buffer[:wire_len]))
+                        if frame is not None:
+                            self.new_can_frame.emit(frame)
+                    del buffer[: max(wire_len, 1)]  # -1 → resync на 1 байт
+                    continue
+                if first != response_marker:
+                    del buffer[0]
+                    continue
+                if len(buffer) < 3:
+                    break
+                status = buffer[1]
+                if status > 0x03:
+                    del buffer[0]  # ложный маркер — у протокола статусы 0..3
+                    continue
+                length = buffer[2]
+                if len(buffer) < 3 + length:
+                    break  # неполный ответ — ждём остаток
+                result = bytes(buffer[3 : 3 + length])
+                if status != 0:
+                    raise RuntimeError(f"Устройство отклонило команду 0x{command:02X}: статус 0x{status:02X}")
+                return result
+            time.sleep(0.005)
+        raise TimeoutError(f"Таймаут ответа на команду 0x{command:02X}")
 
     def read_can_stats(self, channel: int) -> dict[str, int]:
         """Возвращает накопительные RX/TX/lost-счётчики CAN-канала.

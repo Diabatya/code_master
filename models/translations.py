@@ -505,6 +505,18 @@ class Translator:
                 "Инвертирование": "Invert",
                 "FF..FF = 0% внизу, 00..00 = 100% вверху": "FF..FF = 0% at bottom, 00..00 = 100% at top",
                 "сейчас": "now",
+                "По кадрам": "Step frame",
+                "Отправить все принятые кадры обратно в шину. "
+                "Если строки выделены — только выделенные.":
+                    "Send all received frames back to the bus. "
+                    "If rows are selected — only the selected ones.",
+                "Каждое нажатие отправляет следующий кадр": "Each click sends the next frame",
+                "Таблица пуста — нечего отправлять": "Table is empty — nothing to send",
+                "Порт не подключен — отправка невозможна": "Port is not connected — cannot send",
+                "Передача кадров завершена": "Frame transmission finished",
+                "Передача остановлена: порт закрыт": "Transmission stopped: port closed",
+                "Конец списка — следующий шаг начнёт с первого кадра":
+                    "End of list — next step starts from the first frame",
                 "Удалить фрейм": "Remove frame",
                 "Автоматическая запись DATA в Кэш": "Auto-save DATA to Cache",
                 "Кол-во": "Qty",

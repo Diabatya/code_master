@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QGraphicsOpacityEffect,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -697,32 +698,43 @@ class CanTriggerTab(QWidget):
         self._set_cache_enabled(block, False)
         block["cache"]["cache_check"].setEnabled(True)
 
-        # Шапка блока: статус слева, крестик удаления справа вверху.
-        # Ручное позиционирование поверх QGroupBox оказалось ненадёжным
-        # (до первого resize крестик уезжал за заголовок) — кладём его
-        # в обычный layout первой строки.
+        # Шапка блока: статус слева.
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.addWidget(block["status"])
         header_row.addStretch()
-        header_row.addWidget(block["delete_button"])
         group_layout.addLayout(header_row)
         group_layout.addWidget(content)
         block["group"].toggled.connect(lambda checked, c=content: c.setVisible(checked))
         block["group"].toggled.connect(lambda checked, b=block: self._on_trigger_toggled_by_block(b, checked))
         block["content"] = content
 
+        # Крестик удаления — НЕ ребёнок checkable QGroupBox: иначе Qt
+        # глушит его вместе с содержимым при снятом чеке (в т.ч. на show).
+        # Кладём кнопку в ту же ячейку сетки поверх группы — правый верхний
+        # угол блока, активна всегда.
         delete_button = block["delete_button"]
         delete_button.clicked.connect(lambda _c=False, b=block: self._remove_trigger_block(b))
 
-        self._blocks_layout.addWidget(block["group"])
+        wrapper = QWidget()
+        grid = QGridLayout(wrapper)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.addWidget(block["group"], 0, 0)
+        grid.addWidget(
+            delete_button, 0, 0,
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
+        )
+        delete_button.raise_()
+        block["wrapper"] = wrapper
+        self._blocks_layout.addWidget(wrapper)
 
     def _remove_block_at(self, index: int) -> None:
         """Внутреннее удаление блока по позиции (крестик/синхронизация)."""
         block = self._blocks.pop(index)
         self._device_managed.pop(index)
-        self._blocks_layout.removeWidget(block["group"])
-        block["group"].deleteLater()
+        host = block.get("wrapper") or block["group"]
+        self._blocks_layout.removeWidget(host)
+        host.deleteLater()
 
     def _remove_trigger_block(self, block: Dict[str, Any]) -> None:
         """Удаляет блок триггера из UI и из будущей записи в устройство."""

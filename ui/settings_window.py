@@ -263,7 +263,12 @@ class ConnectionTab(QWidget):
         baudrate = int(self._baud_combo.currentText())
         emulation = port_name == "FAKE" or port_text.startswith("FAKE")
         self._config.set_bulk({"port": port_name, "baudrate": baudrate, "emulation": emulation})
-        if self._serial_manager.open_port(port_name, baudrate, emulation=emulation):
+        # auto_reconnect: при обрыве USB менеджер сам ждёт возврата
+        # устройства и переоткрывает порт — оператору не нужно жать
+        # «Подключить» вручную после переподключения кабеля.
+        if self._serial_manager.open_port(
+            port_name, baudrate, emulation=emulation, auto_reconnect=True
+        ):
             self._set_status(tr("Подключено"), error=False)
             self.connected.emit()
         else:

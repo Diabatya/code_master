@@ -475,7 +475,14 @@ class CanChannelMonitor(QWidget):
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
-        # Двойной правый клик по строке ID → сразу «История ID» (без меню)
+        # Двойной правый клик по строке ID → сразу «История ID» (без меню).
+        # Штатный MouseButtonDblClick до нас не доезжает: первый правый
+        # клик уже открыл контекстное меню, и второй уходит в него.
+        # Поэтому считаем два правых клика по одной строке сами — в
+        # _show_context_menu второй клик за 600 мс открывает историю
+        # вместо меню.
+        self._last_rclick_time = 0.0
+        self._last_rclick_row = -1
         self._table.viewport().installEventFilter(self)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.setColumnWidth(0, 90)
@@ -674,7 +681,10 @@ class CanChannelMonitor(QWidget):
             if not port:
                 QMessageBox.warning(self, tr("Внимание"), tr("Устройство не подключено"))
                 return
-            if not self._serial_manager.open_port(port, baudrate, emulation, error_probability=error_probability):
+            if not self._serial_manager.open_port(
+                port, baudrate, emulation, auto_reconnect=True,
+                error_probability=error_probability,
+            ):
                 QMessageBox.warning(self, tr("Внимание"), tr("Устройство не подключено"))
                 return
         self._running = True
@@ -1041,6 +1051,15 @@ class CanChannelMonitor(QWidget):
         row = self._table.currentRow()
         if row < 0:
             return
+        # Второй правый клик подряд по той же строке — это ТЗ-шный
+        # «двойной ПКМ»: открываем историю ID вместо меню.
+        now = time.monotonic()
+        if row == self._last_rclick_row and now - self._last_rclick_time < 0.6:
+            self._last_rclick_row = -1
+            self._show_id_history(row)
+            return
+        self._last_rclick_time = now
+        self._last_rclick_row = row
         menu = QMenu(self)
         menu.addAction(tr("Копировать ID"), lambda: self._copy_selected_id(row))
         menu.addAction(tr("Копировать данные"), lambda: self._copy_selected_data(row))

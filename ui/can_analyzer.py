@@ -2,9 +2,9 @@
 
 import csv
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -20,11 +20,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.can_protocol import pack_can_frame
 from core.dbc_manager import DBCManager
 from core.serial_manager import SerialManager
 from models.logger import get_logger
 from models.translations import _ as tr
-from models.utils import format_data_bytes, int_to_hex, parse_packet_string
+from models.utils import format_data_bytes, hex_to_int, int_to_hex, parse_packet_string
 
 logger = get_logger(__name__)
 
@@ -45,6 +46,14 @@ class CanAnalyzer(QWidget):
         self._analyzing = False
         self._start_time = 0.0
         self._id_last_time: Dict[int, float] = {}
+        # Обратная отправка строк таблицы в шину: очередь строк,
+        # таймер рассылки и позиция «по кадрам» — на каждую таблицу.
+        self._send_queues: Dict[QTableWidget, List[int]] = {}
+        self._send_timers: Dict[QTableWidget, QTimer] = {}
+        self._step_rows: Dict[QTableWidget, List[int]] = {}
+        self._step_pos: Dict[QTableWidget, int] = {}
+        self._table_channel: Dict[QTableWidget, int] = {}
+        self._send_buttons: Dict[QTableWidget, tuple] = {}
         self._create_widgets()
         self._build_layout()
 
@@ -90,6 +99,10 @@ class CanAnalyzer(QWidget):
 
         self._table1 = self._build_table(font)
         self._table2 = self._build_table(font)
+        self._table_channel[self._table1] = 1
+        self._table_channel[self._table2] = 2
+        self._panel1 = self._build_table_panel(self._table1)
+        self._panel2 = self._build_table_panel(self._table2)
 
     def _build_table(self, font: QFont) -> QTableWidget:
         table = QTableWidget()
@@ -103,6 +116,9 @@ class CanAnalyzer(QWidget):
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
+        # Разрешаем выделение нескольких строк: выделенный сегмент
+        # отправляется в шину кнопкой «Отправить».
+        table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         table.setColumnWidth(0, 90)
         table.setColumnWidth(1, 90)
         table.setColumnWidth(2, 50)
@@ -111,6 +127,41 @@ class CanAnalyzer(QWidget):
         table.setColumnWidth(5, 90)
         table.setColumnWidth(6, 260)
         return table
+
+    def _build_table_panel(self, table: QTableWidget) -> QWidget:
+        """Таблица + строка кнопок отправки принятых кадров обратно в шину."""
+        font = QFont("Segoe UI", 9)
+        send_btn = QPushButton(tr("Отправить"))
+        stop_btn = QPushButton(tr("Стоп"))
+        step_btn = QPushButton(tr("По кадрам"))
+        for btn in (send_btn, stop_btn, step_btn):
+            btn.setFont(font)
+            btn.setFixedHeight(26)
+        send_btn.setToolTip(
+            tr("Отправить все принятые кадры обратно в шину. "
+               "Если строки выделены — только выделенные.")
+        )
+        step_btn.setToolTip(tr("Каждое нажатие отправляет следующий кадр"))
+        stop_btn.setEnabled(False)
+        send_btn.clicked.connect(lambda _c=False, t=table: self._send_all(t))
+        stop_btn.clicked.connect(lambda _c=False, t=table: self._stop_sending(t))
+        step_btn.clicked.connect(lambda _c=False, t=table: self._send_next_frame(t))
+        self._send_buttons[table] = (send_btn, stop_btn, step_btn)
+
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 4, 0, 0)
+        buttons.addWidget(send_btn)
+        buttons.addWidget(stop_btn)
+        buttons.addWidget(step_btn)
+        buttons.addStretch()
+
+        panel = QWidget()
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(0)
+        panel_layout.addLayout(buttons)
+        panel_layout.addWidget(table)
+        return panel
 
     def _build_layout(self) -> None:
         layout = QVBoxLayout(self)
@@ -128,8 +179,8 @@ class CanAnalyzer(QWidget):
         layout.addLayout(top_layout)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._table1)
-        splitter.addWidget(self._table2)
+        splitter.addWidget(self._panel1)
+        splitter.addWidget(self._panel2)
         splitter.setSizes([450, 450])
         layout.addWidget(splitter, 1)
 
@@ -186,6 +237,107 @@ class CanAnalyzer(QWidget):
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             table.setItem(row, col, item)
         table.scrollToBottom()
+
+    # ---- Обратная отправка кадров в шину -------------------------------
+
+    def _target_rows(self, table: QTableWidget) -> List[int]:
+        """Выделенные строки по возрастанию; без выделения — вся таблица."""
+        selected = sorted({idx.row() for idx in table.selectedIndexes()})
+        return selected if selected else list(range(table.rowCount()))
+
+    def _row_to_packet(self, table: QTableWidget, row: int) -> Optional[bytes]:
+        """Строка таблицы → проводной CAN-кадр для send_data()."""
+        id_item = table.item(row, 1)
+        if id_item is None:
+            return None
+        can_id = hex_to_int(id_item.text())
+        if can_id is None:
+            return None
+        data_item = table.item(row, 3)
+        data_text = (data_item.text() if data_item is not None else "").strip()
+        try:
+            data = bytes(int(part, 16) for part in data_text.split()) if data_text else b""
+        except ValueError:
+            data = b""
+        channel = self._table_channel.get(table, 1)
+        try:
+            return pack_can_frame(channel, can_id, data)
+        except ValueError:
+            return None
+
+    def _send_all(self, table: QTableWidget) -> None:
+        rows = self._target_rows(table)
+        if not rows:
+            logger.info(tr("Таблица пуста — нечего отправлять"))
+            return
+        if not self._serial_manager.is_open():
+            logger.info(tr("Порт не подключен — отправка невозможна"))
+            return
+        self._stop_sending(table)
+        self._send_queues[table] = list(rows)
+        send_btn, stop_btn, _step_btn = self._send_buttons[table]
+        send_btn.setEnabled(False)
+        stop_btn.setEnabled(True)
+        timer = QTimer(self)
+        timer.setInterval(10)  # ~100 кадров/с — достаточно для USB CDC
+        timer.timeout.connect(lambda t=table: self._send_tick(t))
+        self._send_timers[table] = timer
+        logger.info(
+            "Отправка %d кадров в CAN%d", len(rows), self._table_channel.get(table, 1)
+        )
+        timer.start()
+
+    def _send_tick(self, table: QTableWidget) -> None:
+        queue = self._send_queues.get(table) or []
+        if not queue or not self._serial_manager.is_open():
+            self._stop_sending(table)
+            if not self._serial_manager.is_open():
+                logger.info(tr("Передача остановлена: порт закрыт"))
+            return
+        row = queue.pop(0)
+        packet = self._row_to_packet(table, row)
+        if packet is not None:
+            self._serial_manager.send_data(packet)
+        if not queue:
+            self._stop_sending(table)
+            logger.info(tr("Передача кадров завершена"))
+
+    def _stop_sending(self, table: QTableWidget) -> None:
+        timer = self._send_timers.pop(table, None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        self._send_queues.pop(table, None)
+        buttons = self._send_buttons.get(table)
+        if buttons is not None:
+            send_btn, stop_btn, _step_btn = buttons
+            send_btn.setEnabled(True)
+            stop_btn.setEnabled(False)
+
+    def _send_next_frame(self, table: QTableWidget) -> None:
+        rows = self._target_rows(table)
+        if not rows:
+            logger.info(tr("Таблица пуста — нечего отправлять"))
+            return
+        if not self._serial_manager.is_open():
+            logger.info(tr("Порт не подключен — отправка невозможна"))
+            return
+        # Состав кадров (выделение) изменился — начинаем покадровую
+        # отправку с первого кадра нового набора.
+        if self._step_rows.get(table) != rows:
+            self._step_rows[table] = rows
+            self._step_pos[table] = 0
+        pos = self._step_pos.get(table, 0)
+        row = rows[pos]
+        packet = self._row_to_packet(table, row)
+        if packet is not None:
+            self._serial_manager.send_data(packet)
+        pos += 1
+        if pos >= len(rows):
+            pos = 0
+            logger.info(tr("Конец списка — следующий шаг начнёт с первого кадра"))
+        self._step_pos[table] = pos
+        table.selectRow(row)
 
     def _show_context_menu(self, position) -> None:
         table = self.sender()
