@@ -247,12 +247,16 @@ class DfuDevice:
     def mass_erase(self) -> None:
         """Полное стирание flash (STM32)."""
         logger.warning("Выполняется mass erase — будет стёрта вся flash включая bootloader")
+        # Команду 0x41 ROM-загрузчик принимает только из dfuIDLE: после
+        # upload-ов автомат сидит в dfuUPLOAD_IDLE и DNLOAD даёт STALL
+        # (Errno 5 Input/Output Error) — сначала возвращаемся в IDLE.
+        self._ensure_idle()
         payload = bytes([0x41])
         self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, payload, timeout=30000)
         self._wait(status_timeout=60000)
-        # Команду 0x41 ROM-загрузчик исполняет только из dfuIDLE; после
-        # стирания устройство остаётся в dfuDNLOAD_IDLE, где следующий
-        # блок-0 трактуется как данные — возвращаем автомат в IDLE.
+        # После стирания устройство остаётся в dfuDNLOAD_IDLE, где
+        # следующий блок-0 трактуется как данные — возвращаем автомат
+        # в IDLE.
         self.abort()
 
     def page_erase(self, address: int, timeout_ms: int = 5000) -> None:
@@ -288,7 +292,16 @@ class DfuDevice:
             status = self._status(timeout=5000)
         except usb.core.USBError:
             return
-        if len(status) >= 6 and status[4] != STATE_DFU_IDLE:
+        if len(status) < 6:
+            return
+        if status[4] == STATE_DFU_ERROR:
+            try:
+                self._ctrl(DFU_REQUEST_SEND, DFU_CLRSTATUS, timeout=5000)
+                time.sleep(0.005)
+            except usb.core.USBError:
+                pass
+            return
+        if status[4] != STATE_DFU_IDLE:
             try:
                 self._ctrl(DFU_REQUEST_SEND, DFU_ABORT, timeout=5000)
                 time.sleep(0.005)
