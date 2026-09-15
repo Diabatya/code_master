@@ -447,7 +447,7 @@ class SerialManager(QObject):
         """
         return _ControlSession(self)
 
-    def request_control(self, command: int, payload: bytes = b"", timeout: float = 1.0) -> bytes:
+    def request_control(self, command: int, payload: bytes = b"", timeout: float = 2.0) -> bytes:
         """Выполняет синхронную команду конфигурационного протокола C0-C6.
 
         На время запроса останавливает общий reader, чтобы ответ не был

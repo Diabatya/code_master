@@ -167,8 +167,8 @@ static void send_new_cmd_response(uint8_t cmd, uint8_t status, const uint8_t *pa
    * buffers absorb traffic while we wait inside Protocol_Poll. */
   uint32_t start = HAL_GetTick();
   while (CDC_Transmit_FS(buf, (uint16_t)(3U + len)) != 0U) {
-    if ((HAL_GetTick() - start) >= 500U) {
-      break; /* still inside the PC's 1s command timeout */
+    if ((HAL_GetTick() - start) >= 900U) {
+      break; /* still inside the PC's 2s command timeout (+retry window) */
     }
   }
 }
@@ -628,6 +628,16 @@ void Protocol_Poll(void)
   can_frame_t frame;
   for (uint8_t channel = 0; channel < 2U; channel++) {
     for (uint16_t guard = 0; guard < 64U; guard++) {
+      if (CDC_GetRxAvailable() != 0U) {
+        /* В RX FIFO лежит команда от ПК — прерываем разгрузку кадров:
+         * иначе на насыщенной шине серия send_can_frame() (до 128
+         * передач по ~100 мс каждая при занятом CDC TX) держит команду
+         * секундами, и хост падает по таймауту — «Таймаут ответа на
+         * команду 0xCA» при записи нескольких триггеров подряд.
+         * Кадры не теряются: кольцевые буферы дожидаются следующего
+         * вызова, когда команда будет обработана выше. */
+        return;
+      }
       if (!CanBridge_PopRx(channel, &frame)) {
         break;
       }

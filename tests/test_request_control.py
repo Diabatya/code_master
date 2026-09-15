@@ -31,6 +31,9 @@ class _ScriptedPort:
         return len(data)
 
     def read(self, size: int = 1) -> bytes:
+        # CDC Full-Speed идёт пакетами до 64 Б — отдаём не больше за вызов,
+        # как на реальном линке (иначе один read() съедает «будущие» байты).
+        size = min(size, 64)
         chunk = bytes(self._rx[:size])
         del self._rx[:size]
         return chunk
@@ -107,3 +110,38 @@ def test_request_control_timeout() -> None:
     manager = _manager_with_port(port)
     with pytest.raises(TimeoutError):
         manager.request_control(CMD_CFG_READ, b"", timeout=0.05)
+
+
+def test_request_control_burst_under_can_flood() -> None:
+    """Серия STAGE (>5 триггеров) под потоком CAN-кадров: каждый ответ
+    закрыт лавиной кадров — регрессия «Таймаут ответа на команду 0xCA»."""
+    from core.can_protocol import CMD_TRIGGER_STAGE
+
+    stage_cmd = bytes([CMD_TRIGGER_STAGE, 83, 0]) + bytes(82)
+
+    class _FloodPort(_ScriptedPort):
+        """Отвечает на каждую команду кадрами + ответом — как МК на
+        насыщенной шине: между командами летят CAN-кадры, один с 0xDA
+        внутри данных."""
+
+        _n = 0
+
+        def write(self, data: bytes) -> int:
+            super().write(data)
+            i = self._n
+            self._n += 1
+            self._rx += _rx_frame(1, 0x100 + i, bytes([i & 0xFF] * 8))
+            self._rx += _rx_frame(2, 0x200 + i, b"\xDA\x00\x00")
+            self._rx += _cmd_response(CMD_TRIGGER_STAGE, 0)
+            return len(data)
+
+    port = _FloodPort(b"")
+    manager = _manager_with_port(port)
+
+    with manager.control_session():
+        for _ in range(8):
+            manager.request_control(CMD_TRIGGER_STAGE, stage_cmd[2:])
+
+    # Каждая команда ушла на устройство ровно один раз (без ретраев-таймаутов).
+    assert len(port.writes) == 8
+    assert all(w == stage_cmd for w in port.writes)
