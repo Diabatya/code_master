@@ -115,11 +115,18 @@ class DataVariantsDialog(QDialog):
         layout.addWidget(buttons)
 
 
-def _data_percent(data: bytes, dlc: int) -> float:
-    """DATA как процент заполнения: 00..00 → 0%, FF..FF → 100%."""
+def _data_percent(data: bytes, dlc: int, byte_index: Optional[int] = None) -> float:
+    """DATA как процент заполнения: 00..00 → 0%, FF..FF → 100%.
+
+    byte_index=None — весь DATA целиком; иначе — один байт (0x00→0%, 0xFF→100%).
+    """
     dlc = max(0, min(int(dlc), len(data)))
     if dlc == 0:
         return 0.0
+    if byte_index is not None:
+        if byte_index >= dlc:
+            return 0.0
+        return data[byte_index] * 100.0 / 255.0
     value = int.from_bytes(data[:dlc], "big")
     maximum = (1 << (dlc * 8)) - 1
     return value * 100.0 / maximum if maximum else 0.0
@@ -220,6 +227,10 @@ class IdHistoryDialog(QDialog):
         self.can_id = can_id
         self.setWindowTitle(tr("История ID 0x{0:X} — CAN{1}").format(can_id, channel))
         self.resize(640, 480)
+        # Сырые сэмплы для пересчёта при смене источника графика
+        # (весь DATA или конкретный байт) и инверсии.
+        self._samples_raw: List[Tuple[float, bytes, bool, int]] = []
+        self._byte_index: Optional[int] = None
 
         font = QFont("Segoe UI", 9)
         layout = QVBoxLayout(self)
@@ -251,9 +262,20 @@ class IdHistoryDialog(QDialog):
         self._invert_button.setToolTip(tr("FF..FF = 0% внизу, 00..00 = 100% вверху"))
         self._invert_button.toggled.connect(self._on_invert_toggled)
 
+        # Выбор источника графика: весь DATA или один байт. Для поиска
+        # «какой ID несёт обороты/скорость» удобно смотреть конкретный
+        # байт — в 8-байтном значении его изменение почти не видно.
+        self._source_combo = QComboBox()
+        self._source_combo.setFont(font)
+        self._source_combo.addItem(tr("Весь DATA"), None)
+        for i in range(8):
+            self._source_combo.addItem(tr("Байт {0}").format(i), i)
+        self._source_combo.currentIndexChanged.connect(self._on_source_changed)
+
         bottom = QHBoxLayout()
         bottom.addWidget(self._percent_label)
         bottom.addSpacing(16)
+        bottom.addWidget(self._source_combo)
         bottom.addWidget(self._zoom_label)
         bottom.addWidget(self._zoom_slider, 1)
         bottom.addWidget(self._invert_button)
@@ -278,6 +300,9 @@ class IdHistoryDialog(QDialog):
         self._repaint_timer.timeout.connect(self._graph.update)
         self._repaint_timer.start(250)
 
+    def _current_pct(self, data: bytes, rtr: bool, dlc: int) -> float:
+        return _data_percent(data, dlc, self._byte_index) if not rtr else 0.0
+
     def _append_row(self, t: float, data: bytes, rtr: bool, dlc: int, repaint: bool = True) -> None:
         if self._table.rowCount() >= self.MAX_ROWS:
             self._table.removeRow(0)
@@ -289,7 +314,10 @@ class IdHistoryDialog(QDialog):
             item = QTableWidgetItem(text)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._table.setItem(row, col, item)
-        pct = _data_percent(data, dlc) if not rtr else 0.0
+        self._samples_raw.append((t, bytes(data), rtr, dlc))
+        if len(self._samples_raw) > self.MAX_ROWS:
+            del self._samples_raw[: len(self._samples_raw) - self.MAX_ROWS]
+        pct = self._current_pct(data, rtr, dlc)
         self._graph.add_sample(t, pct)
         if repaint:
             shown = 100.0 - pct if self._invert_button.isChecked() else pct
@@ -299,6 +327,21 @@ class IdHistoryDialog(QDialog):
     def add_sample(self, t: float, data: bytes, rtr: bool, dlc: int) -> None:
         """Вызывается монитором при новом фрейме с этим ID."""
         self._append_row(t, data, rtr, dlc)
+
+    def _on_source_changed(self, _index: int) -> None:
+        """Смена источника графика: весь DATA ↔ конкретный байт."""
+        self._byte_index = self._source_combo.currentData()
+        self._graph.set_samples(
+            [
+                (t, self._current_pct(data, rtr, dlc))
+                for t, data, rtr, dlc in self._samples_raw
+            ]
+        )
+        if self._samples_raw:
+            _t, data, rtr, dlc = self._samples_raw[-1]
+            pct = self._current_pct(data, rtr, dlc)
+            shown = 100.0 - pct if self._invert_button.isChecked() else pct
+            self._percent_label.setText(f"{shown:.1f}%")
 
     def _on_zoom_changed(self, value: int) -> None:
         self._zoom_label.setText(tr("Развёртка: {0} с").format(value))

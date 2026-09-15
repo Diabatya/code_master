@@ -517,6 +517,8 @@ class Translator:
                 "Передача остановлена: порт закрыт": "Transmission stopped: port closed",
                 "Конец списка — следующий шаг начнёт с первого кадра":
                     "End of list — next step starts from the first frame",
+                "Весь DATA": "Whole DATA",
+                "Байт {0}": "Byte {0}",
                 "Удалить фрейм": "Remove frame",
                 "Автоматическая запись DATA в Кэш": "Auto-save DATA to Cache",
                 "Кол-во": "Qty",
