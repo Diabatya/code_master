@@ -613,6 +613,7 @@ class Translator:
                 "USB DFU: сохранение bootloader/config/триггеров...": "USB DFU: saving bootloader/config/triggers...",
                 "USB DFU: полное стирание Flash (mass erase)...": "USB DFU: full Flash erase (mass erase)...",
                 "USB DFU: восстановлено областей: {0}": "USB DFU: restored regions: {0}",
+                "USB DFU: не удалось прочитать область 0x{0:08X} перед стиранием ({1}) — запись отменена, устройство не повреждено": "USB DFU: could not read region 0x{0:08X} before erase ({1}) — write cancelled, device is intact",
                 "USB backend не найден. Установите libusb-package или WinUSB-драйвер через Zadig.": "USB backend not found. Install libusb-package or the WinUSB driver using Zadig.",
                 "pylink-square не установлен": "pylink-square is not installed",
                 "pyocd не установлен": "pyOCD is not installed",

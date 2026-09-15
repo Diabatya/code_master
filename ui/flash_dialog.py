@@ -1073,12 +1073,20 @@ class FlashWorker(QThread):
                         try:
                             blob = bytes(dfu.upload(p_addr, p_size))
                         except Exception as exc:  # noqa: BLE001
-                            logger.warning(
+                            # Mass erase снесёт и то, что не смогли
+                            # сохранить: потерянный bootloader делает
+                            # устройство незагружаемым — прерываемся до
+                            # стирания, а не после него.
+                            logger.error(
                                 "DFU: не удалось сохранить область 0x%08X: %s",
                                 p_addr,
                                 exc,
                             )
-                            continue
+                            return False, tr(
+                                "USB DFU: не удалось прочитать область 0x{0:08X} "
+                                "перед стиранием ({1}) — запись отменена, "
+                                "устройство не повреждено"
+                            ).format(p_addr, exc)
                         if any(b != 0xFF for b in blob):
                             saved_regions.append((p_addr, blob))
 

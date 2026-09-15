@@ -287,26 +287,28 @@ class DfuDevice:
         Без этого блок-0 команды, отправленные из dfuDNLOAD_IDLE, ROM
         воспринимает как обычные данные и «стирание» существует только
         в логе. ABORT из dfuIDLE безопасен — состояние не меняется.
+        ABORT шлём и ПРОВЕРЯЕМ результат: без перечитывания статуса
+        следующая команда могла прилететь раньше перехода и получить
+        errSTALLEDPKT (dfuERROR, bStatus=0x0F).
         """
-        try:
-            status = self._status(timeout=5000)
-        except usb.core.USBError:
-            return
-        if len(status) < 6:
-            return
-        if status[4] == STATE_DFU_ERROR:
+        for _attempt in range(6):
             try:
-                self._ctrl(DFU_REQUEST_SEND, DFU_CLRSTATUS, timeout=5000)
-                time.sleep(0.005)
+                status = self._status(timeout=5000)
+            except usb.core.USBError:
+                return
+            if len(status) < 6:
+                return
+            state = status[4]
+            if state == STATE_DFU_IDLE:
+                return
+            try:
+                if state == STATE_DFU_ERROR:
+                    self._ctrl(DFU_REQUEST_SEND, DFU_CLRSTATUS, timeout=5000)
+                else:
+                    self._ctrl(DFU_REQUEST_SEND, DFU_ABORT, timeout=5000)
             except usb.core.USBError:
                 pass
-            return
-        if status[4] != STATE_DFU_IDLE:
-            try:
-                self._ctrl(DFU_REQUEST_SEND, DFU_ABORT, timeout=5000)
-                time.sleep(0.005)
-            except usb.core.USBError:
-                pass
+            time.sleep(0.02)
 
     def abort(self) -> None:
         """Прерывает текущую DFU-операцию и возвращает устройство в dfuIDLE."""
