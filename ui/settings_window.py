@@ -32,6 +32,7 @@ from core.can_protocol import (
     DEVICE_TYPE_ANALOG,
     DEVICE_TYPE_BASIC,
     DEVICE_TYPE_CAN_FD,
+    EXPECTED_PROTOCOL_VERSION,
 )
 
 from core.serial_manager import SerialManager
@@ -723,8 +724,20 @@ class SettingsWindow(QMainWindow):
                     extras.append(tr("commit {0}").format(info["git_commit"]))
                 if extras:
                     text += "\n" + ", ".join(extras)
+                # Сверка протокола: на старой прошивке новые команды
+                # (stage/commit триггеров и т.п.) отсутствуют и вылезают
+                # непонятными таймаутами — лучше сразу предупредить.
+                proto = int(info.get("protocol_version", 0))
+                if proto < EXPECTED_PROTOCOL_VERSION:
+                    text += "\n" + tr(
+                        "⚠ Прошивка устарела (протокол {0}, требуется {1}) — обновите МК"
+                    ).format(proto, EXPECTED_PROTOCOL_VERSION)
+                    self._system_info_label.setStyleSheet("color: #FFB74D;")
+                else:
+                    self._system_info_label.setStyleSheet("")
                 self._system_info_label.setText(text)
         except Exception:  # noqa: BLE001
+            self._system_info_label.setStyleSheet("")
             self._system_info_label.setText(tr("Firmware: информация недоступна"))
 
     def _copy_device_id(self) -> None:

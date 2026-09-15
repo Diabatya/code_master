@@ -1,6 +1,7 @@
 """Трэйс CAN-шины: две хронологические таблицы для CAN1 и CAN2."""
 
 import csv
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -97,6 +98,14 @@ class CanAnalyzer(QWidget):
         self._export_custom_button.setMinimumHeight(32)
         self._export_custom_button.clicked.connect(self._export_custom)
 
+        self._load_button = QPushButton(tr("Загрузить лог…"))
+        self._load_button.setFont(font)
+        self._load_button.setMinimumHeight(32)
+        self._load_button.setToolTip(
+            tr("Загрузить .trace/CSV в таблицы — дальше «Отправить»/«По кадрам» воспроизводят его в шину")
+        )
+        self._load_button.clicked.connect(self._load_log)
+
         self._table1 = self._build_table(font)
         self._table2 = self._build_table(font)
         self._table_channel[self._table1] = 1
@@ -175,6 +184,7 @@ class CanAnalyzer(QWidget):
         top_layout.addWidget(self._stop_button)
         top_layout.addWidget(self._export_csv_button)
         top_layout.addWidget(self._export_custom_button)
+        top_layout.addWidget(self._load_button)
         top_layout.addStretch()
         layout.addLayout(top_layout)
 
@@ -394,6 +404,72 @@ class CanAnalyzer(QWidget):
                         f.write(f"{values[0]} ID={values[1]} DLC={values[2]} DATA={values[3]} PERIOD={values[4]} ASCII={values[5]} EXPL={values[6]}\n")
         except Exception as exc:  # noqa: BLE001
             logger.error("Ошибка экспорта .trace: %s", exc)
+
+    def _load_log(self) -> None:
+        """Загружает .trace или наш CSV в таблицы — дальше кнопки
+        «Отправить»/«По кадрам» воспроизводят лог в шину."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("Загрузить лог"), "",
+            tr("Trace/CSV (*.trace *.csv);;Все файлы (*)"),
+        )
+        if not path:
+            return
+        loaded = 0
+        try:
+            if path.lower().endswith(".csv"):
+                loaded = self._load_csv(path)
+            else:
+                loaded = self._load_trace(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Ошибка загрузки лога %s: %s", path, exc)
+            return
+        logger.info("Загружено %d кадров из %s", loaded, path)
+
+    def _append_loaded_row(self, table: QTableWidget, values: List[str]) -> None:
+        if table.rowCount() >= MAX_TABLE_ROWS:
+            table.removeRow(0)
+        row = table.rowCount()
+        table.insertRow(row)
+        for col, text in enumerate(values[:7]):
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.setItem(row, col, item)
+
+    def _load_csv(self, path: str) -> int:
+        """CSV нашего экспорта: channel,time,id,dlc,data,period,ascii,explanation."""
+        loaded = 0
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            for values in csv.reader(f):
+                if len(values) < 4 or values[0].lower() == "channel":
+                    continue
+                try:
+                    channel = int(values[0])
+                except ValueError:
+                    continue
+                table = self._table1 if channel == 1 else self._table2
+                self._append_loaded_row(table, values[1:8])
+                loaded += 1
+        return loaded
+
+    _TRACE_LINE_RE = re.compile(
+        r"^(\S+)\s+ID=(\S+)\s+DLC=(\S+)\s+DATA=(.*?)\s+PERIOD=(.*?)\s+ASCII=(.*?)\s+EXPL=(.*)$"
+    )
+
+    def _load_trace(self, path: str) -> int:
+        """Формат .trace: секции [CAN1]/[CAN2], строки «time ID=.. DLC=.. DATA=.. ...»."""
+        loaded = 0
+        table = self._table1
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if line.startswith("[CAN"):
+                    table = self._table1 if "CAN1" in line else self._table2
+                    continue
+                match = self._TRACE_LINE_RE.match(line)
+                if match:
+                    self._append_loaded_row(table, list(match.groups()))
+                    loaded += 1
+        return loaded
 
     @staticmethod
     def parse_packet_string(text: str) -> Optional[Dict[str, Any]]:

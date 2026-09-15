@@ -519,6 +519,17 @@ class Translator:
                     "End of list — next step starts from the first frame",
                 "Весь DATA": "Whole DATA",
                 "Байт {0}": "Byte {0}",
+                "Загрузить лог…": "Load log…",
+                "Загрузить лог": "Load log",
+                "Загрузить .trace/CSV в таблицы — дальше «Отправить»/«По кадрам» воспроизводят его в шину":
+                    "Load a .trace/CSV into the tables — then Send/Step replays it to the bus",
+                "Trace/CSV (*.trace *.csv);;Все файлы (*)":
+                    "Trace/CSV (*.trace *.csv);;All files (*)",
+                "Принято: {0} | Скорость: {1} пак/с | Нагрузка: {2:.0f}%":
+                    "Received: {0} | Rate: {1} pkt/s | Load: {2:.0f}%",
+                "Экспорт истории ID 0x{0:X}": "Export history of ID 0x{0:X}",
+                "⚠ Прошивка устарела (протокол {0}, требуется {1}) — обновите МК":
+                    "⚠ Firmware is outdated (protocol {0}, required {1}) — update the MCU",
                 "Удалить фрейм": "Remove frame",
                 "Автоматическая запись DATA в Кэш": "Auto-save DATA to Cache",
                 "Кол-во": "Qty",

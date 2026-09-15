@@ -37,6 +37,11 @@ CMD_TRIGGER_COMMIT = 0xCB
 CMD_USB_STATS = 0xCC
 CMD_CAN_MODE = 0xCD  # Управление режимом CAN (Normal/Silent) и терминатором
 
+# Версия протокола, которую ожидает хост. Прошивка отвечает её в
+# CMD_SYSTEM_INFO (payload[1]); меньше — функции нового протокола
+# (stage/commit триггеров, cfg-команды) на устройстве отсутствуют.
+EXPECTED_PROTOCOL_VERSION = 1
+
 # Типы устройств
 DEVICE_TYPE_BASIC = 0x00   # Базовое CAN 2.0
 DEVICE_TYPE_ANALOG = 0x01  # 2 CAN + (с аналоговыми портами)

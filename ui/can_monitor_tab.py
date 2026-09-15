@@ -6,13 +6,22 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, TextIO, Tuple
 
-from PySide6.QtCore import QRegularExpression, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QRegularExpressionValidator
+from PySide6.QtCore import QPointF, QRect, QRegularExpression, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QRegularExpressionValidator,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
@@ -115,6 +124,13 @@ class DataVariantsDialog(QDialog):
         layout.addWidget(buttons)
 
 
+def _id_row_color(frame_id: int) -> QColor:
+    """Детерминированный приглушённый цвет ячейки ID — глаз цепляется
+    за цвет, а не за hex, когда кадры сыплются пачками."""
+    hue = (frame_id * 37) % 360
+    return QColor.fromHsl(hue, 80, 40)
+
+
 def _data_percent(data: bytes, dlc: int, byte_index: Optional[int] = None) -> float:
     """DATA как процент заполнения: 00..00 → 0%, FF..FF → 100%.
 
@@ -139,13 +155,17 @@ class _PercentGraph(QWidget):
     переворачивает ось Y (FF..FF внизу, 00..00 вверху).
     """
 
+    LINE_COLOR = QColor("#4CAF50")
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._samples: List[Tuple[float, float]] = []  # (time, percent)
         self._window_s = 30.0
         self._inverted = False
+        self._hover_x: Optional[float] = None
         self.setMinimumHeight(150)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)
 
     def set_window(self, seconds: float) -> None:
         self._window_s = max(1.0, float(seconds))
@@ -165,11 +185,55 @@ class _PercentGraph(QWidget):
         self._samples = list(samples)
         self.update()
 
+    # ---- геометрия -----------------------------------------------------
+
+    def _plot_rect(self) -> "QRect":
+        return self.rect().adjusted(38, 10, -10, -24)
+
+    def _to_point(self, rect, t: float, v: float, start: float) -> QPointF:
+        """(время, %) → точка на канве с учётом инверсии оси Y."""
+        shown = 100.0 - v if self._inverted else v
+        x = rect.left() + rect.width() * (t - start) / self._window_s
+        y = rect.bottom() - rect.height() * shown / 100.0
+        return QPointF(x, y)
+
+    @staticmethod
+    def _smooth_path(points: List[QPointF]) -> QPainterPath:
+        """Сглаживание Catmull-Rom → кубические Bezier (плавная кривая)."""
+        path = QPainterPath()
+        if not points:
+            return path
+        path.moveTo(points[0])
+        n = len(points)
+        for i in range(n - 1):
+            p0 = points[i - 1] if i > 0 else points[0]
+            p1, p2 = points[i], points[i + 1]
+            p3 = points[i + 2] if i + 2 < n else p2
+            c1 = QPointF(p1.x() + (p2.x() - p0.x()) / 6.0,
+                         p1.y() + (p2.y() - p0.y()) / 6.0)
+            c2 = QPointF(p2.x() - (p3.x() - p1.x()) / 6.0,
+                         p2.y() - (p3.y() - p1.y()) / 6.0)
+            path.cubicTo(c1, c2, p2)
+        return path
+
+    # ---- мышь ----------------------------------------------------------
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        self._hover_x = event.position().x()
+        self.update()
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hover_x = None
+        self.update()
+        super().leaveEvent(event)
+
+    # ---- отрисовка -----------------------------------------------------
+
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("#232338"))
-        rect = self.rect().adjusted(38, 10, -10, -24)
+        rect = self._plot_rect()
         painter.setPen(QPen(QColor("#5A5A7A"), 1))
         painter.drawRect(rect)
         if rect.width() <= 0 or rect.height() <= 0:
@@ -191,23 +255,69 @@ class _PercentGraph(QWidget):
         now = time.time()
         start = now - self._window_s
         pts = [(t, v) for t, v in self._samples if t >= start]
-        if len(pts) >= 2:
-            painter.setPen(QPen(QColor("#4CAF50"), 2))
-            prev = pts[0]
-            for t, v in pts[1:]:
-                # Линия должна следовать инверсии шкалы: FF..FF = 0%
-                # внизу при включённом «Инвертировании», иначе 100% вверху.
-                v1 = 100.0 - prev[1] if self._inverted else prev[1]
-                v2 = 100.0 - v if self._inverted else v
-                x1 = rect.left() + rect.width() * (prev[0] - start) / self._window_s
-                y1 = rect.bottom() - rect.height() * v1 / 100.0
-                x2 = rect.left() + rect.width() * (t - start) / self._window_s
-                y2 = rect.bottom() - rect.height() * v2 / 100.0
-                painter.drawLine(int(x1), int(y1), int(x2), int(y2))
-                prev = (t, v)
+        coords = [self._to_point(rect, t, v, start) for t, v in pts]
+
+        # Кривая: сглаженная линия + градиентная заливка под ней
+        if len(coords) >= 2:
+            curve = self._smooth_path(coords)
+            fill = QPainterPath(curve)
+            fill.lineTo(coords[-1].x(), rect.bottom())
+            fill.lineTo(coords[0].x(), rect.bottom())
+            fill.closeSubpath()
+            gradient = QLinearGradient(0, rect.top(), 0, rect.bottom())
+            top = QColor(self.LINE_COLOR)
+            top.setAlpha(90)
+            bottom = QColor(self.LINE_COLOR)
+            bottom.setAlpha(5)
+            gradient.setColorAt(0.0, top)
+            gradient.setColorAt(1.0, bottom)
+            painter.fillPath(fill, gradient)
+            painter.setPen(QPen(self.LINE_COLOR, 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(curve)
+
+            # Светящаяся точка последнего значения + подпись
+            last = coords[-1]
+            glow = QColor(self.LINE_COLOR)
+            glow.setAlpha(60)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(glow)
+            painter.drawEllipse(last, 7, 7)
+            painter.setBrush(self.LINE_COLOR)
+            painter.drawEllipse(last, 3, 3)
+            painter.setPen(QColor("#E0E0E0"))
+            label = f"{pts[-1][1]:.1f}%"
+            lx = min(last.x() + 10, rect.right() - 34)
+            painter.drawText(int(lx), int(last.y()) - 8, label)
+
+        # Метки времени на оси X (5 делений)
         painter.setPen(QColor("#9E9E9E"))
-        painter.drawText(int(rect.left()), self.rect().bottom() - 6, f"-{int(self._window_s)}с")
-        painter.drawText(int(rect.right()) - 24, self.rect().bottom() - 6, tr("сейчас"))
+        for i in range(5):
+            t = start + self._window_s * i / 4.0
+            x = rect.left() + rect.width() * i / 4.0
+            text = time.strftime("%H:%M:%S", time.localtime(t))
+            tx = int(x) - 20 if 0 < i < 4 else int(x) - (2 if i == 0 else 40)
+            painter.drawText(tx, self.rect().bottom() - 6, text)
+
+        # Hover-курсор: вертикальная линия + значение ближайшей точки
+        if self._hover_x is not None and pts:
+            x = min(max(self._hover_x, rect.left()), rect.right())
+            t_hover = start + (x - rect.left()) / rect.width() * self._window_s
+            t_near, v_near = min(pts, key=lambda p: abs(p[0] - t_hover))
+            pt = self._to_point(rect, t_near, v_near, start)
+            painter.setPen(QPen(QColor("#AAAAAA"), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(pt.x()), int(rect.top()), int(pt.x()), int(rect.bottom()))
+            painter.setBrush(QColor("#FFFFFF"))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(pt, 3, 3)
+            ts = time.strftime("%H:%M:%S", time.localtime(t_near))
+            ts += f".{int((t_near % 1) * 1000):03d}"
+            shown = 100.0 - v_near if self._inverted else v_near
+            info = f"{ts} — {shown:.1f}%"
+            ix = min(pt.x() + 8, rect.right() - 110)
+            painter.setPen(QColor("#E0E0E0"))
+            painter.drawText(int(ix), int(rect.top()) + 12, info)
+
         painter.end()
 
 
@@ -272,6 +382,10 @@ class IdHistoryDialog(QDialog):
             self._source_combo.addItem(tr("Байт {0}").format(i), i)
         self._source_combo.currentIndexChanged.connect(self._on_source_changed)
 
+        self._export_button = QPushButton(tr("Экспорт CSV"))
+        self._export_button.setFont(font)
+        self._export_button.clicked.connect(self._export_csv)
+
         bottom = QHBoxLayout()
         bottom.addWidget(self._percent_label)
         bottom.addSpacing(16)
@@ -279,6 +393,7 @@ class IdHistoryDialog(QDialog):
         bottom.addWidget(self._zoom_label)
         bottom.addWidget(self._zoom_slider, 1)
         bottom.addWidget(self._invert_button)
+        bottom.addWidget(self._export_button)
 
         layout.addWidget(self._table, 1)
         layout.addWidget(self._graph)
@@ -353,6 +468,27 @@ class IdHistoryDialog(QDialog):
         if self._graph._samples:
             _t, pct = self._graph._samples[-1]
             self._percent_label.setText(f"{(100.0 - pct) if checked else pct:.1f}%")
+
+    def _export_csv(self) -> None:
+        """Выгружает историю ID в CSV: время, DLC, DATA, процент."""
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            tr("Экспорт истории ID 0x{0:X}").format(self.can_id),
+            f"id_{self.can_id:X}_history.csv",
+            tr("CSV files (*.csv)"),
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["time", "dlc", "data", "percent"])
+                for t, data, rtr, dlc in self._samples_raw:
+                    ts = time.strftime("%H:%M:%S", time.localtime(t)) + f".{int((t % 1) * 1000):03d}"
+                    data_text = "rtr" if rtr else " ".join(format_data_bytes(data))
+                    writer.writerow([ts, dlc, data_text, f"{self._current_pct(data, rtr, dlc):.1f}"])
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Ошибка экспорта истории ID: %s", exc)
 
 
 class BitmapDialog(QDialog):
@@ -451,7 +587,7 @@ class CanChannelMonitor(QWidget):
         self._running = False
         self._received_count = 0
         self._sent_count = 0
-        self._packet_times: deque[float] = deque()
+        self._packet_times: deque[Tuple[float, int]] = deque()  # (t, бит кадра)
         self._last_packet_time: Optional[float] = None
         self._cyclic_frame: Optional[bytes] = None
         self._dbc_manager = DBCManager()
@@ -840,10 +976,15 @@ class CanChannelMonitor(QWidget):
 
     def _update_stats(self) -> None:
         now = time.time()
-        while self._packet_times and now - self._packet_times[0] > 1.0:
+        while self._packet_times and now - self._packet_times[0][0] > 1.0:
             self._packet_times.popleft()
         speed = len(self._packet_times)
-        text = tr("Принято: {0} | Скорость: {1} пак/с").format(self._received_count, speed)
+        bitrate = int(self._config.get(f"can{self._channel}_speed", 500000) or 500000)
+        bits_per_s = sum(bits for _t, bits in self._packet_times)
+        load_pct = min(999.0, bits_per_s * 100.0 / bitrate) if bitrate else 0.0
+        text = tr("Принято: {0} | Скорость: {1} пак/с | Нагрузка: {2:.0f}%").format(
+            self._received_count, speed, load_pct
+        )
         try:
             if self._serial_manager.is_open() and not self._config.get("emulation", False):
                 device = self._serial_manager.read_can_stats(self._channel)
@@ -935,7 +1076,9 @@ class CanChannelMonitor(QWidget):
             return
 
         self._received_count += 1
-        self._packet_times.append(time.time())
+        # Оценка бит кадра для нагрузки шины: ~45 служебных + dlc*8
+        # данных, ×1.15 на битстаффинг, +3 бита interframe.
+        self._packet_times.append((time.time(), int((45 + dlc * 8) * 1.15) + 3))
         self._last_packet_time = time.time()
 
         now = time.time()
@@ -959,6 +1102,8 @@ class CanChannelMonitor(QWidget):
                 if item is None:
                     item = QTableWidgetItem(text)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    if col == 0:
+                        item.setBackground(_id_row_color(frame_id))
                     self._table.setItem(row, col, item)
                 else:
                     item.setText(text)
@@ -986,6 +1131,8 @@ class CanChannelMonitor(QWidget):
             for col, text in enumerate(items):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if col == 0:
+                    item.setBackground(_id_row_color(frame_id))
                 if tooltip:
                     item.setToolTip(tooltip)
                 self._table.setItem(row, col, item)
