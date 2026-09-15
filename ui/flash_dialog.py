@@ -113,6 +113,18 @@ def _flash_size_for_chip_id(chip_id: Optional[int]) -> str:
     return f"{CHIP_FLASH_SIZE_KB.get(chip_id, tr('Неизвестно'))} KB"
 
 
+def _is_valid_trigger_blob(blob: bytes) -> bool:
+    """Пул триггеров — валидное хранилище?
+
+    Ищем заголовок "TRGH" (хранилище v3) или записи "TRG2" (легаси v2 —
+    прошивка сама мигрирует их при старте). Если ни того ни другого —
+    область содержит мусор/чужие данные, восстанавливать её нельзя.
+    """
+    trgh = (0x54524748).to_bytes(4, "little")
+    trg2 = (0x54524732).to_bytes(4, "little")
+    return trgh in blob or trg2 in blob
+
+
 def _format_chip_id(value: Optional[int]) -> str:
     """Форматирует chip ID как HEX-строку."""
     if value is None:
@@ -673,6 +685,7 @@ class FlashWorker(QThread):
         method: str,
         config: Config,
         verify: bool = True,
+        preserve_triggers: bool = True,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -680,6 +693,7 @@ class FlashWorker(QThread):
         self._method = method
         self._config = config
         self._verify = verify
+        self._preserve_triggers = preserve_triggers
         self._current_index = 0
         self._total = len(files)
 
@@ -1053,15 +1067,20 @@ class FlashWorker(QThread):
                     # ВСЮ Flash, поэтому сначала сохраняем области, которых
                     # нет в образе: наш USB-CDC bootloader (без него МК не
                     # стартует application), страницу конфигурации (имя/
-                    # серийник/VID/PID) и пул триггеров.
-                    preserve = (
+                    # серийник/VID/PID) и — по опции — пул триггеров.
+                    preserve = [
                         (BOOTLOADER_BASE_ADDR, APPLICATION_BASE_ADDR - BOOTLOADER_BASE_ADDR),
                         (DEVICE_CONFIG_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE),
-                        (TRIGGER_REGION_ADDR, FLASH_END_ADDR - TRIGGER_REGION_ADDR),
-                    )
+                    ]
+                    if self._preserve_triggers:
+                        preserve.append(
+                            (TRIGGER_REGION_ADDR, FLASH_END_ADDR - TRIGGER_REGION_ADDR)
+                        )
                     saved_regions = []
                     self.log_line.emit(
                         tr("USB DFU: сохранение bootloader/config/триггеров...")
+                        if self._preserve_triggers
+                        else tr("USB DFU: сохранение bootloader/config...")
                     )
                     for p_addr, p_size in preserve:
                         covered = any(
@@ -1088,6 +1107,14 @@ class FlashWorker(QThread):
                                 "устройство не повреждено"
                             ).format(p_addr, exc)
                         if any(b != 0xFF for b in blob):
+                            # Пул триггеров восстанавливаем только если
+                            # там валидное хранилище ("TRGH" v3 или
+                            # легаси-записи "TRG2") — иначе вернём мусор.
+                            if p_addr == TRIGGER_REGION_ADDR and not _is_valid_trigger_blob(blob):
+                                self.log_line.emit(
+                                    tr("USB DFU: область триггеров без валидного хранилища — не восстанавливается")
+                                )
+                                continue
                             saved_regions.append((p_addr, blob))
 
                     self.log_line.emit(
@@ -1595,6 +1622,18 @@ class FlashDialog(QDialog):
         self._verify_checkbox.setChecked(True)
         self._verify_checkbox.setToolTip(tr("Отключите, чтобы ускорить прошивку за счёт пропуска чтения обратно"))
 
+        self._preserve_triggers_checkbox = QCheckBox(tr("Сохранять триггеры"))
+        self._preserve_triggers_checkbox.setChecked(
+            bool(self._config.get("preserve_triggers", True))
+        )
+        self._preserve_triggers_checkbox.setToolTip(
+            tr("При DFU-прошивке возвращать сохранённые триггеры обратно. "
+               "Снимите для чистой прошивки без старых триггеров")
+        )
+        self._preserve_triggers_checkbox.toggled.connect(
+            lambda checked: self._config.set("preserve_triggers", bool(checked))
+        )
+
         # Файлы прошивки
         self._files_group = QGroupBox(tr("Файлы прошивки"))
         self._files_list = QListWidget()
@@ -1657,6 +1696,7 @@ class FlashDialog(QDialog):
         config_layout = QHBoxLayout()
         config_layout.addWidget(self._config_button)
         config_layout.addWidget(self._verify_checkbox)
+        config_layout.addWidget(self._preserve_triggers_checkbox)
         config_layout.addStretch()
         layout.addLayout(config_layout)
 
@@ -2111,7 +2151,14 @@ class FlashDialog(QDialog):
         self._read_config_button.setEnabled(False)
         self._erase_button.setEnabled(False)
         self._progress_bar.setValue(0)
-        self._flash_worker = FlashWorker(prepared, method, self._config, verify=self._verify_checkbox.isChecked(), parent=self)
+        self._flash_worker = FlashWorker(
+            prepared,
+            method,
+            self._config,
+            verify=self._verify_checkbox.isChecked(),
+            preserve_triggers=self._preserve_triggers_checkbox.isChecked(),
+            parent=self,
+        )
         self._flash_worker.log_line.connect(self._log)
         self._flash_worker.progress.connect(self._progress_bar.setValue)
         self._flash_worker.finished.connect(self._on_flash_finished)

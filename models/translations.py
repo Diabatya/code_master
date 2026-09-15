@@ -530,6 +530,15 @@ class Translator:
                 "Экспорт истории ID 0x{0:X}": "Export history of ID 0x{0:X}",
                 "⚠ Прошивка устарела (протокол {0}, требуется {1}) — обновите МК":
                     "⚠ Firmware is outdated (protocol {0}, required {1}) — update the MCU",
+                "Сохранять триггеры": "Preserve triggers",
+                "При DFU-прошивке возвращать сохранённые триггеры обратно. "
+                "Снимите для чистой прошивки без старых триггеров":
+                    "Restore saved triggers after DFU flashing. "
+                    "Uncheck for a clean flash without old triggers",
+                "USB DFU: сохранение bootloader/config...":
+                    "USB DFU: saving bootloader/config...",
+                "USB DFU: область триггеров без валидного хранилища — не восстанавливается":
+                    "USB DFU: trigger region has no valid store — not restoring",
                 "Удалить фрейм": "Remove frame",
                 "Автоматическая запись DATA в Кэш": "Auto-save DATA to Cache",
                 "Кол-во": "Qty",
