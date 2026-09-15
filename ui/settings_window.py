@@ -330,6 +330,10 @@ class SettingsWindow(QMainWindow):
         self._device_name_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         self._device_name_label.setMinimumWidth(180)
 
+        # Индикатор связи: зелёное «Подключено» / красное «Не подключено».
+        self._conn_status_label = QLabel()
+        self._conn_status_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+
         self._serial_label = QLabel(tr("Серийный номер"))
         self._serial_label.setFont(font)
         self._serial_value = QLabel()
@@ -346,6 +350,7 @@ class SettingsWindow(QMainWindow):
         device_layout.setSpacing(8)
         device_layout.addWidget(self._device_label)
         device_layout.addWidget(self._device_name_label)
+        device_layout.addWidget(self._conn_status_label)
         device_layout.addWidget(self._serial_label)
         device_layout.addWidget(self._serial_value)
         device_layout.addWidget(self._copy_id_button)
@@ -590,7 +595,17 @@ class SettingsWindow(QMainWindow):
             return
         self._show_loading_overlay()
 
+    def _update_conn_status(self, connected: bool) -> None:
+        """Индикатор связи между «Устройство» и «Серийный номер»."""
+        self._conn_status_label.setText(
+            tr("Подключено") if connected else tr("Не подключено")
+        )
+        self._conn_status_label.setStyleSheet(
+            f"color: {'#4CAF50' if connected else '#E53935'};"
+        )
+
     def _on_connection_changed(self, connected: bool) -> None:
+        self._update_conn_status(connected)
         if not connected:
             self._hide_loading_overlay()
             self._trigger_tab.clear_device_managed()
@@ -774,6 +789,7 @@ class SettingsWindow(QMainWindow):
         self._serial_manager.error_occurred.connect(self._on_serial_error)
         self._serial_manager.connection_changed.connect(self._on_connection_changed)
         self._serial_manager.connecting.connect(self._on_connecting)
+        self._update_conn_status(self._serial_manager.is_open())
         self._monitor_tab.create_trigger_requested.connect(self._on_create_trigger)
         self._trigger_tab.settings_changed.connect(self._mark_dirty)
 

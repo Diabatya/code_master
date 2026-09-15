@@ -484,6 +484,11 @@ class CanChannelMonitor(QWidget):
         self._last_rclick_time = 0.0
         self._last_rclick_row = -1
         self._table.viewport().installEventFilter(self)
+        # Двойной клик ЛЕВОЙ кнопкой по строке — та же история ID
+        # (таблица логирования, онлайн-график %, развёртка, инверсия).
+        self._table.cellDoubleClicked.connect(
+            lambda row, _col: self._show_id_history(row)
+        )
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.setColumnWidth(0, 90)
         self._table.setColumnWidth(1, 50)
@@ -894,7 +899,7 @@ class CanChannelMonitor(QWidget):
         stats = self._id_stats.setdefault(frame_id, {"count": 0, "last_time": None, "last_data": b"", "last_receive_time": None})
         stats["count"] += 1
         period = self._format_period(frame_id, now)
-        prev_receive_time = stats.get("last_receive_time")
+        prev_data = stats.get("last_data")
         stats["last_time"] = now
 
         timestamp = time.strftime("%H:%M:%S") + f".{int((now % 1) * 1000):03d}"
@@ -916,13 +921,10 @@ class CanChannelMonitor(QWidget):
                     item.setText(text)
                 if tooltip:
                     item.setToolTip(tooltip)
-            # Подсветка частого ID: период следования меньше заданного
-            # интервала → фон ячейки Data светлее на 0.5 с. Содержимое
-            # Data роли не играет — важны только ID и тайминг.
-            if prev_receive_time is not None and self._highlight_interval_ms > 0:
-                elapsed_ms = int((now - prev_receive_time) * 1000)
-                if elapsed_ms < self._highlight_interval_ms:
-                    self._highlight_data_cell(row)
+            # Подсветка изменившихся данных: DATA того же ID изменилась →
+            # фон ячейки Data светлее на «Интервал подсветки» сверху.
+            if prev_data is not None and prev_data != data and self._highlight_interval_ms > 0:
+                self._highlight_data_cell(row)
         else:
             if self._table.rowCount() >= MAX_TABLE_ROWS:
                 last_row = self._table.rowCount() - 1
@@ -1020,7 +1022,9 @@ class CanChannelMonitor(QWidget):
         timer = QTimer(self)
         timer.setSingleShot(True)
         timer.timeout.connect(lambda r=row: self._reset_data_background(r))
-        timer.start(500)
+        # Длительность — из поля «Интервал подсветки» сверху, а не
+        # жёсткие 500 мс (поле раньше ни на что не влияло).
+        timer.start(max(50, self._highlight_interval_ms))
         self._highlight_timers[row] = timer
 
     def _reset_data_background(self, row: int) -> None:
