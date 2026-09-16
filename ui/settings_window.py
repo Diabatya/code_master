@@ -646,6 +646,13 @@ class SettingsWindow(QMainWindow):
             self._trigger_tab.sync_from_device()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Не удалось вычитать триггеры из устройства: %s", exc)
+            # Без предупреждения сбой выглядел как «триггеров нет»,
+            # хотя в МК они есть и исполняются.
+            QMessageBox.warning(
+                self,
+                tr("Вычитка настроек"),
+                tr("Не удалось прочитать триггеры из устройства: {0}").format(exc),
+            )
         finally:
             self._hide_loading_overlay()
             self._loading = False
@@ -1135,19 +1142,22 @@ class SettingsWindow(QMainWindow):
             self._update_device_info()
             self._update_analog_tab()
             # Прогружаем загруженную конфигурацию в МК — та же точка
-            # записи, что у кнопки «Сохранить».
-            self._save_current_config()
-            QMessageBox.information(self, tr("Готово"), tr("Конфигурация загружена"))
+            # записи, что у кнопки «Сохранить». Успех показываем только
+            # если запись реально прошла — иначе после ошибки записи
+            # выскакивало ложное «Конфигурация загружена».
+            if self._save_current_config():
+                QMessageBox.information(self, tr("Готово"), tr("Конфигурация загружена"))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось загрузить: {0}").format(exc))
 
-    def _save_current_config(self) -> None:
+    def _save_current_config(self) -> bool:
         """Сохраняет настройки в файл и прогружает триггеры в устройство.
 
         Конфигуратор — «компилятор»: записанные в МК триггеры исполняются
         устройством автономно, без приложения. Поэтому «Сохранить» —
         единственная точка записи в устройство (кнопки чтения/записи
-        триггеров убраны).
+        триггеров убраны). Возвращает True при полном успехе — «Загрузить
+        конфигурацию» по нему решает, показывать ли «загружена».
         """
         if not self._serial_manager.is_open():
             logger.warning("Сохранение настроек без открытого COM-порта")
@@ -1162,8 +1172,10 @@ class SettingsWindow(QMainWindow):
             # Успешное сохранение подтверждается погасшей кнопкой
             # «Сохранить» — отдельное окно оператору не нужно.
             self._mark_clean()
+            return True
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить: {0}").format(exc))
+            return False
 
     def _factory_reset(self) -> None:
         """Сбрасывает настройки к заводским с подтверждением."""

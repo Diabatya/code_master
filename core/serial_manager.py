@@ -474,6 +474,10 @@ class SerialManager(QObject):
                         return self._control_roundtrip(command, payload, timeout)
                     except TimeoutError as exc:
                         last_timeout = exc
+                        logger.warning(
+                            "Команда 0x%02X: попытка %d без ответа (%s)",
+                            command, _attempt + 1, exc,
+                        )
                 raise last_timeout  # type: ignore[misc]
             finally:
                 if owns_session:

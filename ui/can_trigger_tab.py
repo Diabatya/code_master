@@ -720,10 +720,16 @@ class CanTriggerTab(QWidget):
         grid = QGridLayout(wrapper)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.addWidget(block["group"], 0, 0)
-        grid.addWidget(
-            delete_button, 0, 0,
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
-        )
+        # Крестик — рядом с заголовком «Триггер N»: правый край блока на
+        # широких формах уходит за видимую область, и крестик был виден
+        # только с горизонтальной прокруткой. Левый край виден всегда.
+        holder = QWidget()
+        holder_layout = QHBoxLayout(holder)
+        holder_layout.setContentsMargins(140, 2, 0, 0)
+        holder_layout.setSpacing(0)
+        holder_layout.addWidget(delete_button)
+        holder_layout.addStretch()
+        grid.addWidget(holder, 0, 0)
         delete_button.raise_()
         block["wrapper"] = wrapper
         self._blocks_layout.addWidget(wrapper)
@@ -1137,8 +1143,16 @@ class CanTriggerTab(QWidget):
                 except RuntimeError as exc:
                     if "0x01" in str(exc):
                         break  # конец списка устройства
+                    logger.warning("Чтение триггера %d отклонено: %s", index, exc)
                     continue  # ошибка записи — не рвём синхронизацию
-                except Exception:
+                except TimeoutError:
+                    # Устройство молчит — дальше читать бессмысленно и
+                    # долго (до 70 таймаутов). Пробрасываем наружу, иначе
+                    # при сбое связи показывали «триггеров нет», хотя в
+                    # МК они есть и исполняются.
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Триггер %d пропущен (битая запись): %s", index, exc)
                     continue
                 if self._is_empty_trigger(values):
                     continue
