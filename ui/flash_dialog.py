@@ -1854,6 +1854,17 @@ class FlashDialog(QDialog):
             raise ValueError(tr("Введите серийный номер"))
 
         page = build_device_config_page(name, serial)
+        # Как и в _prepare_firmware_with_config: обновляем кэш идентичности,
+        # чтобы шапка/список портов не показывали старое имя после прошивки.
+        port_names = dict(self._config.get("port_names", {}) or {})
+        port_names[serial] = name
+        self._config.set_bulk({
+            "port_names": port_names,
+            "device_name": name,
+            "device_type_name": name,
+            "device_serial": serial,
+            "serial_number": serial,
+        })
         tmp = Path(tempfile.gettempdir()) / f"config_only_{int(time.time())}.hex"
         _save_intel_hex(page, DEVICE_CONFIG_PAGE_ADDR, tmp)
         return str(tmp)
@@ -2045,11 +2056,20 @@ class FlashDialog(QDialog):
             raise ValueError(tr("Прошивка не помещается в выбранный размер Flash"))
 
         page = build_device_config_page(name, serial)
-        # Запоминаем имя для списка портов: после прошивки устройство
-        # пере-энумерируется с iSerial = serial.
+        # Запоминаем имя для списка портов и шапки настроек: после прошивки
+        # устройство пере-энумерируется с iSerial = serial. Без обновления
+        # device_name/device_serial при сбое CMD_CFG_READ шапка показывала
+        # СТАРОЕ имя из кэша (прямая запись C1 обновляет их — см.
+        # _try_direct_config_write).
         port_names = dict(self._config.get("port_names", {}) or {})
         port_names[serial] = name
-        self._config.set("port_names", port_names)
+        self._config.set_bulk({
+            "port_names": port_names,
+            "device_name": name,
+            "device_type_name": name,
+            "device_serial": serial,
+            "serial_number": serial,
+        })
 
         image = IntelHex()
         image.puts(base, data)

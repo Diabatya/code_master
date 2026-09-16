@@ -720,20 +720,20 @@ class CanTriggerTab(QWidget):
         grid = QGridLayout(wrapper)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.addWidget(block["group"], 0, 0)
-        # Крестик — рядом с заголовком «Триггер N»: правый край блока на
-        # широких формах уходит за видимую область, и крестик был виден
-        # только с горизонтальной прокруткой. Левый край виден всегда.
+        # Крестик — ровно над «+» добавления ответа: тот сидит у правого
+        # края блока «Ответ» (≈18 px от края + половина кнопки 16 px),
+        # поэтому у крестика (24 px) правый отступ ~22 px выравнивает
+        # центры. AlignTop|AlignRight — иначе holder растянется на весь
+        # блок и перехватит все клики по полям триггера.
         holder = QWidget()
         holder_layout = QHBoxLayout(holder)
-        holder_layout.setContentsMargins(140, 2, 0, 0)
+        holder_layout.setContentsMargins(0, 4, 22, 0)
         holder_layout.setSpacing(0)
-        holder_layout.addWidget(delete_button)
         holder_layout.addStretch()
-        # AlignTop|AlignLeft — иначе holder растянется на весь блок и
-        # перехватит все клики по полям триггера.
+        holder_layout.addWidget(delete_button)
         grid.addWidget(
             holder, 0, 0,
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
         )
         delete_button.raise_()
         block["wrapper"] = wrapper
