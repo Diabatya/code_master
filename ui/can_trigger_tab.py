@@ -729,7 +729,12 @@ class CanTriggerTab(QWidget):
         holder_layout.setSpacing(0)
         holder_layout.addWidget(delete_button)
         holder_layout.addStretch()
-        grid.addWidget(holder, 0, 0)
+        # AlignTop|AlignLeft — иначе holder растянется на весь блок и
+        # перехватит все клики по полям триггера.
+        grid.addWidget(
+            holder, 0, 0,
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+        )
         delete_button.raise_()
         block["wrapper"] = wrapper
         self._blocks_layout.addWidget(wrapper)
