@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QTimer, Signal, QPropertyAnimation, QEasingCurve, QEvent
 from PySide6.QtGui import QFont, QStandardItemModel, QStandardItem
 from PySide6.QtWidgets import (
     QApplication,
@@ -451,6 +451,7 @@ class SettingsWindow(QMainWindow):
         # устройства «Сохранить» выключена и полупрозрачна, любое изменение
         # оператора включает её обратно.
         self._loading = False
+        self._refresh_pending = False
         self._baseline_signature: tuple = ()
         self._save_opacity = QGraphicsOpacityEffect(self._save_button)
         self._save_button.setGraphicsEffect(self._save_opacity)
@@ -493,26 +494,73 @@ class SettingsWindow(QMainWindow):
         Используются только «пользовательские» сигналы (activated,
         textEdited, clicked, toggled у checkable-групп и valueChanged
         спинов в фокусе), чтобы программное заполнение при вычитке с
-        устройства не считалось изменением.
+        устройства не считалось изменением. Событийный фильтр на каждом
+        виджете дерева ловит ChildAdded/ChildRemoved — динамически
+        добавленные строки (правила гибкой логики, блоки триггеров)
+        тоже получают отслеживание и помечают форму изменённой.
         """
+        for widget in (root, *root.findChildren(QWidget)):
+            if not widget.property("_dirty_watched"):
+                widget.setProperty("_dirty_watched", True)
+                widget.installEventFilter(self)
         for widget in root.findChildren(QComboBox):
-            widget.activated.connect(self._mark_dirty)
+            if not widget.property("_dt_combo"):
+                widget.setProperty("_dt_combo", True)
+                widget.activated.connect(self._mark_dirty)
         for widget in root.findChildren(QLineEdit):
-            if widget is self._search_edit:
+            if widget is self._search_edit or widget.property("_dt_edit"):
                 continue
+            widget.setProperty("_dt_edit", True)
             widget.textEdited.connect(self._mark_dirty)
         for widget in root.findChildren(QSpinBox):
+            if widget.property("_dt_spin"):
+                continue
+            widget.setProperty("_dt_spin", True)
             widget.valueChanged.connect(
                 lambda *_a, w=widget: self._mark_dirty() if w.hasFocus() else None
             )
         for widget in root.findChildren(QCheckBox):
+            if widget.property("_dt_check"):
+                continue
+            widget.setProperty("_dt_check", True)
             widget.clicked.connect(self._mark_dirty)
         for widget in root.findChildren(QPushButton):
-            if widget.isCheckable():
-                widget.clicked.connect(self._mark_dirty)
+            if widget.property("_dt_btn"):
+                continue
+            widget.setProperty("_dt_btn", True)
+            # clicked — у всех кнопок: не-чекабельные тоже могут менять
+            # поля («Из DBC», +/- строк ответа). Снимок сам решит,
+            # изменилось ли что-то — лишний вызов безопасен.
+            widget.clicked.connect(self._mark_dirty)
         for widget in root.findChildren(QGroupBox):
-            if widget.isCheckable():
+            if widget.isCheckable() and not widget.property("_dt_group"):
+                widget.setProperty("_dt_group", True)
                 widget.toggled.connect(self._on_groupbox_toggled)
+
+    def eventFilter(self, watched: QWidget, event: QEvent) -> bool:  # noqa: N802
+        """Ловит появление/удаление виджетов в дереве настроек.
+
+        ChildAdded — подписывает новое поддерево на отслеживание (строки
+        правил/триггеров создаются после установки фильтров); само
+        добавление уже меняет снимок — помечаем форму. ChildRemoved
+        срабатывает при setParent(None)/уничтожении — то есть при любом
+        удалении блока/строки, даже если само действие не пометило форму.
+        """
+        event_type = event.type()
+        if event_type == QEvent.Type.ChildAdded:
+            child = event.child()
+            if isinstance(child, QWidget):
+                def _track(w: QWidget = child) -> None:
+                    try:
+                        self._install_dirty_tracking(w)
+                    except RuntimeError:
+                        pass  # виджет уже уничтожен
+
+                QTimer.singleShot(0, _track)
+            self._mark_dirty()
+        elif event_type == QEvent.Type.ChildRemoved:
+            self._mark_dirty()
+        return super().eventFilter(watched, event)
 
     def _on_groupbox_toggled(self, _checked: bool) -> None:
         if not self._loading:
@@ -546,14 +594,23 @@ class SettingsWindow(QMainWindow):
         return tuple(sig)
 
     def _mark_dirty(self, *_args: object) -> None:
-        """Обновляет кнопку «Сохранить» по снимку полей.
+        """Планирует пересчёт состояния кнопки «Сохранить».
 
-        Активна, только когда введённые значения отличаются от последней
-        прогруженной конфигурации — стёртое и возвращённое обратно поле
-        изменением не считается.
+        Сравнение снимка откладывается до конца обработки текущего
+        события: сигналы clicked/textEdited часто приходят ДО того, как
+        слот действия изменил интерфейс (строка ещё не добавлена, блок
+        помечен deleteLater, но ещё живёт в дереве виджетов). Один
+        отложенный запуск видит итоговое состояние и заодно схлопывает
+        серию сигналов.
         """
-        if self._loading:
+        if self._loading or self._refresh_pending:
             return
+        self._refresh_pending = True
+        QTimer.singleShot(0, self._refresh_save_state)
+
+    def _refresh_save_state(self) -> None:
+        """Сверяет снимок полей с эталоном и обновляет кнопку."""
+        self._refresh_pending = False
         changed = self._widgets_signature() != self._baseline_signature
         # Без связи с устройством сохранять нечего — кнопка выключена
         # даже при наличии правок; при восстановлении связи состояние
@@ -1079,6 +1136,13 @@ class SettingsWindow(QMainWindow):
         if not path:
             return
         try:
+            # Поля вкладок сначала синхронизируем в конфиг — иначе файл
+            # уносил бы устаревшие значения (правки полей сами по себе
+            # в Config не пишутся), вплоть до пустого списка триггеров.
+            self._trigger_tab._save_config()
+            self._flexible_tab._save_config()
+            if hasattr(self._gateway_tab, "_save_config"):
+                self._gateway_tab._save_config()
             self._config.save_to_file(path)
             self._config.set("last_config_dir", os.path.dirname(path))
             QMessageBox.information(self, tr("Готово"), tr("Конфигурация сохранена"))
@@ -1141,12 +1205,17 @@ class SettingsWindow(QMainWindow):
                 )
             self._update_device_info()
             self._update_analog_tab()
-            # Прогружаем загруженную конфигурацию в МК — та же точка
-            # записи, что у кнопки «Сохранить». Успех показываем только
-            # если запись реально прошла — иначе после ошибки записи
-            # выскакивало ложное «Конфигурация загружена».
-            if self._save_current_config():
-                QMessageBox.information(self, tr("Готово"), tr("Конфигурация загружена"))
+            # Загрузка файла заполняет только поля — запись в МК идёт
+            # отдельным явным действием оператора (кнопка «Сохранить»).
+            # Кэш эталона не трогаем: отличие загруженных значений от
+            # последнего состояния устройства и включает «Сохранить».
+            self._mark_dirty()
+            QMessageBox.information(
+                self,
+                tr("Готово"),
+                tr("Конфигурация загружена в поля настроек. "
+                   "Для записи в устройство нажмите «Сохранить»."),
+            )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось загрузить: {0}").format(exc))
 
@@ -1192,9 +1261,11 @@ class SettingsWindow(QMainWindow):
             # Сначала стираем само устройство: страницу конфигурации и
             # хранилище триггеров во Flash (прошивка перезагружается
             # после команды — соединение может кратковременно пропасть).
+            device_reset = False
             if self._serial_manager.is_open() and not self._config.get("emulation", False):
                 try:
                     self._serial_manager.request_control(CMD_CFG_FACTORY_RESET, b"")
+                    device_reset = True
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("CMD_CFG_FACTORY_RESET не подтверждён устройством: %s", exc)
             self._config.reset_to_defaults()
@@ -1206,6 +1277,14 @@ class SettingsWindow(QMainWindow):
                     self._config.get("gateway_rules", []),
                     self._config.get("gateway_ignore", []),
                 )
+            if device_reset:
+                # Устройство подтвердило сброс — его состояние равно
+                # показанным значениям по умолчанию: это новый эталон.
+                self._mark_clean()
+            else:
+                # Устройство сброс не подтвердило — показанные поля
+                # отличаются от его состояния: «Сохранить» активна.
+                self._mark_dirty()
             QMessageBox.information(self, tr("Готово"), tr("Настройки сброшены"))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сбросить: {0}").format(exc))

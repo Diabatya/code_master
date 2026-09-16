@@ -454,6 +454,10 @@ class Translator:
                 "Настройки сброшены": "Settings reset",
                 "Конфигурация сохранена": "Configuration saved",
                 "Конфигурация загружена": "Configuration loaded",
+                "Конфигурация загружена в поля настроек. Для записи в устройство нажмите «Сохранить».": (
+                    "Configuration loaded into the settings fields. "
+                    "Press 'Save' to write it to the device."
+                ),
                 "Не удалось сохранить: {0}": "Could not save: {0}",
                 "Не удалось загрузить: {0}": "Could not load: {0}",
                 "Страница CAN-шлюза в разработке": "CAN gateway page is under development",

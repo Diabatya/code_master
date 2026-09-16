@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QRegularExpression, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QRegularExpression, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QApplication,
@@ -444,6 +444,11 @@ class CanTriggerTab(QWidget):
         if len(block["rows"]) <= 1:
             return
         block["rows"].remove(row)
+        # setParent(None) — строка покидает дерево виджетов сразу, а не
+        # после обработки deleteLater: иначе снимок полей окна настроек
+        # ещё содержал бы удалённую строку и не видел изменения.
+        row["widget"].setParent(None)
+        row["pause_widget"].setParent(None)
         row["widget"].deleteLater()
         row["pause_widget"].deleteLater()
         self._rebuild_response_rows(block)
@@ -720,10 +725,13 @@ class CanTriggerTab(QWidget):
         grid = QGridLayout(wrapper)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.addWidget(block["group"], 0, 0)
-        # Крестик — ровно над «+» добавления ответа: тот сидит у правого
-        # края блока «Ответ» (≈18 px от края + половина кнопки 16 px),
-        # поэтому у крестика (24 px) правый отступ ~22 px выравнивает
-        # центры. AlignTop|AlignRight — иначе holder растянется на весь
+        # Крестик — по горизонтали ровно над «+» добавления ответа
+        # (тот сидит у правого края блока «Ответ»: ≈18 px от края +
+        # половина кнопки 16 px → правый отступ ~22 px выравнивает
+        # центры), по вертикали — напротив поля Data строки «Приём»:
+        # её позиция известна только после компоновки, поэтому верхний
+        # отступ подстраивается в _align_delete_button при Resize.
+        # AlignTop|AlignRight — иначе holder растянется на весь
         # блок и перехватит все клики по полям триггера.
         holder = QWidget()
         holder_layout = QHBoxLayout(holder)
@@ -737,7 +745,34 @@ class CanTriggerTab(QWidget):
         )
         delete_button.raise_()
         block["wrapper"] = wrapper
+        block["delete_holder_layout"] = holder_layout
+        wrapper.installEventFilter(self)
         self._blocks_layout.addWidget(wrapper)
+
+    def eventFilter(self, watched: QWidget, event: QEvent) -> bool:  # noqa: N802
+        """Подстраивает крестик удаления под поле Data строки «Приём»."""
+        if event.type() == QEvent.Type.Resize:
+            for block in self._blocks:
+                if block.get("wrapper") is watched:
+                    self._align_delete_button(block)
+                    break
+        return super().eventFilter(watched, event)
+
+    def _align_delete_button(self, block: Dict[str, Any]) -> None:
+        """Ставит крестик по высоте ровно напротив поля Data в «Приём»."""
+        data_widget = block["recv"]["data_widget"]
+        wrapper = block.get("wrapper")
+        layout = block.get("delete_holder_layout")
+        if wrapper is None or layout is None:
+            return
+        try:
+            center_y = (
+                data_widget.mapTo(wrapper, QPoint(0, 0)).y()
+                + data_widget.height() // 2
+            )
+        except RuntimeError:
+            return  # виджет уже уничтожен
+        layout.setContentsMargins(0, max(0, center_y - 12), 22, 0)
 
     def _remove_block_at(self, index: int) -> None:
         """Внутреннее удаление блока по позиции (крестик/синхронизация)."""
@@ -745,6 +780,9 @@ class CanTriggerTab(QWidget):
         self._device_managed.pop(index)
         host = block.get("wrapper") or block["group"]
         self._blocks_layout.removeWidget(host)
+        # Отсоединяем от дерева сразу — до отложенного deleteLater,
+        # чтобы снимок полей окна настроек не видел удалённый блок.
+        host.setParent(None)
         host.deleteLater()
 
     def _remove_trigger_block(self, block: Dict[str, Any]) -> None:

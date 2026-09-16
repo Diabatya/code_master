@@ -685,7 +685,7 @@ class FlashWorker(QThread):
         method: str,
         config: Config,
         verify: bool = True,
-        preserve_triggers: bool = True,
+        preserve_triggers: bool = False,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -1624,7 +1624,7 @@ class FlashDialog(QDialog):
 
         self._preserve_triggers_checkbox = QCheckBox(tr("Сохранять триггеры"))
         self._preserve_triggers_checkbox.setChecked(
-            bool(self._config.get("preserve_triggers", True))
+            bool(self._config.get("preserve_triggers", False))
         )
         self._preserve_triggers_checkbox.setToolTip(
             tr("При DFU-прошивке возвращать сохранённые триггеры обратно. "

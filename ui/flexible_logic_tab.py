@@ -336,6 +336,9 @@ class FlexibleLogicTab(QWidget):
         """Удаляет виджет строки."""
         if widget in self._row_widgets:
             self._row_widgets.remove(widget)
+        # setParent(None) до отложенного deleteLater — снимок полей окна
+        # настроек сразу перестаёт видеть удалённую строку.
+        widget.setParent(None)
         widget.deleteLater()
         self._rule_counters = [0] * len(self._row_widgets)
 
