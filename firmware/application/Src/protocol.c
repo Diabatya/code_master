@@ -407,8 +407,10 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       const device_config_t *cfg = DeviceConfig_Get();
       const uint8_t *metadata = (const uint8_t *)APP_METADATA_ADDR;
       /* 16 байт базовой части (как раньше) + UID96 + дата/время сборки +
-       * git commit. Старые версии ПК читают только первые 16 байт. */
-      uint8_t out[56] = {
+       * git commit + диагностический хвост [56..63]: причина сброса,
+       * счётчики USB reset/disconnect и потерянные байты RX FIFO.
+       * Старые версии ПК читают только первые 16 байт. */
+      uint8_t out[64] = {
         s_device_version,
         1U,
         0U,
@@ -436,6 +438,17 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       memset(&out[48], 0, 8U);
       memcpy(&out[48], GIT_COMMIT_STR,
              (sizeof(GIT_COMMIT_STR) - 1U) < 8U ? (sizeof(GIT_COMMIT_STR) - 1U) : 8U);
+      /* [56]=причина сброса (RCC->CSR[31:24] через BKP->DR2),
+       * [57]=bus reset'ов, [58]=disconnect'ов (SEDET/физический),
+       * [60:64]=байт RX FIFO потеряно при переполнении — полевой ответ на
+       * «устройство перестало отвечать» без JTAG. */
+      out[56] = App_GetResetFlags();
+      out[57] = CDC_GetUsbResetCount();
+      out[58] = CDC_GetUsbDisconnectCount();
+      {
+        uint32_t ovf = CDC_GetRxOverflowCount();
+        memcpy(&out[60], &ovf, 4U);
+      }
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
     }

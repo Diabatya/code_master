@@ -26,6 +26,17 @@ uint8_t CDC_ReadRxByte(void);
 uint8_t CDC_PeekRxByte(uint16_t offset, uint8_t *out);
 uint32_t CDC_GetTxDropped(void);
 
+/* Полевая диагностика USB (читается через CMD_SYSTEM_INFO): сколько раз
+ * ядро сообщило bus reset / disconnect и сколько байт RX потеряно из-за
+ * переполнения FIFO. По ним в логе видно, дёргалась ли эnumерация и
+ * переполнялся ли входной буфер, без JTAG. */
+#define CDC_USB_EVENT_RESET      0U
+#define CDC_USB_EVENT_DISCONNECT 1U
+void CDC_NoteUsbEvent(uint8_t event);
+uint8_t CDC_GetUsbResetCount(void);
+uint8_t CDC_GetUsbDisconnectCount(void);
+uint32_t CDC_GetRxOverflowCount(void);
+
 #ifdef __cplusplus
 }
 #endif

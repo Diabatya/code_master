@@ -212,6 +212,13 @@ bool Bootloader_ShouldStay(void)
     stay = true;
   }
 
+  /* Причина этого сброса для диагностики приложения: все флаги RCC->CSR
+   * живут в битах 24..31 (RMVF/PINRST/POR/SFT/IWDG/WWDG/LPWR). Сохраняем
+   * их в BKP->DR2 ДО RMVF — приложение читает DR2 и отдаёт в SYSTEM_INFO;
+   * иначе после RMVF приложение видит обнулённый CSR и причина ребута
+   * (IWDG? питание? soft reset?) теряется. */
+  BKP->DR2 = (uint16_t)((RCC->CSR >> 24) & 0xFFU);
+
   /* Clear flag and reset flags. The legacy RAM word is always cleared as
    * well so a stray 0xDEADBEEF left by CAN data cannot survive into a
    * boot where an older application checks only that address. */

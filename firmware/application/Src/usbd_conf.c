@@ -7,6 +7,7 @@
 
 #include "stm32f1xx_hal.h"
 #include "usbd_core.h"
+#include "usbd_cdc_if.h"
 
 static uint8_t usbd_pool[1024U] __attribute__((aligned(4)));
 static int usbd_pool_busy = 0;
@@ -83,6 +84,7 @@ void HAL_PCD_SOFCallback(PCD_HandleTypeDef * hpcd)
 
 void HAL_PCD_ResetCallback(PCD_HandleTypeDef * hpcd)
 {
+  CDC_NoteUsbEvent(CDC_USB_EVENT_RESET);
   USBD_SpeedTypeDef speed = USBD_SPEED_FULL;
 
   switch (hpcd->Init.speed)
@@ -126,6 +128,7 @@ void HAL_PCD_ConnectCallback(PCD_HandleTypeDef * hpcd)
 
 void HAL_PCD_DisconnectCallback(PCD_HandleTypeDef * hpcd)
 {
+  CDC_NoteUsbEvent(CDC_USB_EVENT_DISCONNECT);
   USBD_LL_DevDisconnected((USBD_HandleTypeDef *) hpcd->pData);
 }
 
@@ -136,7 +139,20 @@ USBD_StatusTypeDef USBD_LL_Init(USBD_HandleTypeDef * pdev)
   hpcd.Init.low_power_enable = 0;
   hpcd.Init.Sof_enable = 0;
   hpcd.Init.speed = PCD_SPEED_FULL;
-  hpcd.Init.vbus_sensing_enable = 1;
+  /* VBUS sensing ВЫКЛЮЧЕНО намеренно. С включённым (1) ядро OTG размаскирует
+   * SRQIM|OTGINT, и любая просадка VBUS (EMI, длинный кабель, скачок
+   * потребления при стирании Flash и работе CAN-трансиверов) даёт прерывание
+   * SEDET → HAL_PCD_DisconnectCallback → USBD_LL_DevDisconnected →
+   * dev_state=DEFAULT + DeInit класса: эндпоинты закрываются, pClassData
+   * освобождается. При этом D+ pull-up ОСТАЁТСЯ — хост видит устройство
+   * подключённым, но запись в OUT NAK'ится («Таймаут записи команды»),
+   * ответы не уходят («Таймаут ответа»), и без полной пере-энумерации от
+   * хоста устройство остаётся зомби навсегда — IWDG не срабатывает, т.к.
+   * главный цикл жив. Детект отключения кабеля для standalone-режима
+   * делается программно через VBUS_Present() (PA9 GPIO), когда
+   * APPLICATION_USE_VBUS_SENSE включён — аппаратный sense для этого не
+   * нужен. */
+  hpcd.Init.vbus_sensing_enable = 0;
   hpcd.pData = pdev;
   pdev->pData = &hpcd;
   HAL_PCD_Init(&hpcd);

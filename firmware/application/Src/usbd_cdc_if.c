@@ -21,6 +21,9 @@ static uint8_t rx_fifo[RX_FIFO_SIZE];
 static volatile uint16_t rx_head = 0;
 static volatile uint16_t rx_tail = 0;
 static volatile uint32_t tx_dropped = 0U;
+static volatile uint32_t rx_overflow_bytes = 0U;
+static volatile uint8_t usb_reset_count = 0U;
+static volatile uint8_t usb_disconnect_count = 0U;
 
 static USBD_CDC_LineCodingTypeDef LineCoding = {
   115200,
@@ -112,6 +115,32 @@ uint32_t CDC_GetTxDropped(void)
   return tx_dropped;
 }
 
+void CDC_NoteUsbEvent(uint8_t event)
+{
+  /* Счётчики насыщающиеся (не сбрасываются на 255) — для полевой
+   * диагностики важен факт и порядок величины, а не точное число. */
+  if (event == CDC_USB_EVENT_RESET) {
+    if (usb_reset_count < 0xFFU) { usb_reset_count++; }
+  } else if (event == CDC_USB_EVENT_DISCONNECT) {
+    if (usb_disconnect_count < 0xFFU) { usb_disconnect_count++; }
+  }
+}
+
+uint8_t CDC_GetUsbResetCount(void)
+{
+  return usb_reset_count;
+}
+
+uint8_t CDC_GetUsbDisconnectCount(void)
+{
+  return usb_disconnect_count;
+}
+
+uint32_t CDC_GetRxOverflowCount(void)
+{
+  return rx_overflow_bytes;
+}
+
 uint8_t CDC_FlushTx(uint32_t timeout_ms)
 {
   USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
@@ -191,6 +220,7 @@ static int8_t CDC_Receive_FS(uint8_t *Buf, uint32_t *Len)
        * happen given RX_FIFO_SIZE=2048 and the main loop draining it every
        * iteration; if it does, the affected command/frame will fail its
        * checksum/marker check downstream and be resynchronized safely. */
+      rx_overflow_bytes += *Len - i;
       break;
     }
     rx_fifo[rx_head] = Buf[i];

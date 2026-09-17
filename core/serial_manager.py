@@ -52,6 +52,21 @@ logger = get_logger(__name__)
 # («прогрузка конфига после заводского сброса не работала ни разу»).
 _REBOOTING_COMMANDS = frozenset((CMD_CFG_WRITE, CMD_CFG_FACTORY_RESET))
 
+# USB IDs приложения (загрузчик — PID 0x5741, см. core/bootloader.py).
+# Нужны для поиска устройства при пере-энумерации на другой COM.
+USB_VID_CODEMASTER = 0x0483
+USB_PID_APPLICATION = 0x5740
+
+
+class _PortWriteTimeout(TimeoutError):
+    """Устройство перестало принимать данные в OUT-эндпоинт.
+
+    Отдельный тип, чтобы request_control мог отличить «порт мёртв»
+    (запись не проходит вообще) от «ответ не дождались» — в первом случае
+    повторная попытка бессмысленна, а дескриптор нужно закрывать и
+    переподключаться немедленно.
+    """
+
 
 SerialPort = Union[serial.Serial, FakeSerial]
 
@@ -188,10 +203,10 @@ class SerialReader(QThread):
 
     def _is_open(self) -> bool:
         """Возвращает True, если порт открыт, независимо от типа объекта."""
-        try:
-            return bool(self._port.is_open)
-        except TypeError:
-            return self._port.is_open()
+        is_open = self._port.is_open
+        if callable(is_open):
+            is_open = is_open()
+        return bool(is_open)
 
     def _in_waiting(self) -> int:
         """Возвращает количество байт в буфере, независимо от типа объекта."""
@@ -398,6 +413,17 @@ class SerialManager(QObject):
                             info.get("build_datetime") or "?",
                             info.get("git_commit") or "?",
                         )
+                        if "reset_flags" in info:
+                            # Диагностика прошивки: почему МК перезагружался
+                            # в прошлый раз и дёргалась ли эnumерация USB —
+                            # ответ на «устройство отваливалось» без JTAG.
+                            logger.info(
+                                "Диагностика МК: сброс=0x%02X, usb_rst=%d, usb_disc=%d, rx_ovf=%d",
+                                int(info.get("reset_flags") or 0),
+                                int(info.get("usb_reset_count") or 0),
+                                int(info.get("usb_disconnect_count") or 0),
+                                int(info.get("rx_overflow_bytes") or 0),
+                            )
                     except Exception:  # noqa: BLE001
                         logger.debug("Устройство не отдало SYSTEM_INFO")
                 self._config.set_bulk(
@@ -527,13 +553,27 @@ class SerialManager(QObject):
                             "Команда 0x%02X: попытка %d без ответа (%s)",
                             command, _attempt + 1, exc,
                         )
+                        if isinstance(exc, _PortWriteTimeout):
+                            break  # OUT-эндпоинт мёртв — повтор бессмысленен
                         continue
+                    except (serial.SerialException, OSError):
+                        # Дескриптор порта умер прямо во время команды —
+                        # та же обработка, что при ожидаемом ребуте МК.
+                        self.expect_reboot()
+                        raise
                     # Ответ дошёл — дальше прошивка перезагружает МК:
                     # порт закроем сразу, пока reader не споткнулся
                     # об уже мёртвый USB-дескриптор.
                     if command in _REBOOTING_COMMANDS:
                         self.expect_reboot()
                     return result
+                if isinstance(last_timeout, _PortWriteTimeout):
+                    # Устройство не принимает данные, хотя порт ещё
+                    # «открыт»: закрываем дескриптор и переподключаемся
+                    # сразу — иначе менеджер десятки секунд долбит
+                    # зомби-хендл таймаутами, пока Windows не снимет
+                    # устройство с шины (в поле — минута мёртвого порта).
+                    self.expect_reboot()
                 raise last_timeout  # type: ignore[misc]
             finally:
                 if owns_session:
@@ -585,7 +625,7 @@ class SerialManager(QObject):
                 chunk = len(data) - written  # некоторые порты возвращают None
             if chunk == 0:
                 if time.time() > write_deadline:
-                    raise TimeoutError(f"Таймаут записи команды 0x{command:02X}")
+                    raise _PortWriteTimeout(f"Таймаут записи команды 0x{command:02X}")
                 time.sleep(0.005)
                 continue
             written += chunk
@@ -721,6 +761,16 @@ class SerialManager(QObject):
             commit = payload[48:56].split(b"\x00")[0].decode("ascii", errors="ignore")
             if commit:
                 info["git_commit"] = commit
+        # [56..63] — диагностический хвост прошивки: причина последнего
+        # сброса МК (RCC->CSR[31:24]), счётчики USB bus reset/disconnect и
+        # потерянные байты RX FIFO. Отвечает на вопрос «почему устройство
+        # пропадало» по полевому логу без доступа к железу.
+        if len(payload) >= 60:
+            info["reset_flags"] = payload[56]
+            info["usb_reset_count"] = payload[57]
+            info["usb_disconnect_count"] = payload[58]
+        if len(payload) >= 64:
+            info["rx_overflow_bytes"] = int.from_bytes(payload[60:64], "little")
         return info
 
     def ping_device(self) -> bool:
@@ -1019,12 +1069,30 @@ class SerialManager(QObject):
             self._reconnect_timer.stop()
             self._reconnect_timer = None
 
+    def _find_app_port_by_usb(self) -> Optional[str]:
+        """Ищет наш адаптер среди портов по USB VID/PID приложения.
+
+        Нужно, когда устройство пере-энумеровалось на другом COM — Windows
+        может выдать новый номер, пока старый ещё держит мёртвый handle;
+        тогда перебор по имени порта бесконечно мимо (FileNotFoundError).
+        """
+        for p in comports():
+            if p.vid == USB_VID_CODEMASTER and p.pid == USB_PID_APPLICATION:
+                return p.device
+        return None
+
     def _do_reconnect(self) -> None:
         """Пытается восстановить соединение с COM-портом."""
         if self.is_open():
             return
-        logger.info("Попытка автоматического переподключения к %s", self._last_port_name)
-        if self.open_port(self._last_port_name, self._last_baudrate, self._last_emulation, self._auto_reconnect):
-            logger.info("Автоматическое переподключение к %s успешно", self._last_port_name)
+        port_name = self._last_port_name
+        if port_name and port_name not in {p.device for p in comports()}:
+            alt = self._find_app_port_by_usb()
+            if alt:
+                logger.info("Устройство пере-энумеровано на другой порт: %s -> %s", port_name, alt)
+                port_name = alt
+        logger.info("Попытка автоматического переподключения к %s", port_name)
+        if self.open_port(port_name, self._last_baudrate, self._last_emulation, self._auto_reconnect):
+            logger.info("Автоматическое переподключение к %s успешно", port_name)
         else:
-            logger.warning("Автоматическое переподключение к %s не удалось, будет повторная попытка", self._last_port_name)
+            logger.warning("Автоматическое переподключение к %s не удалось, будет повторная попытка", port_name)

@@ -91,6 +91,10 @@ void Error_Handler(void);
  * уходило в reset, роняя USB-порт (в полевом логе — ClearCommError
  * PermissionError и «Таймаут записи команды» при прогрузке конфига). */
 void App_KickWatchdog(void);
+/* Причина последнего сброса МК: RCC->CSR[31:24], снятый загрузчиком в
+ * BKP->DR2 до RMVF. Биты байта: 0x04 PIN (NRST), 0x08 POR, 0x10 soft
+ * (NVIC), 0x20 IWDG, 0x40 WWDG, 0x80 LPWR. 0 = загрузчик не записал. */
+uint8_t App_GetResetFlags(void);
 
 #ifdef __cplusplus
 }

@@ -36,6 +36,10 @@ uint32_t g_can_baud_kbps = 500U;
 
 USBD_HandleTypeDef hUsbDeviceFS;
 static IWDG_HandleTypeDef hiwdg;
+/* Причина последнего сброса — RCC->CSR[31:24], сохранённый загрузчиком в
+ * BKP->DR2 до очистки RMVF (само приложение видит CSR уже обнулённым).
+ * 0 = загрузчик старый/не записал либо полный сброс backup-домена. */
+static uint8_t s_reset_flags;
 
 static void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
@@ -53,6 +57,10 @@ void Error_Handler(void)
 int main(void)
 {
   HAL_Init();
+  /* Читаем до любого возможного сброса backup-домена дальше по коду. */
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_RCC_BKP_CLK_ENABLE();
+  s_reset_flags = (uint8_t)(BKP->DR2 & 0xFFU);
   SystemClock_Config();
   JTAG_Disable_SWD_Only();
   MX_GPIO_Init();
@@ -191,6 +199,11 @@ static void MX_GPIO_Init(void)
 
   /* CAN pins, transceiver control, USB D+/D- are initialized by
    * CanBridge_Init() / HAL_PCD_MspInit() respectively. */
+}
+
+uint8_t App_GetResetFlags(void)
+{
+  return s_reset_flags;
 }
 
 void App_KickWatchdog(void)
