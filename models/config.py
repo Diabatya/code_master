@@ -17,6 +17,7 @@ from typing import Any
 from platformdirs import user_data_dir
 
 from models.logger import get_logger
+from models.version import VERSION
 
 logger = get_logger(__name__)
 
@@ -145,15 +146,56 @@ class Config:
         self._initialized = True
         self.load()
 
+    # Настройки оператора, переживающие смену версии приложения.
+    # Всё остальное в config.json — кэш состояния УСТРОЙСТВА (имя,
+    # серийник, триггеры, скорости CAN, шлюзы, гибкая логика…): после
+    # обновления приложения он протухший и не должен подтягиваться в
+    # поля — их заполнит вычитка с МК. Белый список (а не чёрный),
+    # чтобы будущие ключи состояния устройства сбрасывались автоматом.
+    _VERSIONED_KEEP_KEYS = (
+        "port",
+        "baudrate",
+        "emulation",
+        "error_probability",
+        "auto_reconnect",
+        "setup_completed",
+        "theme",
+        "light_theme",
+        "language",
+        "last_config_dir",
+        "com_logger_port",
+        "com_logger_virtual_port",
+        "com_logger_baud",
+        "com_logger_proxy",
+        "target_mcu",
+        "programmer_method",
+        "preserve_triggers",
+        "dbc_path",
+    )
+
     def load(self) -> None:
         """Загружает настройки из config.json, если файл существует."""
         if self._file_path.exists():
             try:
                 with self._file_path.open("r", encoding="utf-8") as file:
                     loaded = json.load(file)
-                    self._data.update(loaded)
             except (json.JSONDecodeError, OSError, TypeError) as exc:
                 logger.error("Ошибка загрузки конфигурации: %s", exc)
+                return
+            if not isinstance(loaded, dict):
+                return
+            if loaded.get("app_version") != VERSION:
+                kept = {k: loaded[k] for k in self._VERSIONED_KEEP_KEYS if k in loaded}
+                kept["app_version"] = VERSION
+                logger.info(
+                    "Кэш состояния устройства сброшен: записан версией %s, приложение %s",
+                    loaded.get("app_version") or "<?>",
+                    VERSION,
+                )
+                self._data.update(kept)
+                self.save()
+                return
+            self._data.update(loaded)
 
     def save(self) -> None:
         """Атомарно сохраняет текущие настройки в config.json.
