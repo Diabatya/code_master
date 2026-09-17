@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.can_protocol import parse_all_frames
+from core.fake_serial import FakeSerial
 from core.listen_only import CanPacket, ListenOnlyMode
 from core.serial_manager import SerialManager
 from models.config import Config
@@ -69,6 +70,11 @@ class ComLoggerReader(QThread):
     def _open_port(self) -> Optional[serial.Serial]:
         """Открывает порт с минимальным воздействием на линии DTR/RTS."""
         try:
+            if self._port_name == "FAKE":
+                # Эмулятор — чтобы логгер можно было проверить без железа.
+                ser = FakeSerial(self._port_name, self._baudrate)
+                ser.open()
+                return ser
             ser = serial.Serial(
                 port=self._port_name,
                 baudrate=self._baudrate,
@@ -88,6 +94,16 @@ class ComLoggerReader(QThread):
             logger.warning("COM-логгер: не удалось открыть %s: %s", self._port_name, exc)
             return None
 
+    @staticmethod
+    def _in_waiting(ser) -> int:
+        waiting = ser.in_waiting
+        return waiting() if callable(waiting) else int(waiting)
+
+    @staticmethod
+    def _is_open(ser) -> bool:
+        is_open = ser.is_open
+        return bool(is_open() if callable(is_open) else is_open)
+
     def run(self) -> None:
         logger.info("COM-логгер: запуск мониторинга %s @ %d", self._port_name, self._baudrate)
         with self._port_lock:
@@ -101,7 +117,9 @@ class ComLoggerReader(QThread):
         try:
             while self._running:
                 try:
-                    chunk = self._ser.read(self._ser.in_waiting or 1)
+                    # FakeSerial: in_waiting/is_open — методы, у pyserial —
+                    # свойства; хелперы скрывают разницу.
+                    chunk = self._ser.read(self._in_waiting(self._ser) or 1)
                     if chunk:
                         logger.debug("COM-логгер: прочитано %d байт из %s", len(chunk), self._port_name)
                         self.data_received.emit(chunk, time.time())
@@ -128,7 +146,7 @@ class ComLoggerReader(QThread):
     def write(self, data: bytes) -> bool:
         with self._port_lock:
             ser = self._ser
-        if ser is None or not ser.is_open:
+        if ser is None or not self._is_open(ser):
             self.error.emit(tr("Порт не подключен"))
             return False
         try:
@@ -370,6 +388,10 @@ class ComLoggerWindow(QDialog):
             current = combo.currentData()
             combo.clear()
             combo.addItem(tr("-- выберите порт --"), "")
+            if combo is self._port_combo:
+                # Эмулятор — проверка логгера без железа (виртуальной
+                # паре com0com FAKE не нужен, туда его не добавляем).
+                combo.addItem(tr("FAKE (эмулятор)"), "FAKE")
             for p in comports():
                 text = f"{p.device}"
                 if p.description:
