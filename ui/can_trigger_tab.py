@@ -1500,6 +1500,23 @@ class CanTriggerTab(QWidget):
             })
         return config
 
+    @staticmethod
+    def _config_trigger_is_empty(trigger: Dict[str, Any]) -> bool:
+        """Запись конфигурации не несёт настройки: ни условия, ни ответов,
+        ни кэша. Старые файлы сохраняли запись на КАЖДЫЙ блок, включая
+        пустые — без фильтра они воскресали «пустыми триггерами» поверх
+        реальных (полевой баг: «5 блоков, 4 пустых»)."""
+        if str(trigger.get("recv_id", "")).strip():
+            return False
+        if str(trigger.get("cache_id", "")).strip():
+            return False
+        responses = trigger.get("responses", [])
+        if isinstance(responses, list):
+            for row in responses:
+                if isinstance(row, dict) and str(row.get("id", "")).strip():
+                    return False
+        return True
+
     def set_config(self, triggers: List[Dict[str, Any]]) -> None:
         """Загружает конфигурацию триггеров из списка.
 
@@ -1508,6 +1525,8 @@ class CanTriggerTab(QWidget):
         «Сохранить» и не запишет их в устройство, ответы при подключении
         обрабатывает приложение).
         """
+        triggers = [t for t in triggers
+                    if isinstance(t, dict) and not self._config_trigger_is_empty(t)]
         self._applying_device_state = True
         try:
             # Блоков ровно столько, сколько триггеров в конфигурации —

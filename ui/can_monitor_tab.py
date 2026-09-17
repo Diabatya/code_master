@@ -1602,30 +1602,15 @@ class CanMonitorTab(QWidget):
             return 500
 
     def _on_can1_speed_changed(self) -> None:
+        # Только выбор значения — в устройство скорость уходит по общей
+        # кнопке «Сохранить» (apply_can_settings_to_device), как и все
+        # остальные настройки окна.
         kbps = self._speed_combo_kbps(self._can1_speed_combo)
         self._config.set("can1_speed", kbps * 1000)
-        self._push_can_speed(1, kbps)
 
     def _on_can2_speed_changed(self) -> None:
         kbps = self._speed_combo_kbps(self._can2_speed_combo)
         self._config.set("can2_speed", kbps * 1000)
-        self._push_can_speed(2, kbps)
-
-    def _push_can_speed(self, channel: int, kbps: int) -> None:
-        """Применяет бод-рейт к периферии МК (CANx реально переходит на него).
-
-        Скорость — это физический параметр шины: приём/передача/триггеры/
-        шлюз идут на ней. Прошивка персистит значение, поэтому оно держится
-        и после перезагрузки/автономной работы. Поддерживаются только
-        бод-рейты из SerialManager.SUPPORTED_CAN_BAUD_KBPS — остальные
-        значения (введённые вручную) отклоняются с понятным сообщением.
-        """
-        if self._syncing_config or not self._serial_manager.is_open():
-            return
-        try:
-            self._serial_manager.set_can_speed(channel, kbps)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Не удалось установить скорость CAN%d=%d кбит/с: %s", channel, kbps, exc)
 
     def apply_can_settings_to_device(self) -> None:
         """Прогружает скорости и режимы обоих каналов в устройство.
@@ -1718,26 +1703,19 @@ class CanMonitorTab(QWidget):
             self._apply_can_mode(channel)
 
     def _apply_can_mode(self, channel: int) -> None:
-        """Отправляет в МК режим Normal, терминатор и бод-рейт канала."""
+        """Отправляет в МК режим Normal и состояние терминатора канала.
+
+        Бод-рейт здесь НЕ применяем: выбранная в комбобоксе скорость
+        уходит в устройство только по общей кнопке «Сохранить»
+        (apply_can_settings_to_device) — иначе перебор значений в
+        списке дёргал бы шину на каждый клик."""
         if not self._serial_manager.is_open():
             return
         term = bool(self._config.get(f"can{channel}_terminator", False))
-        kbps = int(self._config.get(f"can{channel}_speed", 500000) or 500000) // 1000
-        # Одна сессия на пачку команд — иначе каждая перезапускает
-        # reader-поток и обмен растягивается на секунды.
-        with self._serial_manager.control_session():
-            try:
-                self._serial_manager.set_can_mode(channel, 0, term)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Не удалось установить режим CAN%d: %s", channel, exc)
-            # Заодно подтягиваем скорость: устройство могло быть сброшено
-            # на заводские 500 кбит/с — при старте мониторинга оно должно
-            # выйти на шину именно с настроенным бод-рейтом.
-            if kbps in SerialManager.SUPPORTED_CAN_BAUD_KBPS:
-                try:
-                    self._serial_manager.set_can_speed(channel, kbps)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Не удалось установить скорость CAN%d=%d: %s", channel, kbps, exc)
+        try:
+            self._serial_manager.set_can_mode(channel, 0, term)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось установить режим CAN%d: %s", channel, exc)
 
     def _on_sleep_time_changed(self, value: int) -> None:
         self._config.set("sleep_time", value)

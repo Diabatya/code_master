@@ -67,18 +67,20 @@ void DeviceConfig_Init(void)
                 && flash_cfg->reserved[1] == DEVICE_CONFIG_RECORD_SIZE))) {
       memcpy(&s_config, flash_cfg, sizeof(s_config));
       s_config_valid = 1U;
-      return;
     }
+  } else {
+    /* Blank/corrupt page: fall back to defaults without touching Flash (a
+     * write only happens on an explicit CMD_CFG_WRITE/FACTORY_RESET). */
+    load_defaults(&s_config);
+    s_config_valid = 0U;
   }
-  /* Blank/corrupt page: fall back to defaults without touching Flash (a
-   * write only happens on an explicit CMD_CFG_WRITE/FACTORY_RESET). */
-  load_defaults(&s_config);
-  s_config_valid = 0U;
 
   /* Extended record lives right after the main one in the same page; a
    * missing/invalid record simply means 500/500 kbit/s defaults — it was
    * introduced after devices shipped, so absence must not invalidate the
-   * identity record. */
+   * identity record. Читается ВСЕГДА, в т.ч. при валидной основной
+   * записи — ранний return здесь оставлял s_ext_config в нулях,
+   * GetCanBaud отдавал 0 и CAN вообще не стартовал после загрузки. */
   const device_ext_config_t *ext =
       (const device_ext_config_t *)(DEVICE_CONFIG_PAGE_ADDR + DEVICE_EXT_CONFIG_OFFSET);
   if (ext->magic == DEVICE_EXT_CONFIG_MAGIC
@@ -212,17 +214,31 @@ uint8_t DeviceConfig_FactoryReset(void)
   return 1U;
 }
 
+static uint8_t is_supported_can_baud(uint32_t baud_kbps)
+{
+  switch (baud_kbps) {
+    case 1000U: case 500U: case 250U: case 125U:
+    case 100U:  case 50U:  case 20U:  case 10U:
+      return 1U;
+    default:
+      return 0U;
+  }
+}
+
 uint32_t DeviceConfig_GetCanBaud(uint8_t channel)
 {
-  if (channel == 0U) {
-    return s_ext_config.can1_baud_kbps;
-  }
-  return s_ext_config.can2_baud_kbps;
+  uint32_t baud = (channel == 0U) ? s_ext_config.can1_baud_kbps
+                                  : s_ext_config.can2_baud_kbps;
+  /* Даже если ext-запись прошла CRC, но содержит неподдерживаемый бод
+   * (повреждение Flash, несовместимая версия) — не скармливаем его
+   * configure_bit_timing: иначе CAN не стартует вообще (полевой лог:
+   * baud=0 в статистике после сброса). */
+  return is_supported_can_baud(baud) ? baud : DEVICE_CONFIG_DEFAULT_BAUD_KBPS;
 }
 
 uint8_t DeviceConfig_SetCanBaud(uint8_t channel, uint32_t baud_kbps)
 {
-  if (channel > 1U || baud_kbps == 0U || baud_kbps > 0xFFFFU) {
+  if (channel > 1U || !is_supported_can_baud(baud_kbps)) {
     return 0U;
   }
 

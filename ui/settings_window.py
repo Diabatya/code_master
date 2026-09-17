@@ -452,6 +452,7 @@ class SettingsWindow(QMainWindow):
         # оператора включает её обратно.
         self._loading = False
         self._refresh_pending = False
+        self._sync_in_progress = False
         self._baseline_signature: tuple = ()
         self._save_opacity = QGraphicsOpacityEffect(self._save_button)
         self._save_button.setGraphicsEffect(self._save_opacity)
@@ -702,11 +703,18 @@ class SettingsWindow(QMainWindow):
             not self._serial_manager.is_open()
             or self._config.get("emulation", False)
             or self._has_unsaved_changes()
+            or self._sync_in_progress
         ):
             # Вычитки не будет — оверлей, показанный на connecting,
             # нужно снять, иначе он зависнет поверх полей.
             self._hide_loading_overlay()
             return
+        # Реентерабельность запрещена: _read_device_triggers крутит
+        # QApplication.processEvents(), через который отложенный
+        # singleShot запускал ВЛОЖЕННУЮ вычитку — блоки триггеров
+        # перестраивались посередине внешнего прохода (полевой баг:
+        # «5 блоков, 4 пустых» после сворачивания/разворачивания).
+        self._sync_in_progress = True
         self._loading = True
         self._show_loading_overlay()
         try:
@@ -723,6 +731,7 @@ class SettingsWindow(QMainWindow):
         finally:
             self._hide_loading_overlay()
             self._loading = False
+            self._sync_in_progress = False
         self._mark_clean()
 
     def showEvent(self, event) -> None:  # noqa: N802

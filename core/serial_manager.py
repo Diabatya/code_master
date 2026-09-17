@@ -1063,6 +1063,18 @@ class SerialManager(QObject):
         with self._lock:
             if self._port is None or not self.is_open():
                 return
+            # Повторный запуск при живом reader'е обязан его остановить:
+            # перезапись self._reader осиротевала старый поток — он
+            # продолжал read() и крал у команд их ответы (в полевом логе
+            # «Поток чтения запущен» дважды подряд без остановки →
+            # таймауты команд, пока сирота жил).
+            if self._reader is not None:
+                try:
+                    self._reader.finished.disconnect(self._on_reader_finished)
+                except RuntimeError:
+                    pass
+                self._reader.stop()
+                self._reader = None
             self._reader = SerialReader(self._port, self)
             self._reader.new_frame.connect(self.new_can_frame)
             self._reader.new_raw_data.connect(self.raw_data)
