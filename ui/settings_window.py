@@ -608,14 +608,24 @@ class SettingsWindow(QMainWindow):
         self._refresh_pending = True
         QTimer.singleShot(0, self._refresh_save_state)
 
+    def _has_unsaved_changes(self) -> bool:
+        """Есть ли правки, не записанные в устройство (снимок vs эталон).
+
+        Проверка по сигнатуре, а не по состоянию кнопки: кнопка обновляется
+        отложенно (QTimer.singleShot), и на её isEnabled() нельзя
+        опираться — отложенная вычитка устройства иначе могла сработать
+        между заполнением полей и пересчётом кнопки и затереть только что
+        загруженные из файла значения (полевой баг: «Сохранить» не активна
+        после прогрузки, пока не переключишь вкладку)."""
+        return self._widgets_signature() != self._baseline_signature
+
     def _refresh_save_state(self) -> None:
         """Сверяет снимок полей с эталоном и обновляет кнопку."""
         self._refresh_pending = False
-        changed = self._widgets_signature() != self._baseline_signature
         # Без связи с устройством сохранять нечего — кнопка выключена
         # даже при наличии правок; при восстановлении связи состояние
         # пересчитывается в _on_connection_changed → _mark_dirty.
-        enabled = changed and self._serial_manager.is_open()
+        enabled = self._has_unsaved_changes() and self._serial_manager.is_open()
         self._save_opacity.setOpacity(1.0 if enabled else 0.4)
         self._save_button.setEnabled(enabled)
 
@@ -691,7 +701,7 @@ class SettingsWindow(QMainWindow):
         if (
             not self._serial_manager.is_open()
             or self._config.get("emulation", False)
-            or self._save_button.isEnabled()
+            or self._has_unsaved_changes()
         ):
             # Вычитки не будет — оверлей, показанный на connecting,
             # нужно снять, иначе он зависнет поверх полей.
@@ -725,7 +735,7 @@ class SettingsWindow(QMainWindow):
         if (
             self._serial_manager.is_open()
             and not self._config.get("emulation", False)
-            and not self._save_button.isEnabled()
+            and not self._has_unsaved_changes()
         ):
             QTimer.singleShot(0, self._sync_from_device)
 
@@ -1203,13 +1213,23 @@ class SettingsWindow(QMainWindow):
                     self._config.get("gateway_rules", []),
                     self._config.get("gateway_ignore", []),
                 )
+            # Вкладки, чьи поля читают Config только при построении
+            # (скорости/терминаторы/сон в «Мониторинге»), тоже переносим —
+            # иначе после загрузки файла они показывали старые значения,
+            # а снимок «Сохранить» не видел разницы.
+            if hasattr(self._monitor_tab, "sync_from_config"):
+                self._monitor_tab.sync_from_config()
             self._update_device_info()
             self._update_analog_tab()
             # Загрузка файла заполняет только поля — запись в МК идёт
             # отдельным явным действием оператора (кнопка «Сохранить»).
             # Кэш эталона не трогаем: отличие загруженных значений от
             # последнего состояния устройства и включает «Сохранить».
-            self._mark_dirty()
+            # Пересчёт — синхронно: все виджеты уже заполнены, а кнопка
+            # должна зажечься ДО модального QMessageBox — отложенная
+            # вычитка устройства иначе могла бы затереть поля файла
+            # (guard по сигнатуре это тоже блокирует — двойная защита).
+            self._refresh_save_state()
             QMessageBox.information(
                 self,
                 tr("Готово"),
@@ -1238,6 +1258,12 @@ class SettingsWindow(QMainWindow):
                 self._gateway_tab._save_config()
             if self._serial_manager.is_open() and not self._config.get("emulation", False):
                 self._trigger_tab.write_to_device()
+                # Общая запись для всех вкладок: CAN-скорости/режимы из
+                # «Мониторинга» прогружаются тем же действием, что и
+                # триггеры — иначе заданный оператором бод-рейт шины не
+                # доходил до периферии МК.
+                if hasattr(self._monitor_tab, "apply_can_settings_to_device"):
+                    self._monitor_tab.apply_can_settings_to_device()
             # Успешное сохранение подтверждается погасшей кнопкой
             # «Сохранить» — отдельное окно оператору не нужно.
             self._mark_clean()

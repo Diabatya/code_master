@@ -310,7 +310,77 @@ static uint8_t configure_bit_timing(CAN_HandleTypeDef *hcan, uint32_t baud_kbps)
   return (HAL_CAN_Init(hcan) == HAL_OK) ? 1U : 0U;
 }
 
-uint8_t CanBridge_Init(uint32_t baud_kbps)
+static uint8_t is_supported_baud(uint32_t baud_kbps)
+{
+  switch (baud_kbps) {
+    case 1000: case 500: case 250: case 125:
+    case 100:  case 50:  case 20:  case 10:
+      return 1U;
+    default:
+      return 0U;
+  }
+}
+
+/* Pass-all filters: 0..13 assigned to CAN1, 14..27 to CAN2 (bxCAN shared
+ * filter bank split on this family). Software-side filtering (triggers,
+ * PC-side ID filter box in ui/can_monitor_tab.py) happens above this
+ * layer, so the firmware itself does not drop frames by ID. */
+static uint8_t config_pass_all_filter(CAN_HandleTypeDef *hcan, uint8_t channel)
+{
+  CAN_FilterTypeDef filter = {0};
+  filter.FilterIdHigh = 0x0000;
+  filter.FilterIdLow = 0x0000;
+  filter.FilterMaskIdHigh = 0x0000;
+  filter.FilterMaskIdLow = 0x0000;
+  filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
+  filter.FilterBank = (channel == 0U) ? 0U : 14U;
+  filter.FilterMode = CAN_FILTERMODE_IDMASK;
+  filter.FilterScale = CAN_FILTERSCALE_32BIT;
+  filter.FilterActivation = ENABLE;
+  filter.SlaveStartFilterBank = 14;
+  return (HAL_CAN_ConfigFilter(hcan, &filter) == HAL_OK) ? 1U : 0U;
+}
+
+/* Interrupt mask for error/bus-off reporting (CURSOR_FIX_PROMPT.md 4.4):
+ * without these, AutoBusOff silently recovers the peripheral on its own,
+ * but neither the firmware nor the PC ever learn that a bus fault (e.g.
+ * bad/missing termination, disconnected bus) happened at all. See
+ * HAL_CAN_ErrorCallback() below and CMD_CAN_ERROR_STATUS in protocol.c /
+ * PROTOCOL.md.
+ *
+ * CAN_IT_LAST_ERROR_CODE здесь сознательно НЕТ: LEC-прерывание взводится
+ * на каждую ошибку приёма, и на живой шине с неверным бод-рейтом/шумом
+ * это непрерывный шторм SCE-IRQ (SCE на том же приоритете, что и USB) —
+ * главный цикл голодал, ответы на команды задерживались на секунды,
+ * порт отваливался. Подсчёт LEC-ошибок перенесён в опрос ESR в
+ * CanBridge_PollHealth(); IRQ-путь оставлен только для bus-off и
+ * warning/passive-переходов — они редкие и шторма не создают. */
+#define CAN_ERROR_ITS (CAN_IT_ERROR | CAN_IT_BUSOFF | \
+                       CAN_IT_ERROR_WARNING | CAN_IT_ERROR_PASSIVE)
+
+/* Brings one channel onto the bus after (re-)initialization: filter,
+ * start, RX FIFO0 + error notifications. Shared by CanBridge_Init and the
+ * runtime reconfigure path CanBridge_SetBaud. */
+static uint8_t start_channel(CAN_HandleTypeDef *hcan, uint8_t channel)
+{
+  if (!config_pass_all_filter(hcan, channel)) {
+    return 0U;
+  }
+  if (HAL_CAN_Start(hcan) != HAL_OK) {
+    return 0U;
+  }
+  if (HAL_CAN_ActivateNotification(hcan, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK) {
+    return 0U;
+  }
+  if (HAL_CAN_ActivateNotification(hcan, CAN_ERROR_ITS) != HAL_OK) {
+    return 0U;
+  }
+  return 1U;
+}
+
+static uint32_t s_baud_kbps[2] = { 0U, 0U };
+
+uint8_t CanBridge_Init(uint32_t can1_baud_kbps, uint32_t can2_baud_kbps)
 {
   memset(s_ring, 0, sizeof(s_ring));
   memset((void *)s_error_pending, 0, sizeof(s_error_pending));
@@ -332,71 +402,19 @@ uint8_t CanBridge_Init(uint32_t baud_kbps)
   hcan1.Instance = CAN1;
   hcan2.Instance = CAN2;
 
-  if (!configure_bit_timing(&hcan1, baud_kbps)) {
+  if (!configure_bit_timing(&hcan1, can1_baud_kbps)) {
     return 0U;
   }
-  if (!configure_bit_timing(&hcan2, baud_kbps)) {
+  if (!configure_bit_timing(&hcan2, can2_baud_kbps)) {
     return 0U;
   }
+  s_baud_kbps[0] = can1_baud_kbps;
+  s_baud_kbps[1] = can2_baud_kbps;
 
-  /* Pass-all filters: 0..13 assigned to CAN1, 14..27 to CAN2 (bxCAN shared
-   * filter bank split on this family). Software-side filtering (triggers,
-   * PC-side ID filter box in ui/can_monitor_tab.py) happens above this
-   * layer, so the firmware itself does not drop frames by ID. */
-  CAN_FilterTypeDef filter = {0};
-  filter.FilterIdHigh = 0x0000;
-  filter.FilterIdLow = 0x0000;
-  filter.FilterMaskIdHigh = 0x0000;
-  filter.FilterMaskIdLow = 0x0000;
-  filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-  filter.FilterBank = 0;
-  filter.FilterMode = CAN_FILTERMODE_IDMASK;
-  filter.FilterScale = CAN_FILTERSCALE_32BIT;
-  filter.FilterActivation = ENABLE;
-  filter.SlaveStartFilterBank = 14;
-  if (HAL_CAN_ConfigFilter(&hcan1, &filter) != HAL_OK) {
+  if (!start_channel(&hcan1, 0U)) {
     return 0U;
   }
-
-  filter.FilterBank = 14;
-  if (HAL_CAN_ConfigFilter(&hcan2, &filter) != HAL_OK) {
-    return 0U;
-  }
-
-  if (HAL_CAN_Start(&hcan1) != HAL_OK) {
-    return 0U;
-  }
-  if (HAL_CAN_Start(&hcan2) != HAL_OK) {
-    return 0U;
-  }
-
-  if (HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK) {
-    return 0U;
-  }
-  if (HAL_CAN_ActivateNotification(&hcan2, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK) {
-    return 0U;
-  }
-
-  /* Error/bus-off reporting (CURSOR_FIX_PROMPT.md 4.4): without these,
-   * AutoBusOff silently recovers the peripheral on its own, but neither the
-   * firmware nor the PC ever learn that a bus fault (e.g. bad/missing
-   * termination, disconnected bus) happened at all. See
-   * HAL_CAN_ErrorCallback() below and CMD_CAN_ERROR_STATUS in protocol.c /
-   * PROTOCOL.md.
-   *
-   * CAN_IT_LAST_ERROR_CODE здесь сознательно НЕТ: LEC-прерывание взводится
-   * на каждую ошибку приёма, и на живой шине с неверным бод-рейтом/шумом
-   * это непрерывный шторм SCE-IRQ (SCE на том же приоритете, что и USB) —
-   * главный цикл голодал, ответы на команды задерживались на секунды,
-   * порт отваливался. Подсчёт LEC-ошибок перенесён в опрос ESR в
-   * CanBridge_PollHealth(); IRQ-путь оставлен только для bus-off и
-   * warning/passive-переходов — они редкие и шторма не создают. */
-  uint32_t error_its = CAN_IT_ERROR | CAN_IT_BUSOFF |
-                       CAN_IT_ERROR_WARNING | CAN_IT_ERROR_PASSIVE;
-  if (HAL_CAN_ActivateNotification(&hcan1, error_its) != HAL_OK) {
-    return 0U;
-  }
-  if (HAL_CAN_ActivateNotification(&hcan2, error_its) != HAL_OK) {
+  if (!start_channel(&hcan2, 1U)) {
     return 0U;
   }
 
@@ -424,6 +442,41 @@ uint8_t CanBridge_Init(uint32_t baud_kbps)
   CanBridge_SetTransceiverMode(1, 0, 0);
   s_can_ready = 1U;
   return 1U;
+}
+
+uint8_t CanBridge_SetBaud(uint8_t channel, uint32_t baud_kbps)
+{
+  if (!s_can_ready || channel > 1U || !is_supported_baud(baud_kbps)) {
+    return 0U;
+  }
+  if (s_baud_kbps[channel] == baud_kbps) {
+    return 1U;
+  }
+
+  CAN_HandleTypeDef *hcan = (channel == 0U) ? &hcan1 : &hcan2;
+
+  /* Re-enter init mode and reprogram bit timing. HAL_CAN_Init() itself
+   * raises MCR.INRQ and waits for INAK, so this is safe on a running
+   * peripheral: reception/transmission pauses for the few microseconds of
+   * the mode switch, pending TX mailboxes are aborted by the hardware.
+   * No HAL_CAN_DeInit() — its MspDeInit would gate the shared CAN clock
+   * and break the other channel's filter-bank access. */
+  if (!configure_bit_timing(hcan, baud_kbps)) {
+    return 0U;
+  }
+  if (!start_channel(hcan, channel)) {
+    return 0U;
+  }
+  s_baud_kbps[channel] = baud_kbps;
+  return 1U;
+}
+
+uint32_t CanBridge_GetBaud(uint8_t channel)
+{
+  if (channel > 1U) {
+    return 0U;
+  }
+  return s_baud_kbps[channel];
 }
 
 uint8_t CanBridge_IsReady(void)

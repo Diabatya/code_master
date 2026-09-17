@@ -36,11 +36,13 @@ CMD_TRIGGER_STAGE = 0xCA
 CMD_TRIGGER_COMMIT = 0xCB
 CMD_USB_STATS = 0xCC
 CMD_CAN_MODE = 0xCD  # Управление режимом CAN (Normal/Silent) и терминатором
+CMD_CAN_SPEED = 0xCE  # Установка бод-рейта CAN-канала (применяется и персистится в МК)
 
 # Версия протокола, которую ожидает хост. Прошивка отвечает её в
 # CMD_SYSTEM_INFO (payload[1]); меньше — функции нового протокола
-# (stage/commit триггеров, cfg-команды) на устройстве отсутствуют.
-EXPECTED_PROTOCOL_VERSION = 1
+# (stage/commit триггеров, cfg-команды, смена бод-рейта CAN) на
+# устройстве отсутствуют.
+EXPECTED_PROTOCOL_VERSION = 2
 
 # Типы устройств
 DEVICE_TYPE_BASIC = 0x00   # Базовое CAN 2.0

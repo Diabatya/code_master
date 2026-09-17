@@ -7,6 +7,7 @@
 #include "device_config.h"
 
 static device_config_t s_config;
+static device_ext_config_t s_ext_config;
 static uint8_t s_config_valid;
 
 static uint8_t crc8(const uint8_t *data, uint32_t len)
@@ -42,6 +43,16 @@ static void load_defaults(device_config_t *cfg)
   cfg->crc8 = crc8((const uint8_t *)cfg, offsetof(device_config_t, crc8));
 }
 
+static void load_ext_defaults(device_ext_config_t *cfg)
+{
+  memset(cfg, 0, sizeof(*cfg));
+  cfg->magic = DEVICE_EXT_CONFIG_MAGIC;
+  cfg->can1_baud_kbps = DEVICE_CONFIG_DEFAULT_BAUD_KBPS;
+  cfg->can2_baud_kbps = DEVICE_CONFIG_DEFAULT_BAUD_KBPS;
+  cfg->version = DEVICE_EXT_CONFIG_VERSION;
+  cfg->crc8 = crc8((const uint8_t *)cfg, offsetof(device_ext_config_t, crc8));
+}
+
 void DeviceConfig_Init(void)
 {
   const device_config_t *flash_cfg = (const device_config_t *)DEVICE_CONFIG_PAGE_ADDR;
@@ -63,6 +74,20 @@ void DeviceConfig_Init(void)
    * write only happens on an explicit CMD_CFG_WRITE/FACTORY_RESET). */
   load_defaults(&s_config);
   s_config_valid = 0U;
+
+  /* Extended record lives right after the main one in the same page; a
+   * missing/invalid record simply means 500/500 kbit/s defaults — it was
+   * introduced after devices shipped, so absence must not invalidate the
+   * identity record. */
+  const device_ext_config_t *ext =
+      (const device_ext_config_t *)(DEVICE_CONFIG_PAGE_ADDR + DEVICE_EXT_CONFIG_OFFSET);
+  if (ext->magic == DEVICE_EXT_CONFIG_MAGIC
+      && crc8((const uint8_t *)ext, offsetof(device_ext_config_t, crc8)) == ext->crc8
+      && ext->can1_baud_kbps > 0U && ext->can2_baud_kbps > 0U) {
+    memcpy(&s_ext_config, ext, sizeof(s_ext_config));
+  } else {
+    load_ext_defaults(&s_ext_config);
+  }
 }
 
 const device_config_t *DeviceConfig_Get(void)
@@ -75,7 +100,12 @@ uint8_t DeviceConfig_IsValid(void)
   return s_config_valid;
 }
 
-static uint8_t flash_write_config(const device_config_t *cfg)
+/* Programs both records in one pass: any page rewrite (identity write,
+ * CAN speed change, factory reset) rewrites main+extended together, so the
+ * extended settings survive a CMD_CFG_WRITE instead of reverting to
+ * defaults on the next boot. */
+static uint8_t flash_write_config(const device_config_t *cfg,
+                                  const device_ext_config_t *ext)
 {
   HAL_FLASH_Unlock();
 
@@ -105,12 +135,24 @@ static uint8_t flash_write_config(const device_config_t *cfg)
     addr += 2U;
   }
 
+  src = (const uint16_t *)ext;
+  addr = DEVICE_CONFIG_PAGE_ADDR + DEVICE_EXT_CONFIG_OFFSET;
+  for (uint32_t i = 0; i < (sizeof(device_ext_config_t) / 2U); i++) {
+    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, src[i]) != HAL_OK) {
+      HAL_FLASH_Lock();
+      return 0U;
+    }
+    addr += 2U;
+  }
+
   HAL_FLASH_Lock();
   /* Сверяем реальное содержимое страницы: частично прошитая запись
    * (brown-out во время программирования) иначе всплывала бы только
    * после следующего включения — устройство теряло имя/серийник. */
   return (memcmp((const void *)DEVICE_CONFIG_PAGE_ADDR, cfg,
-                 sizeof(device_config_t)) == 0)
+                 sizeof(device_config_t)) == 0
+          && memcmp((const void *)(DEVICE_CONFIG_PAGE_ADDR + DEVICE_EXT_CONFIG_OFFSET),
+                    ext, sizeof(device_ext_config_t)) == 0)
              ? 1U
              : 0U;
 }
@@ -144,7 +186,7 @@ uint8_t DeviceConfig_Write(const uint8_t *device_name, uint8_t device_name_len,
     return 1U;
   }
 
-  if (!flash_write_config(&new_cfg)) {
+  if (!flash_write_config(&new_cfg, &s_ext_config)) {
     return 0U;
   }
 
@@ -157,12 +199,52 @@ uint8_t DeviceConfig_FactoryReset(void)
 {
   device_config_t defaults;
   load_defaults(&defaults);
+  device_ext_config_t ext_defaults;
+  load_ext_defaults(&ext_defaults);
 
-  if (!flash_write_config(&defaults)) {
+  if (!flash_write_config(&defaults, &ext_defaults)) {
     return 0U;
   }
 
   memcpy(&s_config, &defaults, sizeof(s_config));
+  memcpy(&s_ext_config, &ext_defaults, sizeof(s_ext_config));
+  s_config_valid = 1U;
+  return 1U;
+}
+
+uint32_t DeviceConfig_GetCanBaud(uint8_t channel)
+{
+  if (channel == 0U) {
+    return s_ext_config.can1_baud_kbps;
+  }
+  return s_ext_config.can2_baud_kbps;
+}
+
+uint8_t DeviceConfig_SetCanBaud(uint8_t channel, uint32_t baud_kbps)
+{
+  if (channel > 1U || baud_kbps == 0U || baud_kbps > 0xFFFFU) {
+    return 0U;
+  }
+
+  device_ext_config_t new_ext = s_ext_config;
+  if (channel == 0U) {
+    new_ext.can1_baud_kbps = (uint16_t)baud_kbps;
+  } else {
+    new_ext.can2_baud_kbps = (uint16_t)baud_kbps;
+  }
+  new_ext.crc8 = crc8((const uint8_t *)&new_ext, offsetof(device_ext_config_t, crc8));
+
+  if (memcmp(&new_ext, &s_ext_config, sizeof(new_ext)) == 0) {
+    return 1U;
+  }
+
+  if (!flash_write_config(&s_config, &new_ext)) {
+    return 0U;
+  }
+
+  memcpy(&s_ext_config, &new_ext, sizeof(s_ext_config));
+  /* Страница теперь содержит валидную основную запись (пусть и дефолтную,
+   * если конфиг был повреждён) — отмечаем её как действительную. */
   s_config_valid = 1U;
   return 1U;
 }

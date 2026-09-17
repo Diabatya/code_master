@@ -14,6 +14,7 @@ from core.can_protocol import (
     CMD_AUTO_SPEED,
     CMD_AUTO_SPEED_RESP,
     CMD_CAN_MODE,
+    CMD_CAN_SPEED,
     CMD_CAN_STATS,
     CMD_TRIGGER_ENABLE,
     CMD_TRIGGER_STATS,
@@ -692,6 +693,9 @@ class SerialManager(QObject):
             "busoff_count": int.from_bytes(payload[16:20], "little") if len(payload) >= 20 else 0,
             "recovery_count": int.from_bytes(payload[20:24], "little") if len(payload) >= 24 else 0,
             "ready": int(payload[24]) if len(payload) >= 25 else 0,
+            # Фактический бод-рейт канала (kbit/s), прошивки v2+ отдают
+            # его в хвосте — по нему видно, применилась ли настройка.
+            "baud_kbps": int.from_bytes(payload[25:27], "little") if len(payload) >= 27 else 0,
         }
 
     def set_trigger_enabled(self, index: int, enabled: bool) -> None:
@@ -708,6 +712,26 @@ class SerialManager(QObject):
         channel: 1 = CAN1, 2 = CAN2.
         """
         self.request_control(CMD_CAN_MODE, bytes((channel & 0xFF, mode & 0xFF, int(terminator))))
+
+    # Бод-рейты, которые умеет выставить bxCAN при APB1 = 36 МГц
+    # (configure_bit_timing в firmware/application/Src/can_bridge.c).
+    SUPPORTED_CAN_BAUD_KBPS = (1000, 500, 250, 125, 100, 50, 20, 10)
+
+    def set_can_speed(self, channel: int, baud_kbps: int) -> int:
+        """Применяет бод-рейт CAN-канала к периферии МК и персистит его.
+
+        channel: 1 = CAN1, 2 = CAN2. baud_kbps — в кбит/с из списка
+        SUPPORTED_CAN_BAUD_KBPS (иначе прошивка ответит ошибкой 0x02).
+        Возвращает фактически применённый бод-рейт из ответа устройства.
+        """
+        if baud_kbps not in self.SUPPORTED_CAN_BAUD_KBPS:
+            raise ValueError(
+                f"Неподдерживаемая скорость CAN: {baud_kbps} кбит/с "
+                f"(доступны {', '.join(map(str, self.SUPPORTED_CAN_BAUD_KBPS))})"
+            )
+        payload = bytes((channel & 0xFF,)) + (baud_kbps & 0xFFFF).to_bytes(2, "little")
+        resp = self.request_control(CMD_CAN_SPEED, payload)
+        return int.from_bytes(resp[0:2], "little") if len(resp) >= 2 else baud_kbps
 
     def read_trigger_stats(self) -> dict[str, int]:
         """Возвращает счётчик срабатываний и максимальную задержку trigger.

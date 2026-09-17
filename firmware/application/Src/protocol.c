@@ -42,6 +42,7 @@
 #define CMD_TRIGGER_COMMIT      0xCBU
 #define CMD_USB_STATS            0xCCU
 #define CMD_CAN_MODE             0xCDU /* управление режимом и терминатором CAN */
+#define CMD_CAN_SPEED            0xCEU /* установка бод-рейта CAN-канала (runtime + persist) */
 #define APP_METADATA_ADDR       0x0803D000U
 #define APP_METADATA_MAGIC      0x41505031U
 #define STM32_UID96_ADDR        0x1FFFF7E8U /* Unique Device ID (96 бит), F1 */
@@ -335,7 +336,10 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       }
       can_stats_t stats;
       CanBridge_GetStats((uint8_t)(payload[0] - 1U), &stats);
-      uint8_t out[25];
+      /* [25..26] — фактически применённый бод-рейт канала (kbit/s):
+       * монитор опрашивает статистику каждую секунду, поэтому UI всегда
+       * показывает реальную скорость шины, а не только заданное в поле. */
+      uint8_t out[27];
       memcpy(&out[0], &stats.rx_count, 4U);
       memcpy(&out[4], &stats.tx_count, 4U);
       memcpy(&out[8], &stats.lost_count, 4U);
@@ -343,6 +347,9 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       memcpy(&out[16], &stats.busoff_count, 4U);
       memcpy(&out[20], &stats.recovery_count, 4U);
       out[24] = CanBridge_IsReady();
+      uint16_t baud = (uint16_t)CanBridge_GetBaud((uint8_t)(payload[0] - 1U));
+      out[25] = (uint8_t)(baud & 0xFFU);
+      out[26] = (uint8_t)((baud >> 8) & 0xFFU);
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
     }
@@ -425,6 +432,36 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       break;
     }
 
+    case CMD_CAN_SPEED: {
+      /* payload: [channel:1][baud_kbps:2 LE]
+       * channel: 1 = CAN1, 2 = CAN2 — независимые бод-рейты на канал.
+       * Применяется к периферии сразу (CanBridge_SetBaud реконфигурирует
+       * бит-тайминг на лету) и персистится в config-странице — иначе после
+       * ребута/отключения ПК автономные триггеры/шлюз снова вышли бы на
+       * дефолтной скорости. Ответ возвращает фактически применённый бод
+       * (u16 LE), чтобы хост мог отобразить реальное состояние. */
+      if (payload_len < 3U || payload[0] < 1U || payload[0] > 2U) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      uint32_t baud = (uint32_t)(payload[1] | ((uint16_t)payload[2] << 8));
+      uint8_t ch = (uint8_t)(payload[0] - 1U);
+      if (!CanBridge_SetBaud(ch, baud)) {
+        send_new_cmd_response(cmd, 0x02U, NULL, 0U); /* unsupported rate or CAN not ready */
+        break;
+      }
+      if (!DeviceConfig_SetCanBaud(ch, baud)) {
+        /* Применилось, но не персистнулось — предупреждаем хост отдельным
+         * статусом: до перезагрузки скорость работает, после — старая. */
+        send_new_cmd_response(cmd, 0x03U, NULL, 0U);
+        break;
+      }
+      uint16_t applied = (uint16_t)CanBridge_GetBaud(ch);
+      uint8_t out[2] = { (uint8_t)(applied & 0xFFU), (uint8_t)((applied >> 8) & 0xFFU) };
+      send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
+      break;
+    }
+
     case CMD_SYSTEM_INFO: {
       const device_config_t *cfg = DeviceConfig_Get();
       const uint8_t *metadata = (const uint8_t *)APP_METADATA_ADDR;
@@ -434,7 +471,7 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * Старые версии ПК читают только первые 16 байт. */
       uint8_t out[64] = {
         s_device_version,
-        1U,
+        2U, /* protocol version: 2 = CMD_CAN_SPEED поддерживается */
         0U,
         1U,
         cfg->reserved[0],
@@ -642,14 +679,16 @@ static uint16_t try_parse_one(void)
      * rate instead of 0, so the PC's auto_detect_can_speed() gets a usable
      * answer rather than a hard failure; replace with a real sweep once
      * hardware is available to validate transceiver switching timing. */
-    extern uint32_t g_can_baud_kbps; /* defined in main.c */
-    uint8_t resp[3] = { CMD_AUTO_SPEED_RESP, (uint8_t)(g_can_baud_kbps >> 8), (uint8_t)(g_can_baud_kbps & 0xFFU) };
+    /* Фактический бод канала 1 — берём из can_bridge (обновляется при
+     * CMD_CAN_SPEED), а не boot-копию в main.c. */
+    uint32_t baud = CanBridge_GetBaud(0);
+    uint8_t resp[3] = { CMD_AUTO_SPEED_RESP, (uint8_t)(baud >> 8), (uint8_t)(baud & 0xFFU) };
     CDC_Transmit_FS(resp, 3U);
     return 1U;
   }
 
-  /* --- New commands (0xC0-0xCD), see PROTOCOL.md Part 2 --- */
-  if (marker >= 0xC0U && marker <= 0xCDU) {
+  /* --- New commands (0xC0-0xCE), see PROTOCOL.md Part 2 --- */
+  if (marker >= 0xC0U && marker <= 0xCEU) {
     if (avail < 2U) {
       return wait_more_or_resync();
     }

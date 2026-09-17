@@ -42,9 +42,19 @@ typedef struct {
 
 /* Initializes CAN1 (master) + CAN2 (slave) peripherals, GPIO, filters
  * (pass-all on both, filtering is done in software by triggers/UI), and
- * enables RX FIFO0 pending interrupts. baud_kbps applies to both channels
- * (bxCAN2 shares CAN1's filter bank config but has its own bit timing). */
-uint8_t CanBridge_Init(uint32_t baud_kbps);
+ * enables RX FIFO0 pending interrupts. Each channel gets its own bit rate:
+ * CAN1 = can1_baud_kbps, CAN2 = can2_baud_kbps (bxCAN2 shares CAN1's
+ * filter bank config but has its own bit timing). */
+uint8_t CanBridge_Init(uint32_t can1_baud_kbps, uint32_t can2_baud_kbps);
+
+/* Reconfigures one channel's bit rate at runtime (0 = CAN1, 1 = CAN2):
+ * the peripheral briefly enters init mode and comes back on the bus with
+ * the new timing. Transceiver Normal/Silent and termination states are
+ * GPIO-driven and survive the re-init. Returns 1 on success. */
+uint8_t CanBridge_SetBaud(uint8_t channel, uint32_t baud_kbps);
+
+/* Returns the currently applied bit rate of channel 0/1 in kbit/s. */
+uint32_t CanBridge_GetBaud(uint8_t channel);
 
 /* Sets the TJA1050 Normal/Silent select + termination-enable GPIOs for one
  * channel (0=CAN1, 1=CAN2). silent=1 puts the transceiver in listen-only

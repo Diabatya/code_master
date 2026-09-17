@@ -1017,12 +1017,12 @@ class CanChannelMonitor(QWidget):
                 # (last_cmd_ms велик, poll_count замирает) или ПК не
                 # забирает данные (tx_busy_waits растёт).
                 logger.debug(
-                    "CAN%d stats: rx=%d tx=%d lost=%d err=%d busoff=%d | "
+                    "CAN%d stats: rx=%d tx=%d lost=%d err=%d busoff=%d baud=%d | "
                     "usb drop=%d busy=%d cmd=%d cmdms=%d loop=%d",
                     self._channel,
                     device["rx_count"], device["tx_count"],
                     device["lost_count"], device["error_count"],
-                    device["busoff_count"],
+                    device["busoff_count"], device.get("baud_kbps", -1),
                     usb["tx_dropped"], usb.get("tx_busy_waits", -1),
                     usb.get("cmd_count", -1), usb.get("last_cmd_ms", -1),
                     usb.get("poll_count", -1),
@@ -1401,6 +1401,7 @@ class CanMonitorTab(QWidget):
         self._csv_path: Optional[Path] = None
         self._dbc_manager = DBCManager()
         self._memory_indicator = MemoryIndicator(self)
+        self._syncing_config = False
         self._create_widgets()
         self._layout_widgets()
 
@@ -1425,7 +1426,10 @@ class CanMonitorTab(QWidget):
         self._can1_speed_combo.setFont(compact_font)
         self._can1_speed_combo.setEditable(True)
         self._can1_speed_combo.setFixedWidth(100)
-        for preset in ["33.3", "50", "100", "125", "250", "500", "800", "1000"]:
+        # Только бод-рейты, которые bxCAN реально умеет при APB1=36 МГц
+        # (configure_bit_timing в прошивке): 33.3 и 800 кбит/с аппаратно
+        # недостижимы на этом кварце — не показываем нерабочие варианты.
+        for preset in ["10", "20", "50", "100", "125", "250", "500", "1000"]:
             self._can1_speed_combo.addItem(preset)
         self._can1_speed_combo.setMaxVisibleItems(12)
         self._can1_speed_combo.lineEdit().setValidator(QDoubleValidator(0.1, 10000.0, 1, self))
@@ -1453,7 +1457,7 @@ class CanMonitorTab(QWidget):
         self._can2_speed_combo.setFont(compact_font)
         self._can2_speed_combo.setEditable(True)
         self._can2_speed_combo.setFixedWidth(100)
-        for preset in ["33.3", "50", "100", "125", "250", "500", "800", "1000"]:
+        for preset in ["10", "20", "50", "100", "125", "250", "500", "1000"]:
             self._can2_speed_combo.addItem(preset)
         self._can2_speed_combo.setMaxVisibleItems(12)
         self._can2_speed_combo.lineEdit().setValidator(QDoubleValidator(0.1, 10000.0, 1, self))
@@ -1590,19 +1594,85 @@ class CanMonitorTab(QWidget):
             return f"{speed_bps / 1000:.1f}"
         return "500"
 
-    def _on_can1_speed_changed(self) -> None:
+    def _speed_combo_kbps(self, combo: QComboBox) -> int:
+        """Текущее значение комбобокса скорости в кбит/с (дефолт 500)."""
         try:
-            speed_kbps = float(self._can1_speed_combo.currentText().strip() or "500")
+            return int(round(float(combo.currentText().strip() or "500")))
         except ValueError:
-            speed_kbps = 500.0
-        self._config.set("can1_speed", max(1000, int(round(speed_kbps * 1000))))
+            return 500
+
+    def _on_can1_speed_changed(self) -> None:
+        kbps = self._speed_combo_kbps(self._can1_speed_combo)
+        self._config.set("can1_speed", kbps * 1000)
+        self._push_can_speed(1, kbps)
 
     def _on_can2_speed_changed(self) -> None:
+        kbps = self._speed_combo_kbps(self._can2_speed_combo)
+        self._config.set("can2_speed", kbps * 1000)
+        self._push_can_speed(2, kbps)
+
+    def _push_can_speed(self, channel: int, kbps: int) -> None:
+        """Применяет бод-рейт к периферии МК (CANx реально переходит на него).
+
+        Скорость — это физический параметр шины: приём/передача/триггеры/
+        шлюз идут на ней. Прошивка персистит значение, поэтому оно держится
+        и после перезагрузки/автономной работы. Поддерживаются только
+        бод-рейты из SerialManager.SUPPORTED_CAN_BAUD_KBPS — остальные
+        значения (введённые вручную) отклоняются с понятным сообщением.
+        """
+        if self._syncing_config or not self._serial_manager.is_open():
+            return
         try:
-            speed_kbps = float(self._can2_speed_combo.currentText().strip() or "500")
-        except ValueError:
-            speed_kbps = 500.0
-        self._config.set("can2_speed", max(1000, int(round(speed_kbps * 1000))))
+            self._serial_manager.set_can_speed(channel, kbps)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось установить скорость CAN%d=%d кбит/с: %s", channel, kbps, exc)
+
+    def apply_can_settings_to_device(self) -> None:
+        """Прогружает скорости и режимы обоих каналов в устройство.
+
+        Вызывается общей кнопкой «Сохранить» — так же, как триггеры,
+        CAN-настройки становятся частью записанной конфигурации. Без связи
+        с устройством просто ничего не делает. """
+        if not self._serial_manager.is_open():
+            return
+        # Одна сессия на всю пачку: скорости и режимы обоих каналов.
+        with self._serial_manager.control_session():
+            for channel in (1, 2):
+                kbps = self._speed_combo_kbps(
+                    self._can1_speed_combo if channel == 1 else self._can2_speed_combo
+                )
+                if kbps in SerialManager.SUPPORTED_CAN_BAUD_KBPS:
+                    try:
+                        self._serial_manager.set_can_speed(channel, kbps)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Сохранение: скорость CAN%d=%d не применена: %s", channel, kbps, exc)
+                term = bool(self._config.get(f"can{channel}_terminator", False))
+                try:
+                    self._serial_manager.set_can_mode(channel, 0, term)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Сохранение: режим CAN%d не применён: %s", channel, exc)
+
+    def sync_from_config(self) -> None:
+        """Переносит значения конфига в виджеты после загрузки файла.
+
+        Файл меняет только Config — без этого комбобоксы показывали бы
+        устаревшие значения, а снимок «Сохранить» не видел разницы.
+        Программное заполнение в МК не пишет — запись идёт по «Сохранить».
+        """
+        self._syncing_config = True
+        try:
+            self._can1_speed_combo.setCurrentText(
+                self._format_speed(self._config.get("can1_speed", 500000)))
+            self._can2_speed_combo.setCurrentText(
+                self._format_speed(self._config.get("can2_speed", 500000)))
+            self._can1_terminator_check.setChecked(
+                bool(self._config.get("can1_terminator", False)))
+            self._can2_terminator_check.setChecked(
+                bool(self._config.get("can2_terminator", False)))
+            self._sleep_time_spin.setValue(int(self._config.get("sleep_time", 0) or 0))
+            self._sleep_mode_combo.setCurrentIndex(int(self._config.get("sleep_mode", 0) or 0))
+        finally:
+            self._syncing_config = False
 
     @staticmethod
     def _fit_speed_button(button: QPushButton, combo: QComboBox) -> None:
@@ -1631,12 +1701,16 @@ class CanMonitorTab(QWidget):
     def _on_can1_terminator_toggled(self, checked: bool) -> None:
         self._config.set("can1_terminator", checked)
         self._update_terminator_style(self._can1_terminator_check)
-        self._apply_can_mode(1)
+        # Программное setChecked при загрузке файла в МК не пишет —
+        # запись идёт по общей кнопке «Сохранить».
+        if not self._syncing_config:
+            self._apply_can_mode(1)
 
     def _on_can2_terminator_toggled(self, checked: bool) -> None:
         self._config.set("can2_terminator", checked)
         self._update_terminator_style(self._can2_terminator_check)
-        self._apply_can_mode(2)
+        if not self._syncing_config:
+            self._apply_can_mode(2)
 
     def _on_monitor_state_changed(self, channel: int, running: bool) -> None:
         """При запуске мониторинга применяет текущий режим и терминатор."""
@@ -1644,14 +1718,26 @@ class CanMonitorTab(QWidget):
             self._apply_can_mode(channel)
 
     def _apply_can_mode(self, channel: int) -> None:
-        """Отправляет в МК режим Normal и состояние терминатора для канала."""
+        """Отправляет в МК режим Normal, терминатор и бод-рейт канала."""
         if not self._serial_manager.is_open():
             return
         term = bool(self._config.get(f"can{channel}_terminator", False))
-        try:
-            self._serial_manager.set_can_mode(channel, 0, term)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Не удалось установить режим CAN%d: %s", channel, exc)
+        kbps = int(self._config.get(f"can{channel}_speed", 500000) or 500000) // 1000
+        # Одна сессия на пачку команд — иначе каждая перезапускает
+        # reader-поток и обмен растягивается на секунды.
+        with self._serial_manager.control_session():
+            try:
+                self._serial_manager.set_can_mode(channel, 0, term)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Не удалось установить режим CAN%d: %s", channel, exc)
+            # Заодно подтягиваем скорость: устройство могло быть сброшено
+            # на заводские 500 кбит/с — при старте мониторинга оно должно
+            # выйти на шину именно с настроенным бод-рейтом.
+            if kbps in SerialManager.SUPPORTED_CAN_BAUD_KBPS:
+                try:
+                    self._serial_manager.set_can_speed(channel, kbps)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Не удалось установить скорость CAN%d=%d: %s", channel, kbps, exc)
 
     def _on_sleep_time_changed(self, value: int) -> None:
         self._config.set("sleep_time", value)

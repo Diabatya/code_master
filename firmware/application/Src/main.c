@@ -27,12 +27,14 @@
 #define APP_DEVICE_TYPE     0x00U /* DEVICE_TYPE_BASIC, see PROTOCOL.md 1.2 */
 #define APP_DEVICE_VERSION  0x03U /* v0.3 — bump manually on release */
 
-/* Default/fallback CAN bit rate used until a real auto-baud sweep or a
- * config command sets otherwise (see protocol.c's CMD_AUTO_SPEED note and
- * firmware/FIRMWARE_INPUT_REQUEST.md "CAN auto-baud detection parameters",
- * still unresolved without hardware to validate against). 500 kbit/s
- * matches the ТЗ 12.1 worst-case load example (100% dual-bus @ 500kbit/s). */
-uint32_t g_can_baud_kbps = 500U;
+/* Per-channel CAN bit rates in kbit/s. Boot-time values come from the
+ * persisted device config (DeviceConfig_GetCanBaud); the operator can
+ * change them at runtime via CMD_CAN_SPEED, which also persists them so
+ * autonomous trigger/gateway operation keeps the configured rate after
+ * power cycles. Default/fallback is 500 kbit/s — see protocol.c's
+ * CMD_AUTO_SPEED note and firmware/FIRMWARE_INPUT_REQUEST.md "CAN
+ * auto-baud detection parameters" (ТЗ 12.1 worst-case: dual-bus @ 500k). */
+uint32_t g_can_baud_kbps[2] = { 500U, 500U };
 
 USBD_HandleTypeDef hUsbDeviceFS;
 static IWDG_HandleTypeDef hiwdg;
@@ -74,8 +76,12 @@ int main(void)
 
   /* CAN + triggers must run standalone even with USB deactivated (ТЗ
    * 12.4), so bring the CAN bridge up unconditionally, before deciding
-   * whether to start USB at all. */
-  if (!CanBridge_Init(g_can_baud_kbps)) {
+   * whether to start USB at all. Per-channel bit rates come from the
+   * persisted config — an operator-set 250 kbit/s bus must already run at
+   * 250 kbit/s at power-on, before any PC session. */
+  g_can_baud_kbps[0] = DeviceConfig_GetCanBaud(0);
+  g_can_baud_kbps[1] = DeviceConfig_GetCanBaud(1);
+  if (!CanBridge_Init(g_can_baud_kbps[0], g_can_baud_kbps[1])) {
     /* Keep USB/application diagnostics available even when the board's CAN
      * transceiver, pinout or termination prevents CAN initialization. */
   }
