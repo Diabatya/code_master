@@ -226,11 +226,11 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       uint8_t ok = DeviceConfig_Write(name, name_len, serial, serial_len, vid, pid);
       send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
       if (ok) {
-        /* Re-enumerate with the new name/serial (ТЗ 11.3). A full
-         * USB stack re-init is simplest/most robust here; a soft reset
-         * via the same bootloader-flag mechanism would also work but
-         * would unnecessarily route through the bootloader. */
-        HAL_Delay(50);
+        /* Re-enumerate with the new name/serial (ТЗ 11.3). Ждём пока
+         * ответ реально уйдёт хосту (TxState==0) — слепая задержка
+         * теряла его при занятом CDC-канале, и хост считал команду
+         * невыполненной, хотя запись исполнилась и МК ушёл в reset. */
+        CDC_FlushTx(200U);
         reboot_to_application();
       }
       break;
@@ -244,7 +244,10 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * является пользовательской настройкой. */
       Trigger_ClearAll();
       send_new_cmd_response(cmd, 0x00U, NULL, 0U);
-      HAL_Delay(50);
+      /* Та же причина, что у CMD_CFG_WRITE: сначала гарантированная
+       * доставка ответа хосту, потом reset — иначе хост видел таймаут
+       * на фактически выполненной команде и повторял её. */
+      CDC_FlushTx(200U);
       reboot_to_application();
       break;
     }

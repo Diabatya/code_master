@@ -112,6 +112,22 @@ uint32_t CDC_GetTxDropped(void)
   return tx_dropped;
 }
 
+uint8_t CDC_FlushTx(uint32_t timeout_ms)
+{
+  USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+  if (hcdc == NULL) {
+    return 1U;
+  }
+  uint32_t start = HAL_GetTick();
+  while (hcdc->TxState != 0U) {
+    App_KickWatchdog();
+    if ((HAL_GetTick() - start) >= timeout_ms) {
+      return 1U;
+    }
+  }
+  return 0U;
+}
+
 static int8_t CDC_Init_FS(void)
 {
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS);

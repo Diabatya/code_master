@@ -19,7 +19,9 @@ from core.can_protocol import (
     CMD_TRIGGER_STATS,
     CMD_SYSTEM_INFO,
     CMD_USB_STATS,
+    CMD_CFG_FACTORY_RESET,
     CMD_CFG_READ,
+    CMD_CFG_WRITE,
     CMD_DEVICE_ID,
     CMD_DEVICE_ID_RESP,
     CMD_DEVICE_INFO,
@@ -42,6 +44,13 @@ from models.config import Config
 from models.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Команды, после которых прошивка перезагружает МК для пере-энумерации
+# USB (новое имя/серийник, заводской сброс): порт умрёт через ~200 мс
+# после ответа. Закрываем его сразу сами — иначе до обнаружения обрыва
+# reader'ом следующие команды уходят в мёртвый порт таймаутами
+# («прогрузка конфига после заводского сброса не работала ни разу»).
+_REBOOTING_COMMANDS = frozenset((CMD_CFG_WRITE, CMD_CFG_FACTORY_RESET))
 
 
 SerialPort = Union[serial.Serial, FakeSerial]
@@ -511,13 +520,20 @@ class SerialManager(QObject):
                 last_timeout: Optional[TimeoutError] = None
                 for _attempt in range(2):
                     try:
-                        return self._control_roundtrip(command, payload, timeout)
+                        result = self._control_roundtrip(command, payload, timeout)
                     except TimeoutError as exc:
                         last_timeout = exc
                         logger.warning(
                             "Команда 0x%02X: попытка %d без ответа (%s)",
                             command, _attempt + 1, exc,
                         )
+                        continue
+                    # Ответ дошёл — дальше прошивка перезагружает МК:
+                    # порт закроем сразу, пока reader не споткнулся
+                    # об уже мёртвый USB-дескриптор.
+                    if command in _REBOOTING_COMMANDS:
+                        self.expect_reboot()
+                    return result
                 raise last_timeout  # type: ignore[misc]
             finally:
                 if owns_session:
@@ -527,6 +543,27 @@ class SerialManager(QObject):
                         self._control_session_active = False
                         self._start_reader()
                         self._closing = False
+
+    def expect_reboot(self) -> None:
+        """Устройство уходит в перезагрузку/пере-энумерацию USB.
+
+        Закрывает порт сразу и чисто — без ожидания, пока reader сам
+        споткнётся об уже мёртвый дескриптор (PermissionError 13). Так
+        следующие команды не попадают в окно мёртвого порта, а
+        авто-переподключение стартует немедленно.
+        """
+        with self._lock:
+            self._closing = True
+            self._stop_reader()
+            if self._port is not None:
+                try:
+                    self._port.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._port = None
+                self.connection_changed.emit(False)
+            self._closing = False
+        self._schedule_reconnect()
 
     def _control_roundtrip(self, command: int, payload: bytes, timeout: float) -> bytes:
         """Одна попытка команда→ответ. Ответ: [command|0x10, status, len, data]."""

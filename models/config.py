@@ -146,31 +146,28 @@ class Config:
         self._initialized = True
         self.load()
 
-    # Настройки оператора, переживающие смену версии приложения.
-    # Всё остальное в config.json — кэш состояния УСТРОЙСТВА (имя,
-    # серийник, триггеры, скорости CAN, шлюзы, гибкая логика…): после
-    # обновления приложения он протухший и не должен подтягиваться в
-    # поля — их заполнит вычитка с МК. Белый список (а не чёрный),
-    # чтобы будущие ключи состояния устройства сбрасывались автоматом.
-    _VERSIONED_KEEP_KEYS = (
-        "port",
-        "baudrate",
-        "emulation",
-        "error_probability",
-        "auto_reconnect",
-        "setup_completed",
-        "theme",
-        "light_theme",
-        "language",
-        "last_config_dir",
-        "com_logger_port",
-        "com_logger_virtual_port",
-        "com_logger_baud",
-        "com_logger_proxy",
-        "target_mcu",
-        "programmer_method",
-        "preserve_triggers",
-        "dbc_path",
+    # Ключи-зеркала программы, зашитой в МК: после обновления приложения
+    # они протухшие (устройство могли перешить/сбросить) и не должны
+    # подтягиваться в поля — их заполнит вычитка с МК. ЧЁРНЫЙ список, а
+    # не белый: идентичность (device_name/device_serial/port_names) должна
+    # пережить обновление — диалог прошивки предзаполняет из неё поля,
+    # иначе config-страница прошивается с ПУСТЫМ именем и порт показывает
+    # безликий «CodeMaster» вместо имени устройства.
+    _VERSIONED_RESET_KEYS = (
+        "triggers",
+        "gateway_rules",
+        "gateway_ignore",
+        "ignore_list",
+        "flexible_rules",
+        "logic",
+        "analog_ports",
+        "can1_speed",
+        "can2_speed",
+        "can_speed_auto",
+        "can1_terminator",
+        "can2_terminator",
+        "sleep_time",
+        "sleep_mode",
     )
 
     def load(self) -> None:
@@ -185,14 +182,18 @@ class Config:
             if not isinstance(loaded, dict):
                 return
             if loaded.get("app_version") != VERSION:
-                kept = {k: loaded[k] for k in self._VERSIONED_KEEP_KEYS if k in loaded}
-                kept["app_version"] = VERSION
+                for key in self._VERSIONED_RESET_KEYS:
+                    if key in self.DEFAULT_CONFIG:
+                        loaded[key] = deepcopy(self.DEFAULT_CONFIG[key])
+                    else:
+                        loaded.pop(key, None)
+                loaded["app_version"] = VERSION
                 logger.info(
-                    "Кэш состояния устройства сброшен: записан версией %s, приложение %s",
+                    "Кэш программы устройства сброшен: записан версией %s, приложение %s",
                     loaded.get("app_version") or "<?>",
                     VERSION,
                 )
-                self._data.update(kept)
+                self._data.update(loaded)
                 self.save()
                 return
             self._data.update(loaded)

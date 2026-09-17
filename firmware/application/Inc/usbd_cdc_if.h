@@ -16,6 +16,11 @@ extern "C" {
 extern USBD_CDC_ItfTypeDef USBD_CDC_fops;
 
 uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
+/* Ждёт, пока последняя отправка реально уйдёт хосту (TxState==0),
+ * максимум timeout_ms. Нужна перед NVIC_SystemReset по командам
+ * конфигурации: слепая задержка теряла ответ при занятом CDC-канале,
+ * и хост считал команду невыполненной, хотя она исполнилась. */
+uint8_t CDC_FlushTx(uint32_t timeout_ms);
 uint16_t CDC_GetRxAvailable(void);
 uint8_t CDC_ReadRxByte(void);
 uint8_t CDC_PeekRxByte(uint16_t offset, uint8_t *out);
