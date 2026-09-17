@@ -215,6 +215,9 @@ static uint8_t erase_pool(void)
   HAL_FLASH_Unlock();
   for (uint32_t page = TRIGGER_POOL_BASE; page < TRIGGER_FLASH_END;
        page += TRIGGER_FLASH_PAGE) {
+    /* Стирание каждой страницы ~40 мс — пул до 8 КБ; кормим IWDG,
+     * чтобы COMMIT большого набора триггеров не сбрасывал МК. */
+    App_KickWatchdog();
     if (page_is_blank(page)) {
       continue;
     }
@@ -257,6 +260,9 @@ static uint8_t program_store(uint32_t base, uint32_t generation, uint8_t total,
     addr += 2U;
   }
   for (uint8_t j = 0U; j < total; j++) {
+    /* До 70 записей по ~41 halfword — сотни миллисекунд записи;
+     * кормим IWDG между записями. */
+    App_KickWatchdog();
     const uint16_t *src16 = (const uint16_t *)src[j];
     for (uint32_t w = 0U; w < sizeof(trigger_t) / 2U; w++) {
       if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, src16[w]) != HAL_OK) {

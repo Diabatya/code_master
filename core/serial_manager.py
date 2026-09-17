@@ -73,17 +73,22 @@ class _ControlSession:
         with manager._lock:
             if manager._port is None or not manager.is_open():
                 raise RuntimeError("Порт не подключен")
-            manager._closing = True
-            manager._stop_reader()
+            if manager._control_session_depth == 0:
+                manager._closing = True
+                manager._stop_reader()
+            manager._control_session_depth += 1
             manager._control_session_active = True
         return self
 
     def __exit__(self, *_exc) -> None:
         manager = self._manager
         with manager._lock:
-            manager._control_session_active = False
-            manager._start_reader()
-            manager._closing = False
+            if manager._control_session_depth > 0:
+                manager._control_session_depth -= 1
+            if manager._control_session_depth == 0:
+                manager._control_session_active = False
+                manager._start_reader()
+                manager._closing = False
 
 
 def _parse_cfg_read_payload(data: bytes) -> "tuple[str, str]":
@@ -301,6 +306,11 @@ class SerialManager(QObject):
         # гонял бы QThread stop/start, и вычитка 49 слотов триггеров
         # занимала десятки секунд.
         self._control_session_active = False
+        # Сессии реентерабельны: вложенный control_session (или
+        # request_control из другого потока посреди пачки) не должен
+        # перезапускать reader, пока внешняя сессия ещё жива — иначе
+        # reader съедал бы ответы чужих команд.
+        self._control_session_depth = 0
 
     def is_open(self) -> bool:
         """Возвращает True, если порт открыт."""
@@ -366,6 +376,21 @@ class SerialManager(QObject):
                 # устаревшие поля из локального кэша.
                 self.connecting.emit()
                 self._detect_device_id()
+                # В полевой лог — какая сборка прошивки реально стоит на
+                # МК (commit + дата сборки): «прошили последней» без неё
+                # не отличить от реально зашитой версии.
+                if not emulation:
+                    try:
+                        info = self.read_system_info()
+                        logger.info(
+                            "Прошивка МК: app v%d, протокол %d, сборка «%s», commit %s",
+                            int(info.get("application_version") or 0),
+                            int(info.get("protocol_version") or 0),
+                            info.get("build_datetime") or "?",
+                            info.get("git_commit") or "?",
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.debug("Устройство не отдало SYSTEM_INFO")
                 self._config.set_bulk(
                     {"port": port_name, "baudrate": baudrate, "emulation": emulation, "auto_reconnect": auto_reconnect, "error_probability": error_probability}
                 )
@@ -432,6 +457,18 @@ class SerialManager(QObject):
                 self.error_occurred.emit(f"Ошибка отправки: {exc}")
                 return False
 
+    @property
+    def in_control_session(self) -> bool:
+        """Идёт ли сейчас пачка управляющих команд.
+
+        Периодическим опросам (CAN/USB-статистика монитора) нельзя
+        вклиниваться между командами записи/чтения настроек: на живой
+        шине каждая такая команда может отработать только за таймаут,
+        держа _lock секундами и подвешивая всю серию — «прогрузка
+        большого конфига с 5-10 раза».
+        """
+        return self._control_session_active
+
     def control_session(self):
         """Контекстный менеджер: одна остановка reader'а на пачку команд.
 
@@ -463,6 +500,9 @@ class SerialManager(QObject):
                 self._closing = True
                 self._stop_reader()
                 self._control_session_active = True
+                # Неявная сессия занимает уровень глубины — вложенный
+                # control_session не перезапустит reader посреди обмена.
+                self._control_session_depth += 1
             try:
                 # Одна повторная попытка: сразу после переподключения USB
                 # устройство может ещё доинициализироваться и проглотить
@@ -481,9 +521,12 @@ class SerialManager(QObject):
                 raise last_timeout  # type: ignore[misc]
             finally:
                 if owns_session:
-                    self._control_session_active = False
-                    self._start_reader()
-                    self._closing = False
+                    if self._control_session_depth > 0:
+                        self._control_session_depth -= 1
+                    if self._control_session_depth == 0:
+                        self._control_session_active = False
+                        self._start_reader()
+                        self._closing = False
 
     def _control_roundtrip(self, command: int, payload: bytes, timeout: float) -> bytes:
         """Одна попытка команда→ответ. Ответ: [command|0x10, status, len, data]."""
@@ -648,6 +691,11 @@ class SerialManager(QObject):
         with self._lock:
             if self._port is None or not self.is_open():
                 return False
+            # Пока идёт пачка команд настроек — пинг не вклиниваем:
+            # устройство занято записями во Flash, ответ может прийти
+            # за границей 0.5 с и будет ложно прочитан как «отвал».
+            if self._control_session_active:
+                return True
             self._closing = True
             self._stop_reader()
             try:

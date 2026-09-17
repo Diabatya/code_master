@@ -167,6 +167,11 @@ static void send_new_cmd_response(uint8_t cmd, uint8_t status, const uint8_t *pa
    * buffers absorb traffic while we wait inside Protocol_Poll. */
   uint32_t start = HAL_GetTick();
   while (CDC_Transmit_FS(buf, (uint16_t)(3U + len)) != 0U) {
+    /* Занятый TX — легальное состояние, а не зависание: кормим IWDG,
+     * иначе ~900 мс ожидания ответа плюс текущая работа цикла могли
+     * перешагнуть ~1-секундный период вотчдога и сбросить МК посреди
+     * серии команд (в поле — отвал USB-порта и «Таймаут записи»). */
+    App_KickWatchdog();
     if ((HAL_GetTick() - start) >= 900U) {
       break; /* still inside the PC's 2s command timeout (+retry window) */
     }

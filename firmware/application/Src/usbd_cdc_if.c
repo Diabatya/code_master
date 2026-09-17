@@ -85,6 +85,11 @@ uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
        * responses (commands can be retried, CAN frames are best-effort). */
       uint32_t wait_start = HAL_GetTick();
       while (hcdc->TxState == 1U) {
+        /* Ожидание освобождения IN-конечной точки ограничено и само по
+         * себе завершится — кормим IWDG, чтобы занятость USB не
+         * принималась за зависание главного цикла (устройство уходило
+         * в reset и роняло порт посреди серии команд). */
+        App_KickWatchdog();
         if ((HAL_GetTick() - wait_start) >= 100U) {
           tx_dropped++;
           return 1U;

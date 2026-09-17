@@ -79,6 +79,9 @@ static uint8_t flash_write_config(const device_config_t *cfg)
 {
   HAL_FLASH_Unlock();
 
+  /* Стирание страницы ~40 мс — кормим IWDG, чтобы запись конфигурации
+   * в связке с другими ожиданиями не сбрасывала МК. */
+  App_KickWatchdog();
   FLASH_EraseInitTypeDef erase_init = {
     .TypeErase   = FLASH_TYPEERASE_PAGES,
     .PageAddress = DEVICE_CONFIG_PAGE_ADDR,
@@ -89,6 +92,7 @@ static uint8_t flash_write_config(const device_config_t *cfg)
     HAL_FLASH_Lock();
     return 0U;
   }
+  App_KickWatchdog();
 
   const uint16_t *src = (const uint16_t *)cfg;
   uint32_t addr = DEVICE_CONFIG_PAGE_ADDR;

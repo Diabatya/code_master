@@ -986,8 +986,21 @@ class CanChannelMonitor(QWidget):
             self._received_count, speed, load_pct
         )
         try:
-            if self._serial_manager.is_open() and not self._config.get("emulation", False):
-                device = self._serial_manager.read_can_stats(self._channel)
+            if (
+                self._serial_manager.is_open()
+                and not self._config.get("emulation", False)
+                # Идёт пачка команд настроек (запись/вычитка триггеров):
+                # статистика, вклинившись между командами, на живой шине
+                # висит до таймаута и держит _lock секундами — пропускаем
+                # этот тик, в следующий всё дочитается.
+                and not self._serial_manager.in_control_session
+            ):
+                # Обе команды — одной сессией: иначе каждая гоняет
+                # QThread reader stop/start, что на двух каналах
+                # давало ~4 пересоздания потока в секунду непрерывно.
+                with self._serial_manager.control_session():
+                    device = self._serial_manager.read_can_stats(self._channel)
+                    usb = self._serial_manager.read_usb_stats()
                 ready = tr("OK") if device.get("ready") else tr("INIT FAIL")
                 text += tr(" | Ready: {0} | RX: {1} TX: {2} Потеряно: {3} Errors: {4} Bus-off: {5} Recovery: {6}").format(
                     ready,
@@ -998,7 +1011,6 @@ class CanChannelMonitor(QWidget):
                     device["busoff_count"],
                     device["recovery_count"],
                 )
-                usb = self._serial_manager.read_usb_stats()
                 text += tr(" USB dropped: {0}").format(usb["tx_dropped"])
                 self._update_error_warnings(device)
         except Exception:  # noqa: BLE001

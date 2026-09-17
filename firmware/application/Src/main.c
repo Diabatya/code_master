@@ -25,7 +25,7 @@
 #include "protocol.h"
 
 #define APP_DEVICE_TYPE     0x00U /* DEVICE_TYPE_BASIC, see PROTOCOL.md 1.2 */
-#define APP_DEVICE_VERSION  0x02U /* v0.2 — bump manually on release */
+#define APP_DEVICE_VERSION  0x03U /* v0.3 — bump manually on release */
 
 /* Default/fallback CAN bit rate used until a real auto-baud sweep or a
  * config command sets otherwise (see protocol.c's CMD_AUTO_SPEED note and
@@ -191,6 +191,17 @@ static void MX_GPIO_Init(void)
 
   /* CAN pins, transceiver control, USB D+/D- are initialized by
    * CanBridge_Init() / HAL_PCD_MspInit() respectively. */
+}
+
+void App_KickWatchdog(void)
+{
+  /* Дополнительное кормление из ограниченных циклов ожидания (USB TX
+   * занят, стирание/запись Flash): ожидание ограничено таймаутом и само
+   * завершится, но суммарно могло перешагнуть ~1-секундный период IWDG —
+   * устройство уходило в reset и роняло USB-порт посреди серии команд
+   * (полевой лог: ClearCommError PermissionError → ре-энумерация →
+   * «Таймаут записи команды»). */
+  HAL_IWDG_Refresh(&hiwdg);
 }
 
 static void MX_IWDG_Init(void)

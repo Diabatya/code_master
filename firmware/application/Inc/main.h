@@ -85,6 +85,12 @@ extern "C" {
 #define LED_PIN  GPIO_PIN_13
 
 void Error_Handler(void);
+/* Кормит IWDG из ограниченных циклов ожидания (USB TX занят, стирание
+ * Flash): ожидание само по себе выходит по таймауту, но суммарно может
+ * перешагнуть ~1-секундный период вотчдога — без кормления устройство
+ * уходило в reset, роняя USB-порт (в полевом логе — ClearCommError
+ * PermissionError и «Таймаут записи команды» при прогрузке конфига). */
+void App_KickWatchdog(void);
 
 #ifdef __cplusplus
 }
