@@ -57,6 +57,17 @@ static const uint8_t REBOOT_MAGIC[REBOOT_MAGIC_LEN] =
 static uint8_t s_device_type;
 static uint8_t s_device_version;
 
+/* Диагностика «МК медленный или ПК не читает»: полевой лог отличал
+ * таймаут команды от отсутствия ответа, но не показывал, где теряется
+ * время. cmd_count растёт только когда команда реально дошла до
+ * обработчика; last_cmd_ms — сколько МК сам возился с ответом
+ * (мс от входа в handle_new_command до возврата send_*_response);
+ * poll_count — частота итераций главного цикла (замирает при
+ * IRQ-шторме/зависании). Все счётчики уходят в CMD_USB_STATS. */
+static uint32_t s_cmd_count;
+static uint32_t s_last_cmd_ms;
+static uint32_t s_poll_count;
+
 void Protocol_Init(uint8_t device_type, uint8_t device_version)
 {
   s_device_type = device_type;
@@ -382,9 +393,20 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     }
 
     case CMD_USB_STATS: {
+      /* 20 байт телеметрии: tx_dropped + tx_busy_waits (IN-эндпоинт
+       * голодал >100 мс — хост не забирал данные) + cmd_count (сколько
+       * команд реально дошло до обработчика) + last_cmd_ms (сколько МК
+       * возился с последней командой, включая ожидание TX) + poll_count
+       * (итерации Protocol_Poll — замирает при голодании главного цикла).
+       * По дельтам между опросами в поле видно, где теряется время. */
       uint32_t dropped = CDC_GetTxDropped();
-      uint8_t out[4];
-      memcpy(out, &dropped, sizeof(out));
+      uint32_t busy = CDC_GetTxBusyWaits();
+      uint8_t out[20];
+      memcpy(&out[0], &dropped, 4U);
+      memcpy(&out[4], &busy, 4U);
+      memcpy(&out[8], &s_cmd_count, 4U);
+      memcpy(&out[12], &s_last_cmd_ms, 4U);
+      memcpy(&out[16], &s_poll_count, 4U);
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
     }
@@ -641,7 +663,10 @@ static uint16_t try_parse_one(void)
     for (uint32_t i = 0; i < payload_len; i++) {
       CDC_PeekRxByte((uint16_t)(2U + i), &payload[i]);
     }
+    s_cmd_count++;
+    uint32_t cmd_start = HAL_GetTick();
     handle_new_command(marker, payload, payload_len);
+    s_last_cmd_ms = HAL_GetTick() - cmd_start;
     return (uint16_t)total_len;
   }
 
@@ -652,6 +677,7 @@ static uint16_t try_parse_one(void)
 
 void Protocol_Poll(void)
 {
+  s_poll_count++;
   /* Drain the CDC RX FIFO. Bounded per call so a very long pending queue
    * cannot starve CanBridge_PopRx()/Trigger_Poll() in the same main-loop
    * iteration; the remainder is picked up on the next iteration. */

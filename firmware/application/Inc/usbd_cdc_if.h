@@ -25,6 +25,7 @@ uint16_t CDC_GetRxAvailable(void);
 uint8_t CDC_ReadRxByte(void);
 uint8_t CDC_PeekRxByte(uint16_t offset, uint8_t *out);
 uint32_t CDC_GetTxDropped(void);
+uint32_t CDC_GetTxBusyWaits(void);
 
 /* Полевая диагностика USB (читается через CMD_SYSTEM_INFO): сколько раз
  * ядро сообщило bus reset / disconnect и сколько байт RX потеряно из-за

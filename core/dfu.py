@@ -180,7 +180,9 @@ class DfuDevice:
                     logger.debug("DFU wTransferSize из дескриптора: %d", size)
                     return size
             for intf in cfg.interfaces():
-                for alt in intf.altsettings():
+                # pyusb Interface итерируется по altsetting — метода
+                # .altsettings() у него нет (спамило AttributeError в лог).
+                for alt in intf:
                     for source in (getattr(alt, "extra", b""), getattr(alt, "extra_descriptors", [])):
                         size = self._parse_transfer_size(source)
                         if size is not None and size > 0:
@@ -217,6 +219,7 @@ class DfuDevice:
     def _wait(self, status_timeout: int = 60000) -> None:
         """Ждёт завершения операции DFU и проверяет, что статус OK."""
         deadline = time.time() + status_timeout / 1000.0
+        short_reads = 0
         while True:
             if time.time() > deadline:
                 raise RuntimeError("Таймаут ожидания статуса DFU")
@@ -225,7 +228,17 @@ class DfuDevice:
             except usb.core.USBError as exc:
                 raise RuntimeError(f"Ошибка чтения статуса DFU: {exc}") from exc
             if len(status) < 6:
-                raise RuntimeError("Некорректный ответ DFU_GETSTATUS")
+                # Укороченный GETSTATUS встречается в переходных состояниях
+                # автомата (например сразу после upload, когда устройство
+                # ещё в dfuUPLOAD_IDLE и EP0 недоехал). Одна такая посылка
+                # раньше мгновенно рвала прошивку посреди mass erase —
+                # даём автомату доехать и переспрашиваем ограниченно.
+                short_reads += 1
+                if short_reads > 10:
+                    raise RuntimeError("Некорректный ответ DFU_GETSTATUS")
+                time.sleep(0.05)
+                continue
+            short_reads = 0
             state = status[4]
             bstatus = status[0]
             if state in (STATE_DFU_DNLOAD_SYNC, STATE_DFU_DNBUSY):

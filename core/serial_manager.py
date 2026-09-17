@@ -208,13 +208,6 @@ class SerialReader(QThread):
             is_open = is_open()
         return bool(is_open)
 
-    def _in_waiting(self) -> int:
-        """Возвращает количество байт в буфере, независимо от типа объекта."""
-        try:
-            return self._port.in_waiting()
-        except TypeError:
-            return self._port.in_waiting
-
     def run(self) -> None:
         """Цикл чтения: накапливает байты, парсит CAN-кадры и эмитит сигналы."""
         logger.info("Поток чтения COM-порта запущен")
@@ -229,43 +222,41 @@ class SerialReader(QThread):
                     time.sleep(0.05)
                     continue
 
-                available = self._in_waiting()
-                if available > 0:
-                    chunk = self._port.read(min(available, 256))
-                    if chunk:
-                        logger.debug("SerialReader: прочитано %d байт", len(chunk))
-                        self._last_data_time = now
-                        self.new_raw_data.emit(chunk, time.time())
-                        self._buffer.extend(chunk)
-                        self._error_count = 0
-                        # Парсим все полные кадры из буфера и сдвигаем буфер
-                        frames, remainder = parse_all_frames(self._buffer)
-                        if len(remainder) > MAX_BUFFER_SIZE:
-                            logger.warning(
-                                "Буфер приёма превысил %d байт, отбрасываю накопленный мусор",
-                                MAX_BUFFER_SIZE,
-                            )
-                            remainder = remainder[-MAX_BUFFER_SIZE:]
-                        self._buffer = bytearray(remainder)
-                        for frame in frames:
-                            logger.debug(
-                                "Принят CAN-кадр: ch=%s id=0x%08X dlc=%d",
-                                frame["channel"],
-                                frame["id"],
-                                len(bytes(frame["data"])),
-                            )
-                            self.new_frame.emit(frame)
-                elif now - self._last_data_time > 5.0:
-                    # Периодическая проверка жизни порта при долгом простое
-                    byte = self._port.read(1)
-                    if byte:
-                        self._last_data_time = now
-                        self.new_raw_data.emit(byte, time.time())
-                        self._buffer.extend(byte)
-                        self._error_count = 0
-                    else:
-                        self.msleep(5)
+                # Безусловный read(), а не опрос in_waiting: usbser.sys на
+                # Windows не забирает данные с bulk-IN устройства без
+                # ожидающего ReadFile — байты копились в МК и «приезжали»
+                # с задержкой в секунды (команды уходили в таймаут, а
+                # опоздавшие ответы съедались здесь). timeout=0.1 у порта:
+                # пустой read() сам ждёт первый байт до ~100 мс — это и
+                # есть постоянный опрос шины.
+                chunk = self._port.read(256)
+                if chunk:
+                    logger.debug("SerialReader: прочитано %d байт", len(chunk))
+                    self._last_data_time = now
+                    self.new_raw_data.emit(chunk, time.time())
+                    self._buffer.extend(chunk)
+                    self._error_count = 0
+                    # Парсим все полные кадры из буфера и сдвигаем буфер
+                    frames, remainder = parse_all_frames(self._buffer)
+                    if len(remainder) > MAX_BUFFER_SIZE:
+                        logger.warning(
+                            "Буфер приёма превысил %d байт, отбрасываю накопленный мусор",
+                            MAX_BUFFER_SIZE,
+                        )
+                        remainder = remainder[-MAX_BUFFER_SIZE:]
+                    self._buffer = bytearray(remainder)
+                    for frame in frames:
+                        logger.debug(
+                            "Принят CAN-кадр: ch=%s id=0x%08X dlc=%d",
+                            frame["channel"],
+                            frame["id"],
+                            len(bytes(frame["data"])),
+                        )
+                        self.new_frame.emit(frame)
                 else:
+                    # Пустое чтение реального порта уже подождало до
+                    # 100 мс; у FakeSerial read() неблокирующий — пауза
+                    # нужна, чтобы не крутить цикл впустую.
                     self._error_count = 0
                     self.msleep(5)
             except (serial.SerialException, OSError) as exc:
@@ -633,9 +624,16 @@ class SerialManager(QObject):
         response_marker = (command | 0x10) & 0xFF
         buffer = bytearray()
         while time.time() < deadline:
-            available = self._port_in_waiting()
-            if available:
-                buffer.extend(self._port.read(available))
+            # Явный read(), а не опрос in_waiting: usbser.sys на Windows
+            # не держит постоянно поднятый запрос на bulk-IN — без
+            # ожидающего ReadFile байты ответа сидят в МК при
+            # in_waiting == 0, команда уходила в таймаут, а опоздавший
+            # ответ подбирал перезапущенный reader. Порт открыт с
+            # timeout=0.1: read() возвращает накопленное мгновенно либо
+            # ждёт первый байт до ~100 мс — и держит канал чтения живым.
+            chunk = self._port.read(256)
+            if chunk:
+                buffer.extend(chunk)
             # Разбираем поток по кадрам: CAN-кадры МК→ПК пропускаем
             # целиком — иначе байт внутри данных кадра, совпавший с
             # маркером ответа, давал ложное срабатывание, и хост ждал
@@ -671,7 +669,11 @@ class SerialManager(QObject):
                 if status != 0:
                     raise RuntimeError(f"Устройство отклонило команду 0x{command:02X}: статус 0x{status:02X}")
                 return result
-            time.sleep(0.005)
+            if not chunk:
+                # FakeSerial.read() неблокирующий — без паузы цикл
+                # крутится впустую; у реального порта пустой read()
+                # уже подождал до 100 мс сам.
+                time.sleep(0.005)
         raise TimeoutError(f"Таймаут ответа на команду 0x{command:02X}")
 
     def read_can_stats(self, channel: int) -> dict[str, int]:
@@ -727,11 +729,24 @@ class SerialManager(QObject):
         return stats
 
     def read_usb_stats(self) -> dict[str, int]:
-        """Возвращает количество потерянных USB CDC TX-передач."""
+        """Возвращает счётчики USB CDC.
+
+        Базовый ответ — 4 байта (tx_dropped). Расширенные прошивки отдают
+        ещё tx_busy_waits (сколько раз IN-эндпоинт ждал хост >100 мс),
+        cmd_count (команд реально дошло до обработчика), last_cmd_ms
+        (время обработки последней команды на МК) и poll_count (итерации
+        главного цикла — замирает при голодании/IRQ-шторме). По дельтам
+        между опросами в полевом логе видно, где теряется время. """
         payload = self.request_control(CMD_USB_STATS, b"")
-        if len(payload) != 4:
+        if len(payload) < 4:
             raise RuntimeError("Некорректный ответ CMD_USB_STATS")
-        return {"tx_dropped": int.from_bytes(payload, "little")}
+        stats = {"tx_dropped": int.from_bytes(payload[0:4], "little")}
+        if len(payload) >= 20:
+            stats["tx_busy_waits"] = int.from_bytes(payload[4:8], "little")
+            stats["cmd_count"] = int.from_bytes(payload[8:12], "little")
+            stats["last_cmd_ms"] = int.from_bytes(payload[12:16], "little")
+            stats["poll_count"] = int.from_bytes(payload[16:20], "little")
+        return stats
 
     def read_system_info(self) -> dict[str, object]:
         """Возвращает версию application, протокола и config-формата.
@@ -791,12 +806,16 @@ class SerialManager(QObject):
                 deadline = time.time() + 0.5
                 buffer = bytearray()
                 while time.time() < deadline:
-                    available = self._port_in_waiting()
-                    if available:
-                        buffer.extend(self._port.read(available))
+                    # Реальный read() — см. _control_roundtrip: без
+                    # ожидающего чтения usbser.sys может не забирать
+                    # ответ с bulk-IN устройства.
+                    chunk = self._port.read(256)
+                    if chunk:
+                        buffer.extend(chunk)
                         if _scan_for_response(buffer, CMD_DEVICE_ID_RESP):
                             return True
-                    time.sleep(0.01)
+                    else:
+                        time.sleep(0.01)
                 return False
             except Exception:  # noqa: BLE001
                 return False
@@ -846,14 +865,15 @@ class SerialManager(QObject):
                 deadline = time.time() + 0.5
                 buffer = bytearray()
                 while time.time() < deadline:
-                    available = self._port_in_waiting()
-                    if available:
-                        buffer.extend(self._port.read(available))
+                    chunk = self._port.read(256)
+                    if chunk:
+                        buffer.extend(chunk)
                         if _scan_for_response(buffer, CMD_DEVICE_ID_RESP) and len(buffer) >= 3:
                             device_type = buffer[1]
                             device_version = buffer[2]
                             break
-                    time.sleep(0.01)
+                    else:
+                        time.sleep(0.01)
 
                 # 2. Запрос серийного номера и объёма памяти
                 self._port.reset_input_buffer()
@@ -861,9 +881,9 @@ class SerialManager(QObject):
                 deadline = time.time() + 0.5
                 buffer = bytearray()
                 while time.time() < deadline:
-                    available = self._port_in_waiting()
-                    if available:
-                        buffer.extend(self._port.read(available))
+                    chunk = self._port.read(256)
+                    if chunk:
+                        buffer.extend(chunk)
                         if _scan_for_response(buffer, CMD_DEVICE_INFO_RESP) and len(buffer) >= 2:
                             serial_len = buffer[1]
                             expected = 2 + serial_len + 2
@@ -899,9 +919,9 @@ class SerialManager(QObject):
                     deadline = time.time() + 0.6
                     buffer = bytearray()
                     while time.time() < deadline:
-                        available = self._port_in_waiting()
-                        if available:
-                            buffer.extend(self._port.read(available))
+                        chunk = self._port.read(256)
+                        if chunk:
+                            buffer.extend(chunk)
                             if _scan_for_response(buffer, cfg_marker) and len(buffer) >= 3:
                                 status = buffer[1]
                                 length = buffer[2]
@@ -979,9 +999,9 @@ class SerialManager(QObject):
                 deadline = time.time() + 3.0
                 buffer = bytearray()
                 while time.time() < deadline:
-                    available = self._port_in_waiting()
-                    if available:
-                        buffer.extend(self._port.read(available))
+                    chunk = self._port.read(256)
+                    if chunk:
+                        buffer.extend(chunk)
                         if _scan_for_response(buffer, CMD_AUTO_SPEED_RESP) and len(buffer) >= 3:
                             speed = (buffer[1] << 8) | buffer[2]
                             self._config.set("can_speed_auto", True)
@@ -1026,13 +1046,6 @@ class SerialManager(QObject):
             self._reader.heartbeat.connect(self.heartbeat)
             self._reader.finished.connect(self._on_reader_finished)
             self._reader.start()
-
-    def _port_in_waiting(self) -> int:
-        """Возвращает количество байт в буфере порта."""
-        try:
-            return self._port.in_waiting()  # type: ignore
-        except TypeError:
-            return self._port.in_waiting  # type: ignore
 
     def _on_reader_finished(self) -> None:
         """Вызывается при завершении потока чтения; планирует переподключение."""

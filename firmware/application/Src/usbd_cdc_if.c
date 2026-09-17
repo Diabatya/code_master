@@ -21,6 +21,7 @@ static uint8_t rx_fifo[RX_FIFO_SIZE];
 static volatile uint16_t rx_head = 0;
 static volatile uint16_t rx_tail = 0;
 static volatile uint32_t tx_dropped = 0U;
+static volatile uint32_t tx_busy_waits = 0U;
 static volatile uint32_t rx_overflow_bytes = 0U;
 static volatile uint8_t usb_reset_count = 0U;
 static volatile uint8_t usb_disconnect_count = 0U;
@@ -94,6 +95,10 @@ uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
          * в reset и роняло порт посреди серии команд). */
         App_KickWatchdog();
         if ((HAL_GetTick() - wait_start) >= 100U) {
+          /* Отдельный счётчик «хост не забирал IN» — в поле отвечает на
+           * вопрос «МК медленный или ПК не читает»: растёт именно когда
+           * TxState занят >100 мс, т.е. на шине не было IN-токенов. */
+          tx_busy_waits++;
           tx_dropped++;
           return 1U;
         }
@@ -113,6 +118,11 @@ uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
 uint32_t CDC_GetTxDropped(void)
 {
   return tx_dropped;
+}
+
+uint32_t CDC_GetTxBusyWaits(void)
+{
+  return tx_busy_waits;
 }
 
 void CDC_NoteUsbEvent(uint8_t event)

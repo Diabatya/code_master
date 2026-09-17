@@ -1012,6 +1012,21 @@ class CanChannelMonitor(QWidget):
                     device["recovery_count"],
                 )
                 text += tr(" USB dropped: {0}").format(usb["tx_dropped"])
+                # Полевая телеметрия: по дельтам счётчиков между опросами
+                # в логе видно, где теряется время — МК медленный
+                # (last_cmd_ms велик, poll_count замирает) или ПК не
+                # забирает данные (tx_busy_waits растёт).
+                logger.debug(
+                    "CAN%d stats: rx=%d tx=%d lost=%d err=%d busoff=%d | "
+                    "usb drop=%d busy=%d cmd=%d cmdms=%d loop=%d",
+                    self._channel,
+                    device["rx_count"], device["tx_count"],
+                    device["lost_count"], device["error_count"],
+                    device["busoff_count"],
+                    usb["tx_dropped"], usb.get("tx_busy_waits", -1),
+                    usb.get("cmd_count", -1), usb.get("last_cmd_ms", -1),
+                    usb.get("poll_count", -1),
+                )
                 self._update_error_warnings(device)
         except Exception:  # noqa: BLE001
             pass

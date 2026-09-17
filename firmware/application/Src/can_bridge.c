@@ -82,6 +82,21 @@ void CanBridge_GetStats(uint8_t channel, can_stats_t *out)
   out->recovery_count = s_recovery_count[channel];
 }
 
+/* LEC[2:0] из ESR → код ошибки HAL, чтобы CanBridge_TookError() отдавал
+ * те же HAL_CAN_ERROR_* значения, что и IRQ-путь раньше. */
+static uint32_t lec_to_hal_error(uint32_t lec)
+{
+  switch (lec & CAN_ESR_LEC) {
+    case CAN_ESR_LEC_0:                  return HAL_CAN_ERROR_STF;
+    case CAN_ESR_LEC_1:                  return HAL_CAN_ERROR_FOR;
+    case (CAN_ESR_LEC_1 | CAN_ESR_LEC_0): return HAL_CAN_ERROR_ACK;
+    case CAN_ESR_LEC_2:                  return HAL_CAN_ERROR_BR;
+    case (CAN_ESR_LEC_2 | CAN_ESR_LEC_0): return HAL_CAN_ERROR_BD;
+    case (CAN_ESR_LEC_2 | CAN_ESR_LEC_1): return HAL_CAN_ERROR_CRC;
+    default:                             return HAL_CAN_ERROR_NONE;
+  }
+}
+
 void CanBridge_PollHealth(void)
 {
   if (!s_can_ready) {
@@ -89,10 +104,25 @@ void CanBridge_PollHealth(void)
   }
   CAN_HandleTypeDef *handles[2] = { &hcan1, &hcan2 };
   for (uint8_t channel = 0U; channel < 2U; channel++) {
+    uint32_t esr = handles[channel]->Instance->ESR;
     if (s_busoff_active[channel]
-        && ((handles[channel]->Instance->ESR & CAN_ESR_BOFF) == 0U)) {
+        && ((esr & CAN_ESR_BOFF) == 0U)) {
       s_busoff_active[channel] = 0U;
       s_recovery_count[channel]++;
+    }
+    /* Ошибки приёма считаем опросом ESR.LEC, а не прерыванием
+     * (CAN_IT_LAST_ERROR_CODE): на живой ошибающейся шине — чужой
+     * бод-рейт, шум, отсутствие терминации — LEC-прерывание взводится
+     * на каждое событие и шторм SCE-IRQ глушил главный цикл и USB
+     * (ответы на команды задерживались на секунды, порт отваливался).
+     * ESR читается дёшево, LEC защёлкивает последнюю ошибку — счётчик
+     * теперь отражает порядок величины, а не точное число событий. */
+    uint32_t lec = esr & CAN_ESR_LEC;
+    if (lec != 0U) {
+      s_error_count[channel]++;
+      s_error_pending[channel] = 1U;
+      s_last_error_code[channel] = lec_to_hal_error(lec);
+      CLEAR_BIT(handles[channel]->Instance->ESR, CAN_ESR_LEC);
     }
   }
 }
@@ -352,8 +382,17 @@ uint8_t CanBridge_Init(uint32_t baud_kbps)
    * firmware nor the PC ever learn that a bus fault (e.g. bad/missing
    * termination, disconnected bus) happened at all. See
    * HAL_CAN_ErrorCallback() below and CMD_CAN_ERROR_STATUS in protocol.c /
-   * PROTOCOL.md. */
-  uint32_t error_its = CAN_IT_ERROR | CAN_IT_BUSOFF | CAN_IT_LAST_ERROR_CODE;
+   * PROTOCOL.md.
+   *
+   * CAN_IT_LAST_ERROR_CODE здесь сознательно НЕТ: LEC-прерывание взводится
+   * на каждую ошибку приёма, и на живой шине с неверным бод-рейтом/шумом
+   * это непрерывный шторм SCE-IRQ (SCE на том же приоритете, что и USB) —
+   * главный цикл голодал, ответы на команды задерживались на секунды,
+   * порт отваливался. Подсчёт LEC-ошибок перенесён в опрос ESR в
+   * CanBridge_PollHealth(); IRQ-путь оставлен только для bus-off и
+   * warning/passive-переходов — они редкие и шторма не создают. */
+  uint32_t error_its = CAN_IT_ERROR | CAN_IT_BUSOFF |
+                       CAN_IT_ERROR_WARNING | CAN_IT_ERROR_PASSIVE;
   if (HAL_CAN_ActivateNotification(&hcan1, error_its) != HAL_OK) {
     return 0U;
   }
