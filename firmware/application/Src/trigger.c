@@ -39,6 +39,9 @@ typedef struct {
   uint32_t fire_at_tick;
   uint8_t  remaining;      /* оставшиеся отправки (tx_count) */
   uint16_t interval_ms;    /* пауза между отправками (tx_interval_ms) */
+  uint8_t  echo;           /* глубина TX-эха исходного кадра — передаётся
+                            * в ответ, чтобы цепочка триггеров была
+                            * ограничена CAN_TX_ECHO_MAX (см. can_bridge.c) */
 } pending_response_t;
 
 static pending_response_t s_pending[TRIGGER_MAX_RECORDS];
@@ -496,20 +499,23 @@ static uint8_t src_matches(const trigger_t *t, const can_frame_t *frame)
   return (from <= value && value <= to) ? 1U : 0U;
 }
 
-static void arm_response(uint8_t index, const trigger_t *t)
+static void arm_response(uint8_t index, const trigger_t *t, uint8_t echo)
 {
   s_pending[index].armed = 1U;
   s_pending[index].trigger_index = index;
   s_pending[index].fire_at_tick = HAL_GetTick() + t->delay_ms;
   s_pending[index].remaining = t->tx_count ? t->tx_count : 1U;
   s_pending[index].interval_ms = t->tx_interval_ms;
+  s_pending[index].echo = echo;
 }
 
 /* Одна отправка ответа триггера. В кэш-режиме шлётся последний кадр из
  * s_cache[index] (ID/DLC/Data — как приняты с шины), в обычном — поля
  * tx_* записи. tx_channel хранится 0-based (индекс комбобокса UI), а
- * CanBridge_Transmit ждёт wire-нумерацию 1/2. */
-static uint8_t send_response(const trigger_t *t, uint8_t index)
+ * CanBridge_Transmit ждёт wire-нумерацию 1/2. echo — глубина TX-эха
+ * исходного кадра: ответ наследует её, иначе каждый ответ начинал бы
+ * цепочку заново и пинг-понг триггеров не ограничивался. */
+static uint8_t send_response(const trigger_t *t, uint8_t index, uint8_t echo)
 {
   can_frame_t resp;
   if (t->cache_enabled) {
@@ -526,6 +532,7 @@ static uint8_t send_response(const trigger_t *t, uint8_t index)
     resp.dlc = t->tx_dlc;
     memcpy(resp.data, t->tx_data, 8);
   }
+  resp.echo = echo;
   uint8_t sent = 0U;
   if (t->tx_channel == 0U || t->tx_channel == 2U) {
     resp.channel = 1U;
@@ -557,11 +564,11 @@ void Trigger_OnFrame(const can_frame_t *frame)
          * through the pending list — keeps the "instant echo" case as
          * low-latency as possible (still bounded by
          * CanBridge_Transmit()'s own mailbox wait). */
-        if (send_response(t, i)) {
+        if (send_response(t, i, frame->echo)) {
           s_fired_count++;
         }
       } else {
-        arm_response(i, t);
+        arm_response(i, t, frame->echo);
       }
     }
   }
@@ -578,7 +585,7 @@ void Trigger_Poll(void)
       }
       uint8_t index = s_pending[i].trigger_index;
       const trigger_t *t = &s_triggers[index];
-      if (send_response(t, index)) {
+      if (send_response(t, index, s_pending[i].echo)) {
         s_fired_count++;
       }
       /* Повторные отправки («Кол-во отправок» > 1): переарм на

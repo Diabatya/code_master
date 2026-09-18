@@ -1404,6 +1404,24 @@ class CanMonitorTab(QWidget):
         self._syncing_config = False
         self._create_widgets()
         self._layout_widgets()
+        self._mark_save_signature_scope()
+
+    def _mark_save_signature_scope(self) -> None:
+        # Все интерактивные виджеты монитора — рабочие инструменты (панель
+        # отправки, поиск, фильтры, декодирование, инверсия), а не настройки
+        # устройства: без исключения любой ввод в них менял снимок
+        # _widgets_signature и кнопка «Сохранить» загоралась от обычной
+        # работы во вкладке «Мониторинг». Реальные настройки — только
+        # CAN-скорости, терминаторы и параметры сна.
+        config_widgets = {
+            id(self._can1_speed_combo), id(self._can2_speed_combo),
+            id(self._can1_terminator_check), id(self._can2_terminator_check),
+            id(self._sleep_time_spin), id(self._sleep_mode_combo),
+        }
+        for widget in self.findChildren(QWidget):
+            widget.setProperty(
+                "skip_save_signature", id(widget) not in config_widgets
+            )
 
     def _create_widgets(self) -> None:
         compact_font = QFont("Segoe UI", 9)

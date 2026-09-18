@@ -642,6 +642,7 @@ static uint16_t try_parse_one(void)
     frame.rtr = rtr;
     frame.id = id;
     frame.dlc = dlc;
+    frame.echo = 0U; /* кадр от ПК — начало возможной цепочки триггеров */
     if (rtr) {
       memset(frame.data, 0, sizeof(frame.data));
     } else {

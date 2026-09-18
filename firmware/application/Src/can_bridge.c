@@ -20,6 +20,36 @@ typedef struct {
 static can_ring_t s_ring[2];
 static volatile uint32_t s_tx_count[2];
 
+/* TX-эхо кольцо: кадры, которые МК отправил сам (ответы триггеров и
+ * PC→device TX), возвращаются в поток PopRx — bxCAN в Normal-режиме не
+ * принимает собственные передачи, а без эха цепочки триггеров (триггер B
+ * реагирует на кадр, отправленный триггером A или ПК) не работают.
+ * Обслуживается только из главного цикла — ISR его не трогает, поэтому
+ * гонок с RX-ISR нет. frame->echo — глубина эха: каждая петля +1, за
+ * пределом CAN_TX_ECHO_MAX эхо не возвращается — иначе два триггера,
+ * настроенные друг на друга, ушли бы в бесконечный пинг-понг по шине. */
+#define CAN_ECHO_DEPTH   64U
+#define CAN_TX_ECHO_MAX  8U
+
+typedef struct {
+  can_frame_t buf[CAN_ECHO_DEPTH];
+  uint16_t head;
+  uint16_t tail;
+} echo_ring_t;
+
+static echo_ring_t s_echo[2];
+
+static void echo_push(uint8_t channel, const can_frame_t *frame)
+{
+  echo_ring_t *ring = &s_echo[channel];
+  uint16_t next = (uint16_t)((ring->head + 1U) % CAN_ECHO_DEPTH);
+  if (next == ring->tail) {
+    return; /* переполнено — эхо просто теряем, статистику не портим */
+  }
+  ring->buf[ring->head] = *frame;
+  ring->head = next;
+}
+
 /* Sticky per-channel error/bus-off flags + last raw HAL error code, set
  * from HAL_CAN_ErrorCallback() (IRQ context) and consumed/cleared by
  * CanBridge_TookError()/CanBridge_TookBusOff() (main loop / protocol.c),
@@ -55,6 +85,14 @@ uint8_t CanBridge_PopRx(uint8_t channel, can_frame_t *out)
 {
   if (channel > 1U) {
     return 0U;
+  }
+  /* TX-эхо в приоритете: его кадры — уже отправленные ответы триггеров,
+   * цепочка должна увидеть их до следующего снимка шины. */
+  echo_ring_t *echo = &s_echo[channel];
+  if (echo->head != echo->tail) {
+    *out = echo->buf[echo->tail];
+    echo->tail = (uint16_t)((echo->tail + 1U) % CAN_ECHO_DEPTH);
+    return 1U;
   }
   can_ring_t *ring = &s_ring[channel];
   if (ring->head == ring->tail) {
@@ -104,25 +142,45 @@ void CanBridge_PollHealth(void)
   }
   CAN_HandleTypeDef *handles[2] = { &hcan1, &hcan2 };
   for (uint8_t channel = 0U; channel < 2U; channel++) {
+    /* ВСЯ обработка ошибок — опросом ESR из главного цикла, без SCE-IRQ:
+     * флаги EWGF/EPVF/BOFF/LEC уровневые и держатся, пока TEC/REC за
+     * порогом — на битой/несогласованной шине ERRI взведён непрерывно,
+     * шторм прерываний голодал главный цикл: кольцо RX переполнялось,
+     * кадры считались в rx_count, но выбрасывались до PopRx (полевой
+     * отчёт: «rx в статусе растёт, в таблице пусто, триггер не
+     * срабатывает»). Опрос дёшев и деградирует плавно. */
     uint32_t esr = handles[channel]->Instance->ESR;
-    if (s_busoff_active[channel]
-        && ((esr & CAN_ESR_BOFF) == 0U)) {
+    if ((esr & CAN_ESR_BOFF) != 0U) {
+      if (!s_busoff_active[channel]) {
+        s_busoff_active[channel] = 1U;
+        s_busoff_count[channel]++;
+        s_busoff_pending[channel] = 1U;
+        s_error_pending[channel] = 1U;
+        s_last_error_code[channel] |= HAL_CAN_ERROR_BOF;
+      }
+    } else if (s_busoff_active[channel]) {
       s_busoff_active[channel] = 0U;
       s_recovery_count[channel]++;
     }
     /* Ошибки приёма считаем опросом ESR.LEC, а не прерыванием
-     * (CAN_IT_LAST_ERROR_CODE): на живой ошибающейся шине — чужой
-     * бод-рейт, шум, отсутствие терминации — LEC-прерывание взводится
-     * на каждое событие и шторм SCE-IRQ глушил главный цикл и USB
-     * (ответы на команды задерживались на секунды, порт отваливался).
-     * ESR читается дёшево, LEC защёлкивает последнюю ошибку — счётчик
-     * теперь отражает порядок величины, а не точное число событий. */
+     * (CAN_IT_LAST_ERROR_CODE): LEC защёлкивает последнюю ошибку —
+     * счётчик отражает порядок величины, а не точное число событий.
+     * EWGF/EPVF (warning/passive) — тоже только здесь, без IRQ. */
     uint32_t lec = esr & CAN_ESR_LEC;
     if (lec != 0U) {
       s_error_count[channel]++;
       s_error_pending[channel] = 1U;
-      s_last_error_code[channel] = lec_to_hal_error(lec);
+      s_last_error_code[channel] |= lec_to_hal_error(lec);
       CLEAR_BIT(handles[channel]->Instance->ESR, CAN_ESR_LEC);
+    }
+    if ((esr & (CAN_ESR_EWGF | CAN_ESR_EPVF)) != 0U) {
+      s_error_pending[channel] = 1U;
+      if ((esr & CAN_ESR_EWGF) != 0U) {
+        s_last_error_code[channel] |= HAL_CAN_ERROR_EWG;
+      }
+      if ((esr & CAN_ESR_EPVF) != 0U) {
+        s_last_error_code[channel] |= HAL_CAN_ERROR_EPV;
+      }
     }
   }
 }
@@ -147,6 +205,10 @@ uint8_t CanBridge_TookError(uint8_t channel, uint32_t *last_error_code)
   if (last_error_code != NULL) {
     *last_error_code = s_last_error_code[channel];
   }
+  /* Код собран «по ИЛИ» из BOF/EWG/EPV/LEC опросом ESR — сбрасываем
+   * после выдачи, чтобы старые биты не тянулись в следующие отчёты
+   * (аналог hcan->ErrorCode = NONE в старом IRQ-пути). */
+  s_last_error_code[channel] = HAL_CAN_ERROR_NONE;
   return was;
 }
 
@@ -341,23 +403,6 @@ static uint8_t config_pass_all_filter(CAN_HandleTypeDef *hcan, uint8_t channel)
   return (HAL_CAN_ConfigFilter(hcan, &filter) == HAL_OK) ? 1U : 0U;
 }
 
-/* Interrupt mask for error/bus-off reporting (CURSOR_FIX_PROMPT.md 4.4):
- * without these, AutoBusOff silently recovers the peripheral on its own,
- * but neither the firmware nor the PC ever learn that a bus fault (e.g.
- * bad/missing termination, disconnected bus) happened at all. See
- * HAL_CAN_ErrorCallback() below and CMD_CAN_ERROR_STATUS in protocol.c /
- * PROTOCOL.md.
- *
- * CAN_IT_LAST_ERROR_CODE здесь сознательно НЕТ: LEC-прерывание взводится
- * на каждую ошибку приёма, и на живой шине с неверным бод-рейтом/шумом
- * это непрерывный шторм SCE-IRQ (SCE на том же приоритете, что и USB) —
- * главный цикл голодал, ответы на команды задерживались на секунды,
- * порт отваливался. Подсчёт LEC-ошибок перенесён в опрос ESR в
- * CanBridge_PollHealth(); IRQ-путь оставлен только для bus-off и
- * warning/passive-переходов — они редкие и шторма не создают. */
-#define CAN_ERROR_ITS (CAN_IT_ERROR | CAN_IT_BUSOFF | \
-                       CAN_IT_ERROR_WARNING | CAN_IT_ERROR_PASSIVE)
-
 /* Brings one channel onto the bus after (re-)initialization: filter,
  * start, RX FIFO0 + error notifications. Shared by CanBridge_Init and the
  * runtime reconfigure path CanBridge_SetBaud. */
@@ -372,9 +417,12 @@ static uint8_t start_channel(CAN_HandleTypeDef *hcan, uint8_t channel)
   if (HAL_CAN_ActivateNotification(hcan, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK) {
     return 0U;
   }
-  if (HAL_CAN_ActivateNotification(hcan, CAN_ERROR_ITS) != HAL_OK) {
-    return 0U;
-  }
+  /* Error/bus-off прерывания сознательно НЕ включаем: флаги EWGF/EPVF/
+   * BOFF/LEC в ESR уровневые — на ошибающейся шине (несовпадение
+   * бод-рейта, шум, нет терминации) ERRI взведён непрерывно и SCE-IRQ
+   * глушит главный цикл: RX-кольцо переполняется, кадры считаются в
+   * rx_count, но выбрасываются до PopRx → «rx растёт, таблица пуста,
+   * триггер мёртв». Весь учёт — опросом ESR в CanBridge_PollHealth(). */
   return 1U;
 }
 
@@ -383,6 +431,7 @@ static uint32_t s_baud_kbps[2] = { 0U, 0U };
 uint8_t CanBridge_Init(uint32_t can1_baud_kbps, uint32_t can2_baud_kbps)
 {
   memset(s_ring, 0, sizeof(s_ring));
+  memset(s_echo, 0, sizeof(s_echo));
   memset((void *)s_error_pending, 0, sizeof(s_error_pending));
   memset((void *)s_busoff_pending, 0, sizeof(s_busoff_pending));
   memset((void *)s_last_error_code, 0, sizeof(s_last_error_code));
@@ -518,6 +567,16 @@ uint8_t CanBridge_Transmit(const can_frame_t *frame)
         return 0U;
       }
       s_tx_count[internal_channel]++;
+      /* TX-эхо: возвращаем кадр в поток PopRx — цепочки триггеров
+       * («среагируй на кадр, который отправил МК/ПК») без него не
+       * работают, т.к. bxCAN в Normal-режиме себя не слышит. Глубина
+       * ограничена CAN_TX_ECHO_MAX — защита от пинг-понга. */
+      if (frame->echo < CAN_TX_ECHO_MAX) {
+        can_frame_t echo_frame = *frame;
+        echo_frame.echo = (uint8_t)(frame->echo + 1U);
+        echo_frame.channel = internal_channel; /* 0-based, как у RX-кадров */
+        echo_push(internal_channel, &echo_frame);
+      }
       return 1U;
     }
   }
@@ -541,6 +600,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
   frame.rtr = (header.RTR == CAN_RTR_REMOTE) ? 1U : 0U;
   frame.id = frame.extended ? header.ExtId : header.StdId;
   frame.dlc = (uint8_t)header.DLC;
+  frame.echo = 0U; /* кадр с шины — не эхо собственной передачи */
 
   ring_push(frame.channel, &frame);
 

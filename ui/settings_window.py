@@ -575,22 +575,38 @@ class SettingsWindow(QMainWindow):
         оператор мог вернуть значение обратно — тогда изменений нет.
         """
         sig = []
+
+        def _skip(widget: QWidget) -> bool:
+            # Виджеты с флагом skip_save_signature — рабочие инструменты
+            # вкладок (панель отправки монитора, поиск, фильтры,
+            # декодирование), а не настройки устройства: их значения не
+            # должны включать кнопку «Сохранить».
+            return widget is self._search_edit or bool(
+                widget.property("skip_save_signature")
+            )
+
         root = self.centralWidget()
         for widget in root.findChildren(QComboBox):
+            if _skip(widget):
+                continue
             sig.append(("combo", widget.currentIndex(), widget.currentText()))
         for widget in root.findChildren(QLineEdit):
-            if widget is self._search_edit:
+            if _skip(widget):
                 continue
             sig.append(("edit", widget.text()))
         for widget in root.findChildren(QSpinBox):
+            if _skip(widget):
+                continue
             sig.append(("spin", widget.value()))
         for widget in root.findChildren(QCheckBox):
+            if _skip(widget):
+                continue
             sig.append(("check", widget.isChecked()))
         for widget in root.findChildren(QPushButton):
-            if widget.isCheckable():
+            if widget.isCheckable() and not _skip(widget):
                 sig.append(("button", widget.isChecked()))
         for widget in root.findChildren(QGroupBox):
-            if widget.isCheckable():
+            if widget.isCheckable() and not _skip(widget):
                 sig.append(("group", widget.isChecked()))
         return tuple(sig)
 

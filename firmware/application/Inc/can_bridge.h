@@ -22,12 +22,20 @@ extern "C" {
  * against the Flash-write stall discussed in firmware/PROTOCOL.md Part 3. */
 #define CAN_RING_DEPTH   1024U
 
-typedef struct {
+/* Packed: кадры живут в двух кольцах по 1024 шт. + эхо-кольце — выравнивание
+ * раздувало бы каждый слот до 20 байт (RAM F105 = 64 КБ, хвост под
+ * кучу/стек уже впритык). Cortex-M3 допускает невыровненные доступы —
+ * компилятор сам соберёт поле id побайтно. */
+typedef struct __attribute__((packed)) {
   uint8_t  channel;      /* 0 = CAN1, 1 = CAN2 */
   uint8_t  extended;      /* 0 = standard 11-bit ID, 1 = extended 29-bit ID */
   uint8_t  rtr;           /* 0 = data frame, 1 = Remote Transmission Request */
   uint32_t id;
   uint8_t  dlc;           /* 0..8, CAN 2.0 only (no CAN FD, see PROTOCOL.md) */
+  uint8_t  echo;          /* 0 = кадр с шины/с ПК; >0 = глубина TX-эха
+                           * (собственная передача, возвращённая в PopRx
+                           * для цепочек триггеров; ограничена
+                           * CAN_TX_ECHO_MAX против пинг-понга) */
   uint8_t  data[8];
 } can_frame_t;
 
