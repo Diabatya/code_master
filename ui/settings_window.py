@@ -805,18 +805,21 @@ class SettingsWindow(QMainWindow):
         self._mark_clean()
 
     def showEvent(self, event) -> None:  # noqa: N802
-        """При показе окна с уже открытым портом вычитывает устройство —
-        если нет несохранённых правок (иначе стёрлись бы изменения)."""
+        """При показе окна обновляет только лейблы имени/серийника.
+
+        Вычитка конфигурации здесь НЕ выполняется: showEvent приходит и
+        при разворачивании окна из свёрнутого состояния — вычитка
+        перестраивала блоки триггеров из Flash МК (где мог лежать
+        предыдущий конфиг) и _save_config() затирал загруженный файл
+        (полевой баг: «после разворачивания — 5 триггеров, 4 пустых»).
+        Синхронизация с устройством остаётся только на реальном событии
+        подключения — _on_connection_changed."""
         super().showEvent(event)
-        # Имя/серийник могли обновиться (пере-энумерация, программирование),
-        # пока окно было скрыто — показываем актуальные значения.
-        self._update_device_info()
-        if (
-            self._serial_manager.is_open()
-            and not self._config.get("emulation", False)
-            and not self._has_unsaved_changes()
-        ):
-            QTimer.singleShot(0, self._sync_from_device)
+        # Без опроса МК: read_system_info — блокирующая команда в
+        # GUI-потоке, на нестабильном порту она подвешивала окно при
+        # каждом разворачивании. Лейблы обновляются из кэша; свежие
+        # данные приходят по device_identified при подключении.
+        self._update_device_info(query_device=False)
 
     def _update_analog_tab(self) -> None:
         """Добавляет или удаляет вкладку аналоговых портов в зависимости от типа устройства."""
@@ -840,7 +843,9 @@ class SettingsWindow(QMainWindow):
         DEVICE_TYPE_CAN_FD: "2 CAN FD",
     }
 
-    def _update_device_info(self, device_type: int = 0, device_version: int = 0) -> None:
+    def _update_device_info(
+        self, device_type: int = 0, device_version: int = 0, query_device: bool = True
+    ) -> None:
         """Обновляет отображаемые имя устройства и серийный номер."""
         _ = device_version
         device_type = self._config.get("device_type", device_type)
@@ -857,7 +862,11 @@ class SettingsWindow(QMainWindow):
         self._device_name_label.setText(name)
         self._serial_value.setText(serial or tr("Неизвестно"))
         try:
-            if self._serial_manager.is_open() and not self._config.get("emulation", False):
+            if (
+                query_device
+                and self._serial_manager.is_open()
+                and not self._config.get("emulation", False)
+            ):
                 info = self._serial_manager.read_system_info()
                 text = tr("Firmware: app {0}, protocol {1}, Flash {2} KB, size {3} B, CRC32 {4}, config v{5} ({6})").format(
                     info["application_version"],
