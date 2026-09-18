@@ -1,6 +1,6 @@
 """Страница «Триггеры» — блоки условий и ответов, слоты во Flash МК."""
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import QEvent, QPoint, QRegularExpression, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QRegularExpressionValidator
@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -47,6 +49,12 @@ from ui.memory_indicator import MemoryIndicator
 from ui.packet_clipboard import create_clipboard_buttons
 
 logger = get_logger(__name__)
+
+
+class TriggerValidationAborted(Exception):
+    """Сохранение прервано проверкой триггеров: либо найдены ошибки,
+    либо оператор отменил запись после предупреждений. В устройство
+    ничего не записано; кнопка «Сохранить» остаётся активной."""
 
 # Ёмкость списка триггеров: пул Flash 0x0803E000–0x0803FFFF (8 КБ,
 # запись 82 Б), предел по RAM прошивки — TRIGGER_MAX_SLOTS.
@@ -833,6 +841,131 @@ class CanTriggerTab(QWidget):
         if self._add_trigger_block() is not None:
             self._mark_dirty(len(self._blocks) - 1)
 
+    def _sim_records(self) -> List[Dict[str, Any]]:
+        """Записи в формате firmware для симулятора — то же, что ушло бы
+        в МК по «Сохранить» (непустые блоки, enabled как в UI)."""
+        records = []
+        for index in range(len(self._blocks)):
+            values = self._device_trigger_values(index)
+            if not self._is_empty_trigger(values):
+                records.append(values)
+        return records
+
+    def _open_simulation(self) -> None:
+        from ui.trigger_sim_dialog import TriggerSimDialog
+
+        dialog = TriggerSimDialog(self._sim_records, self)
+        dialog.exec()
+
+    @staticmethod
+    def _templates() -> Dict[str, Dict[str, Any]]:
+        """Готовые сценарии триггеров — заполненный блок в один клик,
+        дальше оператор правит ID/данные под себя."""
+        return {
+            tr("Эхо-ответ"): {
+                "active": True,
+                "recv_channel": 0,
+                "recv_bit": 0,
+                "recv_id": "100",
+                "recv_dlc": 8,
+                "recv_rtr": 0,
+                "recv_data": "",
+                "responses": [
+                    {
+                        "channel": 0, "bit": 0, "id": "101", "dlc": 8,
+                        "data": "00 00 00 00 00 00 00 00", "rtr": 0,
+                        "delay_before_send": 0, "delay_between": 0,
+                        "count": 1, "next_delay": 0,
+                    }
+                ],
+            },
+            tr("Маршрутизация CAN1 → CAN2"): {
+                "active": True,
+                "recv_channel": 0,
+                "recv_bit": 0,
+                "recv_id": "123",
+                "recv_dlc": 8,
+                "recv_rtr": 0,
+                "recv_data": "",
+                "responses": [
+                    {
+                        "channel": 1, "bit": 0, "id": "123", "dlc": 8,
+                        "data": "", "rtr": 0,
+                        "delay_before_send": 0, "delay_between": 0,
+                        "count": 1, "next_delay": 0,
+                    }
+                ],
+            },
+            tr("Ответ на RTR-запрос"): {
+                "active": True,
+                "recv_channel": 0,
+                "recv_bit": 0,
+                "recv_id": "200",
+                "recv_dlc": 0,
+                "recv_rtr": 1,
+                "recv_data": "",
+                "responses": [
+                    {
+                        "channel": 0, "bit": 0, "id": "200", "dlc": 8,
+                        "data": "00 00 00 00 00 00 00 00", "rtr": 0,
+                        "delay_before_send": 0, "delay_between": 0,
+                        "count": 1, "next_delay": 0,
+                    }
+                ],
+            },
+            tr("Ответ пачкой ×3 с паузой"): {
+                "active": True,
+                "recv_channel": 0,
+                "recv_bit": 0,
+                "recv_id": "210",
+                "recv_dlc": 8,
+                "recv_rtr": 0,
+                "recv_data": "",
+                "responses": [
+                    {
+                        "channel": 0, "bit": 0, "id": "211", "dlc": 8,
+                        "data": "", "rtr": 0,
+                        "delay_before_send": 50, "delay_between": 20,
+                        "count": 3, "next_delay": 0,
+                    }
+                ],
+            },
+            tr("Кэш-репитер CAN1 → CAN2"): {
+                "active": True,
+                "cache": True,
+                "recv_channel": 0,
+                "recv_bit": 0,
+                "recv_id": "300",
+                "recv_dlc": 0,
+                "recv_rtr": 0,
+                "recv_data": "",
+                "responses": [],
+                "cache_channel": 0,
+                "cache_bit": 0,
+                "cache_id": "300",
+                "cache_dlc": 8,
+                "cache_tx_channel": 1,
+                "cache_from_data": "",
+                "cache_to_data": "",
+                "cache_delay_before_send": 0,
+                "cache_delay_between": 0,
+                "cache_count": 1,
+            },
+        }
+
+    def _add_template_trigger(self, preset: Dict[str, Any]) -> None:
+        """Добавляет блок триггера из шаблона (тем же путём, что загрузка
+        конфига: текущие блоки + пресет → set_config)."""
+        from copy import deepcopy
+
+        if len(self._blocks) >= TRIGGER_COUNT:
+            QMessageBox.warning(
+                self, tr("Шаблон"), tr("Страница триггеров заполнена")
+            )
+            return
+        self.set_config(self._collect_config() + [deepcopy(preset)])
+        self._mark_dirty(len(self._blocks) - 1)
+
     def _build_layout(self) -> None:
         container = QWidget()
         container_layout = QVBoxLayout(container)
@@ -851,7 +984,38 @@ class CanTriggerTab(QWidget):
             "QPushButton:disabled { color: #777777; }"
         )
         self._add_trigger_button.clicked.connect(self._on_add_trigger_clicked)
-        container_layout.addWidget(self._add_trigger_button)
+
+        self._sim_button = QPushButton(tr("Симуляция…"))
+        self._sim_button.setFont(QFont("Segoe UI", 9))
+        self._sim_button.setStyleSheet(
+            "QPushButton { background-color: #2A4A3A; color: #FFFFFF; border: none; border-radius: 4px; padding: 6px 14px; }"
+            "QPushButton:hover { background-color: #3A6A4A; }"
+        )
+        self._sim_button.setToolTip(
+            tr("Прогнать кадры из лога через триггеры без железа")
+        )
+        self._sim_button.clicked.connect(self._open_simulation)
+
+        self._template_button = QPushButton(tr("Шаблон ▾"))
+        self._template_button.setFont(QFont("Segoe UI", 9))
+        self._template_button.setStyleSheet(
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 6px 14px; }"
+            "QPushButton:hover { background-color: #4A4A6A; }"
+        )
+        template_menu = QMenu(self._template_button)
+        for title, preset in self._templates().items():
+            template_menu.addAction(
+                title, lambda _c=False, p=preset: self._add_template_trigger(p)
+            )
+        self._template_button.setMenu(template_menu)
+
+        buttons_row = QHBoxLayout()
+        buttons_row.setSpacing(8)
+        buttons_row.addWidget(self._add_trigger_button)
+        buttons_row.addWidget(self._template_button)
+        buttons_row.addWidget(self._sim_button)
+        buttons_row.addStretch()
+        container_layout.addLayout(buttons_row)
         container_layout.addStretch()
 
         scroll = QScrollArea()
@@ -1239,6 +1403,28 @@ class CanTriggerTab(QWidget):
         оборвались), оператор получает ошибку сразу, а не после
         выключения питания.
         """
+        errors, warnings = self._validate_config(self._collect_config())
+        if errors:
+            QMessageBox.warning(
+                self,
+                tr("Проверка триггеров"),
+                tr("Запись отменена — исправьте:\n\n• {0}").format(
+                    "\n• ".join(errors)
+                ),
+            )
+            raise TriggerValidationAborted("; ".join(errors))
+        if warnings:
+            answer = QMessageBox.question(
+                self,
+                tr("Проверка триггеров"),
+                tr("Предупреждения перед записью:\n\n• {0}\n\nВсё равно записать в устройство?").format(
+                    "\n• ".join(warnings)
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                raise TriggerValidationAborted("; ".join(warnings))
         changed = 0
         staged: List[Tuple[int, bytes]] = []
         default_payload = pack_trigger({})
@@ -1280,6 +1466,35 @@ class CanTriggerTab(QWidget):
                 if "0x01" in str(exc):
                     break
                 raise
+
+        # Автобэкап состояния МК перед перезаписью: если запись пошла
+        # не так или оператор пожалел — прежний список триггеров лежит
+        # в backups/device_*.json (последние 10).
+        try:
+            records = []
+            for payload in device:
+                try:
+                    rec = unpack_trigger(payload)
+                except ValueError:
+                    continue
+                records.append(
+                    {
+                        k: (v.hex() if isinstance(v, (bytes, bytearray)) else v)
+                        for k, v in rec.items()
+                    }
+                )
+            self._config.backup_snapshot(
+                "device_before_save",
+                {
+                    "device_name": self._config.get("device_name", ""),
+                    "device_serial": self._config.get("device_serial", "")
+                    or self._config.get("serial_number", ""),
+                    "triggers": records,
+                },
+                prefix="device",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось сохранить бэкап триггеров устройства: %s", exc)
 
         # Целевой список: только настроенные (непустые) блоки.
         target: List[Tuple[int, bytes]] = []
@@ -1554,6 +1769,148 @@ class CanTriggerTab(QWidget):
                 if isinstance(row, dict) and str(row.get("id", "")).strip():
                     return False
         return True
+
+    @staticmethod
+    def _check_id_range(text: str, extended: int, label: str) -> List[str]:
+        """ID обязан парситься как hex и лежать в диапазоне кадра:
+        11-бит ≤ 0x7FF, 29-бит ≤ 0x1FFFFFFF."""
+        value = hex_to_int(text)
+        if value is None:
+            return [f"{label}: " + tr("ID «{0}» не является HEX").format(text)]
+        limit = 0x1FFFFFFF if extended else 0x7FF
+        if value > limit:
+            kind = tr("расширенного") if extended else tr("стандартного")
+            return [
+                f"{label}: "
+                + tr("ID 0x{0} вне диапазона {1} кадра").format(
+                    f"{value:X}", kind
+                )
+            ]
+        return []
+
+    @staticmethod
+    def _check_data(text: str, dlc: int, label: str) -> Tuple[List[str], List[str]]:
+        """Данные ≤ 8 байт (ошибка — прошивка отрежет молча); длина ≠ DLC
+        (предупреждение — шина пошлёт DLC байт, не заявленное число)."""
+        errors: List[str] = []
+        warnings: List[str] = []
+        data = parse_data_bytes(text.split())
+        if len(data) > 8:
+            errors.append(
+                f"{label}: " + tr("данных {0} байт — максимум 8").format(len(data))
+            )
+        elif data and len(data) != dlc:
+            warnings.append(
+                f"{label}: " + tr("данных {0} байт, а DLC = {1}").format(len(data), dlc)
+            )
+        if dlc > 8:
+            errors.append(f"{label}: " + tr("DLC {0} — максимум 8").format(dlc))
+        return errors, warnings
+
+    def _validate_config(
+        self, triggers: List[Dict[str, Any]]
+    ) -> Tuple[List[str], List[str]]:
+        """Проверка триггеров перед записью. Не меняет полей: ошибки
+        блокируют запись, предупреждения требуют подтверждения — необычные,
+        но допустимые конфигурации остаются возможными."""
+        errors: List[str] = []
+        warnings: List[str] = []
+        rx_seen: Dict[Tuple[int, str], List[int]] = {}
+        rx_map: Dict[Tuple[int, str], int] = {}
+        tx_map: Dict[Tuple[int, str], int] = {}
+        for i, trigger in enumerate(triggers, 1):
+            if self._config_trigger_is_empty(trigger):
+                continue
+            label = tr("Триггер {0}").format(i)
+            rx_text = str(trigger.get("recv_id", "")).strip()
+            rx_channel = int(trigger.get("recv_channel", 0))
+            if trigger.get("cache"):
+                cache_id = str(trigger.get("cache_id", "")).strip()
+                if not cache_id:
+                    warnings.append(
+                        f"{label}: " + tr("кэш включён без ID кэшированного кадра")
+                    )
+                else:
+                    errors += self._check_id_range(
+                        cache_id, int(trigger.get("cache_bit", 0)), f"{label} {tr('кэш')}"
+                    )
+            elif rx_text:
+                errors += self._check_id_range(
+                    rx_text, int(trigger.get("recv_bit", 0)), label
+                )
+                key = (rx_channel, rx_text.lower())
+                rx_seen.setdefault(key, []).append(i)
+                rx_map[key] = i
+            else:
+                warnings.append(
+                    f"{label}: " + tr("нет ID приёма — условие не задано")
+                )
+            e, w = self._check_data(
+                str(trigger.get("recv_data", "")),
+                int(trigger.get("recv_dlc", 0)),
+                f"{label} {tr('приём')}",
+            )
+            errors += e
+            warnings += w
+            for j, response in enumerate(trigger.get("responses", []), 1):
+                rlabel = f"{label} {tr('ответ {0}').format(j)}"
+                tx_text = str(response.get("id", "")).strip()
+                tx_channel = int(response.get("channel", 0))
+                if not tx_text:
+                    warnings.append(f"{rlabel}: " + tr("нет ID ответа"))
+                else:
+                    errors += self._check_id_range(
+                        tx_text, int(response.get("bit", 0)), rlabel
+                    )
+                    tx_map.setdefault((tx_channel, tx_text.lower()), i)
+                    if (
+                        rx_text
+                        and tx_channel == rx_channel
+                        and tx_text.lower() == rx_text.lower()
+                    ):
+                        warnings.append(
+                            f"{rlabel}: "
+                            + tr("ответ повторяет ID приёма — самопетля на одном канале")
+                        )
+                e, w = self._check_data(
+                    str(response.get("data", "")),
+                    int(response.get("dlc", 0)),
+                    rlabel,
+                )
+                errors += e
+                warnings += w
+                if response.get("rtr") and str(response.get("data", "")).strip():
+                    warnings.append(
+                        f"{rlabel}: " + tr("RTR-ответ с данными — шина их проигнорирует")
+                    )
+        for (channel, can_id), indices in rx_seen.items():
+            if len(indices) > 1:
+                warnings.append(
+                    tr("Дублирующийся ID приёма 0x{0} на CAN{1} — триггеры {2}").format(
+                        can_id.upper(), channel + 1, ", ".join(map(str, indices))
+                    )
+                )
+        pingpong_seen: Set[frozenset] = set()
+        for key, rx_i in rx_map.items():
+            if key in tx_map and tx_map[key] != rx_i:
+                # A принимает то, что шлёт B — опасно только при
+                # встречной связи: проверяем, отвечает ли rx_i в приём
+                # tx_map[key].
+                other = tx_map[key]
+                other_rx = next(
+                    (k for k, v in rx_map.items() if v == other), None
+                )
+                if other_rx and other_rx in tx_map and tx_map[other_rx] == rx_i:
+                    pair = frozenset((rx_i, other))
+                    if pair in pingpong_seen:
+                        continue
+                    pingpong_seen.add(pair)
+                    warnings.append(
+                        tr("Пинг-понг: триггер {0} отвечает в приём триггера {1} и наоборот — сработает ограничение эха").format(
+                            rx_i, other
+                        )
+                    )
+        return errors, warnings
 
     def set_config(self, triggers: List[Dict[str, Any]]) -> None:
         """Загружает конфигурацию триггеров из списка.

@@ -302,6 +302,10 @@ class SerialManager(QObject):
     heartbeat = Signal()
     device_identified = Signal(int, int)
     can_speed_detected = Signal(int)
+    # Запланирована попытка автопереподключения: (задержка_сек, номер
+    # попытки) — UI показывает «Переподключение через N с…» вместо
+    # молчаливого шторма попыток каждые 3 секунды.
+    reconnect_scheduled = Signal(int, int)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         """Создаёт менеджер без открытого порта."""
@@ -312,6 +316,7 @@ class SerialManager(QObject):
         self._config = Config()
         self._auto_reconnect = False
         self._reconnect_timer: Optional[QTimer] = None
+        self._reconnect_attempts = 0
         self._last_port_name = ""
         self._last_baudrate = 115200
         self._last_emulation = False
@@ -421,6 +426,7 @@ class SerialManager(QObject):
                 self._config.set_bulk(
                     {"port": port_name, "baudrate": baudrate, "emulation": emulation, "auto_reconnect": auto_reconnect, "error_probability": error_probability}
                 )
+                self._reconnect_attempts = 0
                 self.connection_changed.emit(True)
                 return True
             except Exception as exc:  # noqa: BLE001
@@ -1106,11 +1112,21 @@ class SerialManager(QObject):
             return
         if self._reconnect_timer is not None and self._reconnect_timer.isActive():
             return
-        logger.info("Планируется автоматическое переподключение к %s", self._last_port_name)
+        # Экспоненциальный бэкоф: 3с → 6 → 12 → 24 → 48 → 60с потолок.
+        # Без него занятый порт (PermissionError «Отказано в доступе»)
+        # долбился попытками каждые 3 секунды бесконечно — шторм в логе
+        # и лишняя нагрузка на GUI-поток.
+        delay_ms = min(3000 << self._reconnect_attempts, 60000)
+        self._reconnect_attempts += 1
+        logger.info(
+            "Планируется автоматическое переподключение к %s через %d с (попытка %d)",
+            self._last_port_name, delay_ms // 1000, self._reconnect_attempts,
+        )
+        self.reconnect_scheduled.emit(delay_ms // 1000, self._reconnect_attempts)
         self._reconnect_timer = QTimer(self)
         self._reconnect_timer.setSingleShot(True)
         self._reconnect_timer.timeout.connect(self._do_reconnect)
-        self._reconnect_timer.start(3000)
+        self._reconnect_timer.start(delay_ms)
 
     def _stop_reconnect_timer(self) -> None:
         """Останавливает таймер переподключения."""

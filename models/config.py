@@ -9,6 +9,7 @@ import json
 import os
 import struct
 import threading
+import time
 import zlib
 from copy import deepcopy
 from pathlib import Path
@@ -142,6 +143,7 @@ class Config:
         if self._initialized:
             return
         self._file_path = Path(user_data_dir("CodeMaster", appauthor=False, ensure_exists=True)) / "config.json"
+        self._backup_dir = self._file_path.parent / "backups"
         self._data = deepcopy(self.DEFAULT_CONFIG)
         self._initialized = True
         self.load()
@@ -178,7 +180,11 @@ class Config:
                     loaded = json.load(file)
             except (json.JSONDecodeError, OSError, TypeError) as exc:
                 logger.error("Ошибка загрузки конфигурации: %s", exc)
-                return
+                # Файл побился (обрыв записи, сбой диска) — поднимаем
+                # последний снапшот из backups/, а не стартуем с нуля.
+                loaded = self._load_latest_backup()
+                if loaded is None:
+                    return
             if not isinstance(loaded, dict):
                 return
             if loaded.get("app_version") != VERSION:
@@ -218,6 +224,70 @@ class Config:
             except OSError:
                 pass
 
+    _BACKUP_KEEP = 10
+
+    def backup_dir(self) -> Path:
+        """Каталог снапшотов конфигурации (создаётся по требованию)."""
+        self._backup_dir.mkdir(parents=True, exist_ok=True)
+        return self._backup_dir
+
+    def backup_snapshot(
+        self,
+        reason: str = "auto",
+        data: "dict | None" = None,
+        prefix: str = "config",
+    ) -> "Path | None":
+        """Снапшот настроек в backups/ перед разрушительной операцией.
+
+        Вызывается перед загрузкой файла конфигурации, «Заводскими
+        настройками» и записью в устройство — если сессия пошла не так,
+        прежний конфиг всегда можно вернуть. Хранятся последние
+        _BACKUP_KEEP снапшотов. data=None — снимок текущих настроек;
+        можно передать другой dict (например, вычитку устройства —
+        тогда prefix «device»)."""
+        try:
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            safe_reason = "".join(c if c.isalnum() or c in "-_" else "_" for c in reason)[:40]
+            path = self.backup_dir() / f"{prefix}_{stamp}_{safe_reason}.json"
+            payload = deepcopy(data) if data is not None else deepcopy(self._data)
+            payload["_backup_reason"] = reason
+            payload["_backup_time"] = stamp
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            # Ротация: старые снапшоты сверх лимита удаляем.
+            snapshots = sorted(
+                self._backup_dir.glob(f"{prefix}_*.json"),
+                key=lambda p: p.name,
+            )
+            for old in snapshots[: max(0, len(snapshots) - self._BACKUP_KEEP)]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+            return path
+        except OSError as exc:
+            logger.warning("Не удалось создать снапшот конфигурации: %s", exc)
+            return None
+
+    def _load_latest_backup(self) -> "dict | None":
+        """Новейший снапшот из backups/ — fallback при битом config.json."""
+        try:
+            snapshots = sorted(self._backup_dir.glob("config_*.json"))
+        except OSError:
+            return None
+        for path in reversed(snapshots):
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if isinstance(loaded, dict):
+                loaded.pop("_backup_reason", None)
+                loaded.pop("_backup_time", None)
+                logger.warning("config.json восстановлен из снапшота %s", path.name)
+                return loaded
+        return None
+
     def get(self, key: str, default: Any = None) -> Any:
         """Возвращает значение настройки по ключу."""
         return self._data.get(key, default)
@@ -255,6 +325,8 @@ class Config:
 
     def import_data(self, payload: dict) -> None:
         """Применяет настройки из payload, сохраняя идентичность устройства."""
+        # Файл затирает текущие настройки — сначала снапшот на откат.
+        self.backup_snapshot("before_import")
         for key in self._RESET_PRESERVE_KEYS:
             if key in self._data:
                 payload[key] = deepcopy(self._data[key])
@@ -284,6 +356,7 @@ class Config:
         Имя устройства, серийный номер и тип сохраняются — они заданы при
         программировании МК и не относятся к пользовательским настройкам.
         """
+        self.backup_snapshot("before_factory_reset")
         preserved = {k: deepcopy(self._data[k]) for k in self._RESET_PRESERVE_KEYS if k in self._data}
         self._data = deepcopy(self.DEFAULT_CONFIG)
         self._data.update(preserved)

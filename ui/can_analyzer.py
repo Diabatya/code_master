@@ -55,6 +55,8 @@ class CanAnalyzer(QWidget):
         self._step_pos: Dict[QTableWidget, int] = {}
         self._table_channel: Dict[QTableWidget, int] = {}
         self._send_buttons: Dict[QTableWidget, tuple] = {}
+        self._send_timed: Dict[QTableWidget, bool] = {}
+        self._send_prev_ms: Dict[QTableWidget, "float | None"] = {}
         self._create_widgets()
         self._build_layout()
 
@@ -142,25 +144,32 @@ class CanAnalyzer(QWidget):
         """Таблица + строка кнопок отправки принятых кадров обратно в шину."""
         font = QFont("Segoe UI", 9)
         send_btn = QPushButton(tr("Отправить"))
+        replay_btn = QPushButton(tr("Replay ⏱"))
         stop_btn = QPushButton(tr("Стоп"))
         step_btn = QPushButton(tr("По кадрам"))
-        for btn in (send_btn, stop_btn, step_btn):
+        for btn in (send_btn, replay_btn, stop_btn, step_btn):
             btn.setFont(font)
             btn.setFixedHeight(26)
         send_btn.setToolTip(
             tr("Отправить все принятые кадры обратно в шину. "
                "Если строки выделены — только выделенные.")
         )
+        replay_btn.setToolTip(
+            tr("Воспроизвести кадры с исходными таймингами из колонки времени")
+        )
         step_btn.setToolTip(tr("Каждое нажатие отправляет следующий кадр"))
         stop_btn.setEnabled(False)
-        send_btn.clicked.connect(lambda _c=False, t=table: self._send_all(t))
+        send_btn.clicked.connect(lambda _c=False, t=table: self._send_all(t, timed=False))
+        replay_btn.clicked.connect(lambda _c=False, t=table: self._send_all(t, timed=True))
         stop_btn.clicked.connect(lambda _c=False, t=table: self._stop_sending(t))
         step_btn.clicked.connect(lambda _c=False, t=table: self._send_next_frame(t))
         self._send_buttons[table] = (send_btn, stop_btn, step_btn)
+        self._send_timed[table] = False
 
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 4, 0, 0)
         buttons.addWidget(send_btn)
+        buttons.addWidget(replay_btn)
         buttons.addWidget(stop_btn)
         buttons.addWidget(step_btn)
         buttons.addStretch()
@@ -284,7 +293,7 @@ class CanAnalyzer(QWidget):
         except ValueError:
             return None
 
-    def _send_all(self, table: QTableWidget) -> None:
+    def _send_all(self, table: QTableWidget, timed: bool = False) -> None:
         rows = self._target_rows(table)
         if not rows:
             logger.info(tr("Таблица пуста — нечего отправлять"))
@@ -294,6 +303,8 @@ class CanAnalyzer(QWidget):
             return
         self._stop_sending(table)
         self._send_queues[table] = list(rows)
+        self._send_timed[table] = timed
+        self._send_prev_ms[table] = None
         send_btn, stop_btn, _step_btn = self._send_buttons[table]
         send_btn.setEnabled(False)
         stop_btn.setEnabled(True)
@@ -302,9 +313,27 @@ class CanAnalyzer(QWidget):
         timer.timeout.connect(lambda t=table: self._send_tick(t))
         self._send_timers[table] = timer
         logger.info(
-            "Отправка %d кадров в CAN%d", len(rows), self._table_channel.get(table, 1)
+            "Отправка %d кадров в CAN%d%s",
+            len(rows),
+            self._table_channel.get(table, 1),
+            " (с таймингами лога)" if timed else "",
         )
         timer.start()
+
+    @staticmethod
+    def _row_time_ms(table: QTableWidget, row: int) -> "float | None":
+        """Время строки в мс: «SS.mmm» (elapsed) или «HH:MM:SS.mmm» (лог)."""
+        item = table.item(row, 0)
+        if item is None:
+            return None
+        text = item.text().strip()
+        try:
+            parts = text.split(":")
+            if len(parts) == 3:
+                return (int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])) * 1000
+            return float(text) * 1000
+        except ValueError:
+            return None
 
     def _send_tick(self, table: QTableWidget) -> None:
         queue = self._send_queues.get(table) or []
@@ -317,6 +346,15 @@ class CanAnalyzer(QWidget):
         packet = self._row_to_packet(table, row)
         if packet is not None:
             self._serial_manager.send_data(packet)
+        # Replay: интервал до следующего кадра — по разнице меток
+        # времени строк лога (между 1 мс и 5 с, дальше не ждём).
+        if self._send_timed.get(table) and queue:
+            prev = self._row_time_ms(table, row)
+            nxt = self._row_time_ms(table, queue[0])
+            if prev is not None and nxt is not None:
+                timer = self._send_timers.get(table)
+                if timer is not None:
+                    timer.setInterval(max(1, min(5000, int(nxt - prev))))
         if not queue:
             self._stop_sending(table)
             logger.info(tr("Передача кадров завершена"))

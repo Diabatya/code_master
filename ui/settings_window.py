@@ -5,7 +5,13 @@ from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal, QPropertyAnimation, QEasingCurve, QEvent
-from PySide6.QtGui import QFont, QStandardItemModel, QStandardItem
+from PySide6.QtGui import (
+    QFont,
+    QKeySequence,
+    QShortcut,
+    QStandardItemModel,
+    QStandardItem,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -45,13 +51,14 @@ from ui.com_settings_dialog import BaudRateDetector
 from ui.analog_ports_tab import AnalogPortsTab
 from ui.can_analyzer import CanAnalyzer
 from ui.can_gateway_tab import CanGatewayTab
-from ui.can_monitor_tab import CanMonitorTab
+from ui.can_monitor_tab import CanMonitorTab, CanSettingsReadbackMismatch
 from ui.can_topology import CanTopologyWidget
-from ui.can_trigger_tab import CanTriggerTab
+from ui.can_trigger_tab import CanTriggerTab, TriggerValidationAborted
 from ui.flexible_logic_tab import FlexibleLogicTab
 from ui.hex_edit import HexDataEdit
 from ui.library_browser import LibraryBrowser
 from ui.memory_indicator import MemoryIndicator
+from ui.toast import show_toast
 
 try:
     from serial.tools.list_ports import comports
@@ -422,6 +429,13 @@ class SettingsWindow(QMainWindow):
         setup_button(self._save_button, height=32)
         self._save_button.clicked.connect(self._save_current_config)
 
+        self._diff_button = QPushButton(tr("Что изменится"))
+        setup_button(self._diff_button, height=32)
+        self._diff_button.setToolTip(
+            tr("Сравнение полей с последней записью/вычиткой устройства")
+        )
+        self._diff_button.clicked.connect(self._show_settings_diff)
+
         self._save_config_button = QPushButton(tr("Сохранить конфигурацию"))
         setup_button(self._save_config_button, height=32)
         self._save_config_button.clicked.connect(self._save_config)
@@ -440,6 +454,7 @@ class SettingsWindow(QMainWindow):
 
         bottom_layout.addStretch()
         bottom_layout.addWidget(self._save_button)
+        bottom_layout.addWidget(self._diff_button)
         bottom_layout.addWidget(self._save_config_button)
         bottom_layout.addWidget(self._load_config_button)
         bottom_layout.addWidget(self._factory_reset_button)
@@ -459,6 +474,7 @@ class SettingsWindow(QMainWindow):
         self._progress_offset = 0.0
         self._progress_scale = 100.0
         self._baseline_signature: tuple = ()
+        self._baseline_config: dict = {}
         self._save_opacity = QGraphicsOpacityEffect(self._save_button)
         self._save_button.setGraphicsEffect(self._save_opacity)
         self._install_dirty_tracking(self.centralWidget())
@@ -689,8 +705,155 @@ class SettingsWindow(QMainWindow):
     def _mark_clean(self) -> None:
         """Выключает и приглушает кнопку «Сохранить» — изменений нет."""
         self._baseline_signature = self._widgets_signature()
+        self._baseline_config = self._settings_snapshot()
         self._save_opacity.setOpacity(0.4)
         self._save_button.setEnabled(False)
+
+    # Ключи Config, являющиеся настройками устройства — по ним строится
+    # снимок для диффа «Что изменится». Идентичность (имя/серийник) и
+    # параметры связи не входят: они не пишутся кнопкой «Сохранить».
+    _DIFF_KEYS = (
+        "triggers",
+        "flexible_rules",
+        "gateway_rules",
+        "gateway_ignore",
+        "ignore_list",
+        "logic",
+        "analog_ports",
+        "can1_speed",
+        "can2_speed",
+        "can_speed_auto",
+        "can1_terminator",
+        "can2_terminator",
+        "sleep_time",
+        "sleep_mode",
+    )
+
+    _DIFF_LABELS = {
+        "can1_speed": "Скорость CAN1",
+        "can2_speed": "Скорость CAN2",
+        "can_speed_auto": "Автоскорость CAN",
+        "can1_terminator": "Терминатор CAN1",
+        "can2_terminator": "Терминатор CAN2",
+        "sleep_time": "Время сна",
+        "sleep_mode": "Режим сна",
+        "triggers": "Триггеры",
+        "flexible_rules": "Гибкие правила",
+        "gateway_rules": "Правила шлюза",
+        "gateway_ignore": "Игнор-лист шлюза",
+        "ignore_list": "Игнор-лист",
+        "logic": "Логика",
+        "analog_ports": "Аналоговые порты",
+    }
+
+    def _settings_snapshot(self) -> dict:
+        """Копия настроек устройства для сравнения «до/после».
+
+        Поля виджетов попадают в Config не сразу, а через _save_config
+        каждой вкладки — перед снимком сбрасываем их, иначе дифф не
+        увидел бы несохранённых правок."""
+        for tab in (self._trigger_tab, self._flexible_tab, self._gateway_tab):
+            save = getattr(tab, "_save_config", None)
+            if callable(save):
+                try:
+                    save()
+                except Exception:  # noqa: BLE001
+                    pass
+        data = self._config.all()
+        return {key: data.get(key) for key in self._DIFF_KEYS}
+
+    @staticmethod
+    def _format_diff_scalar(key: str, value: object) -> str:
+        if key.endswith("_speed") and isinstance(value, (int, float)) and value:
+            if int(value) == 33300:
+                return "33.3 кбит/с"
+            return f"{int(value) // 1000} кбит/с" if int(value) % 1000 == 0 else f"{value}"
+        if isinstance(value, bool):
+            return tr("вкл") if value else tr("выкл")
+        return str(value)
+
+    @staticmethod
+    def _describe_trigger(trigger: dict) -> str:
+        """Короткое описание триггера для строки диффа."""
+        channel_names = ("CAN1", "CAN2", tr("любой"))
+        ch = channel_names[min(int(trigger.get("recv_channel", 0) or 0), 2)]
+        rx_id = str(trigger.get("recv_id", "")).strip() or "—"
+        responses = trigger.get("responses") or []
+        tx_id = "—"
+        for row in responses:
+            if isinstance(row, dict) and str(row.get("id", "")).strip():
+                tx_id = str(row["id"]).strip()
+                break
+        state = tr("вкл") if trigger.get("active") else tr("выкл")
+        return tr("{0}: приём {1} ID {2} → ответ ID {3}").format(state, ch, rx_id, tx_id)
+
+    def _settings_diff_lines(self) -> List[str]:
+        """Человекочитаемый список отличий полей от последней записи."""
+        baseline = self._baseline_config
+        current = self._settings_snapshot()
+        lines: List[str] = []
+        for key in self._DIFF_KEYS:
+            old, new = baseline.get(key), current.get(key)
+            if old == new:
+                continue
+            label = tr(self._DIFF_LABELS.get(key, key))
+            if key == "triggers" and isinstance(old, list) and isinstance(new, list):
+                for i in range(max(len(old), len(new))):
+                    if i >= len(old):
+                        lines.append(
+                            tr("{0} {1}: добавлен — {2}").format(
+                                label, i + 1, self._describe_trigger(new[i])
+                            )
+                        )
+                    elif i >= len(new):
+                        lines.append(
+                            tr("{0} {1}: удалён — {2}").format(
+                                label, i + 1, self._describe_trigger(old[i])
+                            )
+                        )
+                    elif old[i] != new[i]:
+                        lines.append(
+                            tr("{0} {1}: {2} → {3}").format(
+                                label,
+                                i + 1,
+                                self._describe_trigger(old[i]),
+                                self._describe_trigger(new[i]),
+                            )
+                        )
+            elif isinstance(old, list) and isinstance(new, list):
+                lines.append(
+                    tr("{0}: {1} → {2} записей").format(label, len(old), len(new))
+                )
+            else:
+                lines.append(
+                    tr("{0}: {1} → {2}").format(
+                        label,
+                        self._format_diff_scalar(key, old),
+                        self._format_diff_scalar(key, new),
+                    )
+                )
+        return lines
+
+    def _show_settings_diff(self) -> None:
+        """Кнопка «Что изменится»: показывает отличия полей от эталона.
+
+        Эталон — состояние на момент последней успешной записи в МК или
+        вычитки устройства: то, что сейчас показывают поля vs то, что
+        реально лежит в устройстве/файле."""
+        lines = self._settings_diff_lines()
+        if not lines:
+            QMessageBox.information(
+                self,
+                tr("Что изменится"),
+                tr("Поля совпадают с последней записью — изменений нет."),
+            )
+            return
+        QMessageBox.information(
+            self,
+            tr("Что изменится — {0} изменений").format(len(lines)),
+            "\n".join(lines[:40])
+            + (tr("\n… и ещё {0}").format(len(lines) - 40) if len(lines) > 40 else ""),
+        )
 
     def _show_loading_overlay(self) -> None:
         """Закрывает поля оверлеем «Загрузка настроек» и запускает пульсацию."""
@@ -741,6 +904,16 @@ class SettingsWindow(QMainWindow):
             f"color: {'#4CAF50' if connected else '#E53935'};"
         )
 
+    def _on_reconnect_scheduled(self, delay_s: int, attempt: int) -> None:
+        """Показывает, что идёт автопереподключение — иначе при занятом
+        порте оператор видит только молчащее «Не подключено»."""
+        self._conn_status_label.setText(
+            tr("Переподключение через {0} с… (попытка {1})").format(
+                delay_s, attempt
+            )
+        )
+        self._conn_status_label.setStyleSheet("color: #FFA726;")
+
     def _on_connection_changed(self, connected: bool) -> None:
         self._update_conn_status(connected)
         if not connected:
@@ -760,17 +933,17 @@ class SettingsWindow(QMainWindow):
         # открытии порта; request_control сам ставит reader на паузу.
         QTimer.singleShot(400, self._sync_from_device)
 
-    def _sync_from_device(self) -> None:
+    def _sync_from_device(self, force: bool = False) -> None:
         """Автоматически вычитывает настройки устройства при подключении.
 
         Если есть несохранённые правки (кнопка «Сохранить» активна),
         вычитку пропускаем — иначе состояние устройства затрёт работу
-        оператора, сделанную до подключения.
-        """
+        оператора, сделанную до подключения. force=True — явная вычитка
+        по Ctrl+R: оператор уже подтвердил замену правок."""
         if (
             not self._serial_manager.is_open()
             or self._config.get("emulation", False)
-            or self._has_unsaved_changes()
+            or (self._has_unsaved_changes() and not force)
             or self._sync_in_progress
         ):
             # Вычитки не будет — оверлей, показанный на connecting,
@@ -964,11 +1137,56 @@ class SettingsWindow(QMainWindow):
         self._serial_manager.error_occurred.connect(self._on_serial_error)
         self._serial_manager.connection_changed.connect(self._on_connection_changed)
         self._serial_manager.connecting.connect(self._on_connecting)
+        self._serial_manager.reconnect_scheduled.connect(
+            self._on_reconnect_scheduled
+        )
         self._update_conn_status(self._serial_manager.is_open())
         self._monitor_tab.create_trigger_requested.connect(self._on_create_trigger)
         self._trigger_tab.settings_changed.connect(self._mark_dirty)
         self._trigger_tab.progress_updated.connect(self._on_tab_progress)
         self._monitor_tab.progress_updated.connect(self._on_tab_progress)
+        self._install_shortcuts()
+
+    def _install_shortcuts(self) -> None:
+        """Горячие клавиши окна настроек.
+
+        Ctrl+S — «Сохранить» (клик по кнопке — уважает её enabled),
+        Ctrl+R — явная вычитка устройства (с подтверждением при
+        несохранённых правках), F5 — старт/стоп мониторинга обоих
+        каналов, Ctrl+O — загрузить файл конфигурации."""
+        for seq, handler in (
+            ("Ctrl+S", self._save_button.click),
+            ("Ctrl+R", self._read_from_device_explicit),
+            ("Ctrl+O", self._load_config),
+            ("F5", self._monitor_tab.toggle_monitoring),
+        ):
+            shortcut = QShortcut(QKeySequence(seq), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(handler)
+
+    def _read_from_device_explicit(self) -> None:
+        """Ctrl+R: явная вычитка устройства по запросу оператора.
+
+        В отличие от автосинхронизации при подключении, здесь при
+        несохранённых правках спрашиваем подтверждение — оператор сам
+        решил перечитать устройство."""
+        if not self._serial_manager.is_open():
+            show_toast(self, tr("Устройство не подключено"), success=False)
+            return
+        if self._has_unsaved_changes():
+            answer = QMessageBox.question(
+                self,
+                tr("Вычитка настроек"),
+                tr("Поля будут заменены состоянием устройства, "
+                   "несохранённые правки потеряются. Продолжить?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self._sync_from_device(force=True)
+            return
+        self._sync_from_device()
 
     def _on_create_trigger(self, packet: dict) -> None:
         self._trigger_tab.create_trigger_from_packet(packet)
@@ -1245,7 +1463,7 @@ class SettingsWindow(QMainWindow):
                 self._gateway_tab._save_config()
             self._config.save_to_file(path)
             self._config.set("last_config_dir", os.path.dirname(path))
-            QMessageBox.information(self, tr("Готово"), tr("Конфигурация сохранена"))
+            show_toast(self, tr("Конфигурация сохранена"))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить: {0}").format(exc))
 
@@ -1320,11 +1538,9 @@ class SettingsWindow(QMainWindow):
             # вычитка устройства иначе могла бы затереть поля файла
             # (guard по сигнатуре это тоже блокирует — двойная защита).
             self._refresh_save_state()
-            QMessageBox.information(
+            show_toast(
                 self,
-                tr("Готово"),
-                tr("Конфигурация загружена в поля настроек. "
-                   "Для записи в устройство нажмите «Сохранить»."),
+                tr("Конфигурация загружена — для записи в устройство нажмите «Сохранить»"),
             )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось загрузить: {0}").format(exc))
@@ -1377,9 +1593,19 @@ class SettingsWindow(QMainWindow):
                     self._progress_offset = 0.0
                     self._progress_scale = 100.0
             # Успешное сохранение подтверждается погасшей кнопкой
-            # «Сохранить» — отдельное окно оператору не нужно.
+            # «Сохранить» и тостом — отдельное окно оператору не нужно.
             self._mark_clean()
+            show_toast(
+                self,
+                tr("Настройки записаны в устройство")
+                if self._serial_manager.is_open()
+                else tr("Конфигурация сохранена"),
+            )
             return True
+        except (TriggerValidationAborted, CanSettingsReadbackMismatch):
+            # Оператор уже увидел список проблем — сохранение прервано
+            # молча, кнопка «Сохранить» остаётся активной.
+            return False
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить: {0}").format(exc))
             return False
@@ -1423,7 +1649,7 @@ class SettingsWindow(QMainWindow):
                 # Устройство сброс не подтвердило — показанные поля
                 # отличаются от его состояния: «Сохранить» активна.
                 self._mark_dirty()
-            QMessageBox.information(self, tr("Готово"), tr("Настройки сброшены"))
+            show_toast(self, tr("Настройки сброшены"))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сбросить: {0}").format(exc))
 
