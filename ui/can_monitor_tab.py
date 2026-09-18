@@ -1939,8 +1939,8 @@ class CanMonitorTab(QWidget):
                     logger.warning(
                         "Сохранение: readback CAN%d не удался: %s", channel, exc
                     )
+                actual = str(got) if got else tr("нет ответа")
                 if got != kbps:
-                    actual = str(got) if got else tr("нет ответа")
                     mismatches.append(
                         tr("CAN{0}: записано {1} кбит/с, устройство сообщает {2}").format(
                             channel, kbps, actual

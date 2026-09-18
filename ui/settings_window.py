@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal, QPropertyAnimation, QEasingCurve, QEvent
+from shiboken6 import isValid
 from PySide6.QtGui import (
     QFont,
     QKeySequence,
@@ -150,6 +151,12 @@ class ConnectionTab(QWidget):
             self._baud_combo.setCurrentIndex(index)
 
     def _refresh_ports(self) -> None:
+        # Вкладка могла умереть вместе с родителем-диалогом
+        # (WA_DeleteOnClose), а её слоты — остаться подключёнными к
+        # SerialManager, если shutdown() не добежал. Сигнал в мёртвый
+        # C++-объект ронял приложение: «QComboBox already deleted».
+        if not isValid(self):
+            return
         current = self._port_combo.currentData()
         self._port_combo.clear()
         self._port_combo.addItem(tr("FAKE (эмулятор)"), "FAKE")
@@ -219,7 +226,13 @@ class ConnectionTab(QWidget):
         вызывать слоты уже удалённого виджета («Internal C++ object
         QComboBox already deleted» при повторном входе в настройки).
         """
-        self._stop_baud_detector()
+        try:
+            self._stop_baud_detector()
+        except RuntimeError:
+            # Детектор уже умер вместе с вкладкой — отписка от сигналов
+            # SerialManager всё равно должна добежать, иначе слоты
+            # останутся в списке подключённых навсегда.
+            pass
         for signal, slot in (
             (self._serial_manager.connection_changed, self._update_ui_state),
             (self._serial_manager.device_identified, self._identified_slot),
@@ -245,6 +258,8 @@ class ConnectionTab(QWidget):
         self._baud_detector = None
 
     def _on_baud_found(self, baud: int) -> None:
+        if not isValid(self):
+            return
         self._auto_baud_button.setEnabled(True)
         index = self._baud_combo.findText(str(baud))
         if index >= 0:
@@ -252,10 +267,14 @@ class ConnectionTab(QWidget):
         self._set_status(tr("Скорость определена: {0}").format(baud), error=False)
 
     def _on_baud_not_found(self) -> None:
+        if not isValid(self):
+            return
         self._auto_baud_button.setEnabled(True)
         self._set_status(tr("Не удалось определить скорость"), error=True)
 
     def _set_status(self, text: str, error: bool = False) -> None:
+        if not isValid(self):
+            return
         self._status_label.setText(text)
         color = "#F44336" if error else "#4CAF50"
         self._status_label.setStyleSheet(f"color: {color};")
@@ -284,6 +303,8 @@ class ConnectionTab(QWidget):
             self._set_status(tr("Ошибка подключения"), error=True)
 
     def _update_ui_state(self, _connected: Optional[bool] = None) -> None:
+        if not isValid(self):
+            return
         is_open = self._serial_manager.is_open()
         self._connect_button.setText(tr("Отключить") if is_open else tr("Подключить"))
         self._port_combo.setEnabled(not is_open)
