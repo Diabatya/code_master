@@ -19,7 +19,6 @@ from models.version import VERSION, ENGINEERING_BUILD
 from ui.dark_theme import apply_dark_theme, apply_light_theme, apply_starline_theme
 from ui.disclaimer_dialog import DisclaimerDialog
 from ui.main_window import MainWindow
-from ui.setup_wizard import SetupWizard
 
 
 def _parse_args() -> argparse.Namespace:
@@ -111,13 +110,11 @@ def main() -> int:
         if disclaimer.exec() != QDialog.DialogCode.Accepted:
             return 0
 
-    if not config.get("setup_completed", False):
-        wizard = SetupWizard()
-        if wizard.exec() == QDialog.DialogCode.Accepted:
-            config.set("setup_completed", True)
-        else:
-            return 0
-
+    # Мастер первого запуска убран: приложение сразу открывает главный
+    # экран. Всё, что мастер задавал (язык, тип устройства, порт),
+    # имеет рабочие значения по умолчанию и меняется из главного окна —
+    # иначе удалённый/сброшенный config.json каждый раз показывал
+    # обязательный мастер перед работой.
     main_window = MainWindow(serial_manager)
     main_window.show()
 

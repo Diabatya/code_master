@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid
 
 from core.dbc_manager import DBCManager
 from core.serial_manager import SerialManager
@@ -372,9 +373,16 @@ class MainWindow(QMainWindow):
     def _on_configure_clicked(self) -> None:
         """Сначала открывает диалог подключения, затем окно настроек CAN."""
         if self._connection_dialog is not None:
-            self._connection_dialog.raise_()
-            self._connection_dialog.activateWindow()
-            return
+            # Ссылка могла пережить C++-объект: WA_DeleteOnClose удаляет
+            # диалог, а если _finish не добежал (исключение в shutdown(),
+            # вложенный processEvents при создании окна настроек) —
+            # Python-обёртка оставалась указывать на мёртвый QDialog и
+            # raise_() ронял приложение: «QDialog already deleted».
+            if isValid(self._connection_dialog):
+                self._connection_dialog.raise_()
+                self._connection_dialog.activateWindow()
+                return
+            self._connection_dialog = None
         dialog = QDialog()
         dialog.setWindowTitle(tr("Подключение"))
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
@@ -396,7 +404,13 @@ class MainWindow(QMainWindow):
         # вызывали бы слоты уже удалённого диалога (падение при повторном
         # входе в настройки: «QComboBox already deleted»).
         def _finish(_result: int) -> None:
-            connection.shutdown()
+            # shutdown() не должен помешать очистке ссылки — иначе
+            # исключение оставляло self._connection_dialog указывающим
+            # на мёртвый диалог и следующее «Настроить» падало.
+            try:
+                connection.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
             self._on_connection_finished()
 
         dialog.finished.connect(_finish)
