@@ -595,6 +595,9 @@ class CanChannelMonitor(QWidget):
         self._id_to_row: Dict[int, int] = {}
         self._id_stats: Dict[int, Dict[str, Any]] = {}
         self._id_data_variants: Dict[int, Set[bytes]] = {}
+        # Последнее направление кадра по каждому ID: True — кадр
+        # отправлен самим МК (tx_echo), строка подсвечивается зелёным.
+        self._id_tx_echo: Dict[int, bool] = {}
         # История фреймов по каждому ID (время, data, rtr, dlc) — для
         # диалога «История ID» из контекстного меню таблицы.
         self._id_history: Dict[int, deque] = {}
@@ -910,6 +913,7 @@ class CanChannelMonitor(QWidget):
         self._id_to_row.clear()
         self._id_stats.clear()
         self._id_data_variants.clear()
+        self._id_tx_echo.clear()
         self._id_history.clear()
         for timer in self._highlight_timers.values():
             timer.stop()
@@ -1099,6 +1103,12 @@ class CanChannelMonitor(QWidget):
         data = bytes(frame["data"])
         rtr = bool(frame.get("rtr", False))
         dlc = int(frame.get("dlc", len(data)))
+        # tx_echo: кадр отправлен самим МК (ответ триггера / другой
+        # программы МК) — bxCAN себя не слышит, прошивка возвращает
+        # собственные передачи в RX-поток с флагом. Такие строки
+        # подсвечиваются зелёным, как кнопка «Запущено».
+        tx_echo = bool(frame.get("tx_echo", False))
+        self._id_tx_echo[frame_id] = tx_echo
         if self._filter_enabled and self._matches_filter(frame_id, data):
             return
 
@@ -1136,6 +1146,7 @@ class CanChannelMonitor(QWidget):
                     item.setText(text)
                 if tooltip:
                     item.setToolTip(tooltip)
+            self._paint_row_direction(row, tx_echo)
             # Подсветка изменившихся данных: DATA того же ID изменилась →
             # фон ячейки Data светлее на «Интервал подсветки» сверху.
             if prev_data is not None and prev_data != data and self._highlight_interval_ms > 0:
@@ -1149,6 +1160,7 @@ class CanChannelMonitor(QWidget):
                     if fid is not None:
                         self._id_to_row.pop(fid, None)
                         self._id_stats.pop(fid, None)
+                        self._id_tx_echo.pop(fid, None)
                 self._table.removeRow(last_row)
                 for fid, r in list(self._id_to_row.items()):
                     if r >= last_row:
@@ -1167,6 +1179,7 @@ class CanChannelMonitor(QWidget):
                 if r >= row:
                     self._id_to_row[fid] = r + 1
             self._id_to_row[frame_id] = row
+            self._paint_row_direction(row, tx_echo)
 
         stats["last_receive_time"] = now
         stats["last_data"] = data
@@ -1228,6 +1241,26 @@ class CanChannelMonitor(QWidget):
                 return row
         return self._table.rowCount()
 
+    def _paint_row_direction(self, row: int, is_tx: bool) -> None:
+        """Зелёная заливка полей строки для кадров, отправленных самим МК
+        (tx_echo: ответ триггера/другой программы МК), как у кнопки
+        «Запущено». Столбец ID сохраняет свой цвет — он кодирует сам ID.
+        Флаг пишется в ячейку DATA, чтобы _reset_data_background после
+        вспышки подсветки вернул правильный цвет, а не дефолт."""
+        for col in range(1, self._table.columnCount()):
+            item = self._table.item(row, col)
+            if item is None:
+                continue
+            if is_tx:
+                item.setBackground(QColor("#4CAF50"))
+                item.setForeground(QColor("#FFFFFF"))
+            else:
+                item.setBackground(QColor())
+                item.setForeground(QColor())
+        data_item = self._table.item(row, 2)
+        if data_item is not None:
+            data_item.setData(Qt.ItemDataRole.UserRole, bool(is_tx))
+
     def _highlight_data_cell(self, row: int) -> None:
         if row in self._highlight_timers:
             self._highlight_timers[row].stop()
@@ -1247,7 +1280,14 @@ class CanChannelMonitor(QWidget):
     def _reset_data_background(self, row: int) -> None:
         data_item = self._table.item(row, 2)
         if data_item is not None:
-            data_item.setBackground(QColor())
+            # TX-строка (кадр отправлен самим МК) возвращается в зелёный,
+            # обычная — в дефолтный фон.
+            if bool(data_item.data(Qt.ItemDataRole.UserRole)):
+                data_item.setBackground(QColor("#4CAF50"))
+                data_item.setForeground(QColor("#FFFFFF"))
+            else:
+                data_item.setBackground(QColor())
+                data_item.setForeground(QColor())
         self._highlight_timers.pop(row, None)
 
     def _show_filter_dialog(self) -> None:
@@ -1390,6 +1430,9 @@ class CanMonitorTab(QWidget):
     """Вкладка мониторинга CAN с двумя каналами."""
 
     create_trigger_requested = Signal(dict)
+    # Прогресс прогрузки CAN-настроек в устройство (0-100 + текст этапа) —
+    # окно настроек показывает процентный индикатор во время «Сохранить».
+    progress_updated = Signal(int, str)
 
     def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1407,21 +1450,20 @@ class CanMonitorTab(QWidget):
         self._mark_save_signature_scope()
 
     def _mark_save_signature_scope(self) -> None:
-        # Все интерактивные виджеты монитора — рабочие инструменты (панель
-        # отправки, поиск, фильтры, декодирование, инверсия), а не настройки
-        # устройства: без исключения любой ввод в них менял снимок
-        # _widgets_signature и кнопка «Сохранить» загоралась от обычной
-        # работы во вкладке «Мониторинг». Реальные настройки — только
-        # CAN-скорости, терминаторы и параметры сна.
-        config_widgets = {
-            id(self._can1_speed_combo), id(self._can2_speed_combo),
-            id(self._can1_terminator_check), id(self._can2_terminator_check),
-            id(self._sleep_time_spin), id(self._sleep_mode_combo),
-        }
-        for widget in self.findChildren(QWidget):
-            widget.setProperty(
-                "skip_save_signature", id(widget) not in config_widgets
-            )
+        # Настройки устройства в мониторе — только эти виджеты: скорости,
+        # терминаторы, параметры сна. Всё остальное (панель отправки,
+        # поиск, фильтры, декодирование, диалоги) — рабочие инструменты,
+        # их ввод не должен включать «Сохранить». Помечаем позитивно:
+        # _widgets_signature исключает любой виджет внутри монитора,
+        # у которого нет предка с save_setting — это покрывает и
+        # динамически создаваемые виджеты (диалоги истории/фильтра),
+        # которых на момент разметки ещё нет в дереве.
+        for widget in (
+            self._can1_speed_combo, self._can2_speed_combo,
+            self._can1_terminator_check, self._can2_terminator_check,
+            self._sleep_time_spin, self._sleep_mode_combo,
+        ):
+            widget.setProperty("save_setting", True)
 
     def _create_widgets(self) -> None:
         compact_font = QFont("Segoe UI", 9)
@@ -1639,6 +1681,9 @@ class CanMonitorTab(QWidget):
         if not self._serial_manager.is_open():
             return
         # Одна сессия на всю пачку: скорости и режимы обоих каналов.
+        steps_done = 0
+        total_steps = 4  # speed + mode на каждый из двух каналов
+        self.progress_updated.emit(0, tr("Применение CAN-настроек"))
         with self._serial_manager.control_session():
             for channel in (1, 2):
                 kbps = self._speed_combo_kbps(
@@ -1649,11 +1694,21 @@ class CanMonitorTab(QWidget):
                         self._serial_manager.set_can_speed(channel, kbps)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("Сохранение: скорость CAN%d=%d не применена: %s", channel, kbps, exc)
+                steps_done += 1
+                self.progress_updated.emit(
+                    int(steps_done * 100 / total_steps),
+                    tr("CAN{0}: скорость {1} кбит/с").format(channel, kbps),
+                )
                 term = bool(self._config.get(f"can{channel}_terminator", False))
                 try:
                     self._serial_manager.set_can_mode(channel, 0, term)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Сохранение: режим CAN%d не применён: %s", channel, exc)
+                steps_done += 1
+                self.progress_updated.emit(
+                    int(steps_done * 100 / total_steps),
+                    tr("CAN{0}: режим и терминатор").format(channel),
+                )
 
     def sync_from_config(self) -> None:
         """Переносит значения конфига в виджеты после загрузки файла.
@@ -1798,7 +1853,7 @@ class CanMonitorTab(QWidget):
             self._csv_path = Path(path)
             self._csv_file = open(self._csv_path, "w", newline="", encoding="utf-8")
             self._csv_writer = csv.writer(self._csv_file)
-            self._csv_writer.writerow(["timestamp", "channel", "id", "dlc", "data"])
+            self._csv_writer.writerow(["timestamp", "channel", "dir", "id", "dlc", "data"])
             self._recording = True
             logger.info("Потоковая запись CAN начата: %s", path)
         except Exception as exc:  # noqa: BLE001
@@ -1822,4 +1877,8 @@ class CanMonitorTab(QWidget):
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S") + f".{int((time.time() % 1) * 1000):03d}"
         frame_id = int(frame["id"])
         data = bytes(frame["data"])
-        self._csv_writer.writerow([timestamp, frame["channel"], int_to_hex(frame_id, 8), len(data), bytes_to_hex_string(data)])
+        # dir: RX = кадр принят с шины (внешний приём), TX = кадр отправлен
+        # самим МК (tx_echo — ответ триггера/программы МК или ретрансляция
+        # кадра ПК). В трейсе видно, что устройство передало само.
+        direction = "TX" if frame.get("tx_echo") else "RX"
+        self._csv_writer.writerow([timestamp, frame["channel"], direction, int_to_hex(frame_id, 8), len(data), bytes_to_hex_string(data)])

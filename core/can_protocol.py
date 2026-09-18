@@ -119,8 +119,12 @@ def unpack_can_frame(raw: bytes, tx: bool = False) -> Optional[Dict[str, object]
 
     Returns:
         Словарь {'channel': int, 'id': int, 'data': bytes, 'extended': bool,
-        'rtr': bool, 'dlc': int, 'raw': bytes} или None, если кадр не найден
-        или контрольная сумма не совпадает.
+        'rtr': bool, 'dlc': int, 'tx_echo': bool, 'raw': bytes} или None,
+        если кадр не найден или контрольная сумма не совпадает.
+        tx_echo=True — кадр ранее отправлен самим МК (ответ триггера или
+        ретрансляция кадра ПК): bxCAN себя не слышит, прошивка возвращает
+        собственные передачи в RX-поток с битом 7 байта channel=1
+        (протокол v2+; младшие 7 бит — номер канала 1/2).
     """
     markers = _TX_MARKERS if tx else _RX_MARKERS
     marker_index = -1
@@ -161,7 +165,8 @@ def unpack_can_frame(raw: bytes, tx: bool = False) -> Optional[Dict[str, object]
     if received_checksum != calculated_checksum:
         return None
 
-    channel = frame[1]
+    channel_byte = frame[1]
+    channel = channel_byte & 0x7F
     if extended:
         can_id = int.from_bytes(frame[2:6], "little")
     else:
@@ -174,6 +179,7 @@ def unpack_can_frame(raw: bytes, tx: bool = False) -> Optional[Dict[str, object]
         "dlc": length,
         "extended": extended,
         "rtr": rtr,
+        "tx_echo": bool(channel_byte & 0x80),
         "raw": frame,
     }
 

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -453,6 +454,10 @@ class SettingsWindow(QMainWindow):
         self._loading = False
         self._refresh_pending = False
         self._sync_in_progress = False
+        # Масштаб/сдвиг для пересчёта прогресса фаз (триггеры 0-85%,
+        # CAN-настройки 85-100% при сохранении; вычитка — вся шкала).
+        self._progress_offset = 0.0
+        self._progress_scale = 100.0
         self._baseline_signature: tuple = ()
         self._save_opacity = QGraphicsOpacityEffect(self._save_button)
         self._save_button.setGraphicsEffect(self._save_opacity)
@@ -477,7 +482,25 @@ class SettingsWindow(QMainWindow):
         self._loading_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._loading_text.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
         self._loading_text.setStyleSheet("color: #FFFFFF;")
+        overlay_layout.addStretch(1)
         overlay_layout.addWidget(self._loading_text)
+        # Процентный индикатор: вкладки шлют progress_updated(0-100, текст)
+        # во время вычитки и прогрузки в МК — оператор видит, что запись
+        # идёт, а не висит.
+        self._loading_progress = QProgressBar(self._loading_overlay)
+        self._loading_progress.setRange(0, 100)
+        self._loading_progress.setValue(0)
+        self._loading_progress.setFixedWidth(420)
+        self._loading_progress.setTextVisible(True)
+        self._loading_progress.setStyleSheet(
+            "QProgressBar { border: 1px solid #5A5A72; border-radius: 4px;"
+            " background-color: #2A2A3A; color: #FFFFFF; text-align: center;"
+            " min-height: 18px; max-height: 18px; }"
+            "QProgressBar::chunk { background-color: #4CAF50; border-radius: 3px; }"
+        )
+        overlay_layout.addSpacing(14)
+        overlay_layout.addWidget(self._loading_progress, 0, Qt.AlignmentFlag.AlignHCenter)
+        overlay_layout.addStretch(1)
         self._loading_overlay.hide()
         self._loading_opacity = QGraphicsOpacityEffect(self._loading_text)
         self._loading_text.setGraphicsEffect(self._loading_opacity)
@@ -577,13 +600,30 @@ class SettingsWindow(QMainWindow):
         sig = []
 
         def _skip(widget: QWidget) -> bool:
-            # Виджеты с флагом skip_save_signature — рабочие инструменты
-            # вкладок (панель отправки монитора, поиск, фильтры,
-            # декодирование), а не настройки устройства: их значения не
-            # должны включать кнопку «Сохранить».
-            return widget is self._search_edit or bool(
+            # Виджеты-инструменты вкладок — не настройки устройства и не
+            # должны включать «Сохранить». Критерии:
+            # 1) поле поиска окна / явный флаг skip_save_signature;
+            # 2) внутри «Мониторинга» — любой виджет без предка с флагом
+            #    save_setting: там настройки только у CAN-скоростей,
+            #    терминаторов и сна, а панель отправки, поиск, фильтры и
+            #    динамические диалоги (история ID, фильтр, DBC) —
+            #    инструменты. Проверка по предкам покрывает виджеты,
+            #    созданные после инициализации (раньше снимок «протекал»
+            #    через них — кнопка вела себя по-разному на вкладках).
+            if widget is self._search_edit or bool(
                 widget.property("skip_save_signature")
-            )
+            ):
+                return True
+            monitor = getattr(self, "_monitor_tab", None)
+            if monitor is not None:
+                node = widget
+                while node is not None:
+                    if node.property("save_setting"):
+                        return False
+                    if node is monitor:
+                        return True
+                    node = node.parentWidget()
+            return False
 
         root = self.centralWidget()
         for widget in root.findChildren(QComboBox):
@@ -657,6 +697,7 @@ class SettingsWindow(QMainWindow):
         self._loading_overlay.setGeometry(self.centralWidget().rect())
         self._loading_overlay.show()
         self._loading_overlay.raise_()
+        self._loading_progress.setValue(0)
         self._loading_anim.start()
         # Мгновенная перерисовка: вызывается и из блокирующего GUI-поток
         # connect() (идентификация ~1-2 с) — без processEvents оверлей
@@ -667,6 +708,17 @@ class SettingsWindow(QMainWindow):
         self._loading_anim.stop()
         self._loading_opacity.setOpacity(1.0)
         self._loading_overlay.hide()
+
+    def _on_tab_progress(self, percent: int, text: str) -> None:
+        """Прогресс от вкладок во время вычитки/прогрузки в МК.
+
+        percent — 0..100 внутри текущей фазы; окно пересчитывает через
+        _progress_offset/_progress_scale в общую шкалу операции."""
+        if text:
+            self._loading_text.setText(text)
+        self._loading_progress.setValue(
+            max(0, min(100, int(self._progress_offset + percent * self._progress_scale / 100.0)))
+        )
 
     def _on_connecting(self) -> None:
         """Порт открыт, идёт идентификация — сразу закрываем поля оверлеем,
@@ -732,6 +784,8 @@ class SettingsWindow(QMainWindow):
         # «5 блоков, 4 пустых» после сворачивания/разворачивания).
         self._sync_in_progress = True
         self._loading = True
+        self._progress_offset = 0.0
+        self._progress_scale = 100.0
         self._show_loading_overlay()
         try:
             self._trigger_tab.sync_from_device()
@@ -904,6 +958,8 @@ class SettingsWindow(QMainWindow):
         self._update_conn_status(self._serial_manager.is_open())
         self._monitor_tab.create_trigger_requested.connect(self._on_create_trigger)
         self._trigger_tab.settings_changed.connect(self._mark_dirty)
+        self._trigger_tab.progress_updated.connect(self._on_tab_progress)
+        self._monitor_tab.progress_updated.connect(self._on_tab_progress)
 
     def _on_create_trigger(self, packet: dict) -> None:
         self._trigger_tab.create_trigger_from_packet(packet)
@@ -1282,13 +1338,35 @@ class SettingsWindow(QMainWindow):
             if hasattr(self._gateway_tab, "_save_config"):
                 self._gateway_tab._save_config()
             if self._serial_manager.is_open() and not self._config.get("emulation", False):
-                self._trigger_tab.write_to_device()
-                # Общая запись для всех вкладок: CAN-скорости/режимы из
-                # «Мониторинга» прогружаются тем же действием, что и
-                # триггеры — иначе заданный оператором бод-рейт шины не
-                # доходил до периферии МК.
-                if hasattr(self._monitor_tab, "apply_can_settings_to_device"):
-                    self._monitor_tab.apply_can_settings_to_device()
+                # Прогрузка в МК — под оверлеем с процентным индикатором:
+                # запись триггеров (чтение списка → STAGE → COMMIT →
+                # проверка) занимает заметное время, оператор должен
+                # видеть процент, а не «зависшее» окно. _sync_in_progress
+                # запрещает вложенную вычитку через processEvents, пока
+                # идёт запись.
+                self._progress_offset = 0.0
+                self._progress_scale = 85.0
+                self._loading_text.setText(tr("Сохранение настроек в устройство…"))
+                self._sync_in_progress = True
+                self._loading = True
+                self._show_loading_overlay()
+                try:
+                    self._trigger_tab.write_to_device()
+                    # Общая запись для всех вкладок: CAN-скорости/режимы из
+                    # «Мониторинга» прогружаются тем же действием, что и
+                    # триггеры — иначе заданный оператором бод-рейт шины не
+                    # доходил до периферии МК.
+                    if hasattr(self._monitor_tab, "apply_can_settings_to_device"):
+                        self._progress_offset = 85.0
+                        self._progress_scale = 15.0
+                        self._monitor_tab.apply_can_settings_to_device()
+                    self._loading_progress.setValue(100)
+                finally:
+                    self._hide_loading_overlay()
+                    self._loading = False
+                    self._sync_in_progress = False
+                    self._progress_offset = 0.0
+                    self._progress_scale = 100.0
             # Успешное сохранение подтверждается погасшей кнопкой
             # «Сохранить» — отдельное окно оператору не нужно.
             self._mark_clean()

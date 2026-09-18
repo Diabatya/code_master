@@ -876,6 +876,14 @@ class Translator:
                 "TX": "TX",
                 "Не удалось открыть порт для отправки": "Could not open port for sending",
                 "-- выберите порт --": "-- select port --",
+                "Чтение триггеров {0}/{1}": "Reading triggers {0}/{1}",
+                "Запись триггеров {0}/{1}": "Writing triggers {0}/{1}",
+                "Фиксация во Flash": "Committing to Flash",
+                "Проверка записи {0}/{1}": "Verifying write {0}/{1}",
+                "Применение CAN-настроек": "Applying CAN settings",
+                "CAN{0}: скорость {1} кбит/с": "CAN{0}: speed {1} kbit/s",
+                "CAN{0}: режим и терминатор": "CAN{0}: mode and terminator",
+                "Сохранение настроек в устройство…": "Saving settings to device…",
             },
         }
 

@@ -110,6 +110,10 @@ class CanTriggerTab(QWidget):
     # Срабатывает при любом пользовательском изменении полей триггеров —
     # окно настроек использует его, чтобы включить кнопку «Сохранить».
     settings_changed = Signal()
+    # Прогресс обмена с устройством (0-100 внутри текущей фазы + текст
+    # этапа) — окно настроек показывает процентный индикатор во время
+    # вычитки и прогрузки триггеров в МК.
+    progress_updated = Signal(int, str)
 
     def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1179,6 +1183,10 @@ class CanTriggerTab(QWidget):
                 # Вычитка блокирует UI-поток — прокачиваем события между
                 # записями, чтобы оверлей «Загрузка настроек» пульсировал,
                 # а не выглядел зависшим.
+                self.progress_updated.emit(
+                    min(100, int((index + 1) * 100 / TRIGGER_COUNT)),
+                    tr("Чтение триггеров {0}/{1}").format(index + 1, TRIGGER_COUNT),
+                )
                 QApplication.processEvents()
                 try:
                     payload = self._serial_manager.request_control(CMD_TRIGGER_READ, bytes((index,)))
@@ -1250,9 +1258,20 @@ class CanTriggerTab(QWidget):
         области за счёт итоговой длины в COMMIT. Для старшей прошивки с
         фиксированными слотами хвост гасится пустыми записями."""
         changed = 0
+        # Шкала прогресса внутри записи: чтение списка устройства 0–35%,
+        # STAGE-записи 35–75%, COMMIT + проверка 75–100%. Окно настроек
+        # пересчитывает это в общую шкалу сохранения.
+        def _report(percent: int, text: str) -> None:
+            self.progress_updated.emit(max(0, min(100, percent)), text)
+            QApplication.processEvents()
+
         # Реальный список устройства (до ответа 0x01 «за границей»).
         device: List[bytes] = []
         for index in range(TRIGGER_COUNT):
+            _report(
+                int((index + 1) * 35 / TRIGGER_COUNT),
+                tr("Чтение триггеров {0}/{1}").format(index + 1, TRIGGER_COUNT),
+            )
             try:
                 device.append(
                     self._serial_manager.request_control(CMD_TRIGGER_READ, bytes((index,)))
@@ -1276,7 +1295,15 @@ class CanTriggerTab(QWidget):
                 continue
             target.append((block_index, pack_trigger(values)))
 
+        # Фаза записи: STAGE по целевому списку + гашение хвоста.
+        write_total = max(len(target) + max(0, len(device) - len(target)), 1)
+        write_step = 0
         for new_index, (block_index, local_payload) in enumerate(target):
+            _report(
+                35 + int(write_step * 40 / write_total),
+                tr("Запись триггеров {0}/{1}").format(write_step + 1, write_total),
+            )
+            write_step += 1
             remote_payload = device[new_index] if new_index < len(device) else None
             if remote_payload == local_payload:
                 self._set_trigger_status(block_index, "synced")
@@ -1292,6 +1319,11 @@ class CanTriggerTab(QWidget):
         # прошивки гасим слоты пустыми записями, новая отбросит их по
         # длине списка в COMMIT.
         for i in range(len(target), len(device)):
+            _report(
+                35 + int(write_step * 40 / write_total),
+                tr("Запись триггеров {0}/{1}").format(write_step + 1, write_total),
+            )
+            write_step += 1
             try:
                 remote_empty = self._is_empty_trigger(unpack_trigger(device[i]))
             except (ValueError, RuntimeError):
@@ -1303,10 +1335,16 @@ class CanTriggerTab(QWidget):
                 changed += 1
 
         if changed or len(device) != len(target):
+            _report(75, tr("Фиксация во Flash"))
             self._serial_manager.request_control(
                 CMD_TRIGGER_COMMIT, bytes((len(target),))
             )
-            for index, expected in staged:
+            verify_total = max(len(staged), 1)
+            for v_idx, (index, expected) in enumerate(staged):
+                _report(
+                    75 + int((v_idx + 1) * 25 / verify_total),
+                    tr("Проверка записи {0}/{1}").format(v_idx + 1, verify_total),
+                )
                 actual = self._serial_manager.request_control(CMD_TRIGGER_READ, bytes((index,)))
                 if actual != expected:
                     block_index = target[index][0] if index < len(target) else index

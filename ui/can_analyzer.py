@@ -6,7 +6,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -115,9 +115,9 @@ class CanAnalyzer(QWidget):
 
     def _build_table(self, font: QFont) -> QTableWidget:
         table = QTableWidget()
-        table.setColumnCount(7)
+        table.setColumnCount(8)
         table.setHorizontalHeaderLabels(
-            [tr("Время"), tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("ASCII"), tr("Пояснение")]
+            [tr("Время"), tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("ASCII"), tr("Пояснение"), tr("Направление")]
         )
         table.setFont(font)
         table.verticalHeader().setVisible(False)
@@ -135,6 +135,7 @@ class CanAnalyzer(QWidget):
         table.setColumnWidth(4, 90)
         table.setColumnWidth(5, 90)
         table.setColumnWidth(6, 260)
+        table.setColumnWidth(7, 80)
         return table
 
     def _build_table_panel(self, table: QTableWidget) -> QWidget:
@@ -241,10 +242,18 @@ class CanAnalyzer(QWidget):
             table.removeRow(0)
         row = table.rowCount()
         table.insertRow(row)
-        values = [elapsed_text, id_text, dlc_text, data_text, period_text, ascii_text, explanation]
+        # Направление: TX — кадр отправлен самим МК (tx_echo — ответ
+        # триггера/программы МК или ретрансляция кадра ПК); RX — приём
+        # с шины. TX-строки подсвечиваются зелёным, как кнопка «Запущено».
+        is_tx = bool(frame.get("tx_echo", False))
+        dir_text = "TX" if is_tx else "RX"
+        values = [elapsed_text, id_text, dlc_text, data_text, period_text, ascii_text, explanation, dir_text]
         for col, text in enumerate(values):
             item = QTableWidgetItem(text)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if is_tx:
+                item.setBackground(QColor("#4CAF50"))
+                item.setForeground(QColor("#FFFFFF"))
             table.setItem(row, col, item)
         table.scrollToBottom()
 
@@ -384,10 +393,10 @@ class CanAnalyzer(QWidget):
         try:
             with open(path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["channel", "time", "id", "dlc", "data", "period", "ascii", "explanation"])
+                writer.writerow(["channel", "time", "id", "dlc", "data", "period", "ascii", "explanation", "dir"])
                 for table, channel in ((self._table1, 1), (self._table2, 2)):
                     for row in range(table.rowCount()):
-                        writer.writerow([channel] + [table.item(row, col).text() if table.item(row, col) else "" for col in range(7)])
+                        writer.writerow([channel] + [table.item(row, col).text() if table.item(row, col) else "" for col in range(8)])
         except Exception as exc:  # noqa: BLE001
             logger.error("Ошибка экспорта CSV: %s", exc)
 
@@ -400,8 +409,8 @@ class CanAnalyzer(QWidget):
                 for table, channel in ((self._table1, 1), (self._table2, 2)):
                     f.write(f"[CAN{channel}]\n")
                     for row in range(table.rowCount()):
-                        values = [table.item(row, col).text() if table.item(row, col) else "" for col in range(7)]
-                        f.write(f"{values[0]} ID={values[1]} DLC={values[2]} DATA={values[3]} PERIOD={values[4]} ASCII={values[5]} EXPL={values[6]}\n")
+                        values = [table.item(row, col).text() if table.item(row, col) else "" for col in range(8)]
+                        f.write(f"{values[0]} ID={values[1]} DLC={values[2]} DATA={values[3]} PERIOD={values[4]} ASCII={values[5]} EXPL={values[6]} DIR={values[7]}\n")
         except Exception as exc:  # noqa: BLE001
             logger.error("Ошибка экспорта .trace: %s", exc)
 
@@ -426,37 +435,60 @@ class CanAnalyzer(QWidget):
         logger.info("Загружено %d кадров из %s", loaded, path)
 
     def _append_loaded_row(self, table: QTableWidget, values: List[str]) -> None:
+        # 8-я колонка «Направление» появилась позже: старые файлы без неё
+        # считаются приёмом с шины (RX).
+        values = list(values[:8]) + ["RX"] * max(0, 8 - len(values))
         if table.rowCount() >= MAX_TABLE_ROWS:
             table.removeRow(0)
         row = table.rowCount()
         table.insertRow(row)
-        for col, text in enumerate(values[:7]):
+        is_tx = values[7].strip().upper() == "TX"
+        for col, text in enumerate(values[:8]):
             item = QTableWidgetItem(text)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if is_tx:
+                item.setBackground(QColor("#4CAF50"))
+                item.setForeground(QColor("#FFFFFF"))
             table.setItem(row, col, item)
 
     def _load_csv(self, path: str) -> int:
-        """CSV нашего экспорта: channel,time,id,dlc,data,period,ascii,explanation."""
+        """CSV нашего экспорта: channel,time,id,dlc,data,period,ascii,explanation[,dir].
+        Стриминговый CSV монитора: timestamp,channel,dir,id,dlc,data — тоже
+        принимаем, по колонке dir."""
         loaded = 0
         with open(path, newline="", encoding="utf-8-sig") as f:
             for values in csv.reader(f):
                 if len(values) < 4 or values[0].lower() == "channel":
+                    continue
+                # Стриминговый CSV монитора: timestamp,channel,dir,id,dlc,data
+                if len(values) >= 6 and values[2].strip().upper() in ("RX", "TX"):
+                    try:
+                        channel = int(values[1])
+                    except ValueError:
+                        continue
+                    table = self._table1 if channel == 1 else self._table2
+                    # time,id,dlc,data,period,ascii,expl,dir — period/ascii/expl пустые
+                    self._append_loaded_row(
+                        table, [values[0], values[3], values[4], values[5], "", "", "", values[2]]
+                    )
+                    loaded += 1
                     continue
                 try:
                     channel = int(values[0])
                 except ValueError:
                     continue
                 table = self._table1 if channel == 1 else self._table2
-                self._append_loaded_row(table, values[1:8])
+                self._append_loaded_row(table, values[1:9])
                 loaded += 1
         return loaded
 
     _TRACE_LINE_RE = re.compile(
-        r"^(\S+)\s+ID=(\S+)\s+DLC=(\S+)\s+DATA=(.*?)\s+PERIOD=(.*?)\s+ASCII=(.*?)\s+EXPL=(.*)$"
+        r"^(\S+)\s+ID=(\S+)\s+DLC=(\S+)\s+DATA=(.*?)\s+PERIOD=(.*?)\s+ASCII=(.*?)\s+EXPL=(.*?)(?:\s+DIR=(\S+))?$"
     )
 
     def _load_trace(self, path: str) -> int:
-        """Формат .trace: секции [CAN1]/[CAN2], строки «time ID=.. DLC=.. DATA=.. ...»."""
+        """Формат .trace: секции [CAN1]/[CAN2], строки «time ID=.. DLC=.. DATA=.. .. DIR=RX|TX».
+        Старые строки без DIR= трактуются как приём с шины (RX)."""
         loaded = 0
         table = self._table1
         with open(path, encoding="utf-8") as f:
@@ -467,7 +499,10 @@ class CanAnalyzer(QWidget):
                     continue
                 match = self._TRACE_LINE_RE.match(line)
                 if match:
-                    self._append_loaded_row(table, list(match.groups()))
+                    groups = list(match.groups())
+                    if groups[7] is None:
+                        groups[7] = "RX"
+                    self._append_loaded_row(table, groups)
                     loaded += 1
         return loaded
 

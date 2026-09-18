@@ -132,8 +132,11 @@ static void send_can_frame(const can_frame_t *frame)
   } else {
     buf[n++] = frame->extended ? MARKER_RX_EXT : MARKER_RX_STD;
   }
-  /* Wire format uses 1-based channel numbers (1=CAN1, 2=CAN2). */
-  buf[n++] = (uint8_t)(frame->channel + 1U);
+  /* Wire format uses 1-based channel numbers (1=CAN1, 2=CAN2) in the low
+   * 7 bits; bit 7 = TX-эхо: кадр был отправлен самим МК (ответ триггера
+   * или ретрансляция кадра ПК), а не принят с шины. Хост по этому биту
+   * подсвечивает «внутреннюю передачу» в мониторе и трейсах. */
+  buf[n++] = (uint8_t)((frame->channel + 1U) | (frame->echo ? 0x80U : 0U));
   if (frame->extended) {
     buf[n++] = (uint8_t)(frame->id & 0xFFU);
     buf[n++] = (uint8_t)((frame->id >> 8) & 0xFFU);
