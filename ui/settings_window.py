@@ -528,6 +528,18 @@ class SettingsWindow(QMainWindow):
         self._loading_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
         self._loading_anim.setLoopCount(-1)
 
+        # Окно создаётся лениво и часто ПОСЛЕ подключения — тогда сигнал
+        # connection_changed уже не придёт и вычитка не запустится.
+        # Одноразово планируем её при создании, если порт уже открыт;
+        # при повторных showEvent синхронизация не повторяется (см. showEvent).
+        # Окно создаётся лениво и часто ПОСЛЕ подключения — тогда сигнал
+        # connection_changed уже не придёт и вычитка не запустится.
+        # Одноразово планируем её при создании, если порт уже открыт;
+        # при повторных showEvent синхронизация не повторяется (см. showEvent).
+        if self._serial_manager.is_open() and not self._config.get("emulation", False):
+            self._show_loading_overlay()
+            QTimer.singleShot(400, self._sync_from_device)
+
     def _install_dirty_tracking(self, root: QWidget) -> None:
         """Подписывает поля ввода на _mark_dirty.
 

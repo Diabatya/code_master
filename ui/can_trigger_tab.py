@@ -1381,6 +1381,17 @@ class CanTriggerTab(QWidget):
         устройство показывает ноль блоков. Блоки, исполняемые МК,
         помечаются device_managed."""
         records = self._read_device_triggers()
+        # Полевая диагностика: по логу видно, что РЕАЛЬНО лежит во Flash —
+        # «мнимые» триггеры оказывались либо честно вычитанным содержимым
+        # МК, либо сидом из локального config.json.
+        logger.info(
+            "Вычитка триггеров устройства: %d%s",
+            len(records),
+            records and " — " + ", ".join(
+                f"0x{r.get('rx_id', 0):X}→0x{r.get('tx_id', 0):X}"
+                for r in records[:15]
+            ) or "",
+        )
 
         self._applying_device_state = True
         try:
@@ -1510,6 +1521,18 @@ class CanTriggerTab(QWidget):
                 continue
             target.append((block_index, pack_trigger(values)))
 
+        # Полевая диагностика: в логе видно, что именно уходит во Flash —
+        # «мнимые» записи после стирания всегда оказывались реальной
+        # записью, инициированной «Сохранить» с сидом из кэша ПК.
+        logger.info(
+            "Запись триггеров: на устройстве %d, целевых %d — %s",
+            len(device), len(target),
+            ", ".join(
+                f"0x{unpack_trigger(p).get('rx_id', 0):X}→0x{unpack_trigger(p).get('tx_id', 0):X}"
+                for _, p in target[:15]
+            ) or "пусто",
+        )
+
         # Фаза записи: STAGE по целевому списку + гашение хвоста.
         write_total = max(len(target) + max(0, len(device) - len(target)), 1)
         write_step = 0
@@ -1553,6 +1576,10 @@ class CanTriggerTab(QWidget):
             _report(75, tr("Фиксация во Flash"))
             self._serial_manager.request_control(
                 CMD_TRIGGER_COMMIT, bytes((len(target),))
+            )
+            logger.info(
+                "COMMIT триггеров: записей=%d, изменено=%d, на устройстве было=%d",
+                len(target), changed, len(device),
             )
             verify_total = max(len(staged), 1)
             for v_idx, (index, expected) in enumerate(staged):
@@ -1705,6 +1732,18 @@ class CanTriggerTab(QWidget):
 
     def _load_config(self) -> None:
         triggers = self._config.get("triggers", [])
+        # Подключённое устройство — источник истины: его вычитка придёт по
+        # sync_from_device. Сид из кэша ПК (config.json) показывал бы
+        # УСТАРЕВШИЕ триггеры как текущие — а «Сохранить» до вычитки
+        # прошивало их обратно в МК (полевой баг: фантомные 5 триггеров,
+        # воскресавшие во Flash после полного стирания через DFU).
+        if self._serial_manager.is_open() and not self._config.get("emulation", False):
+            if triggers:
+                logger.info(
+                    "Сид %d триггеров из config.json пропущен — устройство подключено, ждём вычитку",
+                    len(triggers),
+                )
+            return
         self.set_config(triggers if isinstance(triggers, list) else [])
 
     def _save_config(self) -> None:
