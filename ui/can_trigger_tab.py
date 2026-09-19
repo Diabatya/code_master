@@ -135,6 +135,12 @@ class CanTriggerTab(QWidget):
         # _blocks и растёт/сжимается вместе с ним. Сбрасывается при любом
         # редактировании блока и при отключении порта.
         self._device_managed: List[bool] = []
+        # pc_suspended[i] == True: блок пришёл из «Загрузить конфигурацию»
+        # и ещё не подтверждён «Сохранить» — приложение НЕ исполняет его,
+        # иначе загрузка файла сразу запускала ответы на шине, как будто
+        # конфиг прогрузили в МК. Снимается успешной write_to_device или
+        # вычиткой устройства.
+        self._pc_suspended: List[bool] = []
         self._memory_indicator = MemoryIndicator(self)
 
         self._create_widgets()
@@ -794,6 +800,7 @@ class CanTriggerTab(QWidget):
         """Внутреннее удаление блока по позиции (крестик/синхронизация)."""
         block = self._blocks.pop(index)
         self._device_managed.pop(index)
+        self._pc_suspended.pop(index)
         host = block.get("wrapper") or block["group"]
         self._blocks_layout.removeWidget(host)
         # Отсоединяем от дерева сразу — до отложенного deleteLater,
@@ -826,6 +833,9 @@ class CanTriggerTab(QWidget):
         block = self._create_trigger_block(index)
         self._blocks.append(block)
         self._device_managed.append(False)
+        # Созданный в UI блок исполняется приложением сразу (предпросмотр
+        # до «Сохранить») — подвешенным его не делаем.
+        self._pc_suspended.append(False)
         if hasattr(self, "_blocks_layout"):
             self._layout_trigger_block(block, index)
             self._watch_block_signals(block)
@@ -1419,6 +1429,9 @@ class CanTriggerTab(QWidget):
             for index, values in enumerate(records):
                 self._apply_device_trigger(index, values)
                 self._device_managed[index] = self._is_device_representable(self._blocks[index])
+            # Записи вычитаны из устройства — это подтверждённое
+            # состояние, подвески исполнения здесь нет.
+            self._pc_suspended = [False] * len(self._blocks)
             # Индикатор памяти обновляем, а вот config.json НЕ пишем:
             # автовычитка зеркалила состояние МК в локальный файл, и
             # фантомная запись из МК сидила в UI при следующем запуске —
@@ -1486,6 +1499,10 @@ class CanTriggerTab(QWidget):
         default_payload = pack_trigger({})
         with self._serial_manager.control_session():
             changed = self._write_to_device_locked(default_payload, staged)
+        # «Сохранить» подтвердило конфигурацию: неуправляемые МК блоки
+        # (сложные ответы, не влезающие в trigger_t) исполняются
+        # приложением, подвеска загрузки файла снимается.
+        self._pc_suspended = [False] * len(self._blocks)
         self._save_config()
         return changed
 
@@ -1738,6 +1755,7 @@ class CanTriggerTab(QWidget):
                 "cache_data": self._collect_cache(block["cache"]),
                 "cached_frame": None,
                 "device_managed": self._device_managed[i],
+                "pc_suspended": self._pc_suspended[i],
             })
         return triggers
 
@@ -1996,13 +2014,19 @@ class CanTriggerTab(QWidget):
                     )
         return errors, warnings
 
-    def set_config(self, triggers: List[Dict[str, Any]]) -> None:
+    def set_config(
+        self, triggers: List[Dict[str, Any]], suspend_execution: bool = False
+    ) -> None:
         """Загружает конфигурацию триггеров из списка.
 
         Данные пришли из файла — состояние устройства неизвестно, поэтому
         флаги исполнения на МК сбрасываются (пока пользователь не нажмёт
         «Сохранить» и не запишет их в устройство, ответы при подключении
         обрабатывает приложение).
+
+        suspend_execution=True («Загрузить конфигурацию»): приложение не
+        исполняет эти триггеры и само — файл только заполняет поля, на шине
+        устройство молчит до «Сохранить».
         """
         triggers = [t for t in triggers
                     if isinstance(t, dict) and not self._config_trigger_is_empty(t)]
@@ -2014,6 +2038,7 @@ class CanTriggerTab(QWidget):
                 self._remove_block_at(len(self._blocks) - 1)
             self._ensure_blocks(len(triggers))
             self._device_managed = [False] * len(self._blocks)
+            self._pc_suspended = [suspend_execution] * len(self._blocks)
             for i, block in enumerate(self._blocks):
                 trigger = triggers[i] if i < len(triggers) else {}
                 block["group"].setChecked(bool(trigger.get("active", False)))
@@ -2135,6 +2160,11 @@ class CanTriggerTab(QWidget):
             if trigger.get("device_managed"):
                 # Триггер записан во Flash и исполняется самим МК —
                 # не дублируем ответ со стороны приложения.
+                continue
+            if trigger.get("pc_suspended"):
+                # Блок пришёл из «Загрузить конфигурацию» и ещё не
+                # записан в устройство кнопкой «Сохранить» — на шине
+                # молчим, файл лишь заполняет поля.
                 continue
             if not self._match_condition(
                 trigger, frame_id, frame_channel, data, bool(frame.get("rtr"))

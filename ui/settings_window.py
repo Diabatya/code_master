@@ -1595,7 +1595,13 @@ class SettingsWindow(QMainWindow):
         try:
             self._config.import_data(payload)
             self._config.set("last_config_dir", os.path.dirname(path))
-            self._trigger_tab.set_config(self._config.get("triggers", []))
+            # suspend_execution: файл лишь заполняет поля — приложение не
+            # исполняет эти триггеры само и на шину ничего не уходит, пока
+            # оператор не нажмёт «Сохранить» (иначе устройство «отвечало»
+            # сразу после загрузки — выглядело как запись в МК).
+            self._trigger_tab.set_config(
+                self._config.get("triggers", []), suspend_execution=True
+            )
             self._flexible_tab.set_config(self._config.get("flexible_rules", []))
             if hasattr(self._gateway_tab, "set_config"):
                 self._gateway_tab.set_config(

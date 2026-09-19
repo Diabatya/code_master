@@ -515,7 +515,7 @@ class BitmapDialog(QDialog):
                 label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 label.setStyleSheet(
                     f"background-color: {'#4A6A8A' if (byte >> bit) & 1 else '#2B2B2B'}; "
-                    "border: 1px solid #555; min-width: 22px; min-height: 22px;"
+                    "color: #FFFFFF; border: 1px solid #555; min-width: 22px; min-height: 22px;"
                 )
                 layout.addWidget(label, byte_idx, 7 - bit)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
@@ -1208,7 +1208,10 @@ class CanChannelMonitor(QWidget):
                     item = QTableWidgetItem(text)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     if col == 0:
+                        # Тёмный фон кодирует ID — текст явно белый,
+                        # иначе на светлой теме палитра давала чёрный.
                         item.setBackground(_id_row_color(frame_id))
+                        item.setForeground(QColor("#FFFFFF"))
                     self._table.setItem(row, col, item)
                 else:
                     item.setText(text)
@@ -1240,6 +1243,7 @@ class CanChannelMonitor(QWidget):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if col == 0:
                     item.setBackground(_id_row_color(frame_id))
+                    item.setForeground(QColor("#FFFFFF"))
                 if tooltip:
                     item.setToolTip(tooltip)
                 self._table.setItem(row, col, item)
@@ -1346,6 +1350,7 @@ class CanChannelMonitor(QWidget):
         if data_item is None:
             return
         data_item.setBackground(QColor("#464672"))
+        data_item.setForeground(QColor("#FFFFFF"))
         timer = QTimer(self)
         timer.setSingleShot(True)
         timer.timeout.connect(lambda r=row: self._reset_data_background(r))

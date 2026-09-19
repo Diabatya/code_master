@@ -128,3 +128,29 @@ def test_sync_does_not_persist_device_state_to_config(tab) -> None:
     tab._config._data.pop("triggers", None)
     assert tab.sync_from_device() is True
     assert tab._config.get("triggers") is None
+
+
+def test_file_loaded_triggers_do_not_execute_until_save(tab) -> None:
+    """«Загрузить конфигурацию» только заполняет поля: приложение не
+    исполняет пришедшие из файла триггеры и на шину ничего не уходит,
+    пока оператор не нажмёт «Сохранить» (полевая жалоба — устройство
+    «отвечало» сразу после загрузки, как будто конфиг прогрузили в МК)."""
+    sent: List[Dict[str, Any]] = []
+    tab._send_responses = sent.append
+    tab._send_cached_frame = sent.append
+    tab.set_config([_cfg_trigger()], suspend_execution=True)
+    tab.process_frame(
+        {"id": 0x111, "channel": 1, "data": b"\xaa", "rtr": False, "extended": False}
+    )
+    assert sent == []
+
+
+def test_sync_from_device_clears_suspension(tab) -> None:
+    """Вычитка устройства — подтверждённое состояние: подвеска снимается
+    (управляемые МК триггеры и так пропускаются по device_managed)."""
+    tab.set_config([_cfg_trigger()], suspend_execution=True)
+    assert all(tab._pc_suspended)
+    records = _device_records(tab, [0])
+    tab._read_device_triggers = lambda: records
+    assert tab.sync_from_device() is True
+    assert not any(tab._pc_suspended)

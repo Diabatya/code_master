@@ -147,6 +147,7 @@ class HexHighlighter(QSyntaxHighlighter):
         self._changed_fmt = changed_fmt
         occupied_fmt = QTextCharFormat()
         occupied_fmt.setBackground(QColor("#3A3A4A"))
+        occupied_fmt.setForeground(QColor("#FFFFFF"))
         self._occupied_fmt = occupied_fmt
 
     def highlightBlock(self, text: str) -> None:
@@ -160,11 +161,12 @@ class HexHighlighter(QSyntaxHighlighter):
                 occupied = offset in self._occupied_offsets
                 if changed or occupied:
                     fmt = QTextCharFormat()
+                    if occupied:
+                        fmt.setBackground(QColor("#3A3A4A"))
+                        fmt.setForeground(QColor("#FFFFFF"))
                     if changed:
                         fmt.setForeground(QColor("#F44336"))
                         fmt.setFontWeight(QFont.Weight.Bold)
-                    if occupied:
-                        fmt.setBackground(QColor("#3A3A4A"))
                     self.setFormat(i, 1, fmt)
         else:
             for i in range(self._bytes_per_line):
@@ -176,11 +178,12 @@ class HexHighlighter(QSyntaxHighlighter):
                 occupied = offset in self._occupied_offsets
                 if changed or occupied:
                     fmt = QTextCharFormat()
+                    if occupied:
+                        fmt.setBackground(QColor("#3A3A4A"))
+                        fmt.setForeground(QColor("#FFFFFF"))
                     if changed:
                         fmt.setForeground(QColor("#F44336"))
                         fmt.setFontWeight(QFont.Weight.Bold)
-                    if occupied:
-                        fmt.setBackground(QColor("#3A3A4A"))
                     self.setFormat(pos, 2, fmt)
 
 
