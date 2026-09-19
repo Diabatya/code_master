@@ -22,6 +22,9 @@ sw = w._settings_window
 print("settings opened", flush=True)
 trigger_tab = sw._trigger_tab
 sw._tabs.setCurrentWidget(trigger_tab)
+# При открытом порте сид из config.json пропускается и блоков нет —
+# создаём один явно.
+trigger_tab._ensure_blocks(1)
 block = trigger_tab._blocks[0]
 block["group"].setChecked(True)
 cache = block["cache"]

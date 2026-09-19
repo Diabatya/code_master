@@ -1374,12 +1374,19 @@ class CanTriggerTab(QWidget):
                 records.append(values)
         return records
 
-    def sync_from_device(self) -> None:
+    def sync_from_device(self, force: bool = False) -> bool:
         """Вычитывает триггеры из устройства (вызывается при подключении).
 
         Блоков ровно столько, сколько записей в устройстве — пустое
         устройство показывает ноль блоков. Блоки, исполняемые МК,
-        помечаются device_managed."""
+        помечаются device_managed.
+
+        Возвращает True, если содержимое устройства применено к UI,
+        False — когда на экране уже есть конфигурация, отличающаяся от
+        устройства (загруженный файл, кэш ПК): молча её не затираем,
+        иначе автовычитка при каждом подключении перезаписывала бы
+        открытую работу оператора. force=True (Ctrl+R) — явный запрос
+        на замену, проверка не нужна."""
         records = self._read_device_triggers()
         # Полевая диагностика: по логу видно, что РЕАЛЬНО лежит во Flash —
         # «мнимые» триггеры оказывались либо честно вычитанным содержимым
@@ -1392,6 +1399,13 @@ class CanTriggerTab(QWidget):
                 for r in records[:15]
             ) or "",
         )
+        if not force and self._blocks and not self._ui_matches_device(records):
+            logger.info(
+                "Вычитка: устройство (%d записей) отличается от открытой "
+                "конфигурации — автозамена пропущена",
+                len(records),
+            )
+            return False
 
         self._applying_device_state = True
         try:
@@ -1404,6 +1418,26 @@ class CanTriggerTab(QWidget):
             self._save_config()
         finally:
             self._applying_device_state = False
+        return True
+
+    def _ui_matches_device(self, records: List[Dict[str, Any]]) -> bool:
+        """Сравнивает UI с устройством через сериализованные записи —
+        не зависит от порядка блоков и представления полей."""
+        local: List[bytes] = []
+        for index, block in enumerate(self._blocks):
+            try:
+                values = self._device_trigger_values(index)
+                if not self._is_device_representable(block):
+                    values["enabled"] = 0
+                if not self._is_empty_trigger(values):
+                    local.append(pack_trigger(values))
+            except Exception:  # noqa: BLE001
+                continue
+        try:
+            remote = sorted(pack_trigger(r) for r in records)
+        except Exception:  # noqa: BLE001
+            return False
+        return sorted(local) == remote
 
     def write_to_device(self) -> int:
         """Записывает текущие триггеры в устройство. Возвращает число

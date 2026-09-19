@@ -496,6 +496,10 @@ class SettingsWindow(QMainWindow):
         self._progress_scale = 100.0
         self._baseline_signature: tuple = ()
         self._baseline_config: dict = {}
+        # Устройство расходится с открытой конфигурацией — вычитка
+        # пропущена, чтобы не затирать работу оператора. «Сохранить»
+        # активна: нажатие запишет содержимое экрана поверх устройства.
+        self._device_diverged = False
         self._save_opacity = QGraphicsOpacityEffect(self._save_button)
         self._save_button.setGraphicsEffect(self._save_opacity)
         self._install_dirty_tracking(self.centralWidget())
@@ -731,12 +735,15 @@ class SettingsWindow(QMainWindow):
         # Без связи с устройством сохранять нечего — кнопка выключена
         # даже при наличии правок; при восстановлении связи состояние
         # пересчитывается в _on_connection_changed → _mark_dirty.
-        enabled = self._has_unsaved_changes() and self._serial_manager.is_open()
+        enabled = (
+            self._has_unsaved_changes() or self._device_diverged
+        ) and self._serial_manager.is_open()
         self._save_opacity.setOpacity(1.0 if enabled else 0.4)
         self._save_button.setEnabled(enabled)
 
     def _mark_clean(self) -> None:
         """Выключает и приглушает кнопку «Сохранить» — изменений нет."""
+        self._device_diverged = False
         self._baseline_signature = self._widgets_signature()
         self._baseline_config = self._settings_snapshot()
         self._save_opacity.setOpacity(0.4)
@@ -951,6 +958,7 @@ class SettingsWindow(QMainWindow):
         self._update_conn_status(connected)
         if not connected:
             self._hide_loading_overlay()
+            self._device_diverged = False
             self._trigger_tab.clear_device_managed()
             # Связь потеряна — «Сохранить» недоступна, даже если есть
             # несохранённые правки: писать некуда.
@@ -993,8 +1001,9 @@ class SettingsWindow(QMainWindow):
         self._progress_offset = 0.0
         self._progress_scale = 100.0
         self._show_loading_overlay()
+        applied = None
         try:
-            self._trigger_tab.sync_from_device()
+            applied = self._trigger_tab.sync_from_device(force=force)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Не удалось вычитать триггеры из устройства: %s", exc)
             # Без предупреждения сбой выглядел как «триггеров нет»,
@@ -1008,7 +1017,24 @@ class SettingsWindow(QMainWindow):
             self._hide_loading_overlay()
             self._loading = False
             self._sync_in_progress = False
-        self._mark_clean()
+        if applied is False:
+            # Устройство расходится с открытой конфигурацией — экран
+            # сохранён, оператор решает сам: «Сохранить» запишет своё,
+            # Ctrl+R вычитает устройство. Без этого автовычитка молча
+            # затирала загруженный файл («подтянула хлам и перезаписала
+            # всё» — жалоба с полигона).
+            self._device_diverged = True
+            self._mark_dirty()
+            show_toast(
+                self,
+                tr(
+                    "Триггеры в устройстве отличаются — экран не изменён. "
+                    "«Что изменится» покажет разницу, Ctrl+R вычитает устройство"
+                ),
+            )
+        elif applied:
+            self._device_diverged = False
+            self._mark_clean()
 
     def showEvent(self, event) -> None:  # noqa: N802
         """При показе окна обновляет только лейблы имени/серийника.
@@ -1219,7 +1245,9 @@ class SettingsWindow(QMainWindow):
                 return
             self._sync_from_device(force=True)
             return
-        self._sync_from_device()
+        # Явная вычитка по кнопке — тоже force: оператор сам решил
+        # заменить экран состоянием устройства.
+        self._sync_from_device(force=True)
 
     def _on_create_trigger(self, packet: dict) -> None:
         self._trigger_tab.create_trigger_from_packet(packet)
