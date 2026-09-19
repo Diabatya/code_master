@@ -15,7 +15,11 @@ from core.serial_manager import SerialManager
 class _ScriptedPort:
     """Минимальный порт со «сценарным» RX-потоком для request_control."""
 
-    def __init__(self, rx_stream: bytes) -> None:
+    def __init__(self, rx_stream: bytes, pre_buffered: bytes = b"") -> None:
+        # _pre — байты, уже лежащие в буфере драйвера (приехали, пока
+        # reader был остановлен): их видит in_waiting, и команда должна
+        # дочитать их перед отправкой, не потеряв CAN-кадры.
+        self._pre = bytearray(pre_buffered)
         self._rx = bytearray(rx_stream)
         self.writes = []
 
@@ -34,12 +38,16 @@ class _ScriptedPort:
         # CDC Full-Speed идёт пакетами до 64 Б — отдаём не больше за вызов,
         # как на реальном линке (иначе один read() съедает «будущие» байты).
         size = min(size, 64)
-        chunk = bytes(self._rx[:size])
-        del self._rx[:size]
+        src = self._pre if self._pre else self._rx
+        chunk = bytes(src[:size])
+        del src[:size]
         return chunk
 
+    @property
     def in_waiting(self) -> int:
-        return len(self._rx)
+        # usbser.sys-семантика: «в буфере» только то, что уже приехало —
+        # основной поток устройство отдаёт позже, при read().
+        return len(self._pre)
 
 
 def _rx_frame(channel: int, can_id: int, data: bytes) -> bytes:
@@ -145,3 +153,37 @@ def test_request_control_burst_under_can_flood() -> None:
     # Каждая команда ушла на устройство ровно один раз (без ретраев-таймаутов).
     assert len(port.writes) == 8
     assert all(w == stage_cmd for w in port.writes)
+
+
+def test_request_control_preserves_frames_buffered_while_reader_stopped() -> None:
+    """Кадр, приехавший в паузе между остановкой reader'а и командой,
+    не должен уничтожаться сбросом входного буфера — иначе «RX в
+    статистике растёт, а мониторинг молчит» (полевая регрессия)."""
+    frame = _rx_frame(1, 0x111, b"\x11" * 8)
+    port = _ScriptedPort(
+        _cmd_response(CMD_CFG_READ, 0, b"\x01"),
+        pre_buffered=frame,
+    )
+    manager = _manager_with_port(port)
+
+    received = []
+    manager.new_can_frame.connect(received.append)
+
+    result = manager.request_control(CMD_CFG_READ, b"")
+    assert result == b"\x01"
+    assert [f["id"] for f in received] == [0x111]
+
+
+def test_request_control_preserves_frames_after_response() -> None:
+    """Кадр, приехавший в одном USB-буре сразу за ответом на команду,
+    тоже не теряется — хвост буфера разбирается перед return."""
+    frame = _rx_frame(2, 0x222, b"\x22" * 8)
+    port = _ScriptedPort(_cmd_response(CMD_CFG_READ, 0, b"\x01") + frame)
+    manager = _manager_with_port(port)
+
+    received = []
+    manager.new_can_frame.connect(received.append)
+
+    result = manager.request_control(CMD_CFG_READ, b"")
+    assert result == b"\x01"
+    assert [f["id"] for f in received] == [0x222]

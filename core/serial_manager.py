@@ -603,9 +603,41 @@ class SerialManager(QObject):
             self._closing = False
         self._schedule_reconnect()
 
+    def _drain_input_preserving_frames(self) -> None:
+        """Чистит входной буфер порта, не теряя пришедшие CAN-кадры.
+
+        Слепой reset_input_buffer() уничтожал кадры, приехавшие в паузу
+        между остановкой reader'а и командой (каждый опрос статистики
+        мониторинга останавливает поток чтения): МК кадр принял (RX в
+        статусе рос) и переслал по USB, а ПК стёр его до парсинга —
+        «монитор молчит, триггер будто не ответил». Дочитываем
+        накопленное, целые кадры отдаём в мониторинг, прочее (мусор,
+        устаревшие ответы) отбрасываем как и раньше.
+        """
+        data = bytearray()
+        for _ in range(8):  # кадры могут долетать прямо во время чистки
+            try:
+                pending = self._port.in_waiting
+            except (serial.SerialException, OSError):
+                break
+            if not pending:
+                break
+            try:
+                chunk = self._port.read(pending)
+            except (serial.SerialException, OSError):
+                break
+            if not chunk:
+                break
+            data.extend(chunk)
+        if data:
+            frames, _rest = parse_all_frames(bytes(data))
+            for frame in frames:
+                self.new_can_frame.emit(frame)
+        self._port.reset_input_buffer()
+
     def _control_roundtrip(self, command: int, payload: bytes, timeout: float) -> bytes:
         """Одна попытка команда→ответ. Ответ: [command|0x10, status, len, data]."""
-        self._port.reset_input_buffer()
+        self._drain_input_preserving_frames()
         # pyserial.write() при занятом USB-канале может вернуть меньше
         # байт, чем попросили — обрезанная команда навсегда клала парсер
         # МК (ждал «ещё байты» бесконечно, все команды за ней уходили в
@@ -689,6 +721,12 @@ class SerialManager(QObject):
                 if len(buffer) < 3 + length:
                     break  # неполный ответ — ждём остаток
                 result = bytes(buffer[3 : 3 + length])
+                # Кадры, приехавшие следом за ответом в том же
+                # USB-буре, тоже не теряем — после return они пропали
+                # бы вместе с локальным буфером.
+                frames, _rest = parse_all_frames(bytes(buffer[3 + length :]))
+                for frame in frames:
+                    self.new_can_frame.emit(frame)
                 if status != 0:
                     raise RuntimeError(f"Устройство отклонило команду 0x{command:02X}: статус 0x{status:02X}")
                 return result

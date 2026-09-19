@@ -256,6 +256,7 @@ class FakeSerial:
             self._rx_buffer = self._rx_buffer[size:]
         return bytes(chunk)
 
+    @property
     def in_waiting(self) -> int:
         """Возвращает количество байт, готовых к чтению."""
         with self._buffer_lock:
