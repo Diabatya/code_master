@@ -17,23 +17,30 @@ extern CAN_HandleTypeDef hcan2;
 
 void NMI_Handler(void) { }
 
+/* Код фолта в BKP->DR3: регистр переживает IWDG/софт-ресет, следующий
+ * старт приложения читает его и отдаёт в SYSTEM_INFO[59] — в полевом
+ * логе видно, вис ли МК от краха, а не «просто перестал отвечать». */
 void HardFault_Handler(void)
 {
+  App_NoteFault(1U);
   while (1) { }
 }
 
 void MemManage_Handler(void)
 {
+  App_NoteFault(2U);
   while (1) { }
 }
 
 void BusFault_Handler(void)
 {
+  App_NoteFault(3U);
   while (1) { }
 }
 
 void UsageFault_Handler(void)
 {
+  App_NoteFault(4U);
   while (1) { }
 }
 

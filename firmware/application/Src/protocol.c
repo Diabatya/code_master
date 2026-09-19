@@ -554,6 +554,7 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       out[56] = App_GetResetFlags();
       out[57] = CDC_GetUsbResetCount();
       out[58] = CDC_GetUsbDisconnectCount();
+      out[59] = App_GetFaultCode(); /* !=0 — перед последним ресетом был крах */
       {
         uint32_t ovf = CDC_GetRxOverflowCount();
         memcpy(&out[60], &ovf, 4U);

@@ -42,6 +42,9 @@ static IWDG_HandleTypeDef hiwdg;
  * BKP->DR2 до очистки RMVF (само приложение видит CSR уже обнулённым).
  * 0 = загрузчик старый/не записал либо полный сброс backup-домена. */
 static uint8_t s_reset_flags;
+/* Код фолта, записанный обработчиком в BKP->DR3 перед зависанием —
+ * пережил IWDG-ресет и доехал до этого старта. 0 = фолта не было. */
+static uint8_t s_fault_code;
 
 static void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
@@ -63,6 +66,11 @@ int main(void)
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_RCC_BKP_CLK_ENABLE();
   s_reset_flags = (uint8_t)(BKP->DR2 & 0xFFU);
+  s_fault_code = (uint8_t)(BKP->DR3 & 0xFFU);
+  if (s_fault_code != 0U) {
+    PWR->CR |= PWR_CR_DBP;
+    BKP->DR3 = 0U; /* одноразовый маркер — потреблён */
+  }
   SystemClock_Config();
   JTAG_Disable_SWD_Only();
   MX_GPIO_Init();
@@ -210,6 +218,21 @@ static void MX_GPIO_Init(void)
 uint8_t App_GetResetFlags(void)
 {
   return s_reset_flags;
+}
+
+uint8_t App_GetFaultCode(void)
+{
+  return s_fault_code;
+}
+
+void App_NoteFault(uint8_t code)
+{
+  /* Вызывается из fault-хендлеров: только регистровые записи, без HAL
+   * и без разблокировки Flash — минимум кода в контексте краха. */
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_RCC_BKP_CLK_ENABLE();
+  PWR->CR |= PWR_CR_DBP;
+  BKP->DR3 = code;
 }
 
 void App_KickWatchdog(void)

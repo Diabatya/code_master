@@ -290,7 +290,11 @@ static uint8_t erase_pool(void)
   return erase_pages(TRIGGER_POOL_BASE, TRIGGER_FLASH_END);
 }
 
-/* Пишет заголовок + записи в область [base, FLASH_END) — пул уже стёрт.
+/* Пишет записи + заголовок в область [base, ...) — пул уже стёрт.
+ * Заголовок пишется ПОСЛЕДНИМ: он точка коммита. Обрыв посреди записи
+ * (IWDG/сброс/питание) оставляет область без валидного заголовка —
+ * find_store() её не видит, и при старте поднимается прежнее
+ * хранилище или чистое состояние, но не урезанный список записей.
  * src[j] указывает на запись для позиции j (staged или текущая). */
 static uint8_t program_store(uint32_t base, uint32_t generation, uint8_t total,
                              const trigger_t **src)
@@ -304,15 +308,7 @@ static uint8_t program_store(uint32_t base, uint32_t generation, uint8_t total,
   h.crc8 = crc8((const uint8_t *)&h, offsetof(trigger_header_t, crc8));
 
   HAL_FLASH_Unlock();
-  uint32_t addr = base;
-  const uint16_t *hw = (const uint16_t *)&h;
-  for (uint32_t w = 0U; w < sizeof(h) / 2U; w++) {
-    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, hw[w]) != HAL_OK) {
-      HAL_FLASH_Lock();
-      return 0U;
-    }
-    addr += 2U;
-  }
+  uint32_t addr = base + TRIGGER_HEADER_SIZE;
   for (uint8_t j = 0U; j < total; j++) {
     /* До 70 записей по ~41 halfword — сотни миллисекунд записи;
      * кормим IWDG между записями. */
@@ -325,6 +321,17 @@ static uint8_t program_store(uint32_t base, uint32_t generation, uint8_t total,
       }
       addr += 2U;
     }
+  }
+  /* Заголовок — в последнюю очередь: до этого момента область для
+   * find_store() невидима, частично прошитая область не читается. */
+  addr = base;
+  const uint16_t *hw = (const uint16_t *)&h;
+  for (uint32_t w = 0U; w < sizeof(h) / 2U; w++) {
+    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, hw[w]) != HAL_OK) {
+      HAL_FLASH_Lock();
+      return 0U;
+    }
+    addr += 2U;
   }
   HAL_FLASH_Lock();
 
@@ -433,19 +440,61 @@ uint8_t Trigger_Commit(uint8_t total)
       ? TRIGGER_HEADER_SIZE + (uint32_t)total * sizeof(trigger_t)
       : 0U;
   uint32_t pages = (size + TRIGGER_FLASH_PAGE - 1U) / TRIGGER_FLASH_PAGE;
-  uint32_t base = TRIGGER_FLASH_END - pages * TRIGGER_FLASH_PAGE;
-  if (total != 0U && base < TRIGGER_POOL_BASE) {
+  uint32_t base_top = TRIGGER_FLASH_END - pages * TRIGGER_FLASH_PAGE;
+  if (total != 0U && base_top < TRIGGER_POOL_BASE) {
     return 0U; /* не помещается даже во весь пул */
   }
 
-  /* Стёртые страницы программируются без стирания; остальные —
-   * отработавшие области старого хранилища и легаси-регион — стираем,
-   * чтобы скан при следующем старте не нашёл зомби-заголовок. */
-  if (!erase_pool()) {
-    return 0U;
+  /* Атомарная замена: новая область пишется в страницы, НЕ занятые
+   * действующим хранилищем (второй якорь — низ пула), и становится
+   * видимой только когда дописан заголовок (program_store пишет его
+   * последним). Сброс посреди коммита — IWDG, обрыв USB, питание —
+   * оставляет ПРЕЖНИЙ список целым: следующий старт видит старые
+   * триггеры вместо урезанных/мусорных. Рядом не помещаются (оба
+   * якоря пересекаются со старым) — старое поведение: зачистка пула
+   * целиком, обрыв тогда даёт пустое хранилище, а не мусор. */
+  uint32_t base = 0xFFFFFFFFU;
+  uint32_t old_base = s_store_base;
+  uint32_t old_end = 0U;
+  if (old_base != 0U) {
+    uint32_t old_pages = (TRIGGER_HEADER_SIZE
+                          + (uint32_t)s_count * sizeof(trigger_t)
+                          + (TRIGGER_FLASH_PAGE - 1U)) / TRIGGER_FLASH_PAGE;
+    old_end = old_base + old_pages * TRIGGER_FLASH_PAGE;
   }
-  if (total != 0U && !program_store(base, s_generation + 1U, total, src)) {
-    return 0U; /* RAM-список не трогаем: на Flash старое/мусор */
+  if (total != 0U && old_base != 0U) {
+    const uint32_t anchors[2] = { base_top, TRIGGER_POOL_BASE };
+    for (uint8_t c = 0U; c < 2U; c++) {
+      uint32_t cand = anchors[c];
+      uint32_t cand_end = cand + pages * TRIGGER_FLASH_PAGE;
+      if (cand >= old_end || cand_end <= old_base) {
+        base = cand; /* не пересекается со старым хранилищем */
+        break;
+      }
+    }
+  }
+
+  if (total == 0U) {
+    if (!erase_pool()) {
+      return 0U;
+    }
+  } else if (base != 0xFFFFFFFFU) {
+    if (!erase_pages(base, base + pages * TRIGGER_FLASH_PAGE)
+        || !program_store(base, s_generation + 1U, total, src)) {
+      return 0U; /* старое хранилище не тронуто — коммит можно повторить */
+    }
+    /* Старое стираем только ПОСЛЕ того, как новое стало валидным;
+     * сбой здесь оставляет зомби-заголовок, но find_store() выбирает
+     * область с большим generation — новую. */
+    (void)erase_pages(old_base, old_end);
+  } else {
+    if (!erase_pool()) {
+      return 0U;
+    }
+    if (!program_store(base_top, s_generation + 1U, total, src)) {
+      return 0U; /* RAM-список не трогаем: на Flash старое/мусор */
+    }
+    base = base_top;
   }
 
   for (uint8_t j = 0U; j < total; j++) {

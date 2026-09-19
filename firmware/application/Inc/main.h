@@ -95,6 +95,11 @@ void App_KickWatchdog(void);
  * BKP->DR2 до RMVF. Биты байта: 0x04 PIN (NRST), 0x08 POR, 0x10 soft
  * (NVIC), 0x20 IWDG, 0x40 WWDG, 0x80 LPWR. 0 = загрузчик не записал. */
 uint8_t App_GetResetFlags(void);
+/* Код фолта, оставленный обработчиком в BKP->DR3 до зависания:
+ * 1=HardFault, 2=MemManage, 3=BusFault, 4=UsageFault, 0=фолта не было.
+ * Одноразовый — читается и очищается при старте приложения. */
+uint8_t App_GetFaultCode(void);
+void App_NoteFault(uint8_t code);
 
 #ifdef __cplusplus
 }
