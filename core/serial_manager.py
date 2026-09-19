@@ -279,6 +279,14 @@ class SerialReader(QThread):
         self._running = False
         self.wait(2000)
 
+    def pending_tail(self) -> bytes:
+        """Неразобранный остаток буфера — возможный кусок кадра."""
+        return bytes(self._buffer)
+
+    def seed_buffer(self, data: bytes) -> None:
+        """Подкладывает неразобранный хвост от предыдущего reader'а."""
+        self._buffer.extend(data)
+
 
 class SerialManager(QObject):
     """Высокоуровневый менеджер для работы с COM-портом.
@@ -312,6 +320,10 @@ class SerialManager(QObject):
         super().__init__(parent)
         self._port: Optional[SerialPort] = None
         self._reader: Optional[SerialReader] = None
+        # Недособранный хвост кадра, переносимый между остановкой и
+        # запуском reader'а (и через предкомандную очистку порта) —
+        # иначе кадр, разрезанный остановкой потока, терялся целиком.
+        self._reader_carry = b""
         self._lock = threading.RLock()
         self._config = Config()
         self._auto_reconnect = False
@@ -614,7 +626,10 @@ class SerialManager(QObject):
         накопленное, целые кадры отдаём в мониторинг, прочее (мусор,
         устаревшие ответы) отбрасываем как и раньше.
         """
-        data = bytearray()
+        # Хвост убитого reader'а склеиваем с дочитанным из порта —
+        # кадр мог быть разрезан остановкой потока пополам.
+        data = bytearray(self._reader_carry)
+        self._reader_carry = b""
         for _ in range(8):  # кадры могут долетать прямо во время чистки
             try:
                 pending = self._port.in_waiting
@@ -630,9 +645,10 @@ class SerialManager(QObject):
                 break
             data.extend(chunk)
         if data:
-            frames, _rest = parse_all_frames(bytes(data))
+            frames, remainder = parse_all_frames(bytes(data))
             for frame in frames:
                 self.new_can_frame.emit(frame)
+            self._reader_carry = bytes(remainder)
         self._port.reset_input_buffer()
 
     def _control_roundtrip(self, command: int, payload: bytes, timeout: float) -> bytes:
@@ -1111,6 +1127,9 @@ class SerialManager(QObject):
                 except RuntimeError:
                     pass
                 self._reader.stop()
+                tail = self._reader.pending_tail()
+                if tail:
+                    self._reader_carry = tail
                 self._reader = None
 
     def _start_reader(self) -> None:
@@ -1134,8 +1153,14 @@ class SerialManager(QObject):
                 except RuntimeError:
                     pass
                 self._reader.stop()
+                tail = self._reader.pending_tail()
+                if tail:
+                    self._reader_carry = tail
                 self._reader = None
             self._reader = SerialReader(self._port, self)
+            if self._reader_carry:
+                self._reader.seed_buffer(self._reader_carry)
+                self._reader_carry = b""
             self._reader.new_frame.connect(self.new_can_frame)
             self._reader.new_raw_data.connect(self.raw_data)
             self._reader.error.connect(self.error_occurred)

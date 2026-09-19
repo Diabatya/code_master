@@ -187,3 +187,43 @@ def test_request_control_preserves_frames_after_response() -> None:
     result = manager.request_control(CMD_CFG_READ, b"")
     assert result == b"\x01"
     assert [f["id"] for f in received] == [0x222]
+
+
+def test_request_control_stitches_frame_split_across_reader_restart() -> None:
+    """Кадр, разрезанный остановкой reader'а: голова осталась в буфере
+    убитого потока, хвост приехал в порт — предкомандная очистка
+    склеивает их обратно в целый кадр."""
+    frame = _rx_frame(1, 0x111, b"\x11" * 8)
+    head, tail = frame[:7], frame[7:]
+    port = _ScriptedPort(
+        _cmd_response(CMD_CFG_READ, 0, b"\x01"),
+        pre_buffered=tail,
+    )
+    manager = _manager_with_port(port)
+    manager._reader_carry = head  # «остаток» убитого reader'а
+
+    received = []
+    manager.new_can_frame.connect(received.append)
+
+    result = manager.request_control(CMD_CFG_READ, b"")
+    assert result == b"\x01"
+    assert [f["id"] for f in received] == [0x111]
+
+
+def test_stop_reader_carries_partial_frame() -> None:
+    """Недособранный хвост кадра переживает остановку reader'а —
+    иначе кадр, разрезанный рестартом потока, терялся целиком."""
+    from core.serial_manager import SerialReader
+
+    port = _ScriptedPort(b"")
+    manager = SerialManager()
+    manager._port = port
+    reader = SerialReader(port)
+    partial = _rx_frame(1, 0x111, b"\x11" * 8)[:7]
+    reader.seed_buffer(partial)
+    manager._reader = reader
+
+    manager._stop_reader()  # настоящий метод; reader не запущен — stop() мгновенный
+
+    assert manager._reader is None
+    assert manager._reader_carry == partial
