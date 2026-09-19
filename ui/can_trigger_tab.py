@@ -35,8 +35,10 @@ from core.can_protocol import (
 )
 from core.serial_manager import SerialManager
 from core.trigger_protocol import (
+    GROUP_SEQ_FRAGMENT,
     TRIGGER_MAX_SLOTS,
     count_configured_triggers,
+    expand_schedule,
     pack_trigger,
     unpack_trigger,
 )
@@ -1238,6 +1240,9 @@ class CanTriggerTab(QWidget):
         elif state == "differs":
             text = tr("Статус: {0}, ОТЛИЧАЕТСЯ от устройства").format(on_off)
             color = "#EF5350"
+        elif state == "pc":
+            text = tr("Статус: вкл, исполняется приложением")
+            color = "#FFA726"
         elif state == "enabled":
             text = tr("Статус: включён в устройстве")
             color = "#66BB6A"
@@ -1250,10 +1255,23 @@ class CanTriggerTab(QWidget):
         label.setText(text)
         label.setStyleSheet(f"color: {color};")
 
-    def _apply_device_trigger(self, index: int, values: Dict[str, Any]) -> None:
+    def _apply_device_trigger(
+        self, index: int, group: List[Dict[str, Any]]
+    ) -> None:
+        values = group[0]
+        self._applying_device_state = True
+        try:
+            self._apply_device_group(index, group)
+        finally:
+            self._applying_device_state = False
+        self._set_trigger_status(index, "enabled" if values["enabled"] else "disabled")
+
+    def _apply_device_group(
+        self, index: int, group: List[Dict[str, Any]]
+    ) -> None:
         block = self._blocks[index]
         recv = block["recv"]
-        self._applying_device_state = True
+        values = group[0]
         block["group"].setChecked(bool(values["enabled"]))
         recv["channel"].setCurrentIndex(min(values["rx_channel"], 2))
         recv["bit"].setCurrentIndex(int(values["rx_extended"]))
@@ -1286,48 +1304,162 @@ class CanTriggerTab(QWidget):
             self._set_data_enabled(cache["from_data"], cache["dlc"].value())
             self._set_data_enabled(cache["to_data"], cache["dlc"].value())
         else:
-            rows = block["response"]["rows"]
-            if rows:
-                row = rows[0]
-                row["channel"].setCurrentIndex(min(values["tx_channel"], 2))
-                row["bit"].setCurrentIndex(int(values["tx_extended"]))
-                row["id"].setText(int_to_hex(values["tx_id"], 8 if values["tx_extended"] else 3))
-                row["dlc"].setValue(min(8, values["tx_dlc"]))
-                for edit, value in zip(row["data"], values["tx_data"]):
-                    edit.setText(f"{value:02X}")
-                row["rtr"].setChecked(bool(values.get("tx_rtr", 0)))
-                row["delay_before_send"].setValue(values["delay_ms"])
-                row["delay_between"].setValue(values.get("tx_interval_ms", 0))
-                row["count"].setValue(max(1, values.get("tx_count", 0) or 1))
-                self._set_data_enabled(row["data"], 0 if row["rtr"].isChecked() else row["dlc"].value())
+            # Группа записей → строки «Фреймы ответа». Записи начала
+            # строки (group_seq 0..127) дают фрейм; фрагменты (0x80|f)
+            # добавляют свой count к текущей строке (count>255 пишется
+            # кусками по 255). Абсолютные задержки записей раскладываем
+            # обратно: пауза между строками → next_delay предыдущей,
+            # остаток сверх спина (9999 мс) — в скрытый
+            # delay_before_send следующей строки, тайминг сохраняется.
+            row_records: List[Dict[str, Any]] = []
+            row_counts: List[int] = []
+            for record in group:
+                if record.get("group_seq", 0) & GROUP_SEQ_FRAGMENT and row_counts:
+                    row_counts[-1] += max(1, record.get("tx_count") or 1)
+                else:
+                    row_records.append(record)
+                    row_counts.append(max(1, record.get("tx_count") or 1))
+            responses = []
+            for record in row_records:
+                responses.append({
+                    "channel": min(record["tx_channel"], 2),
+                    "bit": int(record["tx_extended"]),
+                    "id": int_to_hex(
+                        record["tx_id"], 8 if record["tx_extended"] else 3
+                    ),
+                    "dlc": min(8, record["tx_dlc"]),
+                    "data": " ".join(f"{b:02X}" for b in record["tx_data"]),
+                    "rtr": int(record.get("tx_rtr", 0)),
+                    "delay_before_send": record["delay_ms"],
+                    "delay_between": record.get("tx_interval_ms", 0),
+                    "count": 1,
+                    "next_delay": 0,
+                })
+            for row_index, count in enumerate(row_counts):
+                responses[row_index]["count"] = count
+            # Паузу между строками раскладываем в next_delay предыдущей
+            # строки; остаток сверх спина (9999 мс) — в скрытый
+            # delay_before_send следующей, тайминг сохраняется точно.
+            for row_index in range(1, len(row_records)):
+                prev = row_records[row_index - 1]
+                prev_end = (
+                    prev["delay_ms"]
+                    + (row_counts[row_index - 1] - 1)
+                    * prev.get("tx_interval_ms", 0)
+                )
+                gap = max(0, row_records[row_index]["delay_ms"] - prev_end)
+                responses[row_index - 1]["next_delay"] = min(gap, 9999)
+                responses[row_index]["delay_before_send"] = max(0, gap - 9999)
+            self._set_response_rows(block["response"], responses)
         cache["cache_check"].setChecked(cache_enabled)
         self._on_cache_active_changed(index, Qt.CheckState.Checked.value if cache_enabled else Qt.CheckState.Unchecked.value)
-        self._applying_device_state = False
-        self._set_trigger_status(index, "enabled" if values["enabled"] else "disabled")
 
-    def _is_device_representable(self, block: Dict[str, Any]) -> bool:
-        """True, если триггер целиком выразим одной записью trigger_t на МК.
+    @staticmethod
+    def _config_trigger_expandable(trigger: Dict[str, Any]) -> bool:
+        """True, если триггер разворачивается в записи МК (одну или
+        группу). Развёртке мешает только переполнение расписания —
+        суммарная задержка >65 с или >127 строк ответа; такой триггер
+        исполняет приложение, в МК пишется томбстоун."""
+        if trigger.get("cache"):
+            return True
+        filled = [
+            r for r in trigger.get("responses") or []
+            if isinstance(r, dict) and hex_to_int(str(r.get("id", ""))) is not None
+        ]
+        if not filled:
+            return True
+        return expand_schedule(filled) is not None
 
-        Firmware хранит ровно один фрейм ответа (в кэш-режиме — параметры
-        «Откуда читаем»/«Куда отправляем») с паузой перед отправкой,
-        паузой между повторами и счётчиком отправок. Всё, что шире
-        (несколько фреймов ответа, пауза перед следующим фреймом,
-        count>255), исполняется только приложением — записывать такое в
-        МК нельзя, иначе устройство продублирует первый фрейм поверх
-        ответов приложения.
-        """
-        if block["cache"]["cache_check"].isChecked():
+    @staticmethod
+    def _config_trigger_device_representable(trigger: Dict[str, Any]) -> bool:
+        """То же правило, что у _is_device_representable, но для записи
+        конфигурации (dict) — нужно валидации до сборки виджетов и
+        восстановлению PC-only записей при вычитке."""
+        if trigger.get("cache"):
             # Кэш-режим целиком поддержан прошивкой (формат v2).
             return True
-        rows = block["response"]["rows"]
-        filled = [r for r in rows if self._parse_id(r["id"].text()) is not None]
+        filled = [
+            r for r in trigger.get("responses") or []
+            if isinstance(r, dict) and hex_to_int(str(r.get("id", ""))) is not None
+        ]
         if len(filled) > 1:
             return False
         if filled:
             row = filled[0]
-            if row["count"].value() > 255 or row["next_delay"].value() > 0:
+            if int(row.get("count") or 1) > 255 or int(row.get("next_delay") or 0) > 0:
                 return False
         return True
+
+    def _is_device_representable(self, block: Dict[str, Any]) -> bool:
+        """True, если триггер целиком выразим ОДНОЙ записью trigger_t.
+
+        Многофреймовые триггеры сюда не попадают, но на МК всё равно
+        пишутся — развёрнутыми в группу записей (_project_block_records).
+        Проверка нужна только heal'у: одиночная запись enabled=0 с
+        многофреймовым триггером в конфиге — это томбстоун старого
+        формата (устройство хранит заглушку, отвечает приложение).
+        """
+        return self._config_trigger_device_representable(
+            self._collect_block_config(block)
+        )
+
+    def _project_block_records(self, index: int) -> Optional[List[Dict[str, Any]]]:
+        """Раскладывает блок триггера на записи trigger_t для устройства.
+
+        Многофреймовый ответ (несколько строк «Фреймы ответа», пауза
+        перед следующим фреймом, count>255) не влезает в одну запись —
+        разворачивается в группу записей с общим условием приёма:
+        у каждой свой фрейм ответа и абсолютная задержка первой
+        отправки, повторы делает прошивка. Записи группы связаны байтом
+        group_seq, по которому вычитка собирает блок обратно.
+
+        Возвращает список значений записей ([] — блок пустой) или None,
+        если триггер не разворачивается (задержка >65 c, >127 строк) —
+        такой исполняет приложение, в МК пишется томбстоун enabled=0.
+        """
+        values = self._device_trigger_values(index)
+        if self._is_empty_trigger(values):
+            return []
+        block = self._blocks[index]
+        if block["cache"]["cache_check"].isChecked():
+            return [values]
+        rows = [
+            row for row in block["response"]["rows"]
+            if self._parse_id(row["id"].text()) is not None
+        ]
+        if not rows:
+            return [values]
+        schedule = expand_schedule([
+            {
+                "delay_before_send": row["delay_before_send"].value(),
+                "delay_between": row["delay_between"].value(),
+                "count": row["count"].value(),
+                "next_delay": row["next_delay"].value(),
+            }
+            for row in rows
+        ])
+        if schedule is None:
+            return None
+        records = []
+        for row_index, delay, count, interval, seq in schedule:
+            row = rows[row_index]
+            record = dict(values)
+            record.update({
+                "tx_channel": row["channel"].currentIndex(),
+                "tx_extended": row["bit"].currentIndex(),
+                "tx_id": self._parse_id(row["id"].text()) or 0,
+                "tx_dlc": row["dlc"].value(),
+                "tx_data": bytes(
+                    (v or 0) & 0xFF for v in self._parse_data(row["data"])
+                ),
+                "tx_rtr": int(row["rtr"].isChecked()),
+                "delay_ms": delay,
+                "tx_count": count,
+                "tx_interval_ms": interval,
+                "group_seq": seq,
+            })
+            records.append(record)
+        return records
 
     @staticmethod
     def _is_empty_trigger(values: Dict[str, Any]) -> bool:
@@ -1436,15 +1568,20 @@ class CanTriggerTab(QWidget):
 
         self._applying_device_state = True
         try:
-            self._ensure_blocks(len(records))
-            while len(self._blocks) > len(records):
+            groups = self._group_device_records(records)
+            self._ensure_blocks(len(groups))
+            while len(self._blocks) > len(groups):
                 self._remove_block_at(len(self._blocks) - 1)
-            for index, values in enumerate(records):
-                self._apply_device_trigger(index, values)
-                self._device_managed[index] = self._is_device_representable(self._blocks[index])
+            for index, group in enumerate(groups):
+                self._apply_device_trigger(index, group)
+                # Всё, что вычитано из устройства, устройство и
+                # исполняет (многофреймовые группы — тоже: они хранятся
+                # развёрнутыми). Томбстоуны старых записей поправит heal.
+                self._device_managed[index] = True
             # Записи вычитаны из устройства — это подтверждённое
             # состояние, подвески исполнения здесь нет.
             self._pc_suspended = [False] * len(self._blocks)
+            self._heal_pc_only_triggers(groups)
             # Индикатор памяти обновляем, а вот config.json НЕ пишем:
             # автовычитка зеркалила состояние МК в локальный файл, и
             # фантомная запись из МК сидила в UI при следующем запуске —
@@ -1457,17 +1594,120 @@ class CanTriggerTab(QWidget):
             self._applying_device_state = False
         return True
 
+    @staticmethod
+    def _group_device_records(
+        records: List[Dict[str, Any]],
+    ) -> List[List[Dict[str, Any]]]:
+        """Склеивает записи устройства в группы одного триггера.
+
+        Многофреймовый триггер пишется несколькими записями подряд,
+        связанными байтом group_seq: 0 — базовая запись (строка ответа
+        0), 1..127 — новая строка ответа, 0x80|f — фрагмент счётчика
+        текущей строки. Запись с seq>0 без базовой перед ней считается
+        отдельным триггером (защита от чужих/повреждённых данных).
+        """
+        groups: List[List[Dict[str, Any]]] = []
+        for record in records:
+            if record.get("group_seq", 0) == 0 or not groups:
+                groups.append([record])
+            else:
+                groups[-1].append(record)
+        return groups
+
+    def _heal_pc_only_triggers(self, groups: List[List[Dict[str, Any]]]) -> None:
+        """Реанимирует томбстоуны триггеров, исполняемых приложением.
+
+        Триггер, не разворачивающийся в записи trigger_t (суммарная
+        задержка >65 с, >127 строк), пишется в МК с enabled=0 — МК его
+        не исполняет, это делает приложение. Без восстановления вычитка
+        снимала галку с блока: после переподключения ПК переставал
+        исполнять живой триггер, а блок выглядел чужим («закрыл
+        приложение — устройство перестало работать, в списке непонятные
+        записи»). Томбстоун хранит только первый фрейм ответа — блок
+        восстанавливаем из config.json, сохранённого при последней
+        записи. Развёрнутые группы (несколько записей) томбстоунами не
+        являются — их определение полностью во Flash.
+        """
+        config_triggers = [
+            t for t in self._config.get("triggers", []) or []
+            if isinstance(t, dict) and not self._config_trigger_is_empty(t)
+        ]
+        used: Set[int] = set()
+        for index, group in enumerate(groups):
+            if index >= len(self._blocks) or len(group) != 1:
+                continue
+            values = group[0]
+            if values["enabled"]:
+                continue
+            cfg_index = self._find_config_trigger(values, config_triggers, used)
+            if cfg_index is None or not config_triggers[cfg_index].get("active"):
+                continue
+            self._apply_config_trigger(index, config_triggers[cfg_index])
+            if self._is_device_representable(self._blocks[index]):
+                # Влезает в trigger_t — значит enabled=0 это выбор
+                # оператора (галка снята при записи), а не томбстоун.
+                # Не воскрешаем: выключенный триггер обязан молчать.
+                self._apply_device_trigger(index, group)
+                continue
+            used.add(cfg_index)
+            self._device_managed[index] = False
+            self._set_trigger_status(index, "pc")
+            logger.info(
+                "Вычитка: триггер %d (0x%X→0x%X) исполняется приложением — "
+                "блок восстановлен из конфигурации",
+                index + 1, values["rx_id"], values["tx_id"],
+            )
+
+    def _find_config_trigger(
+        self,
+        values: Dict[str, Any],
+        config_triggers: List[Dict[str, Any]],
+        used: Set[int],
+    ) -> Optional[int]:
+        """Индекс записи config.json, из которой сделана запись МК:
+        совпадают ID приёма, режим кэша и первый фрейм ответа (запись МК
+        хранит только его)."""
+        for i, trigger in enumerate(config_triggers):
+            if i in used:
+                continue
+            if (hex_to_int(str(trigger.get("recv_id", ""))) or 0) != values["rx_id"]:
+                continue
+            if bool(trigger.get("cache")) != bool(values.get("cache_enabled")):
+                continue
+            if trigger.get("cache"):
+                if (hex_to_int(str(trigger.get("cache_id", ""))) or 0) != values.get("src_id", 0):
+                    continue
+            else:
+                first_tx = 0
+                for row in trigger.get("responses") or []:
+                    if isinstance(row, dict):
+                        parsed = hex_to_int(str(row.get("id", "")))
+                        if parsed is not None:
+                            first_tx = parsed
+                            break
+                if first_tx != values["tx_id"]:
+                    continue
+            return i
+        return None
+
     def _ui_matches_device(self, records: List[Dict[str, Any]]) -> bool:
         """Сравнивает UI с устройством через сериализованные записи —
-        не зависит от порядка блоков и представления полей."""
+        не зависит от порядка блоков и представления полей. Блоки
+        проецируются тем же развёртыванием, что и при записи, поэтому
+        многофреймовый триггер сравнивается со своей группой записей."""
         local: List[bytes] = []
         for index, block in enumerate(self._blocks):
             try:
-                values = self._device_trigger_values(index)
-                if not self._is_device_representable(block):
+                projected = self._project_block_records(index)
+                if projected is None:
+                    # PC-only блок: на устройстве его томбстоун —
+                    # проецируем так же, как при записи.
+                    values = self._device_trigger_values(index)
                     values["enabled"] = 0
-                if not self._is_empty_trigger(values):
-                    local.append(pack_trigger(values))
+                    projected = [values]
+                for values in projected:
+                    if not self._is_empty_trigger(values):
+                        local.append(pack_trigger(values))
             except Exception:  # noqa: BLE001
                 continue
         try:
@@ -1592,29 +1832,52 @@ class CanTriggerTab(QWidget):
             logger.warning("Не удалось сохранить бэкап триггеров устройства: %s", exc)
 
         # Целевой список: только настроенные (непустые) блоки.
+        # Многофреймовый триггер разворачивается в группу записей —
+        # устройство исполняет его само, приложение не нужно.
         target: List[Tuple[int, bytes]] = []
-        for block_index, block in enumerate(self._blocks):
-            representable = self._is_device_representable(block)
-            values = self._device_trigger_values(block_index)
-            if not representable:
-                # Триггер исполняется приложением — на МК он должен
-                # быть выключен, иначе устройство продублирует ответ.
+        for block_index in range(len(self._blocks)):
+            records = self._project_block_records(block_index)
+            if records is None:
+                # Не разворачивается в записи МК (суммарная задержка
+                # >65 с, >127 строк) — исполняет приложение; в МК пишем
+                # томбстоун enabled=0, чтобы устройство не дублировало
+                # первый фрейм поверх ответов ПК.
+                values = self._device_trigger_values(block_index)
                 values["enabled"] = 0
-            self._device_managed[block_index] = representable
-            if self._is_empty_trigger(values):
-                continue
-            target.append((block_index, pack_trigger(values)))
+                records = [values]
+                self._device_managed[block_index] = False
+            else:
+                self._device_managed[block_index] = True
+            for values in records:
+                target.append((block_index, pack_trigger(values)))
+        if len(target) > TRIGGER_MAX_SLOTS:
+            raise RuntimeError(
+                tr("Триггеры разворачиваются в {0} записей, на устройстве "
+                   "места для {1} — уменьшите число фреймов ответа")
+                .format(len(target), TRIGGER_MAX_SLOTS)
+            )
 
         # Полевая диагностика: в логе видно, что именно уходит во Flash —
         # «мнимые» записи после стирания всегда оказывались реальной
-        # записью, инициированной «Сохранить» с сидом из кэша ПК.
+        # записью, инициированной «Сохранить» с сидом из кэша ПК. Флаг
+        # enabled показываем явно — запись с enabled=0 хранится в МК, но
+        # никогда не срабатывает (томбстоун PC-only или выключенный
+        # триггер), по логу это раньше не отличить.
+        target_desc = []
+        for block_index, payload in target[:15]:
+            record = unpack_trigger(payload)
+            target_desc.append(
+                "0x{0:X}→0x{1:X}{2}{3}".format(
+                    record.get("rx_id", 0),
+                    record.get("tx_id", 0),
+                    "" if record.get("enabled") else " (выкл)",
+                    "" if self._device_managed[block_index] else " (исполняет ПК)",
+                )
+            )
         logger.info(
             "Запись триггеров: на устройстве %d, целевых %d — %s",
             len(device), len(target),
-            ", ".join(
-                f"0x{unpack_trigger(p).get('rx_id', 0):X}→0x{unpack_trigger(p).get('tx_id', 0):X}"
-                for _, p in target[:15]
-            ) or "пусто",
+            ", ".join(target_desc) or "пусто",
         )
 
         # Фаза записи: STAGE по целевому списку + гашение хвоста.
@@ -1626,15 +1889,21 @@ class CanTriggerTab(QWidget):
                 tr("Запись триггеров {0}/{1}").format(write_step + 1, write_total),
             )
             write_step += 1
+            # «Вкл, исполняется приложением» — блок активен, но в trigger_t
+            # не влез: в МК записан томбстоун enabled=0, отвечает ПК.
+            pc_only = (
+                self._blocks[block_index]["group"].isChecked()
+                and not self._device_managed[block_index]
+            )
             remote_payload = device[new_index] if new_index < len(device) else None
             if remote_payload == local_payload:
-                self._set_trigger_status(block_index, "synced")
+                self._set_trigger_status(block_index, "pc" if pc_only else "synced")
             else:
                 self._serial_manager.request_control(
                     CMD_TRIGGER_STAGE, bytes((new_index,)) + local_payload
                 )
                 staged.append((new_index, local_payload))
-                self._set_trigger_status(block_index, "written")
+                self._set_trigger_status(block_index, "pc" if pc_only else "written")
                 changed += 1
 
         # Хвост устройства за пределами целевого списка: для старой
@@ -1838,44 +2107,46 @@ class CanTriggerTab(QWidget):
         self._memory_indicator.show_trigger_usage(count_configured_triggers(triggers))
 
     def _collect_config(self) -> List[Dict[str, Any]]:
-        config = []
-        for block in self._blocks:
-            responses = []
-            for row in block["response"]["rows"]:
-                responses.append({
-                    "channel": row["channel"].currentIndex(),
-                    "bit": row["bit"].currentIndex(),
-                    "id": row["id"].text(),
-                    "dlc": row["dlc"].value(),
-                    "rtr": int(row["rtr"].isChecked()),
-                    "data": " ".join(e.text() for e in row["data"] if e.text()),
-                    "delay_before_send": row["delay_before_send"].value(),
-                    "delay_between": row["delay_between"].value(),
-                    "count": row["count"].value(),
-                    "next_delay": row["next_delay"].value(),
-                })
-            cache = block["cache"]
-            config.append({
-                "active": block["group"].isChecked(),
-                "cache": block["cache"]["cache_check"].isChecked(),
-                "recv_channel": block["recv"]["channel"].currentIndex(),
-                "recv_bit": block["recv"]["bit"].currentIndex(),
-                "recv_id": block["recv"]["id"].text(),
-                "recv_dlc": block["recv"]["dlc"].value(),
-                "recv_rtr": int(block["recv"]["rtr"].isChecked()),
-                "recv_data": " ".join(e.text() for e in block["recv"]["data"] if e.text()),
-                "responses": responses,
-                "cache_channel": cache["channel"].currentIndex(),
-                "cache_bit": cache["bit"].currentIndex(),
-                "cache_id": cache["id"].text(),
-                "cache_dlc": cache["dlc"].value(),
-                "cache_tx_channel": cache["tx_channel"].currentIndex(),
-                "cache_from_data": " ".join(e.text() for e in cache["from_data"] if e.text()),
-                "cache_to_data": " ".join(e.text() for e in cache["to_data"] if e.text()),
-                "cache_delay_before_send": cache["delay_before_send"].value(),
-                "cache_delay_between": cache["delay_between"].value(),
-                "cache_count": cache["count"].value(),
+        return [self._collect_block_config(block) for block in self._blocks]
+
+    @staticmethod
+    def _collect_block_config(block: Dict[str, Any]) -> Dict[str, Any]:
+        responses = []
+        for row in block["response"]["rows"]:
+            responses.append({
+                "channel": row["channel"].currentIndex(),
+                "bit": row["bit"].currentIndex(),
+                "id": row["id"].text(),
+                "dlc": row["dlc"].value(),
+                "rtr": int(row["rtr"].isChecked()),
+                "data": " ".join(e.text() for e in row["data"] if e.text()),
+                "delay_before_send": row["delay_before_send"].value(),
+                "delay_between": row["delay_between"].value(),
+                "count": row["count"].value(),
+                "next_delay": row["next_delay"].value(),
             })
+        cache = block["cache"]
+        config = {
+            "active": block["group"].isChecked(),
+            "cache": block["cache"]["cache_check"].isChecked(),
+            "recv_channel": block["recv"]["channel"].currentIndex(),
+            "recv_bit": block["recv"]["bit"].currentIndex(),
+            "recv_id": block["recv"]["id"].text(),
+            "recv_dlc": block["recv"]["dlc"].value(),
+            "recv_rtr": int(block["recv"]["rtr"].isChecked()),
+            "recv_data": " ".join(e.text() for e in block["recv"]["data"] if e.text()),
+            "responses": responses,
+            "cache_channel": cache["channel"].currentIndex(),
+            "cache_bit": cache["bit"].currentIndex(),
+            "cache_id": cache["id"].text(),
+            "cache_dlc": cache["dlc"].value(),
+            "cache_tx_channel": cache["tx_channel"].currentIndex(),
+            "cache_from_data": " ".join(e.text() for e in cache["from_data"] if e.text()),
+            "cache_to_data": " ".join(e.text() for e in cache["to_data"] if e.text()),
+            "cache_delay_before_send": cache["delay_before_send"].value(),
+            "cache_delay_between": cache["delay_between"].value(),
+            "cache_count": cache["count"].value(),
+        }
         return config
 
     @staticmethod
@@ -1947,6 +2218,21 @@ class CanTriggerTab(QWidget):
             if self._config_trigger_is_empty(trigger):
                 continue
             label = tr("Триггер {0}").format(i)
+            if not trigger.get("active", True):
+                # Полевой баг: заполненный, но выключенный триггер уходил
+                # в МК с enabled=0 — хранился, вычитывался, но никогда не
+                # срабатывал («устройство перестало работать»).
+                warnings.append(
+                    f"{label}: "
+                    + tr("заполнен, но выключен — будет записан неактивным и исполняться не будет")
+                )
+            elif not self._config_trigger_expandable(trigger):
+                # Триггер не разворачивается в записи МК (задержка >65 с)
+                # — на шине отвечает приложение и только пока оно открыто.
+                warnings.append(
+                    f"{label}: "
+                    + tr("исполняется приложением (не помещается в МК) — при закрытии программы перестанет работать")
+                )
             rx_text = str(trigger.get("recv_id", "")).strip()
             rx_channel = int(trigger.get("recv_channel", 0))
             if trigger.get("cache"):
@@ -2051,8 +2337,17 @@ class CanTriggerTab(QWidget):
         исполняет эти триггеры и само — файл только заполняет поля, на шине
         устройство молчит до «Сохранить».
         """
+        dropped = len(triggers)
         triggers = [t for t in triggers
                     if isinstance(t, dict) and not self._config_trigger_is_empty(t)]
+        dropped -= len(triggers)
+        logger.info(
+            "Загружено триггеров в редактор: %d (активных %d)%s%s",
+            len(triggers),
+            sum(1 for t in triggers if t.get("active", True)),
+            f", отброшено пустых {dropped}" if dropped else "",
+            ", исполнение подвешено до «Сохранить»" if suspend_execution else "",
+        )
         self._applying_device_state = True
         try:
             # Блоков ровно столько, сколько триггеров в конфигурации —
@@ -2062,25 +2357,39 @@ class CanTriggerTab(QWidget):
             self._ensure_blocks(len(triggers))
             self._device_managed = [False] * len(self._blocks)
             self._pc_suspended = [suspend_execution] * len(self._blocks)
-            for i, block in enumerate(self._blocks):
-                trigger = triggers[i] if i < len(triggers) else {}
-                block["group"].setChecked(bool(trigger.get("active", False)))
-                cache_active = bool(trigger.get("cache", False))
-                block["cache"]["cache_check"].setChecked(cache_active)
-                self._on_cache_active_changed(i, Qt.CheckState.Checked.value if cache_active else Qt.CheckState.Unchecked.value)
-
-                self._set_row(block["recv"], trigger, "recv")
-                recv_rtr = int(trigger.get("recv_rtr", 0))
-                block["recv"]["rtr"].setChecked(bool(recv_rtr))
-                self._set_data_enabled(
-                    block["recv"]["data"], 0 if recv_rtr else block["recv"]["dlc"].value()
-                )
-                self._set_response_rows(block["response"], trigger.get("responses", []))
-                self._set_cache(block["cache"], trigger)
+            for i in range(len(self._blocks)):
+                self._apply_config_trigger(i, triggers[i])
         finally:
             self._applying_device_state = False
         self._update_add_trigger_button()
         self._memory_indicator.show_trigger_usage(count_configured_triggers(triggers))
+
+    def _apply_config_trigger(self, index: int, trigger: Dict[str, Any]) -> None:
+        """Применяет запись конфигурации к блоку — все поля + активность.
+
+        `active` по умолчанию True: старые файлы/выгрузки ключа не имели,
+        и «триггер есть» надо трактовать как «включён» — иначе вся
+        загруженная конфигурация уходила в МК с enabled=0 (полевой баг:
+        записанные триггеры «не работали» — лежали во Flash мёртвыми).
+        """
+        block = self._blocks[index]
+        self._applying_device_state = True
+        try:
+            block["group"].setChecked(bool(trigger.get("active", True)))
+            cache_active = bool(trigger.get("cache", False))
+            block["cache"]["cache_check"].setChecked(cache_active)
+            self._on_cache_active_changed(index, Qt.CheckState.Checked.value if cache_active else Qt.CheckState.Unchecked.value)
+
+            self._set_row(block["recv"], trigger, "recv")
+            recv_rtr = int(trigger.get("recv_rtr", 0))
+            block["recv"]["rtr"].setChecked(bool(recv_rtr))
+            self._set_data_enabled(
+                block["recv"]["data"], 0 if recv_rtr else block["recv"]["dlc"].value()
+            )
+            self._set_response_rows(block["response"], trigger.get("responses", []))
+            self._set_cache(block["cache"], trigger)
+        finally:
+            self._applying_device_state = False
 
     def _set_row(self, row: Dict[str, Any], data: Dict[str, Any], prefix: str) -> None:
         row["channel"].setCurrentIndex(int(data.get(f"{prefix}_channel", 0)))

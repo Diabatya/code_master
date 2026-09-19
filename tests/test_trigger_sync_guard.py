@@ -46,13 +46,18 @@ def _cfg_trigger(recv_id: str = "111", tx_id: str = "222") -> Dict[str, Any]:
 
 
 def _device_records(tab: CanTriggerTab, indexes: List[int]) -> List[Dict[str, Any]]:
-    """Записи устройства в том виде, в каком их вернёт вычитка."""
+    """Записи устройства в том виде, в каком их вернёт вычитка —
+    многофреймовый триггер разворачивается в группу записей, как при
+    реальной записи."""
     records = []
     for index in indexes:
-        values = tab._device_trigger_values(index)
-        if not tab._is_device_representable(tab._blocks[index]):
+        projected = tab._project_block_records(index)
+        if projected is None:
+            values = tab._device_trigger_values(index)
             values["enabled"] = 0
-        records.append(unpack_trigger(pack_trigger(values)))
+            projected = [values]
+        for values in projected:
+            records.append(unpack_trigger(pack_trigger(values)))
     return records
 
 
@@ -176,3 +181,220 @@ def test_commit_payload_normal_unchanged() -> None:
     отвалилась бы на всех прошивках."""
     assert trigger_module._commit_payload(5, 3) == b"\x05"
     assert trigger_module._commit_payload(5, 2) == b"\x05"
+
+
+def _multi_response_trigger() -> Dict[str, Any]:
+    """Многофреймовый триггер: два фрейма ответа — разворачивается в
+    группу записей МК (group_seq), исполняет устройство."""
+    trigger = _cfg_trigger()
+    trigger["responses"].append(
+        {"channel": 0, "bit": 0, "id": "333", "dlc": 1, "data": "CC", "delay": 0}
+    )
+    return trigger
+
+
+def _unexpandable_trigger() -> Dict[str, Any]:
+    """PC-only триггер: расписание не влезает в записи МК (суммарная
+    задержка >65 с) — на МК пишется томбстоун с enabled=0, исполняет
+    приложение."""
+    trigger = _cfg_trigger()
+    trigger["responses"] = [
+        {
+            "channel": 0, "bit": 0, "id": "222", "dlc": 1, "data": "BB",
+            "delay_before_send": 9999, "delay_between": 9999,
+            "count": 999, "next_delay": 0,
+        }
+    ]
+    return trigger
+
+
+def _tombstone(recv_id: int = 0x111, tx_id: int = 0x222) -> Dict[str, Any]:
+    """Запись МК, как её возвращает вычитка для PC-only триггера:
+    enabled=0, хранит только первый фрейм ответа."""
+    return unpack_trigger(pack_trigger({"enabled": 0, "rx_id": recv_id, "tx_id": tx_id}))
+
+
+def test_pc_only_tombstone_restored_from_config(tab) -> None:
+    """Вычитка томбстоуна (enabled=0) активного PC-only триггера
+    восстанавливает блок из config.json целиком: галка на месте, все
+    фреймы ответа, исполняет приложение. Без этого после переподключения
+    триггер умирал на обоих исполнителях — «закрыл приложение, устройство
+    перестало работать, в списке непонятные записи»."""
+    tab._config._data["triggers"] = [_unexpandable_trigger()]
+    tab._read_device_triggers = lambda: [_tombstone()]
+
+    assert tab.sync_from_device() is True
+    assert len(tab._blocks) == 1
+    block = tab._blocks[0]
+    assert block["group"].isChecked() is True
+    assert tab._device_managed == [False]
+    assert len(block["response"]["rows"]) == 1
+    assert block["response"]["rows"][0]["count"].value() == 999
+
+
+def test_user_disabled_record_stays_disabled(tab) -> None:
+    """enabled=0 у триггера, который влезает в trigger_t — осознанное
+    «выкл» оператора, а не томбстоун PC-only: галку не воскрешаем, иначе
+    выключенное оживало бы при каждом переподключении."""
+    cfg = _cfg_trigger()  # активный в config.json — сохранён до выключения
+    tab._config._data["triggers"] = [cfg]
+    tab._read_device_triggers = lambda: [_tombstone()]
+
+    assert tab.sync_from_device() is True
+    assert tab._blocks[0]["group"].isChecked() is False
+    assert tab._device_managed == [True]
+
+
+def test_inactive_config_tombstone_stays_disabled(tab) -> None:
+    """Томбстоун, чей конфиг-триггер выключен — не воскресает."""
+    cfg = _unexpandable_trigger()
+    cfg["active"] = False
+    tab._config._data["triggers"] = [cfg]
+    tab._read_device_triggers = lambda: [_tombstone()]
+
+    assert tab.sync_from_device() is True
+    assert tab._blocks[0]["group"].isChecked() is False
+
+
+def test_tombstone_without_config_match_stays_disabled(tab) -> None:
+    """enabled=0 без пары в config.json — чужая или выключенная запись:
+    не трогаем."""
+    tab._read_device_triggers = lambda: [_tombstone()]
+
+    assert tab.sync_from_device() is True
+    assert len(tab._blocks) == 1
+    assert tab._blocks[0]["group"].isChecked() is False
+
+
+def test_legacy_trigger_without_active_loads_enabled(tab) -> None:
+    """Старые файлы/выгрузки без ключа active: «триггер есть» = «включён» —
+    иначе вся конфигурация грузилась выключенной и уходила в МК мёртвой."""
+    cfg = _cfg_trigger()
+    del cfg["active"]
+    tab.set_config([cfg])
+    assert tab._blocks[0]["group"].isChecked() is True
+
+
+def test_validate_warns_filled_but_disabled(tab) -> None:
+    """Заполненный, но выключенный триггер пишется в МК мёртвым —
+    оператор должен это видеть до записи."""
+    cfg = _cfg_trigger()
+    cfg["active"] = False
+    errors, warnings = tab._validate_config([cfg])
+    assert not errors
+    assert any("выключен" in w for w in warnings)
+
+
+def test_validate_warns_pc_only_trigger(tab) -> None:
+    """Триггер, не разворачивающийся в записи МК, исполняется
+    приложением и умрёт с ним — предупреждаем при записи."""
+    errors, warnings = tab._validate_config([_unexpandable_trigger()])
+    assert not errors
+    assert any("приложением" in w for w in warnings)
+
+
+def test_validate_silent_for_multiframe(tab) -> None:
+    """Многофреймовый триггер разворачивается в группу записей и
+    исполняется самим МК — предупреждения «исполняется приложением»
+    быть не должно."""
+    errors, warnings = tab._validate_config([_multi_response_trigger()])
+    assert not errors
+    assert not any("приложением" in w for w in warnings)
+
+
+def test_multiframe_projects_to_record_group(tab) -> None:
+    """Триггер с двумя фреймами ответа раскладывается в две записи МК:
+    общее условие приёма, вторая несёт group_seq>0 и абсолютную
+    задержку (next_delay первой строки)."""
+    cfg = _multi_response_trigger()
+    cfg["responses"][0]["next_delay"] = 50
+    tab.set_config([cfg])
+
+    records = tab._project_block_records(0)
+    assert records is not None and len(records) == 2
+    assert records[0]["group_seq"] == 0
+    assert records[0]["tx_id"] == 0x222
+    assert records[1]["group_seq"] == 1
+    assert records[1]["tx_id"] == 0x333
+    assert records[1]["delay_ms"] == 50
+    assert all(r["rx_id"] == 0x111 and r["enabled"] == 1 for r in records)
+
+
+def test_multiframe_group_syncs_back_to_one_block(tab) -> None:
+    """Группа записей устройства собирается обратно в один блок с
+    двумя строками ответа — полный круг запись→вычитка."""
+    cfg = _multi_response_trigger()
+    cfg["responses"][0]["next_delay"] = 50
+    tab.set_config([cfg])
+    records = _device_records(tab, [0])
+
+    tab.set_config([])
+    tab._read_device_triggers = lambda: records
+    assert tab.sync_from_device() is True
+    assert len(tab._blocks) == 1
+    block = tab._blocks[0]
+    assert block["group"].isChecked() is True
+    assert tab._device_managed == [True]
+    rows = block["response"]["rows"]
+    assert len(rows) == 2
+    assert rows[0]["id"].text() == "222"
+    assert rows[1]["id"].text() == "333"
+    assert rows[0]["next_delay"].value() == 50
+
+
+def test_count_over_255_fragments_roundtrip(tab) -> None:
+    """count>255 пишется фрагментами по 255 отправок; вычитка склеивает
+    их обратно в одну строку с исходным count."""
+    cfg = _cfg_trigger()
+    cfg["responses"] = [
+        {
+            "channel": 0, "bit": 0, "id": "222", "dlc": 1, "data": "BB",
+            "delay_before_send": 0, "delay_between": 20,
+            "count": 300, "next_delay": 0,
+        }
+    ]
+    tab.set_config([cfg])
+
+    records = tab._project_block_records(0)
+    assert records is not None and len(records) == 2
+    assert records[0]["tx_count"] == 255 and records[0]["group_seq"] == 0
+    assert records[1]["tx_count"] == 45
+    assert records[1]["group_seq"] & 0x80
+    assert records[1]["delay_ms"] == 255 * 20
+
+    device_records = [unpack_trigger(pack_trigger(r)) for r in records]
+    tab.set_config([])
+    tab._read_device_triggers = lambda: device_records
+    assert tab.sync_from_device() is True
+    assert len(tab._blocks) == 1
+    rows = tab._blocks[0]["response"]["rows"]
+    assert len(rows) == 1
+    assert rows[0]["count"].value() == 300
+    assert rows[0]["delay_between"].value() == 20
+
+
+def test_disabled_multiframe_group_stays_disabled(tab) -> None:
+    """Выключенный многофреймовый триггер пишется группой с enabled=0 —
+    вычитка собирает блок выключенным и heal его не воскрешает."""
+    cfg = _multi_response_trigger()
+    cfg["active"] = False
+    tab.set_config([cfg])
+    records = _device_records(tab, [0])
+    assert len(records) == 2
+    assert all(r["enabled"] == 0 for r in records)
+
+    tab.set_config([])
+    tab._read_device_triggers = lambda: records
+    assert tab.sync_from_device() is True
+    block = tab._blocks[0]
+    assert block["group"].isChecked() is False
+    assert len(block["response"]["rows"]) == 2
+    # Не PC-only: запись полностью во Flash, приложение не исполняет.
+    assert tab._device_managed == [True]
+
+
+def test_validate_silent_for_normal_trigger(tab) -> None:
+    """Обычный активный триггер — без новых предупреждений."""
+    errors, warnings = tab._validate_config([_cfg_trigger()])
+    assert not errors
+    assert not any("выключен" in w or "приложением" in w for w in warnings)

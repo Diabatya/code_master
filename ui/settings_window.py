@@ -1596,6 +1596,13 @@ class SettingsWindow(QMainWindow):
         try:
             self._config.import_data(payload)
             self._config.set("last_config_dir", os.path.dirname(path))
+            # Диагностика полевых «пропали триггеры»: в логе видно, когда
+            # и сколько триггеров пришло из файла.
+            logger.info(
+                "Конфигурация загружена из файла %s: триггеров=%d",
+                path,
+                len(self._config.get("triggers") or []),
+            )
             # suspend_execution: файл лишь заполняет поля — приложение не
             # исполняет эти триггеры само и на шину ничего не уходит, пока
             # оператор не нажмёт «Сохранить» (иначе устройство «отвечало»

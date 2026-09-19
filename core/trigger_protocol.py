@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import struct
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 TRIGGER_MAGIC = 0x54524732
 TRIGGER_FORMAT_VERSION = 2
@@ -44,21 +44,71 @@ def count_configured_triggers(triggers: list) -> int:
     """Сколько слотов конфигурации реально занято (для «Память»).
 
     Слот считается занятым, если триггер включён или в нём заполнены
-    поля приёма/ответа — пустые блоки память не занимают.
+    поля приёма/ответа — пустые блоки память не занимают. Многофреймовый
+    триггер разворачивается в несколько записей (expand_schedule) —
+    считаем записи, а не блоки.
     """
     count = 0
     for trigger in triggers or []:
         if not isinstance(trigger, dict):
             continue
         responses = trigger.get("responses") or []
+        filled = [
+            r for r in responses
+            if isinstance(r, dict) and str(r.get("id", "")).strip()
+        ]
         if (
             trigger.get("active")
             or str(trigger.get("recv_id", "")).strip()
             or str(trigger.get("cache_id", "")).strip()
-            or any(str(r.get("id", "")).strip() for r in responses if isinstance(r, dict))
+            or filled
         ):
-            count += 1
+            schedule = expand_schedule(filled)
+            count += len(schedule) if schedule is not None else 1
     return count
+
+
+# Группировка записей одного триггера — байт reserved_pad (смещение 80)
+# прошивка хранит как есть: 0 — базовая запись (строка ответа 0 или
+# одиночный триггер), 1..127 — начало строки ответа N, 0x80|f —
+# фрагмент счётчика (count>255 разбивается на куски по 255 отправок).
+GROUP_SEQ_BASE = 0
+GROUP_SEQ_FRAGMENT = 0x80
+
+
+def expand_schedule(responses: list) -> Optional[list]:
+    """Раскладывает список фреймов ответа в расписание записей trigger_t.
+
+    Возвращает список кортежей (row_index, delay_ms, tx_count,
+    tx_interval_ms, group_seq) — по одному на запись МК. Тайминги
+    повторяют _send_responses: у каждой записи абсолютная задержка
+    первой отправки, повторы делает прошивка по tx_count/tx_interval_ms.
+    None — триггер не разворачивается (>127 строк или задержка >65535),
+    такой исполняет приложение.
+    """
+    if not responses or len(responses) > 127:
+        return None
+    schedule = []
+    cumulative = 0
+    for row_index, row in enumerate(responses):
+        cumulative += max(0, int(row.get("delay_before_send") or 0))
+        count = max(1, int(row.get("count") or 1))
+        interval = max(0, int(row.get("delay_between") or 0))
+        sent = 0
+        fragment = 0
+        while sent < count:
+            chunk = min(255, count - sent)
+            delay = cumulative + sent * interval
+            if delay > 0xFFFF:
+                return None
+            seq = row_index if sent == 0 else GROUP_SEQ_FRAGMENT | fragment
+            schedule.append((row_index, delay, chunk, interval, seq))
+            sent += chunk
+            fragment += 1
+        cumulative += (count - 1) * interval
+        if row_index < len(responses) - 1:
+            cumulative += max(0, int(row.get("next_delay") or 0))
+    return schedule
 
 
 def crc8(data: bytes) -> int:
@@ -102,7 +152,7 @@ def pack_trigger(values: Dict[str, Any]) -> bytes:
             int(values.get("tx_interval_ms", 0)) & 0xFFFF,
             int(values.get("tx_count", 0)) & 0xFF,
             int(values.get("rx_rtr", 0)) & 0xFF,
-            0,
+            int(values.get("group_seq", 0)) & 0xFF,
             0,
         )
     )
@@ -150,4 +200,5 @@ def unpack_trigger(payload: bytes) -> Dict[str, Any]:
         "tx_interval_ms": values[24],
         "tx_count": values[25],
         "rx_rtr": values[26],
+        "group_seq": values[27],
     }
