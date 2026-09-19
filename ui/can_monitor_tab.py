@@ -1376,7 +1376,9 @@ class CanChannelMonitor(QWidget):
             if row >= 0:
                 self._show_id_history(row)
                 return True
-        return super().eventFilter(watched, event)
+        # False, а не super().eventFilter(): проброс события назад в
+        # watched->event() даёт взаимную рекурсию между фильтрами.
+        return False
 
     def _show_context_menu(self, position) -> None:
         row = self._table.currentRow()

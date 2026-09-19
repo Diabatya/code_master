@@ -637,7 +637,12 @@ class SettingsWindow(QMainWindow):
             self._mark_dirty()
         elif event_type == QEvent.Type.ChildRemoved:
             self._mark_dirty()
-        return super().eventFilter(watched, event)
+        # False — «событие не наше»: super().eventFilter() в PySide6
+        # пробрасывает событие в watched->event() заново, и когда у
+        # watched есть свой фильтр (can_trigger_tab у wrapper'ов),
+        # два фильтра гоняют одно событие по кругу ~300 вложенных
+        # вызовов → сотни _mark_dirty → «Сохранить» мерцала.
+        return False
 
     def _on_groupbox_toggled(self, _checked: bool) -> None:
         if not self._loading:
@@ -701,7 +706,13 @@ class SettingsWindow(QMainWindow):
         for widget in root.findChildren(QGroupBox):
             if widget.isCheckable() and not _skip(widget):
                 sig.append(("group", widget.isChecked()))
-        return tuple(sig)
+        # findChildren отдаёт виджеты в z-order — QTabWidget меняет его
+        # при каждом переключении вкладки, и позиционная сигнатура
+        # расходилась с эталоном без всякой правки: «Сохранить» сама
+        # включалась/выключалась при хождении по вкладкам. Сортировка
+        # делает снимок инвариантным к порядку: реакция только на
+        # реальные изменения значений.
+        return tuple(sorted(sig))
 
     def _mark_dirty(self, *_args: object) -> None:
         """Планирует пересчёт состояния кнопки «Сохранить».

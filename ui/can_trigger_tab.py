@@ -768,7 +768,11 @@ class CanTriggerTab(QWidget):
                 if block.get("wrapper") is watched:
                     self._align_delete_button(block)
                     break
-        return super().eventFilter(watched, event)
+        # False, а не super().eventFilter(): проброс события в
+        # watched->event() порождает взаимную рекурсию с фильтром
+        # settings_window (~300 вложенных вызовов на событие) —
+        # отсюда мерцание кнопки «Сохранить».
+        return False
 
     def _align_delete_button(self, block: Dict[str, Any]) -> None:
         """Ставит крестик по высоте ровно напротив поля Data в «Приём»."""
