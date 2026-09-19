@@ -141,6 +141,23 @@ def _id_row_color(frame_id: int) -> QColor:
     return QColor.fromHsl(hue, 80, 40)
 
 
+def _is_dark_theme() -> bool:
+    """Тёмная ли сейчас палитра приложения."""
+    try:
+        return QApplication.palette().base().color().lightness() < 128
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _tx_echo_colors() -> Tuple[QColor, QColor]:
+    """Фон и текст строки кадра, отправленного самим МК (tx_echo):
+    тёмная тема — оранжевый фон с чёрным текстом, светлая — чёрный
+    фон с белым текстом."""
+    if _is_dark_theme():
+        return QColor("#FF8C00"), QColor("#000000")
+    return QColor("#000000"), QColor("#FFFFFF")
+
+
 def _data_percent(data: bytes, dlc: int, byte_index: Optional[int] = None) -> float:
     """DATA как процент заполнения: 00..00 → 0%, FF..FF → 100%.
 
@@ -606,7 +623,8 @@ class CanChannelMonitor(QWidget):
         self._id_stats: Dict[int, Dict[str, Any]] = {}
         self._id_data_variants: Dict[int, Set[bytes]] = {}
         # Последнее направление кадра по каждому ID: True — кадр
-        # отправлен самим МК (tx_echo), строка подсвечивается зелёным.
+        # отправлен самим МК (tx_echo), строка подсвечивается цветом
+        # направления (тёмная тема — оранжевый, светлая — чёрный).
         self._id_tx_echo: Dict[int, bool] = {}
         # История фреймов по каждому ID (время, data, rtr, dlc) — для
         # диалога «История ID» из контекстного меню таблицы.
@@ -1174,7 +1192,7 @@ class CanChannelMonitor(QWidget):
         # tx_echo: кадр отправлен самим МК (ответ триггера / другой
         # программы МК) — bxCAN себя не слышит, прошивка возвращает
         # собственные передачи в RX-поток с флагом. Такие строки
-        # подсвечиваются зелёным, как кнопка «Запущено».
+        # подсвечиваются цветом направления (_tx_echo_colors).
         tx_echo = bool(frame.get("tx_echo", False))
         self._id_tx_echo[frame_id] = tx_echo
         if self._filter_enabled and self._matches_filter(frame_id, data):
@@ -1323,18 +1341,20 @@ class CanChannelMonitor(QWidget):
         return self._table.rowCount()
 
     def _paint_row_direction(self, row: int, is_tx: bool) -> None:
-        """Зелёная заливка полей строки для кадров, отправленных самим МК
-        (tx_echo: ответ триггера/другой программы МК), как у кнопки
-        «Запущено». Столбец ID сохраняет свой цвет — он кодирует сам ID.
+        """Заливка полей строки для кадров, отправленных самим МК
+        (tx_echo: ответ триггера/другой программы МК): тёмная тема —
+        оранжевый фон, светлая — чёрный. Столбец ID сохраняет свой
+        цвет — он кодирует сам ID.
         Флаг пишется в ячейку DATA, чтобы _reset_data_background после
         вспышки подсветки вернул правильный цвет, а не дефолт."""
+        bg, fg = _tx_echo_colors()
         for col in range(1, self._table.columnCount()):
             item = self._table.item(row, col)
             if item is None:
                 continue
             if is_tx:
-                item.setBackground(QColor("#4CAF50"))
-                item.setForeground(QColor("#FFFFFF"))
+                item.setBackground(bg)
+                item.setForeground(fg)
             else:
                 item.setBackground(QColor())
                 item.setForeground(QColor())
@@ -1362,11 +1382,12 @@ class CanChannelMonitor(QWidget):
     def _reset_data_background(self, row: int) -> None:
         data_item = self._table.item(row, 2)
         if data_item is not None:
-            # TX-строка (кадр отправлен самим МК) возвращается в зелёный,
+            # TX-строка (кадр отправлен самим МК) возвращается в её цвет,
             # обычная — в дефолтный фон.
             if bool(data_item.data(Qt.ItemDataRole.UserRole)):
-                data_item.setBackground(QColor("#4CAF50"))
-                data_item.setForeground(QColor("#FFFFFF"))
+                bg, fg = _tx_echo_colors()
+                data_item.setBackground(bg)
+                data_item.setForeground(fg)
             else:
                 data_item.setBackground(QColor())
                 data_item.setForeground(QColor())

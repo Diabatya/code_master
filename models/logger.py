@@ -76,7 +76,13 @@ def setup_logging() -> None:
     root_logger.addHandler(buffered_file_handler)
     root_logger.addHandler(console_handler)
 
-    logging.getLogger("code_master").info("Логирование настроено. Файл: %s", LOG_FILE)
+    # Версия в стартовой строке — по полевому логу сразу видно, какой
+    # сборкой она снята (половина «багов» на полигоне оказывалась
+    # старым exe, а не текущим кодом).
+    from models.version import VERSION
+    logging.getLogger("code_master").info(
+        "Логирование настроено. Файл: %s, версия %s", LOG_FILE, VERSION
+    )
 
 
 def get_log_dir() -> Path:

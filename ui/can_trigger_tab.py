@@ -758,12 +758,10 @@ class CanTriggerTab(QWidget):
         grid = QGridLayout(wrapper)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.addWidget(block["group"], 0, 0)
-        # Крестик — по горизонтали ровно над «+» добавления ответа
-        # (тот сидит у правого края блока «Ответ»: ≈18 px от края +
-        # половина кнопки 16 px → правый отступ ~22 px выравнивает
-        # центры), по вертикали — напротив поля Data строки «Приём»:
-        # её позиция известна только после компоновки, поэтому верхний
-        # отступ подстраивается в _align_delete_button при Resize.
+        # Крестик — по горизонтали ровно над «+» добавления ответа,
+        # по вертикали — напротив поля Data строки «Приём»: обе
+        # позиции известны только после компоновки, поэтому отступы
+        # подстраиваются в _align_delete_button при Resize.
         # AlignTop|AlignRight — иначе holder растянется на весь
         # блок и перехватит все клики по полям триггера.
         holder = QWidget()
@@ -796,8 +794,10 @@ class CanTriggerTab(QWidget):
         return False
 
     def _align_delete_button(self, block: Dict[str, Any]) -> None:
-        """Ставит крестик по высоте ровно напротив поля Data в «Приём»."""
+        """Ставит крестик по высоте напротив поля Data в «Приём», а по
+        горизонтали — ровно над «+» добавления фрейма ответа."""
         data_widget = block["recv"]["data_widget"]
+        add_button = block["response"]["add_button"]
         wrapper = block.get("wrapper")
         layout = block.get("delete_holder_layout")
         if wrapper is None or layout is None:
@@ -807,9 +807,20 @@ class CanTriggerTab(QWidget):
                 data_widget.mapTo(wrapper, QPoint(0, 0)).y()
                 + data_widget.height() // 2
             )
+            add_center_x = (
+                add_button.mapTo(wrapper, QPoint(0, 0)).x()
+                + add_button.width() // 2
+            )
         except RuntimeError:
             return  # виджет уже уничтожен
-        layout.setContentsMargins(0, max(0, center_y - 12), 22, 0)
+        # Центр крестика — над центром «+»: отступ справа = расстоянию
+        # от центра «+» до правого края минус половина крестика (12 px).
+        # «+» всегда у правого края — отложенная карта при скрытом блоке
+        # даёт x≈0, такие значения отбрасываем и держим прежний отступ.
+        right = layout.contentsMargins().right()
+        if add_center_x > wrapper.width() // 2:
+            right = max(0, wrapper.width() - add_center_x - 12)
+        layout.setContentsMargins(0, max(0, center_y - 12), right, 0)
 
     def _remove_block_at(self, index: int) -> None:
         """Внутреннее удаление блока по позиции (крестик/синхронизация)."""

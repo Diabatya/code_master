@@ -70,10 +70,6 @@ QTableWidget {
     background-color: $bg_widget;
     alternate-background-color: $bg_alternate;
 }
-QTableWidget::item {
-    background-color: $bg_widget;
-    padding: 4px;
-}
 QTableWidget::item:alternate {
     background-color: $bg_alternate;
 }

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from core.can_protocol import pack_can_frame
 from core.dbc_manager import DBCManager
+from ui.can_monitor_tab import _tx_echo_colors
 from core.serial_manager import SerialManager
 from models.logger import get_logger
 from models.translations import _ as tr
@@ -253,16 +254,18 @@ class CanAnalyzer(QWidget):
         table.insertRow(row)
         # Направление: TX — кадр отправлен самим МК (tx_echo — ответ
         # триггера/программы МК или ретрансляция кадра ПК); RX — приём
-        # с шины. TX-строки подсвечиваются зелёным, как кнопка «Запущено».
+        # с шины. Цвет TX-строк — тот же, что в мониторинге:
+        # тёмная тема — оранжевый фон, светлая — чёрный.
         is_tx = bool(frame.get("tx_echo", False))
         dir_text = "TX" if is_tx else "RX"
+        bg, fg = _tx_echo_colors()
         values = [elapsed_text, id_text, dlc_text, data_text, period_text, ascii_text, explanation, dir_text]
         for col, text in enumerate(values):
             item = QTableWidgetItem(text)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if is_tx:
-                item.setBackground(QColor("#4CAF50"))
-                item.setForeground(QColor("#FFFFFF"))
+                item.setBackground(bg)
+                item.setForeground(fg)
             table.setItem(row, col, item)
         table.scrollToBottom()
 
