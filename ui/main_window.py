@@ -190,6 +190,9 @@ class MainWindow(QMainWindow):
         self._heartbeat_timer = QTimer(self)
         self._heartbeat_timer.timeout.connect(self._reset_port_indicator)
         self._heartbeat_timer.start(1500)
+        # closeEvent выставляет True — дочерние окна по нему понимают,
+        # что закрывается всё приложение, и не воскрешают это окно.
+        self._closing_app = False
 
     def _build_layout(self) -> None:
         """Собирает компоновку главного окна."""
@@ -595,6 +598,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         """Корректно закрывает приложение."""
         logger.info("Закрытие главного окна")
+        # Дочерние окна в своём closeEvent зовут main_window.show() —
+        # без флага это воскрешало главное окно посреди выхода.
+        self._closing_app = True
         self._heartbeat_timer.stop()
         if self._settings_window is not None:
             self._settings_window.close()

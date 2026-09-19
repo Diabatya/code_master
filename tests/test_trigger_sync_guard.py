@@ -115,3 +115,16 @@ def test_empty_ui_filled_from_device(tab) -> None:
     tab._read_device_triggers = lambda: records
     assert tab.sync_from_device() is True
     assert len(tab._blocks) == 1
+
+
+def test_sync_does_not_persist_device_state_to_config(tab) -> None:
+    """Автовычитка не зеркалит состояние МК в config.json — иначе
+    фантомная запись из устройства сидела в UI при следующем запуске
+    и «Сохранить» прошивало её обратно (бессмертный фантом). Файл
+    меняется только явными действиями оператора."""
+    tab.set_config([_cfg_trigger()])
+    records = _device_records(tab, [0])
+    tab._read_device_triggers = lambda: records
+    tab._config._data.pop("triggers", None)
+    assert tab.sync_from_device() is True
+    assert tab._config.get("triggers") is None

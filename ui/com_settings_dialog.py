@@ -65,6 +65,14 @@ class BaudRateDetector(QThread):
 class ComSettingsDialog(QDialog):
     """Диалог выбора COM-порта и подключения."""
 
+    # Диалог всегда тёмный (#252538) — на светлой теме палитра даёт
+    # чёрный текст на тёмном фоне, поэтому цвета заданы явно.
+    _DARK_BUTTON_STYLE = (
+        "QPushButton { background-color: #3A3A5A; color: #FFEB3B; "
+        "border: none; border-radius: 4px; }"
+        "QPushButton:hover { background-color: #4A4A6A; }"
+    )
+
     connected = Signal()
 
     def __init__(self, serial_manager: SerialManager, parent: Optional[QDialog] = None) -> None:
@@ -84,6 +92,7 @@ class ComSettingsDialog(QDialog):
 
         self._port_label = QLabel(tr("COM-порт:"))
         self._port_label.setFont(font)
+        self._port_label.setStyleSheet("color: #FFEB3B;")
 
         self._port_combo = QComboBox()
         self._port_combo.setFont(font)
@@ -91,6 +100,7 @@ class ComSettingsDialog(QDialog):
 
         self._baud_label = QLabel(tr("Скорость:"))
         self._baud_label.setFont(font)
+        self._baud_label.setStyleSheet("color: #FFEB3B;")
 
         self._baud_combo = QComboBox()
         self._baud_combo.setFont(font)
@@ -99,6 +109,7 @@ class ComSettingsDialog(QDialog):
         self._auto_baud_button = QPushButton(tr("Автоопределить"))
         self._auto_baud_button.setFixedSize(130, 30)
         self._auto_baud_button.setFont(font)
+        self._auto_baud_button.setStyleSheet(self._DARK_BUTTON_STYLE)
         self._auto_baud_button.clicked.connect(self._on_auto_baudrate)
 
         self._status_label = QLabel("")
@@ -108,11 +119,15 @@ class ComSettingsDialog(QDialog):
         self._connect_button = QPushButton(tr("Подключить"))
         self._connect_button.setFixedSize(120, 34)
         self._connect_button.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._connect_button.setStyleSheet(self._DARK_BUTTON_STYLE)
         self._connect_button.clicked.connect(self._on_connect)
 
         self._button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         self._button_box.rejected.connect(self.reject)
         self._button_box.addButton(self._connect_button, QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_button = self._button_box.button(QDialogButtonBox.StandardButton.Cancel)
+        if cancel_button is not None:
+            cancel_button.setStyleSheet(self._DARK_BUTTON_STYLE)
 
     def _build_layout(self) -> None:
         layout = QVBoxLayout(self)

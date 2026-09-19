@@ -333,6 +333,13 @@ class SerialManager(QObject):
         self._last_baudrate = 115200
         self._last_emulation = False
         self._closing = False
+        # Финальное закрытие менеджера (ручное «Отключить», выход
+        # приложения): после него expect_reboot/_do_reconnect не должны
+        # воскрешать порт — иначе на закрытии окна запускалась вычитка
+        # и зеркалила триггеры устройства в config.json (полевой баг:
+        # «при закрытии приложения что-то отрабатывает»). open_port
+        # снимает флаг — явное подключение снова разрешает реконнект.
+        self._shutdown = False
         self._replay_path: Optional[str] = None
         # Пачка управляющих команд делит одну остановку reader'а
         # (см. control_session) — без этого каждый request_control
@@ -382,6 +389,9 @@ class SerialManager(QObject):
             self._last_emulation = emulation
             self._stop_reconnect_timer()
             self.close_port()
+            # Явное открытие — менеджер жив, реконнект снова разрешён
+            # (close_port выше выставил _shutdown для финального пути).
+            self._shutdown = False
             try:
                 if emulation:
                     self._port = FakeSerial(port_name, baudrate, error_probability)
@@ -450,8 +460,12 @@ class SerialManager(QObject):
                 return False
 
     def close_port(self) -> None:
-        """Закрывает порт и останавливает поток чтения."""
+        """Закрывает порт и останавливает поток чтения.
+
+        Это финальное закрытие: после него реконнект не планируется,
+        пока кто-то явно не вызовет open_port (тот снимет _shutdown)."""
         with self._lock:
+            self._shutdown = True
             self._closing = True
             self._stop_reconnect_timer()
             if self._reader is not None:
@@ -1194,7 +1208,7 @@ class SerialManager(QObject):
 
     def _schedule_reconnect(self) -> None:
         """Запускает таймер для автоматического переподключения."""
-        if not self._auto_reconnect or self.is_open():
+        if self._shutdown or not self._auto_reconnect or self.is_open():
             return
         if self._reconnect_timer is not None and self._reconnect_timer.isActive():
             return
@@ -1234,7 +1248,7 @@ class SerialManager(QObject):
 
     def _do_reconnect(self) -> None:
         """Пытается восстановить соединение с COM-портом."""
-        if self.is_open():
+        if self._shutdown or self.is_open():
             return
         port_name = self._last_port_name
         if port_name and port_name not in {p.device for p in comports()}:

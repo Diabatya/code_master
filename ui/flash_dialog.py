@@ -2210,10 +2210,13 @@ class FlashDialog(QDialog):
         self._port_was_open = False
         try:
             logger.info("Восстановление SerialManager после операции")
+            # auto_reconnect обязателен: open_port по умолчанию сбрасывает
+            # флаг — после флеш-операции обрыв связи не переподключался.
             self._serial_manager.open_port(
                 self._config.get("port", ""),
                 self._config.get("baudrate", 115200),
                 emulation=self._config.get("emulation", False),
+                auto_reconnect=True,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("Не удалось восстановить COM-порт: %s", exc)

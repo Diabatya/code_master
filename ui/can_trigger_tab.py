@@ -1419,7 +1419,14 @@ class CanTriggerTab(QWidget):
             for index, values in enumerate(records):
                 self._apply_device_trigger(index, values)
                 self._device_managed[index] = self._is_device_representable(self._blocks[index])
-            self._save_config()
+            # Индикатор памяти обновляем, а вот config.json НЕ пишем:
+            # автовычитка зеркалила состояние МК в локальный файл, и
+            # фантомная запись из МК сидила в UI при следующем запуске —
+            # «Сохранить» прошивало её обратно. Файл теперь меняется
+            # только явными действиями оператора (Сохранить/удаление).
+            self._memory_indicator.show_trigger_usage(
+                count_configured_triggers(self._collect_config())
+            )
         finally:
             self._applying_device_state = False
         return True

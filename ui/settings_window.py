@@ -490,6 +490,10 @@ class SettingsWindow(QMainWindow):
         self._loading = False
         self._refresh_pending = False
         self._sync_in_progress = False
+        # Окно закрывается: отложенная вычитка (singleShot 400 мс после
+        # connect) на закрытом окне не нужна — она писала состояние МК в
+        # config.json уже на выходе из приложения.
+        self._closing_down = False
         # Масштаб/сдвиг для пересчёта прогресса фаз (триггеры 0-85%,
         # CAN-настройки 85-100% при сохранении; вычитка — вся шкала).
         self._progress_offset = 0.0
@@ -993,7 +997,8 @@ class SettingsWindow(QMainWindow):
         оператора, сделанную до подключения. force=True — явная вычитка
         по Ctrl+R: оператор уже подтвердил замену правок."""
         if (
-            not self._serial_manager.is_open()
+            self._closing_down
+            or not self._serial_manager.is_open()
             or self._config.get("emulation", False)
             or (self._has_unsaved_changes() and not force)
             or self._sync_in_progress
@@ -1050,6 +1055,9 @@ class SettingsWindow(QMainWindow):
     def showEvent(self, event) -> None:  # noqa: N802
         """При показе окна обновляет только лейблы имени/серийника.
 
+        Окно переиспользуется (close → show): флаг закрытия снимаем —
+        иначе после первого закрытия вычитка была бы отключена навсегда.
+
         Вычитка конфигурации здесь НЕ выполняется: showEvent приходит и
         при разворачивании окна из свёрнутого состояния — вычитка
         перестраивала блоки триггеров из Flash МК (где мог лежать
@@ -1058,6 +1066,7 @@ class SettingsWindow(QMainWindow):
         Синхронизация с устройством остаётся только на реальном событии
         подключения — _on_connection_changed."""
         super().showEvent(event)
+        self._closing_down = False
         # Без опроса МК: read_system_info — блокирующая команда в
         # GUI-потоке, на нестабильном порту она подвешивала окно при
         # каждом разворачивании. Лейблы обновляются из кэша; свежие
@@ -1745,7 +1754,13 @@ class SettingsWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         """Закрывает окно настроек и обязательно показывает главное окно."""
         logger.info("Закрыто окно настроек")
-        if self._main_window is not None:
+        self._closing_down = True
+        # Главное окно показываем, только если это НЕ его собственное
+        # закрытие — иначе show() воскрешал главное окно посреди выхода
+        # из приложения («при закрытии что-то отрабатывает»).
+        if self._main_window is not None and not getattr(
+            self._main_window, "_closing_app", False
+        ):
             self._main_window.show()
             self._main_window.raise_()
             self._main_window.activateWindow()

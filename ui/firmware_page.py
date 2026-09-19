@@ -110,7 +110,12 @@ class BootloaderWorker(QThread):
             pass
         if self._was_open and self._port_name:
             try:
-                self._serial_manager.open_port(self._port_name, self._baudrate)
+                # auto_reconnect обязателен: open_port по умолчанию сбрасывает
+                # флаг, и после прошивки устройство при обрыве больше не
+                # переподключалось («не произошло переподключения»).
+                self._serial_manager.open_port(
+                    self._port_name, self._baudrate, auto_reconnect=True
+                )
             except Exception:  # noqa: S110
                 pass
 

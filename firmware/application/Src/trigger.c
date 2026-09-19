@@ -18,6 +18,7 @@ static trigger_t s_triggers[TRIGGER_MAX_RECORDS];
 static trigger_t s_staged[TRIGGER_MAX_RECORDS];
 static uint8_t s_stage_flags[TRIGGER_MAX_RECORDS];
 static uint8_t s_staged_max;    /* наибольший staged-индекс +1 */
+static uint32_t s_stage_tick;   /* тик последнего STAGE */
 static uint8_t s_count;         /* активных записей в списке */
 static uint32_t s_store_base;   /* адрес заголовка области в пуле, 0 — нет */
 static uint32_t s_generation;   /* generation последнего коммита */
@@ -51,6 +52,13 @@ typedef struct {
 #define TRIGGER_TX_RETRY_MAX 20U
 #define TRIGGER_TX_RETRY_DELAY_MS 1U
 
+/* STAGE без COMMIT живёт ограниченное время: оборванная сессия записи
+ * (USB-обрыв между STAGE и COMMIT) держала staged-записи вооружёнными
+ * бесконечно — любой поздний COMMIT (в т.ч. мусорный байт 0xCB из
+ * рассинхрона потока) дописывал их во Flash «фантомным» триггером,
+ * воскресавшим после каждого ребута. */
+#define TRIGGER_STAGE_TIMEOUT_MS 15000U
+
 static pending_response_t s_pending[TRIGGER_MAX_RECORDS];
 static uint32_t s_fired_count;
 static uint32_t s_dropped_count; /* отправки, исчерпавшие ретраи */
@@ -59,6 +67,9 @@ static uint8_t s_flash_valid_count; /* включённых записей, пр
   из Flash при старте — диагностика «триггеры пропали после питания» */
 
 static uint8_t trigger_fields_valid(const trigger_t *trig);
+static uint8_t erase_pages(uint32_t from, uint32_t to);
+static uint8_t program_store(uint32_t base, uint32_t generation, uint8_t total,
+                             const trigger_t **src);
 
 static uint8_t crc8(const uint8_t *data, uint32_t len)
 {
@@ -150,6 +161,7 @@ void Trigger_Init(void)
   s_max_lateness_ms = 0U;
   s_count = 0U;
   s_staged_max = 0U;
+  s_stage_tick = 0U;
   s_store_base = 0U;
   s_generation = 0U;
   s_flash_valid_count = 0U;
@@ -178,8 +190,7 @@ void Trigger_Init(void)
   }
 
   /* Миграция v2: старый фиксированный регион 0x0803E000, 49 слотов.
-   * Записи поднимаются в RAM и работают сразу; во Flash они переезжают
-   * в новый формат при ближайшем COMMIT. */
+   * Записи поднимаются в RAM и работают сразу. */
   const uint8_t *legacy = (const uint8_t *)TRIGGER_LEGACY_ADDR;
   for (uint8_t i = 0U; i < TRIGGER_LEGACY_COUNT; i++) {
     const trigger_t *flash_t =
@@ -191,6 +202,32 @@ void Trigger_Init(void)
         s_flash_valid_count++;
       }
     }
+  }
+
+  /* Миграция финализируется сразу: поднятые записи пишем v3-хранилищем
+   * в верх пула, легаси-страницу внизу НЕ стираем — при обрыве питания
+   * посреди записи следующий старт снова найдёт источник и повторит
+   * переезд. Без финализации легаси реимпортировалось при КАЖДОМ
+   * старте: удалённый, но ни разу не сохранённый триггер воскресал
+   * «фантомом» после каждого ребута. */
+  if (s_count != 0U) {
+    const trigger_t *src[TRIGGER_MAX_RECORDS];
+    for (uint8_t j = 0U; j < s_count; j++) {
+      src[j] = &s_triggers[j];
+    }
+    uint32_t size = TRIGGER_HEADER_SIZE + (uint32_t)s_count * sizeof(trigger_t);
+    uint32_t pages = (size + TRIGGER_FLASH_PAGE - 1U) / TRIGGER_FLASH_PAGE;
+    uint32_t base = TRIGGER_FLASH_END - pages * TRIGGER_FLASH_PAGE;
+    /* Хранилище привязано к верху пула и при максимуме записей не
+     * достаёт до легаси-страницы — стираем только целевой диапазон. */
+    if (base > TRIGGER_LEGACY_ADDR
+        && erase_pages(base, TRIGGER_FLASH_END)
+        && program_store(base, 1U, s_count, src)) {
+      s_store_base = base;
+      s_generation = 1U;
+    }
+    /* Сбой записи не фатален: список уже в RAM и работает, переезд
+     * повторится при следующем старте. */
   }
 }
 
@@ -221,12 +258,11 @@ static uint8_t page_is_blank(uint32_t addr)
   return 1U;
 }
 
-/* Стирает все непустые страницы пула триггеров. */
-static uint8_t erase_pool(void)
+/* Стирает все непустые страницы в диапазоне [from, to). */
+static uint8_t erase_pages(uint32_t from, uint32_t to)
 {
   HAL_FLASH_Unlock();
-  for (uint32_t page = TRIGGER_POOL_BASE; page < TRIGGER_FLASH_END;
-       page += TRIGGER_FLASH_PAGE) {
+  for (uint32_t page = from; page < to; page += TRIGGER_FLASH_PAGE) {
     /* Стирание каждой страницы ~40 мс — пул до 8 КБ; кормим IWDG,
      * чтобы COMMIT большого набора триггеров не сбрасывал МК. */
     App_KickWatchdog();
@@ -246,6 +282,12 @@ static uint8_t erase_pool(void)
   }
   HAL_FLASH_Lock();
   return 1U;
+}
+
+/* Стирает все непустые страницы пула триггеров. */
+static uint8_t erase_pool(void)
+{
+  return erase_pages(TRIGGER_POOL_BASE, TRIGGER_FLASH_END);
 }
 
 /* Пишет заголовок + записи в область [base, FLASH_END) — пул уже стёрт.
@@ -305,6 +347,7 @@ void Trigger_ClearAll(void)
   erase_pool();
   s_count = 0U;
   s_staged_max = 0U;
+  s_stage_tick = 0U;
   s_store_base = 0U;
   s_flash_valid_count = 0U;
   memset(s_stage_flags, 0, sizeof(s_stage_flags));
@@ -344,6 +387,7 @@ uint8_t Trigger_Stage(uint8_t index, const trigger_t *trig)
   staged.crc8 = crc8((const uint8_t *)&staged, offsetof(trigger_t, crc8));
   s_staged[index] = staged;
   s_stage_flags[index] = 1U;
+  s_stage_tick = HAL_GetTick();
   if (index >= s_staged_max) {
     s_staged_max = (uint8_t)(index + 1U);
   }
@@ -411,6 +455,7 @@ uint8_t Trigger_Commit(uint8_t total)
   s_store_base = (total != 0U) ? base : 0U;
   s_generation++;
   s_staged_max = 0U;
+  s_stage_tick = 0U;
   memset(s_stage_flags, 0, sizeof(s_stage_flags));
   /* Слоты выше новой длины больше не исполняются — кэш/отложенные
    * отправки по ним надо сбросить, а по перезаписанным — обновить. */
@@ -591,6 +636,14 @@ void Trigger_OnFrame(const can_frame_t *frame)
 void Trigger_Poll(void)
 {
   uint32_t now = HAL_GetTick();
+  /* STAGE без COMMIT протухает: оборванная сессия записи (USB-обрыв
+   * между STAGE и COMMIT) держала staged-записи вооружёнными
+   * бесконечно — см. TRIGGER_STAGE_TIMEOUT_MS. */
+  if (s_staged_max != 0U
+      && (uint32_t)(now - s_stage_tick) > TRIGGER_STAGE_TIMEOUT_MS) {
+    s_staged_max = 0U;
+    memset(s_stage_flags, 0, sizeof(s_stage_flags));
+  }
   for (uint8_t i = 0; i < TRIGGER_MAX_RECORDS; i++) {
     if (s_pending[i].armed && (int32_t)(now - s_pending[i].fire_at_tick) >= 0) {
       uint32_t lateness = now - s_pending[i].fire_at_tick;
