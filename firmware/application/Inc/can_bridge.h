@@ -46,6 +46,7 @@ typedef struct {
   uint32_t error_count;
   uint32_t busoff_count;
   uint32_t recovery_count;
+  uint32_t tx_fail_count;  /* кадры, не отправленные: TX-ящики заняты */
 } can_stats_t;
 
 /* Initializes CAN1 (master) + CAN2 (slave) peripherals, GPIO, filters

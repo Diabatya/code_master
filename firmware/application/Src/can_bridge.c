@@ -19,6 +19,11 @@ typedef struct {
 
 static can_ring_t s_ring[2];
 static volatile uint32_t s_tx_count[2];
+/* Кадры, которые CanBridge_Transmit() не смог поставить на шину за
+ * бюджет ожидания ящика: арбитраж под нагрузкой, шторм ретраев при
+ * отсутствии ACK (listen-only анализатор), bus-off. Без счётчика такие
+ * дропы невидимы — полевой симптом «ответ триггера то был, то не был». */
+static volatile uint32_t s_tx_fail_count[2];
 
 /* TX-эхо кольцо: кадры, которые МК отправил сам (ответы триггеров и
  * PC→device TX), возвращаются в поток PopRx — bxCAN в Normal-режиме не
@@ -118,6 +123,7 @@ void CanBridge_GetStats(uint8_t channel, can_stats_t *out)
   out->error_count = s_error_count[channel];
   out->busoff_count = s_busoff_count[channel];
   out->recovery_count = s_recovery_count[channel];
+  out->tx_fail_count = s_tx_fail_count[channel];
 }
 
 /* LEC[2:0] из ESR → код ошибки HAL, чтобы CanBridge_TookError() отдавал
@@ -564,6 +570,7 @@ uint8_t CanBridge_Transmit(const can_frame_t *frame)
   for (uint32_t attempt = 0; attempt < 500U; attempt++) {
     if (HAL_CAN_GetTxMailboxesFreeLevel(hcan) > 0U) {
       if (HAL_CAN_AddTxMessage(hcan, &header, (uint8_t *)frame->data, &mailbox) != HAL_OK) {
+        s_tx_fail_count[internal_channel]++;
         return 0U;
       }
       s_tx_count[internal_channel]++;
@@ -580,6 +587,8 @@ uint8_t CanBridge_Transmit(const can_frame_t *frame)
       return 1U;
     }
   }
+  /* Бюджет исчерпан — все ящики заняты дольше допустимого окна. */
+  s_tx_fail_count[internal_channel]++;
   return 0U;
 }
 

@@ -772,6 +772,9 @@ class SerialManager(QObject):
             # Фактический бод-рейт канала (kbit/s), прошивки v2+ отдают
             # его в хвосте — по нему видно, применилась ли настройка.
             "baud_kbps": int.from_bytes(payload[25:27], "little") if len(payload) >= 27 else 0,
+            # Кадры, не отправленные из-за занятых TX-ящиков (прошивки v3+):
+            # пропавшие ответы триггеров под нагрузкой раньше были невидимы.
+            "tx_fail_count": int.from_bytes(payload[27:31], "little") if len(payload) >= 31 else 0,
         }
 
     def set_trigger_enabled(self, index: int, enabled: bool) -> None:
@@ -826,6 +829,10 @@ class SerialManager(QObject):
         if len(payload) >= 10:
             stats["flash_valid_count"] = payload[8]
             stats["config_valid"] = payload[9]
+        if len(payload) >= 16:
+            # Отправки ответа, исчерпавшие ретраи на занятых TX-ящиках —
+            # полевой симптом «ответ триггера то был, то не был».
+            stats["dropped_count"] = int.from_bytes(payload[12:16], "little")
         return stats
 
     def read_usb_stats(self) -> dict[str, int]:

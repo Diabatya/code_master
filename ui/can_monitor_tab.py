@@ -1054,17 +1054,24 @@ class CanChannelMonitor(QWidget):
                     device["recovery_count"],
                 )
                 text += tr(" USB dropped: {0}").format(usb["tx_dropped"])
+                # TXfail: кадры, которые МК не смог поставить на шину
+                # (все TX-ящики заняты — арбитраж/нет ACK/bus-off) —
+                # именно так выглядит молчаливый пропуск ответа триггера.
+                tx_fail = device.get("tx_fail_count", 0)
+                if tx_fail:
+                    text += tr(" | TXfail: {0}").format(tx_fail)
                 # Полевая телеметрия: по дельтам счётчиков между опросами
                 # в логе видно, где теряется время — МК медленный
                 # (last_cmd_ms велик, poll_count замирает) или ПК не
                 # забирает данные (tx_busy_waits растёт).
                 logger.debug(
-                    "CAN%d stats: rx=%d tx=%d lost=%d err=%d busoff=%d baud=%d | "
+                    "CAN%d stats: rx=%d tx=%d lost=%d err=%d busoff=%d baud=%d txfail=%d | "
                     "usb drop=%d busy=%d cmd=%d cmdms=%d loop=%d",
                     self._channel,
                     device["rx_count"], device["tx_count"],
                     device["lost_count"], device["error_count"],
                     device["busoff_count"], device.get("baud_kbps", -1),
+                    tx_fail,
                     usb["tx_dropped"], usb.get("tx_busy_waits", -1),
                     usb.get("cmd_count", -1), usb.get("last_cmd_ms", -1),
                     usb.get("poll_count", -1),

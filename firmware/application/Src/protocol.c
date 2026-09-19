@@ -341,8 +341,10 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       CanBridge_GetStats((uint8_t)(payload[0] - 1U), &stats);
       /* [25..26] — фактически применённый бод-рейт канала (kbit/s):
        * монитор опрашивает статистику каждую секунду, поэтому UI всегда
-       * показывает реальную скорость шины, а не только заданное в поле. */
-      uint8_t out[27];
+       * показывает реальную скорость шины, а не только заданное в поле.
+       * [27..30] — кадры, не отправленные из-за занятых TX-ящиков:
+       * пропавшие ответы триггеров/шлюза под нагрузкой теперь видимы. */
+      uint8_t out[31];
       memcpy(&out[0], &stats.rx_count, 4U);
       memcpy(&out[4], &stats.tx_count, 4U);
       memcpy(&out[8], &stats.lost_count, 4U);
@@ -353,6 +355,7 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       uint16_t baud = (uint16_t)CanBridge_GetBaud((uint8_t)(payload[0] - 1U));
       out[25] = (uint8_t)(baud & 0xFFU);
       out[26] = (uint8_t)((baud >> 8) & 0xFFU);
+      memcpy(&out[27], &stats.tx_fail_count, 4U);
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
     }
@@ -360,18 +363,22 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     case CMD_TRIGGER_STATS: {
       uint32_t fired_count = 0U;
       uint32_t max_lateness_ms = 0U;
-      Trigger_GetStats(&fired_count, &max_lateness_ms);
+      uint32_t dropped_count = 0U;
+      Trigger_GetStats(&fired_count, &max_lateness_ms, &dropped_count);
       /* [0:4]=fired, [4:8]=max_lateness, [8]=flash_valid_count — сколько
        * включённых триггеров реально прочитано из Flash при старте.
        * Если после power cycle здесь 0 при сохранённых триггерах —
-       * страницы не пережили перезапуск (диагностика для поддержки). */
-      uint8_t out[12];
+       * страницы не пережили перезапуск (диагностика для поддержки).
+       * [12:16]=dropped — отправки ответа, исчерпавшие ретраи на
+       * занятых TX-ящиках (дропы, ранее невидимые). */
+      uint8_t out[16];
       memcpy(&out[0], &fired_count, 4U);
       memcpy(&out[4], &max_lateness_ms, 4U);
       out[8] = Trigger_FlashValidCount();
       out[9] = DeviceConfig_IsValid();
       out[10] = Trigger_Count();        /* записей в списке сейчас */
       out[11] = TRIGGER_MAX_RECORDS;    /* ёмкость пула */
+      memcpy(&out[12], &dropped_count, 4U);
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
     }

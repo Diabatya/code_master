@@ -111,8 +111,10 @@ void Trigger_Init(void);
  * dedicated hardware timer). */
 void Trigger_Poll(void);
 
-/* Returns cumulative trigger timing counters since boot. */
-void Trigger_GetStats(uint32_t *fired_count, uint32_t *max_lateness_ms);
+/* Returns cumulative trigger timing counters since boot. dropped_count —
+ * отправки ответа, исчерпавшие ретраи на занятых TX-ящиках (можно NULL). */
+void Trigger_GetStats(uint32_t *fired_count, uint32_t *max_lateness_ms,
+                      uint32_t *dropped_count);
 
 /* Сколько включённых триггеров прошло валидацию Flash при старте —
  * диагностика «триггеры пропали после выключения питания». */

@@ -42,10 +42,18 @@ typedef struct {
   uint8_t  echo;           /* глубина TX-эха исходного кадра — передаётся
                             * в ответ, чтобы цепочка триггеров была
                             * ограничена CAN_TX_ECHO_MAX (см. can_bridge.c) */
+  uint8_t  retries;        /* попытки отправки при занятых TX-ящиках */
 } pending_response_t;
+
+/* Ответ, который не удалось поставить на шину (CanBridge_Transmit
+ * вернул 0 — ящики заняты арбитражем/ретраями без ACK), ретраим
+ * с паузой вместо молчаливого дропа; лимит ~20 мс на отправку. */
+#define TRIGGER_TX_RETRY_MAX 20U
+#define TRIGGER_TX_RETRY_DELAY_MS 1U
 
 static pending_response_t s_pending[TRIGGER_MAX_RECORDS];
 static uint32_t s_fired_count;
+static uint32_t s_dropped_count; /* отправки, исчерпавшие ретраи */
 static uint32_t s_max_lateness_ms;
 static uint8_t s_flash_valid_count; /* включённых записей, прочитанных
   из Flash при старте — диагностика «триггеры пропали после питания» */
@@ -138,6 +146,7 @@ void Trigger_Init(void)
   memset(s_cache, 0, sizeof(s_cache));
   memset(s_cache_valid, 0, sizeof(s_cache_valid));
   s_fired_count = 0U;
+  s_dropped_count = 0U;
   s_max_lateness_ms = 0U;
   s_count = 0U;
   s_staged_max = 0U;
@@ -507,6 +516,7 @@ static void arm_response(uint8_t index, const trigger_t *t, uint8_t echo)
   s_pending[index].remaining = t->tx_count ? t->tx_count : 1U;
   s_pending[index].interval_ms = t->tx_interval_ms;
   s_pending[index].echo = echo;
+  s_pending[index].retries = 0U;
 }
 
 /* Одна отправка ответа триггера. В кэш-режиме шлётся последний кадр из
@@ -566,6 +576,10 @@ void Trigger_OnFrame(const can_frame_t *frame)
          * CanBridge_Transmit()'s own mailbox wait). */
         if (send_response(t, i, frame->echo)) {
           s_fired_count++;
+        } else {
+          /* Ящики заняты — не дропаем молча: переводим отправку на
+           * путь с ретраями в Trigger_Poll(). */
+          arm_response(i, t, frame->echo);
         }
       } else {
         arm_response(i, t, frame->echo);
@@ -585,9 +599,20 @@ void Trigger_Poll(void)
       }
       uint8_t index = s_pending[i].trigger_index;
       const trigger_t *t = &s_triggers[index];
-      if (send_response(t, index, s_pending[i].echo)) {
+      if (!send_response(t, index, s_pending[i].echo)) {
+        /* Ящики заняты: попытку не сжигаем, переарм на ~1 мс. Раньше
+         * провал тут молча съедал отправку — ответ триггера пропадал
+         * на нагруженной шине без следа ни в одном счётчике. */
+        if (s_pending[i].retries < TRIGGER_TX_RETRY_MAX) {
+          s_pending[i].retries++;
+          s_pending[i].fire_at_tick = now + TRIGGER_TX_RETRY_DELAY_MS;
+          continue;
+        }
+        s_dropped_count++;
+      } else {
         s_fired_count++;
       }
+      s_pending[i].retries = 0U;
       /* Повторные отправки («Кол-во отправок» > 1): переарм на
        * tx_interval_ms; в кэш-режиме каждый повтор шлёт уже свежие
        * данные кэша. */
@@ -601,13 +626,17 @@ void Trigger_Poll(void)
   }
 }
 
-void Trigger_GetStats(uint32_t *fired_count, uint32_t *max_lateness_ms)
+void Trigger_GetStats(uint32_t *fired_count, uint32_t *max_lateness_ms,
+                      uint32_t *dropped_count)
 {
   if (fired_count != NULL) {
     *fired_count = s_fired_count;
   }
   if (max_lateness_ms != NULL) {
     *max_lateness_ms = s_max_lateness_ms;
+  }
+  if (dropped_count != NULL) {
+    *dropped_count = s_dropped_count;
   }
 }
 
