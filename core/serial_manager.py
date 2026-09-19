@@ -638,7 +638,23 @@ class SerialManager(QObject):
             # ответ подбирал перезапущенный reader. Порт открыт с
             # timeout=0.1: read() возвращает накопленное мгновенно либо
             # ждёт первый байт до ~100 мс — и держит канал чтения живым.
-            chunk = self._port.read(256)
+            try:
+                chunk = self._port.read(256)
+            except (serial.SerialException, OSError):
+                # Команды, после которых МК сразу перезагружается
+                # (CFG_WRITE, FACTORY_RESET): ack уходит в CDC, но
+                # teardown порта обгоняет его чтение хостом —
+                # «Device not configured» при исполненной команде,
+                # а UI показывал ложную ошибку и уходил на
+                # bootloader-fallback. Мёртвый порт здесь и есть
+                # подтверждение: при отказе прошивка ответила бы
+                # статусом и НЕ перезагружалась. Смерть в фазе
+                # записи сюда не попадает — write() выше ловит свои
+                # исключения отдельно.
+                if command in _REBOOTING_COMMANDS:
+                    self.expect_reboot()
+                    return b""
+                raise
             if chunk:
                 buffer.extend(chunk)
             # Разбираем поток по кадрам: CAN-кадры МК→ПК пропускаем
