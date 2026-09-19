@@ -16,8 +16,11 @@ from core.can_protocol import (
     CMD_CAN_MODE,
     CMD_CAN_SPEED,
     CMD_CAN_STATS,
+    CMD_TRIGGER_COMMIT,
     CMD_TRIGGER_ENABLE,
+    CMD_TRIGGER_STAGE,
     CMD_TRIGGER_STATS,
+    CMD_TRIGGER_WRITE,
     CMD_SYSTEM_INFO,
     CMD_USB_STATS,
     CMD_CFG_FACTORY_RESET,
@@ -52,6 +55,15 @@ logger = get_logger(__name__)
 # reader'ом следующие команды уходят в мёртвый порт таймаутами
 # («прогрузка конфига после заводского сброса не работала ни разу»).
 _REBOOTING_COMMANDS = frozenset((CMD_CFG_WRITE, CMD_CFG_FACTORY_RESET))
+# Команды, меняющие состояние устройства (Flash/настройки/таблица
+# триггеров) — их исходящий лог обязателен для полевой диагностики:
+# фантомный сброс МК со стёртыми триггерами оказался недоказуем именно
+# из-за того, что запись в порт из request_control не логировалась.
+_MUTATING_COMMANDS = frozenset((
+    CMD_CFG_WRITE, CMD_CFG_FACTORY_RESET, CMD_TRIGGER_WRITE,
+    CMD_TRIGGER_ENABLE, CMD_TRIGGER_STAGE, CMD_TRIGGER_COMMIT,
+    CMD_CAN_MODE, CMD_CAN_SPEED,
+))
 
 # USB IDs приложения (загрузчик — PID 0x5741, см. core/bootloader.py).
 # Нужны для поиска устройства при пере-энумерации на другой COM.
@@ -351,6 +363,10 @@ class SerialManager(QObject):
         # перезапускать reader, пока внешняя сессия ещё жива — иначе
         # reader съедал бы ответы чужих команд.
         self._control_session_depth = 0
+        # Версия протокола подключённой прошивки из CMD_SYSTEM_INFO —
+        # от неё зависит допустимый формат деструктивных команд
+        # (ключи v3). 0 = неизвестно/эмуляция — слать легаси-формат.
+        self._device_protocol_version = 0
 
     def is_open(self) -> bool:
         """Возвращает True, если порт открыт."""
@@ -368,6 +384,13 @@ class SerialManager(QObject):
             if self._port is None:
                 return ""
             return getattr(self._port, "port", "")
+
+    def device_protocol_version(self) -> int:
+        """Версия протокола прошивки из последнего CMD_SYSTEM_INFO.
+
+        0 — неизвестно (эмуляция или устройство не отдало SYSTEM_INFO):
+        в этом случае деструктивные команды слать в легаси-формате. """
+        return self._device_protocol_version
 
     def open_port(self, port_name: str, baudrate: int, emulation: bool = False, auto_reconnect: bool = False, error_probability: int = 0) -> bool:
         """Открывает COM-порт (реальный или эмулированный).
@@ -425,6 +448,7 @@ class SerialManager(QObject):
                 if not emulation:
                     try:
                         info = self.read_system_info()
+                        self._device_protocol_version = int(info.get("protocol_version") or 0)
                         logger.info(
                             "Прошивка МК: app v%d, протокол %d, сборка «%s», commit %s",
                             int(info.get("application_version") or 0),
@@ -674,6 +698,18 @@ class SerialManager(QObject):
         # таймаут до физического переподключения порта). Дописываем до
         # конца, чтобы устройство видело только целые структуры.
         data = bytes((command & 0xFF, len(payload))) + payload
+        # Изменяющие состояние команды логируем всегда: полевой инцидент
+        # с фантомным сбросом МК (самопроизвольный NVIC_SystemReset и
+        # стёртые триггеры) был недоказуем именно потому, что в логе
+        # видны только кадры send_data, а команды уходили незаметно.
+        # Читающие опросы (stats/info идут каждую секунду) — в debug,
+        # иначе лог превращается в шум.
+        log_fn = logger.info if command in _MUTATING_COMMANDS else logger.debug
+        log_fn(
+            "Команда в порт %s: 0x%02X, payload=%d байт%s",
+            self.current_port_name(), command, len(payload),
+            f", {payload[:16].hex(' ')}" if payload else "",
+        )
         written = 0
         write_deadline = time.time() + timeout
         while written < len(data):

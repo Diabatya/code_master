@@ -58,6 +58,7 @@ from core.firmware_utils import (
     validate_application_vector,
 )
 from core.can_protocol import (
+    CFG_WRITE_TRAILER,
     CMD_CFG_READ,
     CMD_CFG_WRITE,
     DEVICE_TYPE_ANALOG,
@@ -2116,6 +2117,10 @@ class FlashDialog(QDialog):
         serial = self._serial_edit.text().strip().encode("ascii", errors="ignore")[:10]
         payload = bytes((len(name),)) + name + bytes((len(serial),)) + serial
         payload += bytes((0x83, 0x04, 0x40, 0x57))
+        # Трейлер-ключ протокола v3: новая прошивка отвергает C1 без него
+        # (защита от фантомной записи при рассинхроне потока), старая
+        # прошивка лишние байты просто игнорирует.
+        payload += CFG_WRITE_TRAILER
         try:
             self._serial_manager.request_control(CMD_CFG_WRITE, payload)
             name_str = name.decode("ascii", errors="ignore")

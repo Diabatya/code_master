@@ -41,6 +41,7 @@ from core.can_protocol import (
     DEVICE_TYPE_BASIC,
     DEVICE_TYPE_CAN_FD,
     EXPECTED_PROTOCOL_VERSION,
+    FACTORY_RESET_KEY,
 )
 
 from core.serial_manager import SerialManager
@@ -1715,7 +1716,10 @@ class SettingsWindow(QMainWindow):
             device_reset = False
             if self._serial_manager.is_open() and not self._config.get("emulation", False):
                 try:
-                    self._serial_manager.request_control(CMD_CFG_FACTORY_RESET, b"")
+                    # Ключ "FCLR" обязателен для прошивки с протоколом
+                    # v3 — голый 0xC2 она отвергает как возможный фантом
+                    # рассинхрона потока.
+                    self._serial_manager.request_control(CMD_CFG_FACTORY_RESET, FACTORY_RESET_KEY)
                     device_reset = True
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("CMD_CFG_FACTORY_RESET не подтверждён устройством: %s", exc)

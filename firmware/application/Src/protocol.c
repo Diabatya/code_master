@@ -43,6 +43,19 @@
 #define CMD_USB_STATS            0xCCU
 #define CMD_CAN_MODE             0xCDU /* управление режимом и терминатором CAN */
 #define CMD_CAN_SPEED            0xCEU /* установка бод-рейта CAN-канала (runtime + persist) */
+
+/* Защита деструктивных команд от фантомного срабатывания при рассинхроне
+ * CDC-потока: парсер после битого кадра пересматривает следующие байты
+ * как маркеры команд, и одиночный мусорный 0xC2 раньше стирал ВСЕ
+ * триггеры и перезагружал МК (полевой лог: «сброс=0x14», 0 триггеров
+ * после переподключения при живом обмене bb-кадрами). Теперь команда
+ * исполняется только с ключом в payload — случайная последовательность
+ * байт его практически не воспроизведёт. Протокол версии 3. */
+#define CFG_WRITE_TRAILER_0     0xA5U /* трейлер CMD_CFG_WRITE: ...[A5][5A] */
+#define CFG_WRITE_TRAILER_1     0x5AU
+static const uint8_t FACTORY_RESET_KEY[4] = { 'F', 'C', 'L', 'R' };
+#define TRIGGER_CLEAR_KEY       0xA5U /* CMD_TRIGGER_COMMIT: [0x00][A5] = стереть все */
+
 #define APP_METADATA_ADDR       0x0803D000U
 #define APP_METADATA_MAGIC      0x41505031U
 #define STM32_UID96_ADDR        0x1FFFF7E8U /* Unique Device ID (96 бит), F1 */
@@ -238,6 +251,17 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       uint16_t vid = (uint16_t)(payload[p] | (payload[p + 1] << 8)); p += 2U;
       uint16_t pid = (uint16_t)(payload[p] | (payload[p + 1] << 8)); p += 2U;
 
+      /* Трейлер-ключ обязателен (протокол v3): без него мусорный 0xC1
+       * из рассинхрона потока переписывал бы имя/серийник и сбрасывал
+       * МК. Старый хост без трейлера получает отказ и уходит на запись
+       * конфигурации через DFU; старая прошивка лишние байты в конце
+       * payload просто игнорирует — обратная совместимость держится. */
+      if ((payload_len - p) != 2U ||
+          payload[p] != CFG_WRITE_TRAILER_0 || payload[p + 1U] != CFG_WRITE_TRAILER_1) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+
       uint8_t ok = DeviceConfig_Write(name, name_len, serial, serial_len, vid, pid);
       send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
       if (ok) {
@@ -252,6 +276,14 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     }
 
     case CMD_CFG_FACTORY_RESET: {
+      /* Ключ "FCLR" обязателен (протокол v3): голый байт 0xC2 с любым
+       * байтом длины раньше исполнялся как есть — рассинхрон потока
+       * стирал все триггеры и сбрасывал МК без ведома хоста. */
+      if (payload_len != (uint8_t)sizeof(FACTORY_RESET_KEY) ||
+          memcmp(payload, FACTORY_RESET_KEY, sizeof(FACTORY_RESET_KEY)) != 0) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
       /* Заводские настройки стирают хранилище триггеров — иначе записи
        * оставались во Flash и продолжали срабатывать после «сброса».
        * Страницу конфигурации (имя/серийный номер/VID/PID) команда НЕ
@@ -397,13 +429,21 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
 
     case CMD_TRIGGER_COMMIT: {
       /* payload[0] — итоговая длина списка триггеров (упакованного,
-       * без пустых слотов). Пустой payload — старое поведение: список
-       * сохраняет прежний размер, staged-записи накладываются. */
-      if (payload_len > 1U) {
+       * без пустых слотов). Форма [0x00][TRIGGER_CLEAR_KEY] — стереть
+       * весь список: голый «CB 01 00» намеренно отвергается (протокол
+       * v3) — рассинхрон потока не должен мочь обнулить хранилище.
+       * Пустой payload («закоммить staged, сохранив размер») тоже
+       * отвергается: хост его не шлёт, а двухбайтовый мусорный «CB 00»
+       * — ровно тот фантом, из-за которого триггеры пропадали. */
+      uint8_t total;
+      if (payload_len == 1U && payload[0] != 0U) {
+        total = payload[0];
+      } else if (payload_len == 2U && payload[0] == 0U && payload[1] == TRIGGER_CLEAR_KEY) {
+        total = 0U;
+      } else {
         send_new_cmd_response(cmd, 0x01U, NULL, 0U);
         break;
       }
-      uint8_t total = payload_len ? payload[0] : 0xFFU;
       uint8_t ok = Trigger_Commit(total);
       send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
       break;
@@ -481,7 +521,7 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * Старые версии ПК читают только первые 16 байт. */
       uint8_t out[64] = {
         s_device_version,
-        2U, /* protocol version: 2 = CMD_CAN_SPEED поддерживается */
+        3U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи деструктивных команд */
         0U,
         1U,
         cfg->reserved[0],

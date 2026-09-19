@@ -154,3 +154,25 @@ def test_sync_from_device_clears_suspension(tab) -> None:
     tab._read_device_triggers = lambda: records
     assert tab.sync_from_device() is True
     assert not any(tab._pc_suspended)
+
+
+def test_commit_payload_clear_all_keyed_on_v3() -> None:
+    """Прошивка v3 принимает стирание всех триггеров только с ключом:
+    голый «CB 01 00» отвергается как фантом рассинхрона (полевой баг —
+    мусорный COMMIT обнулял хранилище)."""
+    assert trigger_module._commit_payload(0, 3) == bytes((0, 0xA5))
+    assert trigger_module._commit_payload(0, 4) == bytes((0, 0xA5))
+
+
+def test_commit_payload_clear_all_legacy_on_v2() -> None:
+    """Старая прошивка ключ не знает — ей легаси-формат «CB 01 00»,
+    иначе «удалить все триггеры» молча отваливалось бы на v2."""
+    assert trigger_module._commit_payload(0, 2) == b"\x00"
+    assert trigger_module._commit_payload(0, 0) == b"\x00"
+
+
+def test_commit_payload_normal_unchanged() -> None:
+    """Обычный COMMIT формата не менял — иначе запись триггеров
+    отвалилась бы на всех прошивках."""
+    assert trigger_module._commit_payload(5, 3) == b"\x05"
+    assert trigger_module._commit_payload(5, 2) == b"\x05"

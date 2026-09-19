@@ -42,7 +42,16 @@ CMD_CAN_SPEED = 0xCE  # Установка бод-рейта CAN-канала (�
 # CMD_SYSTEM_INFO (payload[1]); меньше — функции нового протокола
 # (stage/commit триггеров, cfg-команды, смена бод-рейта CAN) на
 # устройстве отсутствуют.
-EXPECTED_PROTOCOL_VERSION = 2
+EXPECTED_PROTOCOL_VERSION = 3
+
+# Ключи деструктивных команд (протокол v3): прошивка отвергает
+# CMD_CFG_WRITE без трейлера A5 5A, CMD_CFG_FACTORY_RESET без "FCLR" и
+# CMD_TRIGGER_COMMIT с total=0 без байта-ключа — мусорный байт команды
+# из рассинхрона CDC-потока (пересмотр байтов после битого кадра) не
+# может больше стереть триггеры, переписать идентичность или сбросить МК.
+CFG_WRITE_TRAILER = b"\xA5\x5A"
+FACTORY_RESET_KEY = b"FCLR"
+TRIGGER_CLEAR_ALL_KEY = 0xA5
 
 # Типы устройств
 DEVICE_TYPE_BASIC = 0x00   # Базовое CAN 2.0

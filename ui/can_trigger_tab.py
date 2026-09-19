@@ -30,6 +30,7 @@ from core.can_protocol import (
     CMD_TRIGGER_COMMIT,
     CMD_TRIGGER_READ,
     CMD_TRIGGER_STAGE,
+    TRIGGER_CLEAR_ALL_KEY,
     pack_can_frame,
 )
 from core.serial_manager import SerialManager
@@ -64,6 +65,18 @@ TRIGGER_COUNT = TRIGGER_MAX_SLOTS
 MAX_RESPONSE_FRAMES = 5
 CHANNELS = [tr("CAN1"), tr("CAN2"), tr("CAN1 и CAN2")]
 BIT_RATES = [tr("11 бит"), tr("29 бит")]
+
+
+def _commit_payload(total: int, protocol_version: int) -> bytes:
+    """Payload для CMD_TRIGGER_COMMIT.
+
+    Полное стирание списка (total=0): прошивка протокола v3 требует
+    байт-ключ — голый «CB 01 00» она отвергает как возможный фантом
+    рассинхрона CDC-потока. Старая прошивка ключ не знает и отвергла бы
+    саму форму «CB 02 00 A5» — ей шлём легаси-формат."""
+    if total == 0 and protocol_version >= 3:
+        return bytes((0, TRIGGER_CLEAR_ALL_KEY))
+    return bytes((total,))
 
 
 class _IdValidator:
@@ -1497,8 +1510,17 @@ class CanTriggerTab(QWidget):
         changed = 0
         staged: List[Tuple[int, bytes]] = []
         default_payload = pack_trigger({})
-        with self._serial_manager.control_session():
-            changed = self._write_to_device_locked(default_payload, staged)
+        try:
+            with self._serial_manager.control_session():
+                changed = self._write_to_device_locked(default_payload, staged)
+        except Exception:
+            # Запись прервана на полпути (таймаут, отказ COMMIT, обрыв
+            # порта): состояние Flash неизвестно. Снимаем флаги
+            # «исполняется на МК» — приложение берёт триггеры на себя:
+            # возможный дубль ответа виден на шине, а молчащий триггер —
+            # невидимый сбой (в поле именно так «пропадали» записи).
+            self._device_managed = [False] * len(self._blocks)
+            raise
         # «Сохранить» подтвердило конфигурацию: неуправляемые МК блоки
         # (сложные ответы, не влезающие в trigger_t) исполняются
         # приложением, подвеска загрузки файла снимается.
@@ -1636,9 +1658,10 @@ class CanTriggerTab(QWidget):
 
         if changed or len(device) != len(target):
             _report(75, tr("Фиксация во Flash"))
-            self._serial_manager.request_control(
-                CMD_TRIGGER_COMMIT, bytes((len(target),))
+            commit_payload = _commit_payload(
+                len(target), self._serial_manager.device_protocol_version()
             )
+            self._serial_manager.request_control(CMD_TRIGGER_COMMIT, commit_payload)
             logger.info(
                 "COMMIT триггеров: записей=%d, изменено=%d, на устройстве было=%d",
                 len(target), changed, len(device),
