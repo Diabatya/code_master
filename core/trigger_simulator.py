@@ -66,6 +66,8 @@ class TriggerSimulator:
 
     @staticmethod
     def _src_matches(t: Dict[str, Any], frame: Dict[str, Any]) -> bool:
+        """Побайтовый матч источника кэша: каждый байт должен попасть в
+        свой [from[i], to[i]]; from[i] > to[i] — wildcard «X» (игнор)."""
         if t.get("src_channel", 0) != 2 and t.get("src_channel", 0) != frame["channel"]:
             return False
         if int(t.get("src_extended", 0)) != int(frame.get("extended", 0)):
@@ -79,12 +81,13 @@ class TriggerSimulator:
         src_to = bytes(t.get("src_to", b"\xff" * 8))
         data = bytes(frame.get("data", b""))
         dlc = int(frame.get("dlc", len(data)))
-        from_v = to_v = value = 0
         for i in range(min(src_dlc, 8)):
-            from_v = (from_v << 8) | src_from[i]
-            to_v = (to_v << 8) | src_to[i]
-            value = (value << 8) | (data[i] if i < dlc and i < len(data) else 0)
-        return from_v <= value <= to_v
+            if src_from[i] > src_to[i]:
+                continue
+            b = data[i] if i < dlc and i < len(data) else 0
+            if b < src_from[i] or b > src_to[i]:
+                return False
+        return True
 
     # --- ответы ---------------------------------------------------------
 
@@ -130,7 +133,17 @@ class TriggerSimulator:
         sent: List[Dict[str, Any]] = []
         for i, t in enumerate(self._triggers):
             if t.get("enabled") and t.get("cache_enabled") and self._src_matches(t, frame):
-                self._cache[i] = dict(frame)
+                cached = dict(frame)
+                # Wildcard-позиции (from>to) обнуляются при захвате —
+                # в ответе на их месте уйдёт 0x00 (порт Trigger_OnFrame).
+                src_from = bytes(t.get("src_from", b"\x00" * 8))
+                src_to = bytes(t.get("src_to", b"\xff" * 8))
+                data = bytearray(cached.get("data", b""))
+                for j in range(min(int(t.get("src_dlc", 0)), 8)):
+                    if src_from[j] > src_to[j] and j < len(data):
+                        data[j] = 0
+                cached["data"] = bytes(data)
+                self._cache[i] = cached
                 self._cache_valid[i] = True
             if self._frame_matches(t, frame):
                 sends = int(t.get("tx_count", 0)) or 1

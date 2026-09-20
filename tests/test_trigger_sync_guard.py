@@ -142,7 +142,7 @@ def test_file_loaded_triggers_do_not_execute_until_save(tab) -> None:
     «отвечало» сразу после загрузки, как будто конфиг прогрузили в МК)."""
     sent: List[Dict[str, Any]] = []
     tab._send_responses = sent.append
-    tab._send_cached_frame = sent.append
+    tab._send_cached_frames = sent.append
     tab.set_config([_cfg_trigger()], suspend_execution=True)
     tab.process_frame(
         {"id": 0x111, "channel": 1, "data": b"\xaa", "rtr": False, "extended": False}
@@ -398,3 +398,139 @@ def test_validate_silent_for_normal_trigger(tab) -> None:
     errors, warnings = tab._validate_config([_cfg_trigger()])
     assert not errors
     assert not any("выключен" in w or "приложением" in w for w in warnings)
+
+
+def _cache_cfg() -> Dict[str, Any]:
+    """Триггер с двумя строками кэша и wildcard «X» в приёме и диапазонах."""
+    return {
+        "active": True,
+        "cache": True,
+        "recv_channel": 0, "recv_bit": 0, "recv_id": "111", "recv_dlc": 3,
+        "recv_rtr": 0, "recv_data": "AA X 33",
+        "responses": [],
+        "cache_rows": [
+            {
+                "channel": 0, "bit": 0, "id": "300", "dlc": 2,
+                "tx_channel": 1,
+                "from": "11 X", "to": "22 X",
+                "delay_before_send": 10, "delay_between": 5,
+                "count": 2, "next_delay": 40,
+            },
+            {
+                "channel": 0, "bit": 0, "id": "400", "dlc": 4,
+                "tx_channel": 0,
+                "from": "00 00 00 00", "to": "FF FF FF FF",
+                "delay_before_send": 0, "delay_between": 7,
+                "count": 3, "next_delay": 0,
+            },
+        ],
+    }
+
+
+def test_recv_wildcard_packs_zero_mask(tab) -> None:
+    """«X» в поле приёма → байт не сравнивается (rx_data_mask=0), а при
+    вычитке показывается как «X» — не «00»."""
+    tab.set_config([_cache_cfg()])
+    records = tab._project_block_records(0)
+    assert records is not None and records
+    assert records[0]["rx_data_mask"] == bytes((0xFF, 0x00, 0xFF, 0, 0, 0, 0, 0))
+
+    device_records = _device_records(tab, [0])
+    tab.set_config([])
+    tab._read_device_triggers = lambda: device_records
+    assert tab.sync_from_device() is True
+    data_edits = tab._blocks[0]["recv"]["data"]
+    assert data_edits[0].text() == "AA"
+    assert data_edits[1].text() == "X"
+    assert data_edits[2].text() == "33"
+
+
+def test_cache_rows_project_to_record_group(tab) -> None:
+    """Каждая строка кэша — своя запись с собственным src-фильтром и
+    слотом кэша; group_seq и абсолютные задержки — как у многофрейма.
+    «X» в От/До кодируется инвертированным диапазоном (from>to)."""
+    tab.set_config([_cache_cfg()])
+    records = tab._project_block_records(0)
+    assert records is not None and len(records) == 2
+    assert all(r["cache_enabled"] == 1 and r["rx_id"] == 0x111 for r in records)
+    assert records[0]["src_id"] == 0x300 and records[0]["group_seq"] == 0
+    assert records[0]["src_from"][0] == 0x11 and records[0]["src_to"][0] == 0x22
+    # «X» — инвертированный диапазон: байт игнорируется, в кэше = 0x00.
+    assert records[0]["src_from"][1] == 0xFF and records[0]["src_to"][1] == 0x00
+    assert records[0]["delay_ms"] == 10 and records[0]["tx_count"] == 2
+    assert records[1]["src_id"] == 0x400 and records[1]["group_seq"] == 1
+    # 10 + 5*(2-1) повторов строки 0 + пауза 40 перед следующей строкой.
+    assert records[1]["delay_ms"] == 55
+    assert records[1]["tx_count"] == 3 and records[1]["tx_interval_ms"] == 7
+
+
+def test_cache_rows_group_syncs_back(tab) -> None:
+    """Группа кэш-записей устройства собирается обратно в строки кэша —
+    включая «X» на месте инвертированных диапазонов."""
+    tab.set_config([_cache_cfg()])
+    device_records = _device_records(tab, [0])
+    tab.set_config([])
+    tab._read_device_triggers = lambda: device_records
+    assert tab.sync_from_device() is True
+    rows = tab._blocks[0]["cache"]["rows"]
+    assert len(rows) == 2
+    assert rows[0]["id"].text() == "300" and rows[1]["id"].text() == "400"
+    assert rows[0]["from_data"][1].text() == "X"
+    assert rows[0]["to_data"][1].text() == "X"
+    assert rows[0]["from_data"][0].text() == "11"
+    assert rows[0]["count"].value() == 2 and rows[1]["count"].value() == 3
+    assert rows[0]["next_delay"].value() == 40
+
+
+def test_pc_cache_wildcard_zeroing(tab) -> None:
+    """PC-исполнение: кадр в диапазоне попадает в кэш, wildcard-байт
+    обнуляется; вне диапазона — не кэшируется; срабатывание шлёт кэш."""
+    cfg = _cache_cfg()
+    # Нулевые задержки — иначе отправка уходит в QTimer.singleShot.
+    cfg["cache_rows"][0]["delay_before_send"] = 0
+    cfg["cache_rows"][0]["count"] = 1
+    cfg["cache_rows"][0]["next_delay"] = 0
+    tab.set_config([cfg])
+    # Кадр источника: 0xB5 ∈ [0x11..0x22]? Нет — вне диапазона.
+    src = {"id": 0x300, "channel": 1, "data": bytes([0x15, 0x77]),
+           "extended": False, "rtr": False}
+    tab.process_frame(src)
+    # 0x15 в [0x11..0x22], байт 1 — wildcard → закэширован с 0x00.
+    assert tab._pc_cache.get((0, 0))["data"] == bytes([0x15, 0x00])
+    # За пределами диапазона — кэш не пополняется.
+    tab._pc_cache.clear()
+    tab.process_frame({**src, "data": bytes([0x05, 0x77])})
+    assert (0, 0) not in tab._pc_cache
+    # Срабатывание по приёму → ответ из кэша на канале строки (CAN2).
+    tab.process_frame(src)
+    sent: List[tuple] = []
+    tab._send_frame = lambda *a, **k: sent.append(a)
+    tab.process_frame({"id": 0x111, "channel": 1, "data": bytes([0xAA, 0x00, 0x33]),
+                       "extended": False, "rtr": False})
+    assert sent, "ответ из кэша не отправлен"
+    assert sent[0][0] == 0x300  # id закэшированного кадра
+    assert sent[0][2] == 1      # tx_channel строки = CAN2 (index 1)
+
+
+def test_simulator_src_wildcard() -> None:
+    """Симулятор повторяет прошивку: инвертированный диапазон = байт
+    игнорируется при матче и обнуляется в кэше."""
+    from core.trigger_simulator import simulate
+
+    record = unpack_trigger(pack_trigger({
+        "enabled": 1, "rx_channel": 0, "rx_id": 0x111,
+        "rx_id_mask": 0x7FF, "rx_dlc": 0, "rx_data": b"\x00" * 8,
+        "rx_data_mask": b"\x00" * 8,
+        "tx_channel": 0, "cache_enabled": 1,
+        "src_channel": 0, "src_id": 0x300, "src_dlc": 2,
+        "src_from": bytes([0x10, 0xFF]), "src_to": bytes([0x20, 0x00]),
+        "tx_count": 1, "delay_ms": 0, "tx_interval_ms": 0,
+    }))
+    frames = [
+        {"time_ms": 0, "channel": 1, "id": 0x300, "data": bytes([0x15, 0x99])},
+        {"time_ms": 10, "channel": 1, "id": 0x111, "data": b""},
+    ]
+    result = simulate([record], frames)
+    tx = result["tx_frames"]
+    assert tx and tx[0]["id"] == 0x300
+    assert tx[0]["data"] == bytes([0x15, 0x00]), "wildcard-байт уходит как 0x00"

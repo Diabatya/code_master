@@ -92,8 +92,8 @@ typedef struct __attribute__((packed)) {
   uint8_t  src_extended;
   uint32_t src_id;          /* кадр кэшируется при точном совпадении ID */
   uint8_t  src_dlc;
-  uint8_t  src_from[8];     /* нижняя граница Data (big-endian, src_dlc байт) */
-  uint8_t  src_to[8];       /* верхняя граница Data */
+  uint8_t  src_from[8];     /* побайтовая нижняя граница Data (src_dlc байт) */
+  uint8_t  src_to[8];       /* побайтовая верхняя граница; from>to = wildcard «X» (байт игнорируется, в кэше = 0x00) */
   uint16_t tx_interval_ms;  /* пауза между повторными отправками */
   uint8_t  tx_count;        /* кол-во отправок (0 трактуется как 1) */
   uint8_t  rx_rtr;          /* приём: 0=любой кадр, 1=только RTR, 2=только data */

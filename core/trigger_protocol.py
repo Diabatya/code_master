@@ -52,11 +52,24 @@ def count_configured_triggers(triggers: list) -> int:
     for trigger in triggers or []:
         if not isinstance(trigger, dict):
             continue
-        responses = trigger.get("responses") or []
-        filled = [
-            r for r in responses
-            if isinstance(r, dict) and str(r.get("id", "")).strip()
-        ]
+        # Кэш-триггер разворачивается по строкам кэша (у каждой свой
+        # src-фильтр), обычный — по фреймам ответа.
+        if trigger.get("cache"):
+            rows = trigger.get("cache_rows")
+            if isinstance(rows, list):
+                filled = [
+                    r for r in rows
+                    if isinstance(r, dict) and str(r.get("id", "")).strip()
+                ]
+            else:  # легаси-одиночный кэш
+                filled = [{"id": trigger.get("cache_id", "")}] if str(
+                    trigger.get("cache_id", "")
+                ).strip() else []
+        else:
+            filled = [
+                r for r in trigger.get("responses") or []
+                if isinstance(r, dict) and str(r.get("id", "")).strip()
+            ]
         if (
             trigger.get("active")
             or str(trigger.get("recv_id", "")).strip()

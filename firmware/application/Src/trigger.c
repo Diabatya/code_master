@@ -575,7 +575,10 @@ static uint8_t frame_matches(const trigger_t *t, const can_frame_t *frame)
 }
 
 /* Матчер «Откуда читаем» кэш-режима: кадр кэшируется, если канал/битность/
- * ID совпали, а Data (big-endian, src_dlc байт) попадает в [from, to].
+ * ID совпали, а каждый байт Data (src_dlc байт) попадает в свой диапазон
+ * [src_from[i], src_to[i]]. Инвертированный диапазон (from[i] > to[i]) —
+ * wildcard «X»: байт не участвует в сравнении, а при захвате в кэш
+ * обнуляется (в ответе уйдёт 0x00 — см. Trigger_OnFrame).
  * src_dlc == 0 — данные не проверяются (матч только по ID). */
 static uint8_t src_matches(const trigger_t *t, const can_frame_t *frame)
 {
@@ -588,18 +591,18 @@ static uint8_t src_matches(const trigger_t *t, const can_frame_t *frame)
   if (t->src_id != frame->id) {
     return 0U;
   }
-  if (t->src_dlc == 0U) {
-    return 1U;
-  }
-  uint64_t from = 0U, to = 0U, value = 0U;
   for (uint8_t i = 0; i < t->src_dlc && i < 8U; i++) {
-    from = (from << 8) | t->src_from[i];
-    to = (to << 8) | t->src_to[i];
+    if (t->src_from[i] > t->src_to[i]) {
+      continue;
+    }
     /* Кадр короче src_dlc — недостающие байты считаются нулевыми, как в
-     * host-логике _data_in_range() (ljust нулями). */
-    value = (value << 8) | (i < frame->dlc ? frame->data[i] : 0U);
+     * host-логике _cache_src_matches(). */
+    uint8_t b = (i < frame->dlc) ? frame->data[i] : 0U;
+    if (b < t->src_from[i] || b > t->src_to[i]) {
+      return 0U;
+    }
   }
-  return (from <= value && value <= to) ? 1U : 0U;
+  return 1U;
 }
 
 static void arm_response(uint8_t index, const trigger_t *t, uint8_t echo)
@@ -659,6 +662,14 @@ void Trigger_OnFrame(const can_frame_t *frame)
      * до отправки. */
     if (t->enabled && t->cache_enabled && src_matches(t, frame)) {
       s_cache[i] = *frame;
+      /* Wildcard-позиции (from>to) в кэше обнуляются: при ответе на
+       * месте игнорированных байтов уйдёт 0x00, а не случайное значение
+       * последнего кадра. */
+      for (uint8_t j = 0; j < t->src_dlc && j < 8U; j++) {
+        if (t->src_from[j] > t->src_to[j]) {
+          s_cache[i].data[j] = 0U;
+        }
+      }
       s_cache_valid[i] = 1U;
     }
     if (frame_matches(t, frame)) {

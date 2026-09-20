@@ -45,7 +45,7 @@ from core.trigger_protocol import (
 from models.config import Config
 from models.logger import get_logger
 from models.translations import _ as tr
-from models.utils import hex_to_int, int_to_hex, parse_data_bytes
+from models.utils import hex_to_int, int_to_hex
 from ui.hex_edit import create_data_field_widget
 from ui.id_edit import IdPasteEdit
 from ui.memory_indicator import MemoryIndicator
@@ -156,6 +156,11 @@ class CanTriggerTab(QWidget):
         # конфиг прогрузили в МК. Снимается успешной write_to_device или
         # вычиткой устройства.
         self._pc_suspended: List[bool] = []
+        # Персистентный кэш PC-исполнения: (индекс блока, строка кэша) →
+        # последний подошедший кадр. Живёт между кадрами (как s_cache в
+        # прошивке); сбрасывается при сохранении конфигурации — фильтры
+        # могли измениться и старые данные уже не отвечают им.
+        self._pc_cache: Dict[Tuple[int, int], Dict[str, Any]] = {}
         self._memory_indicator = MemoryIndicator(self)
 
         self._create_widgets()
@@ -178,8 +183,10 @@ class CanTriggerTab(QWidget):
         edit._id_validator = _IdValidator(edit, bit_combo)
         return edit
 
-    def _make_data_edits(self, font: QFont) -> Tuple[List[QLineEdit], QWidget]:
-        return create_data_field_widget(font, 8, edit_width=42)
+    def _make_data_edits(
+        self, font: QFont, allow_x: bool = False
+    ) -> Tuple[List[QLineEdit], QWidget]:
+        return create_data_field_widget(font, 8, edit_width=42, allow_x=allow_x)
 
     def _make_channel_combo(self, font: QFont) -> QComboBox:
         combo = QComboBox()
@@ -234,7 +241,9 @@ class CanTriggerTab(QWidget):
         dlc = self._make_dlc_spin(font)
         layout.addWidget(dlc)
         layout.addWidget(QLabel(tr("Data")))
-        data, data_widget = self._make_data_edits(font)
+        # Приёмная маска поддерживает «X» — байт не участвует в
+        # сравнении (rx_data_mask=0 на этой позиции).
+        data, data_widget = self._make_data_edits(font, allow_x=True)
         layout.addWidget(data_widget)
 
         rtr = QPushButton(tr("RTR"))
@@ -512,6 +521,10 @@ class CanTriggerTab(QWidget):
             row["remove_button"].setEnabled(len(block["rows"]) > 1)
 
     def _create_cache_block(self, font: QFont, index: int) -> Dict[str, Any]:
+        """Блок кэша — динамический список строк, как «Фреймы ответа»:
+        у каждой строки свой источник (канал/ID/DLC/диапазон От-До) и
+        своя отправка (канал, паузы, количество). Один входящий кадр
+        может пополнять несколько строк кэша."""
         group = QGroupBox(tr("Кэш"))
         group.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         group_layout = QVBoxLayout(group)
@@ -528,80 +541,133 @@ class CanTriggerTab(QWidget):
         fields_layout.setSpacing(4)
         fields_layout.setContentsMargins(0, 0, 0, 0)
 
-        row1 = QHBoxLayout()
-        row1.setSpacing(4)
-        src_label = QLabel(tr("Откуда читаем"))
-        row1.addWidget(src_label)
-        channel = self._make_channel_combo(font)
-        row1.addWidget(channel)
-        row1.addWidget(QLabel(tr("Бит")))
-        bit = self._make_bit_combo(font)
-        row1.addWidget(bit)
-        row1.addWidget(QLabel(tr("ID")))
-        can_id = self._make_id_edit(font, bit)
-        row1.addWidget(can_id)
-        row1.addWidget(QLabel(tr("DLC")))
-        dlc = self._make_dlc_spin(font)
-        row1.addWidget(dlc)
-        row1.addStretch()
+        header = QHBoxLayout()
+        header_label = QLabel(tr("Строки кэша"))
+        header.addWidget(header_label)
+        header.addStretch()
+        add_button = QPushButton("+")
+        add_button.setFixedSize(32, 32)
+        add_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        add_button.setStyleSheet(
+            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #5A5A7A; }"
+        )
+        add_button.setToolTip(tr("Добавить строку кэша"))
+        header.addWidget(add_button)
+        fields_layout.addLayout(header)
 
-        row2 = QHBoxLayout()
-        row2.setSpacing(4)
-        row2.addWidget(QLabel(tr("От")))
-        from_data, from_data_widget = self._make_data_edits(font)
-        row2.addWidget(from_data_widget)
-        from_copy_paste = create_clipboard_buttons(self, can_id, dlc, from_data, bit)
-        row2.addWidget(from_copy_paste)
-        row2.addSpacing(8)
-        row2.addWidget(QLabel(tr("До")))
-        to_data, to_data_widget = self._make_data_edits(font)
-        row2.addWidget(to_data_widget)
-        to_copy_paste = create_clipboard_buttons(self, can_id, dlc, to_data, bit)
-        row2.addWidget(to_copy_paste)
-        row2.addStretch()
-
-        row3 = QHBoxLayout()
-        row3.setSpacing(4)
-        dst_label = QLabel(tr("Куда отправляем"))
-        row3.addWidget(dst_label)
-        tx_channel = self._make_channel_combo(font)
-        row3.addWidget(tx_channel)
-        delay_before_label = QLabel(tr("Пауза перед отправкой"))
-        delay_between_label = QLabel(tr("Пауза между пакетами"))
-        row3.addWidget(delay_before_label)
-        delay_before_send = self._make_delay_spin(font)
-        delay_before_send.setSuffix("")
-        delay_before_send.setFixedWidth(80)
-        row3.addWidget(delay_before_send)
-        row3.addWidget(delay_between_label)
-        delay_between = self._make_delay_spin(font)
-        delay_between.setSuffix("")
-        delay_between.setFixedWidth(80)
-        row3.addWidget(delay_between)
-        row3.addWidget(QLabel(tr("Кол-во отправок")))
-        count = self._make_count_spin(font, 255)
-        count.setSuffix("")
-        count.setFixedWidth(60)
-        row3.addWidget(count)
-        row3.addStretch()
-
-        dlc.valueChanged.connect(lambda value: self._set_data_enabled(from_data, value))
-        dlc.valueChanged.connect(lambda value: self._set_data_enabled(to_data, value))
-        self._set_data_enabled(from_data, dlc.value())
-        self._set_data_enabled(to_data, dlc.value())
-
-        fields_layout.addLayout(row1)
-        fields_layout.addLayout(row2)
-        fields_layout.addLayout(row3)
+        rows_layout = QVBoxLayout()
+        rows_layout.setSpacing(4)
+        fields_layout.addLayout(rows_layout)
         group_layout.addWidget(fields_widget)
 
         cache = {
             "group": group,
             "cache_check": cache_check,
             "fields_widget": fields_widget,
-            "row2_layout": row2,
+            "header_label": header_label,
+            "rows_layout": rows_layout,
+            "add_button": add_button,
+            "rows": [],
+        }
+        add_button.clicked.connect(lambda: self._add_cache_row(cache, font))
+        self._add_cache_row(cache, font)
+        return cache
+
+    def _create_cache_row(self, font: QFont, cache: Dict[str, Any]) -> Dict[str, Any]:
+        """Одна строка кэша: источник (канал/ID/DLC/диапазон От-До) и
+        отправка закэшированного кадра (канал/паузы/количество).
+        «X» в полях От/До — байт игнорируется при сравнении, а в ответе
+        на его месте уходит 0x00."""
+        widget = QWidget()
+        column = QVBoxLayout(widget)
+        column.setSpacing(2)
+        column.setContentsMargins(0, 0, 0, 0)
+
+        line1 = QHBoxLayout()
+        line1.setSpacing(4)
+        src_label = QLabel(tr("Откуда читаем"))
+        line1.addWidget(src_label)
+        channel = self._make_channel_combo(font)
+        line1.addWidget(channel)
+        line1.addWidget(QLabel(tr("Бит")))
+        bit = self._make_bit_combo(font)
+        line1.addWidget(bit)
+        line1.addWidget(QLabel(tr("ID")))
+        can_id = self._make_id_edit(font, bit)
+        line1.addWidget(can_id)
+        line1.addWidget(QLabel(tr("DLC")))
+        dlc = self._make_dlc_spin(font)
+        line1.addWidget(dlc)
+        line1.addWidget(QLabel(tr("От")))
+        from_data, from_data_widget = self._make_data_edits(font, allow_x=True)
+        line1.addWidget(from_data_widget)
+        from_copy_paste = create_clipboard_buttons(self, can_id, dlc, from_data, bit)
+        line1.addWidget(from_copy_paste)
+        line1.addWidget(QLabel(tr("До")))
+        to_data, to_data_widget = self._make_data_edits(font, allow_x=True)
+        line1.addWidget(to_data_widget)
+        to_copy_paste = create_clipboard_buttons(self, can_id, dlc, to_data, bit)
+        line1.addWidget(to_copy_paste)
+        line1.addStretch()
+
+        line2 = QHBoxLayout()
+        line2.setSpacing(4)
+        dst_label = QLabel(tr("Куда отправляем"))
+        line2.addWidget(dst_label)
+        tx_channel = self._make_channel_combo(font)
+        line2.addWidget(tx_channel)
+        delay_before_label = QLabel(tr("Пауза перед отправкой"))
+        delay_between_label = QLabel(tr("Пауза между пакетами"))
+        line2.addWidget(delay_before_label)
+        delay_before_send = self._make_delay_spin(font)
+        delay_before_send.setSuffix("")
+        delay_before_send.setFixedWidth(80)
+        line2.addWidget(delay_before_send)
+        line2.addWidget(delay_between_label)
+        delay_between = self._make_delay_spin(font)
+        delay_between.setSuffix("")
+        delay_between.setFixedWidth(80)
+        line2.addWidget(delay_between)
+        count_label = QLabel(tr("Кол-во отправок"))
+        line2.addWidget(count_label)
+        count = self._make_count_spin(font, 999)
+        count.setSuffix("")
+        count.setFixedWidth(60)
+        line2.addWidget(count)
+        line2.addStretch()
+
+        remove_button = QPushButton("\u2013")
+        remove_button.setFixedSize(32, 32)
+        remove_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        remove_button.setStyleSheet(
+            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #5A5A7A; }"
+        )
+        remove_button.setToolTip(tr("Удалить строку"))
+        line2.addWidget(remove_button)
+
+        column.addLayout(line1)
+        column.addLayout(line2)
+
+        dlc.valueChanged.connect(lambda value: self._set_data_enabled(from_data, value))
+        dlc.valueChanged.connect(lambda value: self._set_data_enabled(to_data, value))
+        self._set_data_enabled(from_data, dlc.value())
+        self._set_data_enabled(to_data, dlc.value())
+
+        next_delay = self._make_delay_spin(font)
+        next_delay.setFixedWidth(80)
+        pause_widget = self._create_pause_widget(font, next_delay)
+
+        row = {
+            "widget": widget,
+            "pause_widget": pause_widget,
+            "next_delay": next_delay,
             "src_label": src_label,
             "dst_label": dst_label,
+            "delay_before_label": delay_before_label,
+            "delay_between_label": delay_between_label,
+            "count_label": count_label,
             "channel": channel,
             "tx_channel": tx_channel,
             "bit": bit,
@@ -615,12 +681,72 @@ class CanTriggerTab(QWidget):
             "to_copy_paste": to_copy_paste,
             "delay_before_send": delay_before_send,
             "delay_between": delay_between,
-            "delay_before_label": delay_before_label,
-            "delay_between_label": delay_between_label,
             "count": count,
+            "remove_button": remove_button,
         }
-        can_id.set_fill_callback(lambda parsed, c=cache: self._fill_cache_from_packet(c, parsed))
-        return cache
+        remove_button.clicked.connect(lambda: self._remove_cache_row(cache, row))
+        can_id.set_fill_callback(
+            lambda parsed, r=row: self._fill_cache_row_from_packet(r, parsed)
+        )
+        return row
+
+    def _add_cache_row(self, cache: Dict[str, Any], font: QFont) -> None:
+        """Добавляет строку кэша (максимум как у фреймов ответа)."""
+        if len(cache["rows"]) >= MAX_RESPONSE_FRAMES:
+            return
+        new_row = self._create_cache_row(font, cache)
+        cache["rows"].append(new_row)
+        # Строки, добавленные после _watch_block_signals, подписываем здесь.
+        index = next(
+            (i for i, b in enumerate(self._blocks) if b["cache"] is cache),
+            None,
+        )
+        if index is not None:
+            self._watch_widget_tree(
+                new_row["widget"],
+                index,
+                [new_row["from_copy_paste"], new_row["to_copy_paste"]],
+            )
+        self._rebuild_cache_rows(cache)
+        self._update_cache_buttons(cache)
+
+    def _remove_cache_row(self, cache: Dict[str, Any], row: Dict[str, Any]) -> None:
+        """Удаляет строку кэша (минимум 1)."""
+        if len(cache["rows"]) <= 1:
+            return
+        cache["rows"].remove(row)
+        row["widget"].setParent(None)
+        row["pause_widget"].setParent(None)
+        row["widget"].deleteLater()
+        row["pause_widget"].deleteLater()
+        self._rebuild_cache_rows(cache)
+        self._update_cache_buttons(cache)
+
+    def _rebuild_cache_rows(self, cache: Dict[str, Any]) -> None:
+        """Перестраивает layout строк кэша и видимость пауз — как у
+        фреймов ответа: «Пауза перед отправкой» только в первой строке,
+        между строками — «Пауза перед следующим»."""
+        for row in cache["rows"]:
+            cache["rows_layout"].removeWidget(row["widget"])
+            row["widget"].hide()
+            cache["rows_layout"].removeWidget(row["pause_widget"])
+            row["pause_widget"].hide()
+        for i, row in enumerate(cache["rows"]):
+            cache["rows_layout"].addWidget(row["widget"])
+            row["widget"].show()
+            first = i == 0
+            row["delay_before_label"].setVisible(first)
+            row["delay_before_send"].setVisible(first)
+            if i < len(cache["rows"]) - 1:
+                cache["rows_layout"].addWidget(row["pause_widget"])
+                row["pause_widget"].show()
+
+    def _update_cache_buttons(self, cache: Dict[str, Any]) -> None:
+        """Активирует/деактивирует кнопки +/- строк кэша."""
+        can_add = len(cache["rows"]) < MAX_RESPONSE_FRAMES
+        cache["add_button"].setEnabled(can_add)
+        for row in cache["rows"]:
+            row["remove_button"].setEnabled(len(cache["rows"]) > 1)
 
     def _set_data_enabled(self, edits: List[QLineEdit], count: int) -> None:
         for i, edit in enumerate(edits):
@@ -655,23 +781,23 @@ class CanTriggerTab(QWidget):
         rtr = row["rtr"].isChecked() if "rtr" in row else False
         self._set_data_enabled(row["data"], 0 if rtr else dlc)
 
-    def _fill_cache_from_packet(self, cache: Dict[str, Any], parsed: Dict[str, Any]) -> None:
-        """Заполняет кэш (ID, DLC, From Data) из распарсенного пакета."""
+    def _fill_cache_row_from_packet(self, row: Dict[str, Any], parsed: Dict[str, Any]) -> None:
+        """Заполняет строку кэша (ID, DLC, От/До) из распарсенного пакета."""
         can_id = parsed.get("id")
         if can_id is None:
             return
         bit_index = 1 if can_id > 0x7FF else 0
-        cache["bit"].setCurrentIndex(bit_index)
-        cache["id"].setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
+        row["bit"].setCurrentIndex(bit_index)
+        row["id"].setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
         dlc = max(1, min(8, parsed.get("dlc", 8)))
-        cache["dlc"].setValue(dlc)
+        row["dlc"].setValue(dlc)
         data = parsed.get("data", [])
-        for i, edit in enumerate(cache["from_data"]):
+        for i, edit in enumerate(row["from_data"]):
             edit.setText(f"{data[i]:02X}" if i < len(data) else "")
-        for i, edit in enumerate(cache["to_data"]):
+        for i, edit in enumerate(row["to_data"]):
             edit.setText(f"{data[i]:02X}" if i < len(data) else "")
-        self._set_data_enabled(cache["from_data"], dlc)
-        self._set_data_enabled(cache["to_data"], dlc)
+        self._set_data_enabled(row["from_data"], dlc)
+        self._set_data_enabled(row["to_data"], dlc)
 
     def _create_widgets(self) -> None:
         self._font = QFont("Segoe UI", 9)
@@ -1087,8 +1213,8 @@ class CanTriggerTab(QWidget):
         block["group"].toggled.connect(mark)
         skip = [
             block["recv"]["copy_paste"],
-            block["cache"]["from_copy_paste"],
-            block["cache"]["to_copy_paste"],
+            *(row["from_copy_paste"] for row in block["cache"]["rows"]),
+            *(row["to_copy_paste"] for row in block["cache"]["rows"]),
             *(row["copy_paste"] for row in block["response"]["rows"]),
         ]
         self._watch_widget_tree(block["group"], block, skip)
@@ -1140,11 +1266,16 @@ class CanTriggerTab(QWidget):
         """Помечает конфигурацию изменённой пользователем."""
         if self._applying_device_state:
             return
+        # Фильтры/ответы могли измениться — накопленный кэш PC-исполнения
+        # им уже не отвечает (аналог memset(s_cache_valid) при коммите).
+        self._pc_cache.clear()
         if index is not None and 0 <= index < len(self._device_managed):
             self._device_managed[index] = False
         self.settings_changed.emit()
 
-    def _device_trigger_values(self, index: int) -> Dict[str, Any]:
+    def _device_trigger_values(
+        self, index: int, cache_row: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         block = self._blocks[index]
         recv = block["recv"]
         # rx_channel/tx_channel хранятся 0-based как индекс комбобокса:
@@ -1161,24 +1292,31 @@ class CanTriggerTab(QWidget):
         if cache_enabled:
             # Кэш-режим: ответ — последний закэшированный кадр, поля
             # tx_id/dlc/data/rtr записи не используются прошивкой.
-            # «Куда отправляем» → tx_channel; паузы/повторы — из блока кэша.
+            # Каждая строка кэша — своя запись (src_* её фильтра).
+            # Пустые поля диапазона — полный диапазон [00, FF]; «X»
+            # кодируется инвертированным диапазоном (from=FF > to=00) —
+            # прошивка игнорирует байт и обнуляет его в кэше.
             tx_id, tx_extended, tx_dlc, tx_rtr = 0, 0, 0, 0
             tx_data = b""
-            tx_channel = cache["tx_channel"].currentIndex()
-            delay_ms = cache["delay_before_send"].value()
-            tx_interval_ms = cache["delay_between"].value()
-            tx_count = cache["count"].value()
-            src_channel = cache["channel"].currentIndex()
-            src_extended = cache["bit"].currentIndex()
-            src_id = self._parse_id(cache["id"].text()) or 0
-            src_dlc = cache["dlc"].value()
+            row = cache_row or (
+                self._collect_cache_row(cache["rows"][0]) if cache["rows"] else {}
+            )
+            wild = row.get("wild") or [False] * 8
+            tx_channel = int(row.get("tx_channel", 0))
+            delay_ms = int(row.get("delay_before_send", 0))
+            tx_interval_ms = int(row.get("delay_between", 0))
+            tx_count = int(row.get("count", 1))
+            src_channel = int(row.get("channel", 0))
+            src_extended = int(row.get("extended", 0))
+            src_id = row.get("id") or 0
+            src_dlc = int(row.get("dlc", 0))
             src_from = bytes(
-                (v & 0xFF) if v is not None else 0x00
-                for v in self._parse_data(cache["from_data"])
+                0xFF if wild[i] else ((v & 0xFF) if v is not None else 0x00)
+                for i, v in enumerate(row.get("data_from", [None] * 8))
             )
             src_to = bytes(
-                (v & 0xFF) if v is not None else 0xFF
-                for v in self._parse_data(cache["to_data"])
+                0x00 if wild[i] else ((v & 0xFF) if v is not None else 0xFF)
+                for i, v in enumerate(row.get("data_to", [None] * 8))
             )
         else:
             response_rows = block["response"]["rows"]
@@ -1288,8 +1426,10 @@ class CanTriggerTab(QWidget):
         recv["bit"].setCurrentIndex(int(values["rx_extended"]))
         recv["id"].setText(int_to_hex(values["rx_id"], 8 if values["rx_extended"] else 3))
         recv["dlc"].setValue(max(1, min(8, values["rx_dlc"] or 8)))
-        for edit, value in zip(recv["data"], values["rx_data"]):
-            edit.setText(f"{value:02X}")
+        rx_data_mask = bytes(values.get("rx_data_mask", b"\xff" * 8))
+        for i, (edit, value) in enumerate(zip(recv["data"], values["rx_data"])):
+            # Байт с нулевой маской — wildcard: показываем «X», а не «00».
+            edit.setText("X" if i < len(rx_data_mask) and rx_data_mask[i] == 0 else f"{value:02X}")
         recv["rtr"].setChecked(values.get("rx_rtr", 0) == 1)
         self._set_data_enabled(
             recv["data"], 0 if recv["rtr"].isChecked() else recv["dlc"].value()
@@ -1298,22 +1438,57 @@ class CanTriggerTab(QWidget):
         cache = block["cache"]
         cache_enabled = bool(values.get("cache_enabled", 0))
         if cache_enabled:
-            cache["channel"].setCurrentIndex(min(values.get("src_channel", 0), 2))
-            cache["bit"].setCurrentIndex(int(values.get("src_extended", 0)))
-            cache["id"].setText(
-                int_to_hex(values.get("src_id", 0), 8 if values.get("src_extended") else 3)
-            )
-            cache["dlc"].setValue(max(1, min(8, values.get("src_dlc", 0) or 8)))
-            for edit, value in zip(cache["from_data"], values.get("src_from", b"")):
-                edit.setText(f"{value:02X}")
-            for edit, value in zip(cache["to_data"], values.get("src_to", b"")):
-                edit.setText(f"{value:02X}")
-            cache["tx_channel"].setCurrentIndex(min(values["tx_channel"], 2))
-            cache["delay_before_send"].setValue(values["delay_ms"])
-            cache["delay_between"].setValue(values.get("tx_interval_ms", 0))
-            cache["count"].setValue(max(1, values.get("tx_count", 0) or 1))
-            self._set_data_enabled(cache["from_data"], cache["dlc"].value())
-            self._set_data_enabled(cache["to_data"], cache["dlc"].value())
+            # Группа записей → строки кэша. Развёртка group_seq та же,
+            # что у фреймов ответа: записи строки (seq 0..127) дают
+            # строку, фрагменты (0x80|f) добавляют свой count.
+            # Инвертированный диапазон (from>to) показываем как «X».
+            row_records: List[Dict[str, Any]] = []
+            row_counts: List[int] = []
+            for record in group:
+                if record.get("group_seq", 0) & GROUP_SEQ_FRAGMENT and row_counts:
+                    row_counts[-1] += max(1, record.get("tx_count") or 1)
+                else:
+                    row_records.append(record)
+                    row_counts.append(max(1, record.get("tx_count") or 1))
+            cache_rows = []
+            for record in row_records:
+                src_from = bytes(record.get("src_from", b"\x00" * 8))
+                src_to = bytes(record.get("src_to", b"\xff" * 8))
+                cache_rows.append({
+                    "channel": min(record.get("src_channel", 0), 2),
+                    "bit": int(record.get("src_extended", 0)),
+                    "id": int_to_hex(
+                        record.get("src_id", 0),
+                        8 if record.get("src_extended") else 3,
+                    ),
+                    "dlc": max(1, min(8, record.get("src_dlc", 0) or 8)),
+                    "from": " ".join(
+                        "X" if src_from[i] > src_to[i] else f"{src_from[i]:02X}"
+                        for i in range(8)
+                    ),
+                    "to": " ".join(
+                        "X" if src_from[i] > src_to[i] else f"{src_to[i]:02X}"
+                        for i in range(8)
+                    ),
+                    "tx_channel": min(record["tx_channel"], 2),
+                    "delay_before_send": record["delay_ms"],
+                    "delay_between": record.get("tx_interval_ms", 0),
+                    "count": 1,
+                    "next_delay": 0,
+                })
+            for row_index, count in enumerate(row_counts):
+                cache_rows[row_index]["count"] = count
+            for row_index in range(1, len(row_records)):
+                prev = row_records[row_index - 1]
+                prev_end = (
+                    prev["delay_ms"]
+                    + (row_counts[row_index - 1] - 1)
+                    * prev.get("tx_interval_ms", 0)
+                )
+                gap = max(0, row_records[row_index]["delay_ms"] - prev_end)
+                cache_rows[row_index - 1]["next_delay"] = min(gap, 9999)
+                cache_rows[row_index]["delay_before_send"] = max(0, gap - 9999)
+            self._set_cache_rows(cache, cache_rows)
         else:
             # Группа записей → строки «Фреймы ответа». Записи начала
             # строки (group_seq 0..127) дают фрейм; фрагменты (0x80|f)
@@ -1372,6 +1547,17 @@ class CanTriggerTab(QWidget):
         суммарная задержка >65 с или >127 строк ответа; такой триггер
         исполняет приложение, в МК пишется томбстоун."""
         if trigger.get("cache"):
+            # Строки кэша разворачиваются в записи по тому же
+            # расписанию, что и фреймы ответа.
+            cache_rows = trigger.get("cache_rows")
+            if isinstance(cache_rows, list):
+                filled_rows = [
+                    r for r in cache_rows
+                    if isinstance(r, dict) and hex_to_int(str(r.get("id", ""))) is not None
+                ]
+                if not filled_rows:
+                    return True
+                return expand_schedule(filled_rows) is not None
             return True
         filled = [
             r for r in trigger.get("responses") or []
@@ -1433,7 +1619,23 @@ class CanTriggerTab(QWidget):
             return []
         block = self._blocks[index]
         if block["cache"]["cache_check"].isChecked():
-            return [values]
+            # Каждая строка кэша — отдельная запись с собственным
+            # src-фильтром и своим слотом кэша в прошивке. Строки
+            # связаны group_seq — как у многофреймового ответа.
+            cache_rows = [
+                self._collect_cache_row(row)
+                for row in block["cache"]["rows"]
+                if self._parse_id(row["id"].text()) is not None
+            ]
+            if not cache_rows:
+                return [values]
+            schedule = expand_schedule(cache_rows)
+            if schedule is None:
+                return None
+            return [
+                self._cache_row_record(index, cache_rows[row_index], delay, count, interval, seq)
+                for row_index, delay, count, interval, seq in schedule
+            ]
         rows = [
             row for row in block["response"]["rows"]
             if self._parse_id(row["id"].text()) is not None
@@ -1471,6 +1673,26 @@ class CanTriggerTab(QWidget):
             })
             records.append(record)
         return records
+
+    def _cache_row_record(
+        self,
+        index: int,
+        cache_row: Dict[str, Any],
+        delay: int,
+        count: int,
+        interval: int,
+        seq: int,
+    ) -> Dict[str, Any]:
+        """Запись trigger_t одной строки кэша: её src-фильтр и канал
+        отправки + абсолютный тайминг из расписания expand_schedule."""
+        record = self._device_trigger_values(index, cache_row)
+        record.update({
+            "delay_ms": delay,
+            "tx_count": count,
+            "tx_interval_ms": interval,
+            "group_seq": seq,
+        })
+        return record
 
     @staticmethod
     def _is_empty_trigger(values: Dict[str, Any]) -> bool:
@@ -1686,7 +1908,14 @@ class CanTriggerTab(QWidget):
             if bool(trigger.get("cache")) != bool(values.get("cache_enabled")):
                 continue
             if trigger.get("cache"):
-                if (hex_to_int(str(trigger.get("cache_id", ""))) or 0) != values.get("src_id", 0):
+                # Первая строка кэша (cache_rows) или легаси-поле cache_id.
+                cache_rows = trigger.get("cache_rows")
+                first_id = (
+                    cache_rows[0].get("id", "")
+                    if isinstance(cache_rows, list) and cache_rows
+                    else trigger.get("cache_id", "")
+                )
+                if (hex_to_int(str(first_id)) or 0) != values.get("src_id", 0):
                     continue
             else:
                 first_tx = 0
@@ -2019,11 +2248,16 @@ class CanTriggerTab(QWidget):
                 row["remove_button"].setToolTip(tr("Удалить фрейм"))
                 row["delay_before_label"].setText(tr("Пауза перед отправкой"))
                 row["delay_between_label"].setText(tr("Пауза между пакетами"))
-            block["cache"]["src_label"].setText(tr("Откуда читаем"))
-            block["cache"]["dst_label"].setText(tr("Куда отправляем"))
-            block["cache"]["delay_before_label"].setText(tr("Пауза перед отправкой"))
-            block["cache"]["delay_between_label"].setText(tr("Пауза между пакетами"))
             block["cache"]["group"].setTitle(tr("Кэш"))
+            block["cache"]["header_label"].setText(tr("Строки кэша"))
+            block["cache"]["add_button"].setToolTip(tr("Добавить строку кэша"))
+            for row in block["cache"]["rows"]:
+                row["src_label"].setText(tr("Откуда читаем"))
+                row["dst_label"].setText(tr("Куда отправляем"))
+                row["delay_before_label"].setText(tr("Пауза перед отправкой"))
+                row["delay_between_label"].setText(tr("Пауза между пакетами"))
+                row["count_label"].setText(tr("Кол-во отправок"))
+                row["remove_button"].setToolTip(tr("Удалить строку"))
 
     def _parse_id(self, text: str) -> Optional[int]:
         return hex_to_int(text.strip())
@@ -2032,12 +2266,37 @@ class CanTriggerTab(QWidget):
         result: List[Optional[int]] = []
         for edit in edits:
             text = edit.text().strip()
-            if text:
+            if "X" in text.upper():
+                # Wildcard: байт не сравнивается (маска 0).
+                result.append(None)
+            elif text:
                 val = hex_to_int(text)
                 result.append(val if val is not None else 0)
             else:
                 result.append(None)
         return result
+
+    @staticmethod
+    def _parse_data_triple(
+        edits: List[QLineEdit],
+    ) -> Tuple[List[Optional[int]], List[bool]]:
+        """Разбор полей данных с wildcard: (значения, флаги «X»).
+        Пустое поле — None без флага wild (в диапазонах это граница по
+        умолчанию), «X» — None с флагом (байт игнорируется/обнуляется)."""
+        values: List[Optional[int]] = []
+        wild: List[bool] = []
+        for edit in edits:
+            text = edit.text().strip()
+            if "X" in text.upper():
+                values.append(None)
+                wild.append(True)
+            elif text:
+                values.append(hex_to_int(text) or 0)
+                wild.append(False)
+            else:
+                values.append(None)
+                wild.append(False)
+        return values, wild
 
     def _build_internal_triggers(self) -> List[Dict[str, Any]]:
         triggers = []
@@ -2055,8 +2314,7 @@ class CanTriggerTab(QWidget):
                 "recv_channel": block["recv"]["channel"].currentIndex(),
                 "cache": block["cache"]["cache_check"].isChecked(),
                 "responses": self._collect_responses(block["response"]["rows"]),
-                "cache_data": self._collect_cache(block["cache"]),
-                "cached_frame": None,
+                "cache_rows": self._collect_cache(block["cache"]),
                 "device_managed": self._device_managed[i],
                 "pc_suspended": self._pc_suspended[i],
             })
@@ -2081,19 +2339,34 @@ class CanTriggerTab(QWidget):
             })
         return result
 
-    def _collect_cache(self, cache: Dict[str, Any]) -> Dict[str, Any]:
-        can_id = self._parse_id(cache["id"].text())
+    def _collect_cache(self, cache: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Строки кэша блока с заданным ID — по одному фильтру источника
+        на строку. Строки без ID пропускаются: в прошивку они не
+        проецируются, и PC-расписание не должно тратить на них паузы."""
+        rows = [self._collect_cache_row(row) for row in cache["rows"]]
+        return [row for row in rows if row["id"] is not None]
+
+    def _collect_cache_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Собирает строку кэша в dict: фильтр источника (канал/бит/ID/
+        DLC + побайтовый диапазон От/До с флагами wildcard «X») и
+        параметры отправки закэшированного кадра."""
+        data_from, wild_from = self._parse_data_triple(row["from_data"])
+        data_to, wild_to = self._parse_data_triple(row["to_data"])
+        # «X» хотя бы в одном из полей пары — байт игнорируется целиком.
+        wild = [a or b for a, b in zip(wild_from, wild_to)]
         return {
-            "id": can_id,
-            "channel": cache["channel"].currentIndex(),
-            "tx_channel": cache["tx_channel"].currentIndex(),
-            "extended": cache["bit"].currentIndex(),
-            "data_from": self._parse_data(cache["from_data"]),
-            "data_to": self._parse_data(cache["to_data"]),
-            "dlc": cache["dlc"].value(),
-            "delay_before_send": cache["delay_before_send"].value(),
-            "delay_between": cache["delay_between"].value(),
-            "count": cache["count"].value(),
+            "id": self._parse_id(row["id"].text()),
+            "channel": row["channel"].currentIndex(),
+            "tx_channel": row["tx_channel"].currentIndex(),
+            "extended": row["bit"].currentIndex(),
+            "data_from": data_from,
+            "data_to": data_to,
+            "wild": wild,
+            "dlc": row["dlc"].value(),
+            "delay_before_send": row["delay_before_send"].value(),
+            "delay_between": row["delay_between"].value(),
+            "count": row["count"].value(),
+            "next_delay": row["next_delay"].value(),
         }
 
     def _load_config(self) -> None:
@@ -2114,6 +2387,8 @@ class CanTriggerTab(QWidget):
 
     def _save_config(self) -> None:
         triggers = self._collect_config()
+        # Фильтры могли измениться — старый кэш им уже не отвечает.
+        self._pc_cache.clear()
         self._config.set("triggers", triggers)
         self._memory_indicator.show_trigger_usage(count_configured_triggers(triggers))
 
@@ -2130,13 +2405,37 @@ class CanTriggerTab(QWidget):
                 "id": row["id"].text(),
                 "dlc": row["dlc"].value(),
                 "rtr": int(row["rtr"].isChecked()),
-                "data": " ".join(e.text() for e in row["data"] if e.text()),
+                # Пустой байт пишется явным «00» — позиции не съезжают.
+                "data": " ".join(
+                    e.text() or "00" for e in row["data"][: row["dlc"].value()]
+                ),
                 "delay_before_send": row["delay_before_send"].value(),
                 "delay_between": row["delay_between"].value(),
                 "count": row["count"].value(),
                 "next_delay": row["next_delay"].value(),
             })
         cache = block["cache"]
+        cache_rows = []
+        for row in cache["rows"]:
+            cache_rows.append({
+                "channel": row["channel"].currentIndex(),
+                "bit": row["bit"].currentIndex(),
+                "id": row["id"].text(),
+                "dlc": row["dlc"].value(),
+                "tx_channel": row["tx_channel"].currentIndex(),
+                # Границы диапазона пишутся явно: пустой От = «00»,
+                # пустой До = «FF», wildcard «X» сохраняется как есть.
+                "from": " ".join(
+                    e.text() or "00" for e in row["from_data"][: row["dlc"].value()]
+                ),
+                "to": " ".join(
+                    e.text() or "FF" for e in row["to_data"][: row["dlc"].value()]
+                ),
+                "delay_before_send": row["delay_before_send"].value(),
+                "delay_between": row["delay_between"].value(),
+                "count": row["count"].value(),
+                "next_delay": row["next_delay"].value(),
+            })
         config = {
             "active": block["group"].isChecked(),
             "cache": block["cache"]["cache_check"].isChecked(),
@@ -2145,19 +2444,29 @@ class CanTriggerTab(QWidget):
             "recv_id": block["recv"]["id"].text(),
             "recv_dlc": block["recv"]["dlc"].value(),
             "recv_rtr": int(block["recv"]["rtr"].isChecked()),
-            "recv_data": " ".join(e.text() for e in block["recv"]["data"] if e.text()),
+            # Пустой байт приёма — wildcard, пишется явным «X».
+            "recv_data": " ".join(
+                e.text() or "X"
+                for e in block["recv"]["data"][: block["recv"]["dlc"].value()]
+            ),
             "responses": responses,
-            "cache_channel": cache["channel"].currentIndex(),
-            "cache_bit": cache["bit"].currentIndex(),
-            "cache_id": cache["id"].text(),
-            "cache_dlc": cache["dlc"].value(),
-            "cache_tx_channel": cache["tx_channel"].currentIndex(),
-            "cache_from_data": " ".join(e.text() for e in cache["from_data"] if e.text()),
-            "cache_to_data": " ".join(e.text() for e in cache["to_data"] if e.text()),
-            "cache_delay_before_send": cache["delay_before_send"].value(),
-            "cache_delay_between": cache["delay_between"].value(),
-            "cache_count": cache["count"].value(),
+            "cache_rows": cache_rows,
         }
+        # Дублируем первую строку кэша в легаси-поля — старые версии
+        # приложения читают одиночный кэш именно оттуда.
+        first = cache_rows[0] if cache_rows else {}
+        config.update({
+            "cache_channel": first.get("channel", 0),
+            "cache_bit": first.get("bit", 0),
+            "cache_id": first.get("id", ""),
+            "cache_dlc": first.get("dlc", 8),
+            "cache_tx_channel": first.get("tx_channel", 0),
+            "cache_from_data": first.get("from", ""),
+            "cache_to_data": first.get("to", ""),
+            "cache_delay_before_send": first.get("delay_before_send", 0),
+            "cache_delay_between": first.get("delay_between", 0),
+            "cache_count": first.get("count", 1),
+        })
         return config
 
     @staticmethod
@@ -2170,6 +2479,11 @@ class CanTriggerTab(QWidget):
             return False
         if str(trigger.get("cache_id", "")).strip():
             return False
+        cache_rows = trigger.get("cache_rows")
+        if isinstance(cache_rows, list):
+            for row in cache_rows:
+                if isinstance(row, dict) and str(row.get("id", "")).strip():
+                    return False
         responses = trigger.get("responses", [])
         if isinstance(responses, list):
             for row in responses:
@@ -2201,14 +2515,18 @@ class CanTriggerTab(QWidget):
         (предупреждение — шина пошлёт DLC байт, не заявленное число)."""
         errors: List[str] = []
         warnings: List[str] = []
-        data = parse_data_bytes(text.split())
-        if len(data) > 8:
+        # Токен «X» — валидный wildcard-байт и тоже считается байтом.
+        tokens = [t for t in text.split() if t.strip()]
+        data_len = sum(
+            1 for t in tokens if hex_to_int(t) is not None or "X" in t.upper()
+        )
+        if data_len > 8:
             errors.append(
-                f"{label}: " + tr("данных {0} байт — максимум 8").format(len(data))
+                f"{label}: " + tr("данных {0} байт — максимум 8").format(data_len)
             )
-        elif data and len(data) != dlc:
+        elif data_len and data_len != dlc:
             warnings.append(
-                f"{label}: " + tr("данных {0} байт, а DLC = {1}").format(len(data), dlc)
+                f"{label}: " + tr("данных {0} байт, а DLC = {1}").format(data_len, dlc)
             )
         if dlc > 8:
             errors.append(f"{label}: " + tr("DLC {0} — максимум 8").format(dlc))
@@ -2247,14 +2565,26 @@ class CanTriggerTab(QWidget):
             rx_text = str(trigger.get("recv_id", "")).strip()
             rx_channel = int(trigger.get("recv_channel", 0))
             if trigger.get("cache"):
-                cache_id = str(trigger.get("cache_id", "")).strip()
-                if not cache_id:
+                # Строки кэша (новый формат) или легаси-одиночный кэш.
+                cache_rows = trigger.get("cache_rows")
+                if not isinstance(cache_rows, list):
+                    cache_rows = [{
+                        "id": trigger.get("cache_id", ""),
+                        "bit": trigger.get("cache_bit", 0),
+                    }]
+                filled = [
+                    r for r in cache_rows
+                    if isinstance(r, dict) and str(r.get("id", "")).strip()
+                ]
+                if not filled:
                     warnings.append(
                         f"{label}: " + tr("кэш включён без ID кэшированного кадра")
                     )
-                else:
+                for j, crow in enumerate(filled, 1):
                     errors += self._check_id_range(
-                        cache_id, int(trigger.get("cache_bit", 0)), f"{label} {tr('кэш')}"
+                        str(crow["id"]).strip(),
+                        int(crow.get("bit", 0)),
+                        f"{label} {tr('кэш')} {j}",
                     )
             elif rx_text:
                 errors += self._check_id_range(
@@ -2402,14 +2732,28 @@ class CanTriggerTab(QWidget):
         finally:
             self._applying_device_state = False
 
+    @staticmethod
+    def _set_data_fields(
+        edits: List[QLineEdit], text: str, allow_x: bool = False
+    ) -> None:
+        """Заполняет байтовые поля из строки токенов позиционно: токен i
+        попадает в поле i («X» — только в wildcard-полях, пустой/битый
+        токен очищает поле)."""
+        tokens = str(text).split()
+        for i, edit in enumerate(edits):
+            token = tokens[i] if i < len(tokens) else ""
+            if allow_x and "X" in token.upper():
+                edit.setText("X")
+            else:
+                value = hex_to_int(token)
+                edit.setText(f"{value:02X}" if value is not None else "")
+
     def _set_row(self, row: Dict[str, Any], data: Dict[str, Any], prefix: str) -> None:
         row["channel"].setCurrentIndex(int(data.get(f"{prefix}_channel", 0)))
         row["bit"].setCurrentIndex(int(data.get(f"{prefix}_bit", 0)))
         row["id"].setText(str(data.get(f"{prefix}_id", "")))
         row["dlc"].setValue(int(data.get(f"{prefix}_dlc", 8)))
-        bytes_data = parse_data_bytes(str(data.get(f"{prefix}_data", "")).split())
-        for d, edit in enumerate(row["data"]):
-            edit.setText(f"{bytes_data[d]:02X}" if d < len(bytes_data) else "")
+        self._set_data_fields(row["data"], str(data.get(f"{prefix}_data", "")), allow_x=True)
         self._set_data_enabled(row["data"], row["dlc"].value())
 
     def _set_response_rows(self, response_block: Dict[str, Any], responses: List[Dict[str, Any]]) -> None:
@@ -2429,9 +2773,7 @@ class CanTriggerTab(QWidget):
         response["bit"].setCurrentIndex(int(data.get("bit", 0)))
         response["id"].setText(str(data.get("id", "")))
         response["dlc"].setValue(int(data.get("dlc", 8)))
-        bytes_data = parse_data_bytes(str(data.get("data", "")).split())
-        for d, edit in enumerate(response["data"]):
-            edit.setText(f"{bytes_data[d]:02X}" if d < len(bytes_data) else "")
+        self._set_data_fields(response["data"], str(data.get("data", "")))
         response["rtr"].setChecked(bool(data.get("rtr", 0)))
         self._set_data_enabled(response["data"], 0 if response["rtr"].isChecked() else response["dlc"].value())
         response["delay_before_send"].setValue(int(data.get("delay_before_send", 0)))
@@ -2440,22 +2782,50 @@ class CanTriggerTab(QWidget):
         response["next_delay"].setValue(int(data.get("next_delay", 0)))
 
     def _set_cache(self, cache: Dict[str, Any], data: Dict[str, Any]) -> None:
-        cache["channel"].setCurrentIndex(int(data.get("cache_channel", 0)))
-        cache["tx_channel"].setCurrentIndex(int(data.get("cache_tx_channel", 0)))
-        cache["bit"].setCurrentIndex(int(data.get("cache_bit", 0)))
-        cache["id"].setText(str(data.get("cache_id", "")))
-        cache["dlc"].setValue(int(data.get("cache_dlc", 8)))
-        cache["delay_before_send"].setValue(int(data.get("cache_delay_before_send", 0)))
-        cache["delay_between"].setValue(int(data.get("cache_delay_between", data.get("cache_delay", 0))))
-        cache["count"].setValue(int(data.get("cache_count", 1)))
-        from_bytes = parse_data_bytes(str(data.get("cache_from_data", "")).split())
-        to_bytes = parse_data_bytes(str(data.get("cache_to_data", "")).split())
-        for d, edit in enumerate(cache["from_data"]):
-            edit.setText(f"{from_bytes[d]:02X}" if d < len(from_bytes) else "")
-        for d, edit in enumerate(cache["to_data"]):
-            edit.setText(f"{to_bytes[d]:02X}" if d < len(to_bytes) else "")
-        self._set_data_enabled(cache["from_data"], cache["dlc"].value())
-        self._set_data_enabled(cache["to_data"], cache["dlc"].value())
+        rows = data.get("cache_rows")
+        if not isinstance(rows, list):
+            # Легаси-конфиг: одиночный кэш в плоских полях cache_*.
+            rows = [{
+                "channel": data.get("cache_channel", 0),
+                "bit": data.get("cache_bit", 0),
+                "id": data.get("cache_id", ""),
+                "dlc": data.get("cache_dlc", 8),
+                "tx_channel": data.get("cache_tx_channel", 0),
+                "from": data.get("cache_from_data", ""),
+                "to": data.get("cache_to_data", ""),
+                "delay_before_send": data.get("cache_delay_before_send", 0),
+                "delay_between": data.get("cache_delay_between", data.get("cache_delay", 0)),
+                "count": data.get("cache_count", 1),
+                "next_delay": 0,
+            }]
+        self._set_cache_rows(cache, rows)
+
+    def _set_cache_rows(self, cache: Dict[str, Any], rows: List[Dict[str, Any]]) -> None:
+        """Заполняет динамический список строк кэша — как _set_response_rows."""
+        widget_rows = cache["rows"]
+        for r, row in enumerate(widget_rows):
+            data = rows[r] if r < len(rows) else {}
+            self._set_cache_row(row, data)
+        while len(widget_rows) > len(rows) and len(widget_rows) > 1:
+            self._remove_cache_row(cache, widget_rows[-1])
+        for r in range(len(widget_rows), len(rows)):
+            self._add_cache_row(cache, self._font)
+            self._set_cache_row(cache["rows"][-1], rows[r])
+
+    def _set_cache_row(self, row: Dict[str, Any], data: Dict[str, Any]) -> None:
+        row["channel"].setCurrentIndex(int(data.get("channel", 0)))
+        row["tx_channel"].setCurrentIndex(int(data.get("tx_channel", 0)))
+        row["bit"].setCurrentIndex(int(data.get("bit", 0)))
+        row["id"].setText(str(data.get("id", "")))
+        row["dlc"].setValue(max(1, min(8, int(data.get("dlc", 8)))))
+        self._set_data_fields(row["from_data"], str(data.get("from", "")), allow_x=True)
+        self._set_data_fields(row["to_data"], str(data.get("to", "")), allow_x=True)
+        row["delay_before_send"].setValue(int(data.get("delay_before_send", 0)))
+        row["delay_between"].setValue(int(data.get("delay_between", data.get("delay", 0))))
+        row["count"].setValue(max(1, int(data.get("count", 1))))
+        row["next_delay"].setValue(int(data.get("next_delay", 0)))
+        self._set_data_enabled(row["from_data"], row["dlc"].value())
+        self._set_data_enabled(row["to_data"], row["dlc"].value())
 
     def _data_from_response(self, response: Dict[str, Any]) -> bytes:
         """Формирует байты данных фрейма ответа с учётом DLC."""
@@ -2514,7 +2884,7 @@ class CanTriggerTab(QWidget):
             ):
                 continue
             if trigger["cache"]:
-                self._send_cached_frame(trigger)
+                self._send_cached_frames(trigger)
             else:
                 self._send_responses(trigger)
 
@@ -2568,27 +2938,37 @@ class CanTriggerTab(QWidget):
             if i < len(trigger["responses"]) - 1:
                 cumulative += response["next_delay"]
 
-    def _send_cached_frame(self, trigger: Dict[str, Any]) -> None:
-        """Отправляет последний сохранённый кадр из кэша с задержками и повторами."""
-        cached = trigger.get("cached_frame")
-        if cached is None:
-            return
-        cache = trigger["cache_data"]
-        channel = cache["tx_channel"]
-        delay_before = cache["delay_before_send"]
-        delay_between = cache["delay_between"]
-        count = max(1, cache["count"])
-        cumulative = delay_before
-        for j in range(count):
-            if cumulative == 0:
-                self._send_frame(cached["id"], cached["data"], channel)
+    def _send_cached_frames(self, trigger: Dict[str, Any]) -> None:
+        """Отправляет кэшированные кадры по строкам — как _send_responses:
+        у каждой строки своя пауза перед отправкой, пауза между пакетами
+        и количество; между строками — «Пауза перед следующим».
+        Строка без заполненного кэша пропускается (как s_cache_valid=0)."""
+        cumulative = 0
+        rows = trigger["cache_rows"]
+        for i, row in enumerate(rows):
+            cumulative += row["delay_before_send"]
+            cached = self._pc_cache.get((trigger["index"], i))
+            count = max(1, row["count"])
+            channel = row["tx_channel"]
+            if cached is not None:
+                can_id = cached["id"]
+                data = cached["data"]
+                for j in range(count):
+                    if cumulative == 0:
+                        self._send_frame(can_id, data, channel)
+                    else:
+                        QTimer.singleShot(
+                            cumulative,
+                            lambda cid=can_id, d=data, ch=channel: self._send_frame(cid, d, ch),
+                        )
+                    if j < count - 1:
+                        cumulative += row["delay_between"]
             else:
-                QTimer.singleShot(
-                    cumulative,
-                    lambda cid=cached["id"], d=cached["data"], ch=channel: self._send_frame(cid, d, ch),
-                )
-            if j < count - 1:
-                cumulative += delay_between
+                # Кэш пуст — отправок нет, но позиция строки в расписании
+                # сохраняется: следующая строка ждёт её слот как обычно.
+                cumulative += (count - 1) * row["delay_between"]
+            if i < len(rows) - 1:
+                cumulative += row["next_delay"]
 
     def _update_cache(
         self,
@@ -2598,47 +2978,55 @@ class CanTriggerTab(QWidget):
         data: bytes,
         extended: bool = False,
     ) -> None:
-        """Сохраняет кадр в кэш, если он пришёл на канал «Откуда читаем»,
-        совпадает по битности/ID и его Data попадает в заданный диапазон."""
+        """Сохраняет кадр в кэши всех подошедших строк — один входящий
+        кадр может пополнить несколько строк кэша. Wildcard-байты («X»)
+        при захвате обнуляются — в ответе на их месте уйдёт 0x00."""
         if not trigger["cache"]:
             return
-        cache = trigger["cache_data"]
-        if cache["id"] is None or cache["id"] != frame_id:
-            return
-        if bool(cache.get("extended", 0)) != extended:
-            return
-        src_channel = int(cache["channel"])
-        if src_channel != 2 and src_channel + 1 != frame_channel:
-            return
-        if not self._data_in_range(data, cache["data_from"], cache["data_to"], cache["dlc"]):
-            return
-        dlc = cache["dlc"]
-        trigger["cached_frame"] = {
-            "id": frame_id,
-            "data": bytes(data[:dlc]) if len(data) >= dlc else bytes(data) + bytes(dlc - len(data)),
-            "channel": frame_channel,
-        }
+        for row_index, row in enumerate(trigger["cache_rows"]):
+            if row["id"] is None or row["id"] != frame_id:
+                continue
+            if bool(row.get("extended", 0)) != extended:
+                continue
+            src_channel = int(row["channel"])
+            if src_channel != 2 and src_channel + 1 != frame_channel:
+                continue
+            dlc = row["dlc"]
+            wild = row["wild"]
+            if not self._cache_src_matches(data, row["data_from"], row["data_to"], wild, dlc):
+                continue
+            # Кэшируется кадр целиком (как s_cache в прошивке); нулями
+            # становятся только wildcard-байты внутри диапазона src_dlc.
+            captured = bytearray(data[:8])
+            for j in range(min(dlc, len(captured))):
+                if j < len(wild) and wild[j]:
+                    captured[j] = 0
+            self._pc_cache[(trigger["index"], row_index)] = {
+                "id": frame_id,
+                "data": bytes(captured),
+                "channel": frame_channel,
+            }
 
-    def _data_in_range(
-        self,
+    @staticmethod
+    def _cache_src_matches(
         data: bytes,
         data_from: List[Optional[int]],
         data_to: List[Optional[int]],
+        wild: List[bool],
         dlc: int,
     ) -> bool:
-        """Проверяет, что data (big-endian) попадает в диапазон [От, До]."""
-        from_bytes = bytearray(dlc)
-        to_bytes = bytearray(dlc)
+        """Побайтовая проверка [От, До]: байт i подходит, если
+        От[i] ≤ data[i] ≤ До[i]; «X» (wild) — байт игнорируется.
+        Порт src_matches() прошивки: там «X» кодируется from>to."""
         for i in range(dlc):
-            from_val = data_from[i]
-            to_val = data_to[i]
-            # Пустое поле означает «любое значение» для этого байта
-            from_bytes[i] = (from_val & 0xFF) if from_val is not None else 0x00
-            to_bytes[i] = (to_val & 0xFF) if to_val is not None else 0xFF
-        from_int = int.from_bytes(from_bytes, "big")
-        to_int = int.from_bytes(to_bytes, "big")
-        value = int.from_bytes(bytes(data[:dlc]).ljust(dlc, b"\x00"), "big")
-        return from_int <= value <= to_int
+            if i < len(wild) and wild[i]:
+                continue
+            lo = data_from[i] if i < len(data_from) and data_from[i] is not None else 0x00
+            hi = data_to[i] if i < len(data_to) and data_to[i] is not None else 0xFF
+            b = data[i] if i < len(data) else 0
+            if b < lo or b > hi:
+                return False
+        return True
 
     def create_trigger_from_packet(self, packet: Dict[str, object]) -> None:
         """Создаёт первый триггер из пакета мониторинга."""
