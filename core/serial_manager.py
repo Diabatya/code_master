@@ -825,6 +825,10 @@ class SerialManager(QObject):
             # Кадры, не отправленные из-за занятых TX-ящиков (прошивки v3+):
             # пропавшие ответы триггеров под нагрузкой раньше были невидимы.
             "tx_fail_count": int.from_bytes(payload[27:31], "little") if len(payload) >= 31 else 0,
+            # Кадры, вычитанные backstop-опросом RX FIFO0 из главного
+            # цикла (прошивки protocol>=4): >0 — прерывание RX0 часть
+            # кадров пропускало (на F105 делит вектор с USB_LP).
+            "fifo_poll_count": int.from_bytes(payload[31:35], "little") if len(payload) >= 35 else 0,
         }
 
     def set_trigger_enabled(self, index: int, enabled: bool) -> None:

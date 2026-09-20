@@ -29,16 +29,43 @@ class TriggerSimulator:
         self._cache: List[Optional[Dict[str, Any]]] = [None] * len(records)
         self._cache_valid = [False] * len(records)
         self._pending: List[Optional[Dict[str, Any]]] = [None] * len(records)
+        # Состояние «кол-во сработок до смены DATA» — порт fire_state_t.
+        self._rx_state = [self._new_fire_state() for _ in records]
+        self._src_state = [self._new_fire_state() for _ in records]
         self.fired_count = 0
         # События для UI: (time_ms, текст).
         self.events: List[Dict[str, Any]] = []
 
+    @staticmethod
+    def _new_fire_state() -> Dict[str, Any]:
+        return {"have": False, "last": b"", "count": 0, "suppress": False}
+
+    @staticmethod
+    def _fire_track(state: Dict[str, Any], frame: Dict[str, Any]) -> None:
+        """Порт fire_track(): смена DATA (на уровне ID-фильтра) сбрасывает
+        защёлку лимита — триггер снова исполняет N сработок."""
+        data = bytes(frame.get("data", b""))
+        dlc = min(int(frame.get("dlc", len(data))), 8)
+        last = data[:dlc]
+        if not state["have"] or state["last"] != last:
+            state["last"] = last
+            state["have"] = True
+            state["count"] = 0
+            state["suppress"] = False
+
+    @staticmethod
+    def _listen_echo(t: Dict[str, Any], prefix: str) -> bool:
+        """«Слушать отправляемое»: True (по умолчанию, как v2) — триггер
+        видит и свои TX-эха; False — только кадры с шины."""
+        return bool(t.get(f"{prefix}_listen_echo", True))
+
     # --- матчеры: точный порт trigger.c --------------------------------
 
     @staticmethod
-    def _frame_matches(t: Dict[str, Any], frame: Dict[str, Any]) -> bool:
-        if not t.get("enabled"):
-            return False
+    def _rx_header_matches(t: Dict[str, Any], frame: Dict[str, Any]) -> bool:
+        """Условие приёма без Data: RTR-режим, канал, битность, ID по
+        маске, DLC — порт rx_header_matches(). На этом уровне для
+        счётчика сработок отслеживается «смена DATA»."""
         rx_rtr = int(t.get("rx_rtr", 0))
         if rx_rtr == 1 and not frame.get("rtr"):
             return False
@@ -54,26 +81,39 @@ class TriggerSimulator:
         dlc = int(frame.get("dlc", len(frame.get("data", b""))))
         if t.get("rx_dlc", 0) and int(t["rx_dlc"]) != dlc:
             return False
-        if rx_rtr != 1:
-            rx_data = bytes(t.get("rx_data", b"\x00" * 8))
-            rx_mask = bytes(t.get("rx_data_mask", b"\x00" * 8))
-            data = bytes(frame.get("data", b""))
-            for i in range(min(dlc, 8)):
-                b = data[i] if i < len(data) else 0
-                if (rx_data[i] & rx_mask[i]) != (b & rx_mask[i]):
-                    return False
         return True
 
     @staticmethod
-    def _src_matches(t: Dict[str, Any], frame: Dict[str, Any]) -> bool:
-        """Побайтовый матч источника кэша: каждый байт должен попасть в
-        свой [from[i], to[i]]; from[i] > to[i] — wildcard «X» (игнор)."""
+    def _rx_data_matches(t: Dict[str, Any], frame: Dict[str, Any]) -> bool:
+        """Побайтовое сравнение Data по маске (маска 0 — «X») — порт
+        rx_data_matches(). В режиме «только RTR» данных нет — True."""
+        if int(t.get("rx_rtr", 0)) == 1:
+            return True
+        rx_data = bytes(t.get("rx_data", b"\x00" * 8))
+        rx_mask = bytes(t.get("rx_data_mask", b"\x00" * 8))
+        data = bytes(frame.get("data", b""))
+        dlc = int(frame.get("dlc", len(data)))
+        for i in range(min(dlc, 8)):
+            b = data[i] if i < len(data) else 0
+            if (rx_data[i] & rx_mask[i]) != (b & rx_mask[i]):
+                return False
+        return True
+
+    @staticmethod
+    def _src_id_matches(t: Dict[str, Any], frame: Dict[str, Any]) -> bool:
+        """Источник кэша на уровне ID (канал/битность/ID) — порт
+        src_id_matches(); «смена DATA» счётчика кэша на этом уровне."""
         if t.get("src_channel", 0) != 2 and t.get("src_channel", 0) != frame["channel"]:
             return False
         if int(t.get("src_extended", 0)) != int(frame.get("extended", 0)):
             return False
-        if int(t.get("src_id", 0)) != int(frame["id"]):
-            return False
+        return int(t.get("src_id", 0)) == int(frame["id"])
+
+    @staticmethod
+    def _src_range_matches(t: Dict[str, Any], frame: Dict[str, Any]) -> bool:
+        """Побайтовый диапазон «От/До»: каждый байт должен попасть в
+        свой [from[i], to[i]]; from[i] > to[i] — wildcard «X» (игнор).
+        Порт src_range_matches()."""
         src_dlc = int(t.get("src_dlc", 0))
         if not src_dlc:
             return True
@@ -132,36 +172,65 @@ class TriggerSimulator:
         """Кадр с шины (или TX-эхо) → список отправленных кадров-ответов."""
         sent: List[Dict[str, Any]] = []
         for i, t in enumerate(self._triggers):
-            if t.get("enabled") and t.get("cache_enabled") and self._src_matches(t, frame):
-                cached = dict(frame)
-                # Wildcard-позиции (from>to) обнуляются при захвате —
-                # в ответе на их месте уйдёт 0x00 (порт Trigger_OnFrame).
-                src_from = bytes(t.get("src_from", b"\x00" * 8))
-                src_to = bytes(t.get("src_to", b"\xff" * 8))
-                data = bytearray(cached.get("data", b""))
-                for j in range(min(int(t.get("src_dlc", 0)), 8)):
-                    if src_from[j] > src_to[j] and j < len(data):
-                        data[j] = 0
-                cached["data"] = bytes(data)
-                self._cache[i] = cached
-                self._cache_valid[i] = True
-            if self._frame_matches(t, frame):
-                sends = int(t.get("tx_count", 0)) or 1
-                if int(t.get("delay_ms", 0)) == 0 and sends == 1:
-                    responses = self._send_response(t, i, int(frame.get("echo", 0)), now_ms)
-                    if responses:
-                        self.fired_count += 1
-                    sent.extend(responses)
-                else:
-                    self._arm(i, t, int(frame.get("echo", 0)), now_ms)
-                    self.events.append(
-                        {
-                            "time_ms": now_ms,
-                            "trigger": i,
-                            "kind": "armed",
-                            "delay": int(t.get("delay_ms", 0)),
-                        }
-                    )
+            if not t.get("enabled"):
+                continue
+            echo = int(frame.get("echo", 0))
+            # Кэш: MUTE_ECHO — источник слушает только шину; fire_limit —
+            # захват прекращается после N одинаковых DATA до их смены.
+            if (
+                t.get("cache_enabled")
+                and not (echo and not self._listen_echo(t, "src"))
+                and self._src_id_matches(t, frame)
+            ):
+                src_state = self._src_state[i]
+                src_limit = int(t.get("src_fire_limit", 0))
+                if src_limit:
+                    self._fire_track(src_state, frame)
+                if not src_state["suppress"] and self._src_range_matches(t, frame):
+                    cached = dict(frame)
+                    # Wildcard-позиции (from>to) обнуляются при захвате —
+                    # в ответе на их месте уйдёт 0x00 (порт Trigger_OnFrame).
+                    src_from = bytes(t.get("src_from", b"\x00" * 8))
+                    src_to = bytes(t.get("src_to", b"\xff" * 8))
+                    data = bytearray(cached.get("data", b""))
+                    for j in range(min(int(t.get("src_dlc", 0)), 8)):
+                        if src_from[j] > src_to[j] and j < len(data):
+                            data[j] = 0
+                    cached["data"] = bytes(data)
+                    self._cache[i] = cached
+                    self._cache_valid[i] = True
+                    if src_limit:
+                        src_state["count"] += 1
+                        if src_state["count"] >= src_limit:
+                            src_state["suppress"] = True
+            if (echo and not self._listen_echo(t, "rx")) or not self._rx_header_matches(t, frame):
+                continue
+            rx_state = self._rx_state[i]
+            rx_limit = int(t.get("rx_fire_limit", 0))
+            if rx_limit:
+                self._fire_track(rx_state, frame)
+            if rx_state["suppress"] or not self._rx_data_matches(t, frame):
+                continue
+            sends = int(t.get("tx_count", 0)) or 1
+            if int(t.get("delay_ms", 0)) == 0 and sends == 1:
+                responses = self._send_response(t, i, echo, now_ms)
+                if responses:
+                    self.fired_count += 1
+                sent.extend(responses)
+            else:
+                self._arm(i, t, echo, now_ms)
+                self.events.append(
+                    {
+                        "time_ms": now_ms,
+                        "trigger": i,
+                        "kind": "armed",
+                        "delay": int(t.get("delay_ms", 0)),
+                    }
+                )
+            if rx_limit:
+                rx_state["count"] += 1
+                if rx_state["count"] >= rx_limit:
+                    rx_state["suppress"] = True
         return sent
 
     def poll(self, now_ms: float) -> List[Dict[str, Any]]:

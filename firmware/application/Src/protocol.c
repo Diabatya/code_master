@@ -316,12 +316,18 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     }
 
     case CMD_TRIGGER_WRITE: {
-      if (payload_len < 1U + sizeof(trigger_t) || payload[0] >= TRIGGER_MAX_RECORDS) {
+      /* Записи 82 Б (старый хост, формат v2) и 90 Б (v3) — обе
+       * принимаются, короткая дополняется нулями (Trigger_FromWire). */
+      if (payload_len < 1U + TRIGGER_RECORD_SIZE_V2
+          || payload[0] >= TRIGGER_MAX_RECORDS) {
         send_new_cmd_response(cmd, 0x01U, NULL, 0U);
         break;
       }
       trigger_t t;
-      memcpy(&t, &payload[1], sizeof(trigger_t));
+      if (!Trigger_FromWire(&payload[1], payload_len - 1U, &t)) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
       uint8_t ok = Trigger_Set(payload[0], &t);
       send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
       break;
@@ -375,8 +381,10 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * монитор опрашивает статистику каждую секунду, поэтому UI всегда
        * показывает реальную скорость шины, а не только заданное в поле.
        * [27..30] — кадры, не отправленные из-за занятых TX-ящиков:
-       * пропавшие ответы триггеров/шлюза под нагрузкой теперь видимы. */
-      uint8_t out[31];
+       * пропавшие ответы триггеров/шлюза под нагрузкой теперь видимы.
+       * [31..34] — кадры, спасённые backstop-опросом RX FIFO0: >0 =
+       * прерывание RX0 часть кадров пропускало (делит вектор с USB_LP). */
+      uint8_t out[35];
       memcpy(&out[0], &stats.rx_count, 4U);
       memcpy(&out[4], &stats.tx_count, 4U);
       memcpy(&out[8], &stats.lost_count, 4U);
@@ -388,6 +396,7 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       out[25] = (uint8_t)(baud & 0xFFU);
       out[26] = (uint8_t)((baud >> 8) & 0xFFU);
       memcpy(&out[27], &stats.tx_fail_count, 4U);
+      memcpy(&out[31], &stats.fifo_poll_count, 4U);
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
     }
@@ -416,12 +425,17 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     }
 
     case CMD_TRIGGER_STAGE: {
-      if (payload_len < 1U + sizeof(trigger_t) || payload[0] >= TRIGGER_MAX_RECORDS) {
+      /* 82 Б (старый хост) и 90 Б (v3) — см. CMD_TRIGGER_WRITE. */
+      if (payload_len < 1U + TRIGGER_RECORD_SIZE_V2
+          || payload[0] >= TRIGGER_MAX_RECORDS) {
         send_new_cmd_response(cmd, 0x01U, NULL, 0U);
         break;
       }
       trigger_t staged;
-      memcpy(&staged, &payload[1], sizeof(staged));
+      if (!Trigger_FromWire(&payload[1], payload_len - 1U, &staged)) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
       uint8_t ok = Trigger_Stage(payload[0], &staged);
       send_new_cmd_response(cmd, ok ? 0x00U : 0x01U, NULL, 0U);
       break;
@@ -521,7 +535,9 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * Старые версии ПК читают только первые 16 байт. */
       uint8_t out[64] = {
         s_device_version,
-        3U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи деструктивных команд */
+        4U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
+             * деструктивных команд; 4 = записи триггеров v3 (90 Б —
+             * fire_limit + флаги эха), старым прошивкам хост шлёт 82 Б */
         0U,
         1U,
         cfg->reserved[0],

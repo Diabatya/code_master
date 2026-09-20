@@ -545,6 +545,20 @@ class Translator:
                     "USB DFU: trigger region has no valid store — not restoring",
                 "Удалить фрейм": "Remove frame",
                 "Автоматическая запись DATA в Кэш": "Auto-save DATA to Cache",
+                "Слушать отправляемое": "Listen to transmitted",
+                "Кол-во сработок до смены DATA": "Fire count until DATA change",
+                "Срабатывать и на кадры, отправленные самим МК (TX-эхо)":
+                    "Trigger on frames sent by the MCU itself (TX echo)",
+                "Кэшировать и кадры, отправленные самим МК (TX-эхо)":
+                    "Cache frames sent by the MCU itself (TX echo)",
+                "Отработать N кадров с одинаковой Data и молчать до смены "
+                "содержимого; новая Data запускает счёт заново":
+                    "Fire on N frames with the same Data, then stay silent "
+                    "until the content changes; new Data restarts the count",
+                "Кэшировать N кадров с одинаковой Data и остановиться до "
+                "смены содержимого; новая Data запускает счёт заново":
+                    "Cache N frames with the same Data, then stop until the "
+                    "content changes; new Data restarts the count",
                 "Строки кэша": "Cache rows",
                 "Добавить строку кэша": "Add cache row",
                 "Удалить строку": "Remove row",

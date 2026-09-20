@@ -66,6 +66,7 @@ static volatile uint32_t s_error_count[2];
 static volatile uint32_t s_busoff_count[2];
 static volatile uint32_t s_recovery_count[2];
 static volatile uint8_t s_busoff_active[2];
+static volatile uint32_t s_fifo_poll_count[2];
 static uint8_t s_can_ready;
 
 static void ring_push(uint8_t channel, const can_frame_t *frame)
@@ -124,6 +125,7 @@ void CanBridge_GetStats(uint8_t channel, can_stats_t *out)
   out->busoff_count = s_busoff_count[channel];
   out->recovery_count = s_recovery_count[channel];
   out->tx_fail_count = s_tx_fail_count[channel];
+  out->fifo_poll_count = s_fifo_poll_count[channel];
 }
 
 /* LEC[2:0] из ESR → код ошибки HAL, чтобы CanBridge_TookError() отдавал
@@ -187,6 +189,35 @@ void CanBridge_PollHealth(void)
       if ((esr & CAN_ESR_EPVF) != 0U) {
         s_last_error_code[channel] |= HAL_CAN_ERROR_EPV;
       }
+    }
+    /* Backstop-дренаж RX FIFO0 из главного цикла: на F105 вектор
+     * CAN1_RX0 делит линию с USB_LP — если доставка прерывания
+     * потеряна/замаскирована штормом USB, аппаратное FIFO (3 слота)
+     * переполняется и кадры теряются уже на входе, хотя МК жив.
+     * GetRxMessage снимает сообщение и сбрасывает FMP — дублировать
+     * кадры с IRQ-путём не может: кто первым вычитал, того и кадр.
+     * Критическая секция короткая — гонка «FillLevel>0 → IRQ вычитал →
+     * GetRxMessage на пустом FIFO» просто вернёт HAL_ERROR и выйдет.
+     * Цикл ограничен глубиной аппаратного FIFO (3 сообщения). */
+    while (HAL_CAN_GetRxFifoFillLevel(handles[channel], CAN_RX_FIFO0) > 0U) {
+      can_frame_t frame;
+      CAN_RxHeaderTypeDef rx_header;
+      uint32_t primask = __get_PRIMASK();
+      __disable_irq();
+      HAL_StatusTypeDef status =
+          HAL_CAN_GetRxMessage(handles[channel], CAN_RX_FIFO0, &rx_header, frame.data);
+      __set_PRIMASK(primask);
+      if (status != HAL_OK) {
+        break;
+      }
+      frame.channel = channel;
+      frame.extended = (rx_header.IDE == CAN_ID_EXT) ? 1U : 0U;
+      frame.rtr = (rx_header.RTR == CAN_RTR_REMOTE) ? 1U : 0U;
+      frame.id = frame.extended ? rx_header.ExtId : rx_header.StdId;
+      frame.dlc = (uint8_t)rx_header.DLC;
+      frame.echo = 0U;
+      ring_push(channel, &frame);
+      s_fifo_poll_count[channel]++;
     }
   }
 }

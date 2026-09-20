@@ -66,6 +66,20 @@ static uint32_t s_max_lateness_ms;
 static uint8_t s_flash_valid_count; /* включённых записей, прочитанных
   из Flash при старте — диагностика «триггеры пропали после питания» */
 
+/* Состояние «кол-во сработок до смены DATA» (формат v3): на запись —
+ * счётчик сработок на неизменном содержимом и защёлка «лимит исчерпан»
+ * (тот самый «бит в ОЗУ» из ТЗ). Смена DATA на уровне ID-фильтра
+ * сбрасывает защёлку — триггер снова исполняет лимит сработок. */
+typedef struct {
+  uint16_t count;     /* сработок на текущей неизменной DATA */
+  uint8_t  suppress;  /* лимит исчерпан — игнорируем до смены DATA */
+  uint8_t  have;      /* last/last_dlc заполнены */
+  uint8_t  last_dlc;
+  uint8_t  last[8];
+} fire_state_t;
+static fire_state_t s_rx_state[TRIGGER_MAX_RECORDS];   /* условие приёма */
+static fire_state_t s_src_state[TRIGGER_MAX_RECORDS];  /* источник кэша */
+
 static uint8_t trigger_fields_valid(const trigger_t *trig);
 static uint8_t erase_pages(uint32_t from, uint32_t to);
 static uint8_t program_store(uint32_t base, uint32_t generation, uint8_t total,
@@ -93,43 +107,72 @@ static void load_default(trigger_t *t)
   t->crc8 = crc8((const uint8_t *)t, offsetof(trigger_t, crc8));
 }
 
-/* Запись триггера валидна, если magic/CRC/версия и поля корректны.
- * Версия заголовка формата лежит в reserved[0..1]: 0/0 — старые записи
- * до версионирования, 2/82 — формат v2 (rx_rtr сидит в бывшем
- * reserved_pad и у старых записей равен 0 = «любой кадр»). */
-static uint8_t record_valid(const trigger_t *flash_t)
+/* Валидация записи во Flash по сырым байтам — формат v2 (82 Б) и v3
+ * (90 Б) читаются с разным шагом, CRC закрывает всю запись, её длина —
+ * последний байт области записи. Версия/размер лежат в reserved[0..1]:
+ * 0/0 — старые записи до версионирования, 2/82 — v2, 3/90 — v3. */
+static uint8_t record_valid_at(const uint8_t *p, uint32_t rec_size)
 {
-  if (flash_t->magic != TRIGGER_MAGIC) {
+  uint32_t magic;
+  memcpy(&magic, p, sizeof(magic));
+  if (magic != TRIGGER_MAGIC) {
     return 0U;
   }
-  if (crc8((const uint8_t *)flash_t, offsetof(trigger_t, crc8)) != flash_t->crc8) {
+  uint8_t ver = p[49];
+  uint8_t sz = p[50];
+  if (!((ver == 0U && sz == 0U)
+        || (ver == TRIGGER_FORMAT_VERSION_V2 && sz == TRIGGER_RECORD_SIZE_V2)
+        || (ver == TRIGGER_FORMAT_VERSION && sz == TRIGGER_RECORD_SIZE))) {
     return 0U;
   }
-  if (!((flash_t->reserved[0] == 0U && flash_t->reserved[1] == 0U)
-        || (flash_t->reserved[0] == TRIGGER_FORMAT_VERSION
-            && flash_t->reserved[1] == TRIGGER_RECORD_SIZE))) {
+  if (sz != 0U && sz != rec_size) {
+    return 0U; /* размер записи обязан совпадать с шагом области */
+  }
+  return crc8(p, rec_size - 1U) == p[rec_size - 1U];
+}
+
+/* Сырые байты записи → runtime-структура v3: хвост за rec_size нулями
+ * (у записей v2 новых полей нет — функции выключены/эхо слушается). */
+static uint8_t load_record(const uint8_t *p, uint32_t rec_size, trigger_t *out)
+{
+  if (!record_valid_at(p, rec_size)) {
     return 0U;
   }
-  return trigger_fields_valid(flash_t);
+  memset(out, 0, sizeof(*out));
+  memcpy(out, p, rec_size < sizeof(*out) ? rec_size : sizeof(*out));
+  return trigger_fields_valid(out);
 }
 
 /* Поиск активной области хранилища: страница пула, начинающаяся с
  * валидного заголовка "TRGH". Если таких несколько (оборванная запись
- * оставила старую область ниже), выбирается больший generation. */
-static uint32_t find_store(uint8_t *count_out, uint32_t *gen_out)
+ * оставила старую область ниже), выбирается больший generation.
+ * Принимаются версии 3 (записи 82 Б) и 4 (записи 90 Б): хранилище v3,
+ * записанное старой прошивкой, поднимается в RAM и переписывается v4
+ * при ближайшем COMMIT — триггеры не теряются при обновлении. */
+static uint32_t find_store(uint8_t *count_out, uint32_t *gen_out,
+                           uint32_t *stride_out)
 {
   uint32_t best = 0U;
   uint32_t best_gen = 0U;
+  uint32_t best_stride = 0U;
   for (uint32_t page = TRIGGER_POOL_BASE; page < TRIGGER_FLASH_END;
        page += TRIGGER_FLASH_PAGE) {
     const trigger_header_t *h = (const trigger_header_t *)page;
-    if (h->magic != TRIGGER_HEADER_MAGIC || h->version != TRIGGER_STORE_VERSION) {
+    uint32_t stride;
+    if (h->magic != TRIGGER_HEADER_MAGIC) {
+      continue;
+    }
+    if (h->version == TRIGGER_STORE_VERSION) {
+      stride = sizeof(trigger_t);
+    } else if (h->version == TRIGGER_STORE_VERSION_V3) {
+      stride = TRIGGER_RECORD_SIZE_V2;
+    } else {
       continue;
     }
     if (h->count > TRIGGER_MAX_RECORDS) {
       continue;
     }
-    if (page + TRIGGER_HEADER_SIZE + (uint32_t)h->count * sizeof(trigger_t)
+    if (page + TRIGGER_HEADER_SIZE + (uint32_t)h->count * stride
         > TRIGGER_FLASH_END) {
       continue;
     }
@@ -139,12 +182,14 @@ static uint32_t find_store(uint8_t *count_out, uint32_t *gen_out)
     if (best == 0U || h->generation >= best_gen) {
       best = page;
       best_gen = h->generation;
+      best_stride = stride;
     }
   }
   if (best != 0U) {
     const trigger_header_t *h = (const trigger_header_t *)best;
     *count_out = h->count;
     *gen_out = best_gen;
+    *stride_out = best_stride;
   }
   return best;
 }
@@ -156,6 +201,8 @@ void Trigger_Init(void)
   memset(s_stage_flags, 0, sizeof(s_stage_flags));
   memset(s_cache, 0, sizeof(s_cache));
   memset(s_cache_valid, 0, sizeof(s_cache_valid));
+  memset(s_rx_state, 0, sizeof(s_rx_state));
+  memset(s_src_state, 0, sizeof(s_src_state));
   s_fired_count = 0U;
   s_dropped_count = 0U;
   s_max_lateness_ms = 0U;
@@ -168,20 +215,20 @@ void Trigger_Init(void)
 
   uint8_t count = 0U;
   uint32_t gen = 0U;
-  uint32_t base = find_store(&count, &gen);
+  uint32_t stride = 0U;
+  uint32_t base = find_store(&count, &gen, &stride);
   if (base != 0U) {
-    /* v3-хранилище: записи идут сплошным списком за заголовком. Битая
-     * запись (обрыв записи/повреждение) просто пропускается — остальные
-     * остаются рабочими. */
+    /* Записи идут сплошным списком за заголовком с шагом stride
+     * (82 Б у хранилища v3, 90 Б у v4). Битая запись (обрыв записи/
+     * повреждение) просто пропускается — остальные остаются рабочими. */
     const uint8_t *p = (const uint8_t *)(base + TRIGGER_HEADER_SIZE);
     for (uint8_t i = 0U; i < count; i++) {
-      const trigger_t *flash_t = (const trigger_t *)(p + (uint32_t)i * sizeof(trigger_t));
-      if (record_valid(flash_t)) {
-        memcpy(&s_triggers[s_count], flash_t, sizeof(trigger_t));
-        s_count++;
-        if (flash_t->enabled) {
+      const uint8_t *rec = p + (uint32_t)i * stride;
+      if (load_record(rec, stride, &s_triggers[s_count])) {
+        if (s_triggers[s_count].enabled) {
           s_flash_valid_count++;
         }
+        s_count++;
       }
     }
     s_store_base = base;
@@ -189,18 +236,17 @@ void Trigger_Init(void)
     return;
   }
 
-  /* Миграция v2: старый фиксированный регион 0x0803E000, 49 слотов.
-   * Записи поднимаются в RAM и работают сразу. */
+  /* Миграция v2: старый фиксированный регион 0x0803E000, 49 слотов
+   * по 82 Б. Записи поднимаются в RAM и работают сразу. */
   const uint8_t *legacy = (const uint8_t *)TRIGGER_LEGACY_ADDR;
   for (uint8_t i = 0U; i < TRIGGER_LEGACY_COUNT; i++) {
-    const trigger_t *flash_t =
-        (const trigger_t *)(legacy + (uint32_t)i * sizeof(trigger_t));
-    if (record_valid(flash_t) && s_count < TRIGGER_MAX_RECORDS) {
-      memcpy(&s_triggers[s_count], flash_t, sizeof(trigger_t));
-      s_count++;
-      if (flash_t->enabled) {
+    const uint8_t *rec = legacy + (uint32_t)i * TRIGGER_RECORD_SIZE_V2;
+    if (s_count < TRIGGER_MAX_RECORDS
+        && load_record(rec, TRIGGER_RECORD_SIZE_V2, &s_triggers[s_count])) {
+      if (s_triggers[s_count].enabled) {
         s_flash_valid_count++;
       }
+      s_count++;
     }
   }
 
@@ -372,7 +418,9 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
       || trig->rx_dlc > 8U || trig->tx_dlc > 8U
       || trig->tx_rtr > 1U || trig->rx_rtr > 2U || trig->cache_enabled > 1U
       || trig->src_channel > 2U || trig->src_extended > 1U
-      || trig->src_dlc > 8U) {
+      || trig->src_dlc > 8U
+      || (trig->rx_flags & ~TRIGGER_F_MUTE_ECHO) != 0U
+      || (trig->src_flags & ~TRIGGER_F_MUTE_ECHO) != 0U) {
     return 0U;
   }
   uint32_t rx_max = trig->rx_extended ? 0x1FFFFFFFU : 0x7FFU;
@@ -380,6 +428,20 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
   uint32_t src_max = trig->src_extended ? 0x1FFFFFFFU : 0x7FFU;
   return (trig->rx_id <= rx_max && trig->rx_id_mask <= rx_max
           && trig->tx_id <= tx_max && trig->src_id <= src_max) ? 1U : 0U;
+}
+
+/* Запись с провода → runtime-структура: принимаются 82 Б (хост/формат
+ * v2 — новые поля нулями: лимиты выключены, эхо слушается) и 90 Б
+ * (формат v3). Так старый ПК продолжает писать триггеры в новую
+ * прошивку. */
+uint8_t Trigger_FromWire(const uint8_t *src, uint32_t len, trigger_t *out)
+{
+  if (len != TRIGGER_RECORD_SIZE && len != TRIGGER_RECORD_SIZE_V2) {
+    return 0U;
+  }
+  memset(out, 0, sizeof(*out));
+  memcpy(out, src, len);
+  return 1U;
 }
 
 uint8_t Trigger_Stage(uint8_t index, const trigger_t *trig)
@@ -457,10 +519,16 @@ uint8_t Trigger_Commit(uint8_t total)
   uint32_t old_base = s_store_base;
   uint32_t old_end = 0U;
   if (old_base != 0U) {
+    /* Устаревшее хранилище могло быть записано с шагом 82 Б (store v3) —
+     * sizeof(trigger_t) здесь завышает оценку, но это безопасно:
+     * пересечение проверяется с запасом, а стирание зажато концом Flash. */
     uint32_t old_pages = (TRIGGER_HEADER_SIZE
                           + (uint32_t)s_count * sizeof(trigger_t)
                           + (TRIGGER_FLASH_PAGE - 1U)) / TRIGGER_FLASH_PAGE;
     old_end = old_base + old_pages * TRIGGER_FLASH_PAGE;
+    if (old_end > TRIGGER_FLASH_END) {
+      old_end = TRIGGER_FLASH_END;
+    }
   }
   if (total != 0U && old_base != 0U) {
     const uint32_t anchors[2] = { base_top, TRIGGER_POOL_BASE };
@@ -510,6 +578,11 @@ uint8_t Trigger_Commit(uint8_t total)
    * отправки по ним надо сбросить, а по перезаписанным — обновить. */
   memset(s_pending, 0, sizeof(s_pending));
   memset(s_cache_valid, 0, sizeof(s_cache_valid));
+  /* Счётчики «сработок до смены DATA» относятся к записи — при новом
+   * списке начинают с нуля, иначе переиспользованный слот наследовал
+   * бы чужую защёлку и молчал до первой смены DATA. */
+  memset(s_rx_state, 0, sizeof(s_rx_state));
+  memset(s_src_state, 0, sizeof(s_src_state));
   return 1U;
 }
 
@@ -535,11 +608,13 @@ uint8_t Trigger_SetEnabled(uint8_t index, uint8_t enabled)
   return Trigger_Set(index, &updated);
 }
 
-static uint8_t frame_matches(const trigger_t *t, const can_frame_t *frame)
+/* Условие приёма на уровне заголовка: режим RTR, канал, битность, ID по
+ * маске и DLC. Отделено от сравнения Data — «смена DATA» для счётчика
+ * сработок отслеживается уже на этом уровне (кадр с тем же ID, но
+ * другим содержимым сбрасывает защёлку лимита, даже если под шаблон
+ * данных он не попал). */
+static uint8_t rx_header_matches(const trigger_t *t, const can_frame_t *frame)
 {
-  if (!t->enabled) {
-    return 0U;
-  }
   /* rx_rtr: 0 = любой кадр (старое поведение), 1 = только RTR-запрос,
    * 2 = только кадр с данными. */
   if (t->rx_rtr == 1U && frame->rtr == 0U) {
@@ -562,9 +637,14 @@ static uint8_t frame_matches(const trigger_t *t, const can_frame_t *frame)
      * treatment of an unset/zero length as "don't care"). */
     return 0U;
   }
+  return 1U;
+}
+
+static uint8_t rx_data_matches(const trigger_t *t, const can_frame_t *frame)
+{
   if (t->rx_rtr != 1U) {
     /* В RTR-режиме кадр не несёт данных — сравнение по Data не имеет
-     * смысла и пропускается. */
+     * смысла и пропускается. Байт с маской 0x00 — wildcard «X». */
     for (uint8_t i = 0; i < frame->dlc && i < 8U; i++) {
       if ((t->rx_data[i] & t->rx_data_mask[i]) != (frame->data[i] & t->rx_data_mask[i])) {
         return 0U;
@@ -574,13 +654,9 @@ static uint8_t frame_matches(const trigger_t *t, const can_frame_t *frame)
   return 1U;
 }
 
-/* Матчер «Откуда читаем» кэш-режима: кадр кэшируется, если канал/битность/
- * ID совпали, а каждый байт Data (src_dlc байт) попадает в свой диапазон
- * [src_from[i], src_to[i]]. Инвертированный диапазон (from[i] > to[i]) —
- * wildcard «X»: байт не участвует в сравнении, а при захвате в кэш
- * обнуляется (в ответе уйдёт 0x00 — см. Trigger_OnFrame).
- * src_dlc == 0 — данные не проверяются (матч только по ID). */
-static uint8_t src_matches(const trigger_t *t, const can_frame_t *frame)
+/* Источник кэша на уровне ID (канал/битность/ID) — для «смены DATA»
+ * счётчика сработок кэша. */
+static uint8_t src_id_matches(const trigger_t *t, const can_frame_t *frame)
 {
   if (t->src_channel != 2U && t->src_channel != frame->channel) {
     return 0U;
@@ -588,9 +664,16 @@ static uint8_t src_matches(const trigger_t *t, const can_frame_t *frame)
   if (t->src_extended != frame->extended) {
     return 0U;
   }
-  if (t->src_id != frame->id) {
-    return 0U;
-  }
+  return t->src_id == frame->id;
+}
+
+/* Побайтовый диапазон «От/До»: каждый байт Data (src_dlc штук) должен
+ * попасть в свой [src_from[i], src_to[i]]. Инвертированный диапазон
+ * (from[i] > to[i]) — wildcard «X»: байт не участвует в сравнении, а при
+ * захвате в кэш обнуляется (в ответе уйдёт 0x00 — см. Trigger_OnFrame).
+ * src_dlc == 0 — данные не проверяются (матч только по ID). */
+static uint8_t src_range_matches(const trigger_t *t, const can_frame_t *frame)
+{
   for (uint8_t i = 0; i < t->src_dlc && i < 8U; i++) {
     if (t->src_from[i] > t->src_to[i]) {
       continue;
@@ -603,6 +686,24 @@ static uint8_t src_matches(const trigger_t *t, const can_frame_t *frame)
     }
   }
   return 1U;
+}
+
+/* «Кол-во сработок до смены DATA»: запоминает содержимое кадра на
+ * уровне ID-фильтра; при смене DATA защёлка лимита сбрасывается —
+ * триггер снова исполняет до rx/src_fire_limit сработок. Вызывается
+ * только когда соответствующий лимит != 0. */
+static void fire_track(fire_state_t *st, const can_frame_t *frame)
+{
+  uint8_t dlc = frame->dlc > 8U ? 8U : frame->dlc;
+  if (!st->have || st->last_dlc != dlc
+      || memcmp(st->last, frame->data, dlc) != 0) {
+    memset(st->last, 0, sizeof(st->last));
+    memcpy(st->last, frame->data, dlc);
+    st->last_dlc = dlc;
+    st->have = 1U;
+    st->count = 0U;
+    st->suppress = 0U;
+  }
 }
 
 static void arm_response(uint8_t index, const trigger_t *t, uint8_t echo)
@@ -656,23 +757,51 @@ void Trigger_OnFrame(const can_frame_t *frame)
 {
   for (uint8_t i = 0; i < s_count; i++) {
     const trigger_t *t = &s_triggers[i];
+    if (!t->enabled) {
+      continue;
+    }
     /* Кэш пополняется независимо от условия «Приём» — триггер постоянно
      * переписывает Data последнего подходящего кадра. Обновление идёт
      * до проверки rx-матча: кадр, попавший в оба фильтра, обновит кэш
-     * до отправки. */
-    if (t->enabled && t->cache_enabled && src_matches(t, frame)) {
-      s_cache[i] = *frame;
-      /* Wildcard-позиции (from>to) в кэше обнуляются: при ответе на
-       * месте игнорированных байтов уйдёт 0x00, а не случайное значение
-       * последнего кадра. */
-      for (uint8_t j = 0; j < t->src_dlc && j < 8U; j++) {
-        if (t->src_from[j] > t->src_to[j]) {
-          s_cache[i].data[j] = 0U;
+     * до отправки. src_flags&MUTE_ECHO — источник слушает только шину
+     * (собственные отправки МК не кэшируются); src_fire_limit — захват
+     * прекращается после N одинаковых DATA до их смены. */
+    if (t->cache_enabled
+        && !(frame->echo != 0U && (t->src_flags & TRIGGER_F_MUTE_ECHO) != 0U)
+        && src_id_matches(t, frame)) {
+      if (t->src_fire_limit != 0U) {
+        fire_track(&s_src_state[i], frame);
+      }
+      if (s_src_state[i].suppress == 0U && src_range_matches(t, frame)) {
+        s_cache[i] = *frame;
+        /* Wildcard-позиции (from>to) в кэше обнуляются: при ответе на
+         * месте игнорированных байтов уйдёт 0x00, а не случайное значение
+         * последнего кадра. */
+        for (uint8_t j = 0; j < t->src_dlc && j < 8U; j++) {
+          if (t->src_from[j] > t->src_to[j]) {
+            s_cache[i].data[j] = 0U;
+          }
+        }
+        s_cache_valid[i] = 1U;
+        if (t->src_fire_limit != 0U
+            && ++s_src_state[i].count >= t->src_fire_limit) {
+          s_src_state[i].suppress = 1U;
         }
       }
-      s_cache_valid[i] = 1U;
     }
-    if (frame_matches(t, frame)) {
+    /* rx_flags&MUTE_ECHO — триггер не реагирует на кадры, отправленные
+     * самим МК (TX-эхо); 0 — слушает и внешние, и свои (как в v2). */
+    if ((frame->echo != 0U && (t->rx_flags & TRIGGER_F_MUTE_ECHO) != 0U)
+        || !rx_header_matches(t, frame)) {
+      continue;
+    }
+    if (t->rx_fire_limit != 0U) {
+      fire_track(&s_rx_state[i], frame);
+    }
+    if (s_rx_state[i].suppress != 0U || !rx_data_matches(t, frame)) {
+      continue;
+    }
+    {
       uint8_t sends = t->tx_count ? t->tx_count : 1U;
       if (t->delay_ms == 0U && sends == 1U) {
         /* Zero delay, single shot: send immediately, no need to go
@@ -688,6 +817,10 @@ void Trigger_OnFrame(const can_frame_t *frame)
         }
       } else {
         arm_response(i, t, frame->echo);
+      }
+      if (t->rx_fire_limit != 0U
+          && ++s_rx_state[i].count >= t->rx_fire_limit) {
+        s_rx_state[i].suppress = 1U;
       }
     }
   }

@@ -6,13 +6,19 @@ import struct
 from typing import Dict, Any, Optional
 
 TRIGGER_MAGIC = 0x54524732
-TRIGGER_FORMAT_VERSION = 2
-TRIGGER_SIZE = 82
-# Хвост записи: tx_interval_ms(H), tx_count(B), rx_rtr(B), pad(B), crc8(B).
-# rx_rtr занимает бывший байт reserved_pad — размер записи остался 82 Б.
-# rx_rtr: 0 = любой кадр (как раньше), 1 = только RTR-запрос,
-# 2 = только кадр с данными.
-_TRIGGER_FORMAT = "<IBBBIIB8s8sBBIB8sH2sBBBBIB8s8sHBBBB"
+TRIGGER_FORMAT_VERSION = 3
+TRIGGER_FORMAT_VERSION_V2 = 2
+TRIGGER_SIZE = 90
+TRIGGER_SIZE_V2 = 82
+# Формат v3 (90 Б): к v2 добавлены rx_fire_limit(H), rx_flags(B),
+# src_fire_limit(H), src_flags(B), 2 байта выравнивания — crc8 в конце.
+# rx_flags/src_flags, бит 0 = MUTE_ECHO: не реагировать на TX-эхо
+# (собственные отправки МК). 0 = слушать шину и эхо (поведение v2).
+# *_fire_limit: «кол-во сработок до смены DATA» — N срабатываний на
+# неизменной Data, затем защёлка до смены содержимого; 0 = выкл.
+_TRIGGER_FORMAT_V2 = "<IBBBIIB8s8sBBIB8sH2sBBBBIB8s8sHBBBB"
+_TRIGGER_FORMAT = "<IBBBIIB8s8sBBIB8sH2sBBBBIB8s8sHBBBHBHBBB B".replace(" ", "")
+TRIGGER_F_MUTE_ECHO = 0x01
 
 # Хранилище триггеров v3 (см. firmware/PROTOCOL.md и Inc/trigger.h):
 # записи упакованы в суффикс пула страниц над config-страницей
@@ -23,7 +29,7 @@ _TRIGGER_FORMAT = "<IBBBIIB8s8sBBIB8sH2sBBBBIB8s8sHBBBB"
 TRIGGER_POOL_BASE = 0x0803E000
 TRIGGER_POOL_SIZE = 0x08040000 - TRIGGER_POOL_BASE  # 8192
 TRIGGER_HEADER_SIZE = 16
-TRIGGER_SLOT_SIZE = 82
+TRIGGER_SLOT_SIZE = 90
 # Лимит по RAM прошивки (70 записей), а не по пулу — см. Inc/trigger.h.
 TRIGGER_MAX_SLOTS = 70
 
@@ -133,61 +139,97 @@ def crc8(data: bytes) -> int:
     return value
 
 
-def pack_trigger(values: Dict[str, Any]) -> bytes:
-    """Pack a trigger_t-compatible record and calculate firmware CRC8."""
-    raw = bytearray(
-        struct.pack(
-            _TRIGGER_FORMAT,
-            TRIGGER_MAGIC,
-            int(values.get("enabled", 0)) & 0xFF,
-            int(values.get("rx_channel", 0)) & 0xFF,
-            int(values.get("rx_extended", 0)) & 0xFF,
-            int(values.get("rx_id", 0)) & 0x1FFFFFFF,
-            int(values.get("rx_id_mask", 0x7FF)) & 0x1FFFFFFF,
-            int(values.get("rx_dlc", 0)) & 0xFF,
-            bytes(values.get("rx_data", b""))[:8].ljust(8, b"\x00"),
-            bytes(values.get("rx_data_mask", b""))[:8].ljust(8, b"\x00"),
-            int(values.get("tx_channel", 0)) & 0xFF,
-            int(values.get("tx_extended", 0)) & 0xFF,
-            int(values.get("tx_id", 0)) & 0x1FFFFFFF,
-            int(values.get("tx_dlc", 0)) & 0xFF,
-            bytes(values.get("tx_data", b""))[:8].ljust(8, b"\x00"),
-            int(values.get("delay_ms", 0)) & 0xFFFF,
-            bytes((TRIGGER_FORMAT_VERSION, TRIGGER_SIZE)),
-            int(values.get("tx_rtr", 0)) & 0xFF,
-            int(values.get("cache_enabled", 0)) & 0xFF,
-            int(values.get("src_channel", 0)) & 0xFF,
-            int(values.get("src_extended", 0)) & 0xFF,
-            int(values.get("src_id", 0)) & 0x1FFFFFFF,
-            int(values.get("src_dlc", 0)) & 0xFF,
-            bytes(values.get("src_from", b""))[:8].ljust(8, b"\x00"),
-            bytes(values.get("src_to", b"\xff" * 8))[:8].ljust(8, b"\xff"),
-            int(values.get("tx_interval_ms", 0)) & 0xFFFF,
-            int(values.get("tx_count", 0)) & 0xFF,
-            int(values.get("rx_rtr", 0)) & 0xFF,
-            int(values.get("group_seq", 0)) & 0xFF,
-            0,
-        )
+def pack_trigger(values: Dict[str, Any], fmt_version: int = TRIGGER_FORMAT_VERSION) -> bytes:
+    """Pack a trigger_t-compatible record and calculate firmware CRC8.
+
+    fmt_version=3 (по умолчанию) — запись 90 Б с новыми полями;
+    fmt_version=2 — легаси-запись 82 Б для старых прошивок (новые
+    опции на провод не уходят — они выполняются PC-исполнением)."""
+    common = (
+        TRIGGER_MAGIC,
+        int(values.get("enabled", 0)) & 0xFF,
+        int(values.get("rx_channel", 0)) & 0xFF,
+        int(values.get("rx_extended", 0)) & 0xFF,
+        int(values.get("rx_id", 0)) & 0x1FFFFFFF,
+        int(values.get("rx_id_mask", 0x7FF)) & 0x1FFFFFFF,
+        int(values.get("rx_dlc", 0)) & 0xFF,
+        bytes(values.get("rx_data", b""))[:8].ljust(8, b"\x00"),
+        bytes(values.get("rx_data_mask", b""))[:8].ljust(8, b"\x00"),
+        int(values.get("tx_channel", 0)) & 0xFF,
+        int(values.get("tx_extended", 0)) & 0xFF,
+        int(values.get("tx_id", 0)) & 0x1FFFFFFF,
+        int(values.get("tx_dlc", 0)) & 0xFF,
+        bytes(values.get("tx_data", b""))[:8].ljust(8, b"\x00"),
+        int(values.get("delay_ms", 0)) & 0xFFFF,
+        bytes((fmt_version, TRIGGER_SIZE_V2 if fmt_version == 2 else TRIGGER_SIZE)),
+        int(values.get("tx_rtr", 0)) & 0xFF,
+        int(values.get("cache_enabled", 0)) & 0xFF,
+        int(values.get("src_channel", 0)) & 0xFF,
+        int(values.get("src_extended", 0)) & 0xFF,
+        int(values.get("src_id", 0)) & 0x1FFFFFFF,
+        int(values.get("src_dlc", 0)) & 0xFF,
+        bytes(values.get("src_from", b""))[:8].ljust(8, b"\x00"),
+        bytes(values.get("src_to", b"\xff" * 8))[:8].ljust(8, b"\xff"),
+        int(values.get("tx_interval_ms", 0)) & 0xFFFF,
+        int(values.get("tx_count", 0)) & 0xFF,
+        int(values.get("rx_rtr", 0)) & 0xFF,
+        int(values.get("group_seq", 0)) & 0xFF,
     )
+    if fmt_version == 2:
+        raw = bytearray(struct.pack(_TRIGGER_FORMAT_V2, *common, 0))
+    else:
+        rx_flags = 0 if values.get("rx_listen_echo", True) else TRIGGER_F_MUTE_ECHO
+        src_flags = 0 if values.get("src_listen_echo", True) else TRIGGER_F_MUTE_ECHO
+        raw = bytearray(
+            struct.pack(
+                _TRIGGER_FORMAT,
+                *common,
+                int(values.get("rx_fire_limit", 0)) & 0xFFFF,
+                rx_flags,
+                int(values.get("src_fire_limit", 0)) & 0xFFFF,
+                src_flags,
+                0, 0, 0,
+            )
+        )
     raw[-1] = crc8(raw[:-1])
     return bytes(raw)
 
 
 def unpack_trigger(payload: bytes) -> Dict[str, Any]:
-    """Validate and unpack a trigger_t-compatible payload."""
-    if len(payload) != TRIGGER_SIZE:
+    """Validate and unpack a trigger_t-compatible payload (v2/v3)."""
+    if len(payload) == TRIGGER_SIZE:
+        values = struct.unpack(_TRIGGER_FORMAT, payload)
+        fmt_ok = values[15] in (
+            (0, 0),
+            bytes((TRIGGER_FORMAT_VERSION, TRIGGER_SIZE)),
+        )
+        tail = {
+            "rx_fire_limit": values[28],
+            "rx_listen_echo": not (values[29] & TRIGGER_F_MUTE_ECHO),
+            "src_fire_limit": values[30],
+            "src_listen_echo": not (values[31] & TRIGGER_F_MUTE_ECHO),
+        }
+    elif len(payload) == TRIGGER_SIZE_V2:
+        values = struct.unpack(_TRIGGER_FORMAT_V2, payload)
+        fmt_ok = values[15] in (
+            (0, 0),
+            bytes((TRIGGER_FORMAT_VERSION_V2, TRIGGER_SIZE_V2)),
+        )
+        tail = {
+            "rx_fire_limit": 0,
+            "rx_listen_echo": True,
+            "src_fire_limit": 0,
+            "src_listen_echo": True,
+        }
+    else:
         raise ValueError(f"Некорректный размер trigger_t: {len(payload)}")
-    values = struct.unpack(_TRIGGER_FORMAT, payload)
     if values[0] != TRIGGER_MAGIC:
         raise ValueError("Неверный magic trigger_t")
     if crc8(payload[:-1]) != payload[-1]:
         raise ValueError("Неверный CRC8 trigger_t")
-    if not (
-        (values[15][0] == 0 and values[15][1] == 0)
-        or (values[15][0] == TRIGGER_FORMAT_VERSION and values[15][1] == TRIGGER_SIZE)
-    ):
+    if not fmt_ok:
         raise ValueError("Неподдерживаемая версия trigger_t")
-    return {
+    result = {
         "enabled": values[1],
         "rx_channel": values[2],
         "rx_extended": values[3],
@@ -215,3 +257,5 @@ def unpack_trigger(payload: bytes) -> Dict[str, Any]:
         "rx_rtr": values[26],
         "group_seq": values[27],
     }
+    result.update(tail)
+    return result

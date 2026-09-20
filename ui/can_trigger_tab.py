@@ -36,6 +36,8 @@ from core.can_protocol import (
 from core.serial_manager import SerialManager
 from core.trigger_protocol import (
     GROUP_SEQ_FRAGMENT,
+    TRIGGER_FORMAT_VERSION,
+    TRIGGER_FORMAT_VERSION_V2,
     TRIGGER_MAX_SLOTS,
     count_configured_triggers,
     expand_schedule,
@@ -161,6 +163,12 @@ class CanTriggerTab(QWidget):
         # прошивке); сбрасывается при сохранении конфигурации — фильтры
         # могли измениться и старые данные уже не отвечают им.
         self._pc_cache: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        # Состояние «кол-во сработок до смены DATA» при PC-исполнении:
+        # приём — по индексу блока, источник кэша — по (блок, строка).
+        # Порт fire_state_t прошивки: last/have — последняя DATA,
+        # count/suppress — счётчик и защёлка лимита.
+        self._pc_rx_state: Dict[int, Dict[str, Any]] = {}
+        self._pc_src_state: Dict[Tuple[int, int], Dict[str, Any]] = {}
         self._memory_indicator = MemoryIndicator(self)
 
         self._create_widgets()
@@ -265,6 +273,36 @@ class CanTriggerTab(QWidget):
 
         layout.addStretch()
 
+        # Вторая строка приёма — опции: реагировать ли на кадры,
+        # отправленные самим МК (TX-эхо), и счётчик «сработок до смены
+        # DATA»: N срабатываний на неизменной Data, затем игнор до смены
+        # содержимого (бит защёлки в ОЗУ прошивки/ПК).
+        options_layout = QHBoxLayout()
+        options_layout.setSpacing(4)
+        listen_echo = QCheckBox(tr("Слушать отправляемое"))
+        listen_echo.setFont(font)
+        listen_echo.setChecked(True)
+        listen_echo.setToolTip(
+            tr("Срабатывать и на кадры, отправленные самим МК (TX-эхо)")
+        )
+        options_layout.addWidget(listen_echo)
+        fire_check = QCheckBox(tr("Кол-во сработок до смены DATA"))
+        fire_check.setFont(font)
+        fire_check.setToolTip(
+            tr("Отработать N кадров с одинаковой Data и молчать до смены "
+               "содержимого; новая Data запускает счёт заново")
+        )
+        options_layout.addWidget(fire_check)
+        fire_spin = QSpinBox()
+        fire_spin.setRange(1, 9999)
+        fire_spin.setValue(1)
+        fire_spin.setFont(font)
+        fire_spin.setFixedWidth(70)
+        fire_spin.setEnabled(False)
+        fire_check.toggled.connect(fire_spin.setEnabled)
+        options_layout.addWidget(fire_spin)
+        options_layout.addStretch()
+
         def _on_dlc_or_rtr(*_args: object) -> None:
             # В RTR-режиме приёма кадр не несёт данных — поля Data
             # блокируются (матч идёт по каналу/битности/ID/DLC).
@@ -276,6 +314,7 @@ class CanTriggerTab(QWidget):
 
         row = {
             "layout": layout,
+            "options_layout": options_layout,
             "channel": channel,
             "bit": bit,
             "id": can_id,
@@ -284,6 +323,9 @@ class CanTriggerTab(QWidget):
             "data_widget": data_widget,
             "rtr": rtr,
             "copy_paste": copy_paste,
+            "listen_echo": listen_echo,
+            "fire_check": fire_check,
+            "fire_spin": fire_spin,
         }
         can_id.set_fill_callback(lambda parsed, r=row: self._fill_row_from_packet(r, parsed))
         return row
@@ -647,8 +689,37 @@ class CanTriggerTab(QWidget):
         remove_button.setToolTip(tr("Удалить строку"))
         line2.addWidget(remove_button)
 
+        # Третья линия — опции источника: реагировать ли на собственные
+        # отправки МК и счётчик «сработок до смены DATA» (как в приёме).
+        line3 = QHBoxLayout()
+        line3.setSpacing(4)
+        listen_echo = QCheckBox(tr("Слушать отправляемое"))
+        listen_echo.setFont(font)
+        listen_echo.setChecked(True)
+        listen_echo.setToolTip(
+            tr("Кэшировать и кадры, отправленные самим МК (TX-эхо)")
+        )
+        line3.addWidget(listen_echo)
+        fire_check = QCheckBox(tr("Кол-во сработок до смены DATA"))
+        fire_check.setFont(font)
+        fire_check.setToolTip(
+            tr("Кэшировать N кадров с одинаковой Data и остановиться до "
+               "смены содержимого; новая Data запускает счёт заново")
+        )
+        line3.addWidget(fire_check)
+        fire_spin = QSpinBox()
+        fire_spin.setRange(1, 9999)
+        fire_spin.setValue(1)
+        fire_spin.setFont(font)
+        fire_spin.setFixedWidth(70)
+        fire_spin.setEnabled(False)
+        fire_check.toggled.connect(fire_spin.setEnabled)
+        line3.addWidget(fire_spin)
+        line3.addStretch()
+
         column.addLayout(line1)
         column.addLayout(line2)
+        column.addLayout(line3)
 
         dlc.valueChanged.connect(lambda value: self._set_data_enabled(from_data, value))
         dlc.valueChanged.connect(lambda value: self._set_data_enabled(to_data, value))
@@ -683,6 +754,9 @@ class CanTriggerTab(QWidget):
             "delay_between": delay_between,
             "count": count,
             "remove_button": remove_button,
+            "listen_echo": listen_echo,
+            "fire_check": fire_check,
+            "fire_spin": fire_spin,
         }
         remove_button.clicked.connect(lambda: self._remove_cache_row(cache, row))
         can_id.set_fill_callback(
@@ -777,7 +851,12 @@ class CanTriggerTab(QWidget):
         row["dlc"].setValue(dlc)
         data = parsed.get("data", [])
         for i, edit in enumerate(row["data"]):
-            edit.setText(f"{data[i]:02X}" if i < len(data) else "")
+            # None — wildcard «X» из буфера (parse_packet_string);
+            # в полях без поддержки wildcard позиция остаётся пустой.
+            if i < len(data) and data[i] is None:
+                edit.setText("X" if getattr(edit, "_allow_x", False) else "")
+            else:
+                edit.setText(f"{data[i]:02X}" if i < len(data) else "")
         rtr = row["rtr"].isChecked() if "rtr" in row else False
         self._set_data_enabled(row["data"], 0 if rtr else dlc)
 
@@ -793,9 +872,15 @@ class CanTriggerTab(QWidget):
         row["dlc"].setValue(dlc)
         data = parsed.get("data", [])
         for i, edit in enumerate(row["from_data"]):
-            edit.setText(f"{data[i]:02X}" if i < len(data) else "")
+            edit.setText(
+                "X" if i < len(data) and data[i] is None
+                else (f"{data[i]:02X}" if i < len(data) else "")
+            )
         for i, edit in enumerate(row["to_data"]):
-            edit.setText(f"{data[i]:02X}" if i < len(data) else "")
+            edit.setText(
+                "X" if i < len(data) and data[i] is None
+                else (f"{data[i]:02X}" if i < len(data) else "")
+            )
         self._set_data_enabled(row["from_data"], dlc)
         self._set_data_enabled(row["to_data"], dlc)
 
@@ -857,6 +942,7 @@ class CanTriggerTab(QWidget):
         content_layout.setContentsMargins(6, 6, 6, 6)
 
         content_layout.addLayout(block["recv"]["layout"])
+        content_layout.addLayout(block["recv"]["options_layout"])
         content_layout.addWidget(block["response"]["group"])
         content_layout.addWidget(block["cache"]["group"])
         self._set_cache_enabled(block, False)
@@ -1262,6 +1348,21 @@ class CanTriggerTab(QWidget):
             if not self._inside_any(widget, skip):
                 widget.clicked.connect(mark)
 
+    @staticmethod
+    def _fire_track_data(state: Dict[str, Any], data: bytes) -> None:
+        """Порт fire_track() прошивки: кадр с новой Data сбрасывает
+        защёлку лимита — триггер снова исполняет N сработок."""
+        last = bytes(data[:8])
+        if not state["have"] or state["last"] != last:
+            state["last"] = last
+            state["have"] = True
+            state["count"] = 0
+            state["suppress"] = False
+
+    @staticmethod
+    def _new_fire_state() -> Dict[str, Any]:
+        return {"have": False, "last": b"", "count": 0, "suppress": False}
+
     def _mark_dirty(self, index: Optional[int] = None) -> None:
         """Помечает конфигурацию изменённой пользователем."""
         if self._applying_device_state:
@@ -1269,6 +1370,8 @@ class CanTriggerTab(QWidget):
         # Фильтры/ответы могли измениться — накопленный кэш PC-исполнения
         # им уже не отвечает (аналог memset(s_cache_valid) при коммите).
         self._pc_cache.clear()
+        self._pc_rx_state.clear()
+        self._pc_src_state.clear()
         if index is not None and 0 <= index < len(self._device_managed):
             self._device_managed[index] = False
         self.settings_changed.emit()
@@ -1318,6 +1421,10 @@ class CanTriggerTab(QWidget):
                 0x00 if wild[i] else ((v & 0xFF) if v is not None else 0xFF)
                 for i, v in enumerate(row.get("data_to", [None] * 8))
             )
+            src_listen_echo = bool(row.get("listen_echo", True))
+            src_fire_limit = (
+                int(row.get("fire_limit", 0)) if row.get("fire_limit_enabled") else 0
+            )
         else:
             response_rows = block["response"]["rows"]
             response = response_rows[0] if response_rows else None
@@ -1342,6 +1449,8 @@ class CanTriggerTab(QWidget):
             src_id = 0
             src_from = b""
             src_to = b""
+            src_listen_echo = True
+            src_fire_limit = 0
 
         return {
             "enabled": int(block["group"].isChecked()),
@@ -1370,6 +1479,13 @@ class CanTriggerTab(QWidget):
             "src_to": src_to,
             "tx_interval_ms": tx_interval_ms,
             "tx_count": tx_count,
+            # Опции формата v3: эхо-фильтр и «сработки до смены DATA».
+            "rx_listen_echo": recv["listen_echo"].isChecked(),
+            "rx_fire_limit": (
+                recv["fire_spin"].value() if recv["fire_check"].isChecked() else 0
+            ),
+            "src_listen_echo": src_listen_echo,
+            "src_fire_limit": src_fire_limit,
         }
 
     def _set_trigger_status(self, index: int, state: str) -> None:
@@ -1431,6 +1547,10 @@ class CanTriggerTab(QWidget):
             # Байт с нулевой маской — wildcard: показываем «X», а не «00».
             edit.setText("X" if i < len(rx_data_mask) and rx_data_mask[i] == 0 else f"{value:02X}")
         recv["rtr"].setChecked(values.get("rx_rtr", 0) == 1)
+        recv["listen_echo"].setChecked(bool(values.get("rx_listen_echo", True)))
+        rx_fire_limit = int(values.get("rx_fire_limit", 0))
+        recv["fire_check"].setChecked(rx_fire_limit > 0)
+        recv["fire_spin"].setValue(max(1, min(9999, rx_fire_limit or 1)))
         self._set_data_enabled(
             recv["data"], 0 if recv["rtr"].isChecked() else recv["dlc"].value()
         )
@@ -1475,6 +1595,8 @@ class CanTriggerTab(QWidget):
                     "delay_between": record.get("tx_interval_ms", 0),
                     "count": 1,
                     "next_delay": 0,
+                    "listen_echo": int(record.get("src_listen_echo", True)),
+                    "fire_limit": int(record.get("src_fire_limit", 0)),
                 })
             for row_index, count in enumerate(row_counts):
                 cache_rows[row_index]["count"] = count
@@ -1600,6 +1722,28 @@ class CanTriggerTab(QWidget):
             self._collect_block_config(block)
         )
 
+    def _record_fmt_version(self) -> int:
+        """Формат записи на провод: прошивка с protocol≥4 принимает
+        90-байтные записи v3 (fire_limit + флаги эха), старшим шлём
+        82-байтные v2 — новые опции тогда исполняет приложение."""
+        if self._serial_manager.device_protocol_version() >= 4:
+            return TRIGGER_FORMAT_VERSION
+        return TRIGGER_FORMAT_VERSION_V2
+
+    @staticmethod
+    def _record_uses_v3(record: Dict[str, Any]) -> bool:
+        """Запись несёт опции формата v3 — старая прошивка их не
+        исполнит, такой триггер остаётся на PC-исполнении."""
+        return bool(
+            record.get("rx_fire_limit")
+            or not record.get("rx_listen_echo", True)
+            or record.get("src_fire_limit")
+            or not record.get("src_listen_echo", True)
+        )
+
+    def _pack_record(self, values: Dict[str, Any]) -> bytes:
+        return pack_trigger(values, fmt_version=self._record_fmt_version())
+
     def _project_block_records(self, index: int) -> Optional[List[Dict[str, Any]]]:
         """Раскладывает блок триггера на записи trigger_t для устройства.
 
@@ -1618,6 +1762,7 @@ class CanTriggerTab(QWidget):
         if self._is_empty_trigger(values):
             return []
         block = self._blocks[index]
+        records: List[Dict[str, Any]] = []
         if block["cache"]["cache_check"].isChecked():
             # Каждая строка кэша — отдельная запись с собственным
             # src-фильтром и своим слотом кэша в прошивке. Строки
@@ -1627,51 +1772,60 @@ class CanTriggerTab(QWidget):
                 for row in block["cache"]["rows"]
                 if self._parse_id(row["id"].text()) is not None
             ]
-            if not cache_rows:
-                return [values]
-            schedule = expand_schedule(cache_rows)
-            if schedule is None:
-                return None
-            return [
-                self._cache_row_record(index, cache_rows[row_index], delay, count, interval, seq)
-                for row_index, delay, count, interval, seq in schedule
+            if cache_rows:
+                schedule = expand_schedule(cache_rows)
+                if schedule is None:
+                    return None
+                records = [
+                    self._cache_row_record(index, cache_rows[row_index], delay, count, interval, seq)
+                    for row_index, delay, count, interval, seq in schedule
+                ]
+            else:
+                records = [values]
+        else:
+            rows = [
+                row for row in block["response"]["rows"]
+                if self._parse_id(row["id"].text()) is not None
             ]
-        rows = [
-            row for row in block["response"]["rows"]
-            if self._parse_id(row["id"].text()) is not None
-        ]
-        if not rows:
-            return [values]
-        schedule = expand_schedule([
-            {
-                "delay_before_send": row["delay_before_send"].value(),
-                "delay_between": row["delay_between"].value(),
-                "count": row["count"].value(),
-                "next_delay": row["next_delay"].value(),
-            }
-            for row in rows
-        ])
-        if schedule is None:
+            if not rows:
+                records = [values]
+            else:
+                schedule = expand_schedule([
+                    {
+                        "delay_before_send": row["delay_before_send"].value(),
+                        "delay_between": row["delay_between"].value(),
+                        "count": row["count"].value(),
+                        "next_delay": row["next_delay"].value(),
+                    }
+                    for row in rows
+                ])
+                if schedule is None:
+                    return None
+                for row_index, delay, count, interval, seq in schedule:
+                    row = rows[row_index]
+                    record = dict(values)
+                    record.update({
+                        "tx_channel": row["channel"].currentIndex(),
+                        "tx_extended": row["bit"].currentIndex(),
+                        "tx_id": self._parse_id(row["id"].text()) or 0,
+                        "tx_dlc": row["dlc"].value(),
+                        "tx_data": bytes(
+                            (v or 0) & 0xFF for v in self._parse_data(row["data"])
+                        ),
+                        "tx_rtr": int(row["rtr"].isChecked()),
+                        "delay_ms": delay,
+                        "tx_count": count,
+                        "tx_interval_ms": interval,
+                        "group_seq": seq,
+                    })
+                    records.append(record)
+        if (
+            self._record_fmt_version() == TRIGGER_FORMAT_VERSION_V2
+            and any(self._record_uses_v3(r) for r in records)
+        ):
+            # Старая прошивка (protocol<4) записи v3 не исполнит — такой
+            # триггер остаётся на PC-исполнении (томбстоун enabled=0).
             return None
-        records = []
-        for row_index, delay, count, interval, seq in schedule:
-            row = rows[row_index]
-            record = dict(values)
-            record.update({
-                "tx_channel": row["channel"].currentIndex(),
-                "tx_extended": row["bit"].currentIndex(),
-                "tx_id": self._parse_id(row["id"].text()) or 0,
-                "tx_dlc": row["dlc"].value(),
-                "tx_data": bytes(
-                    (v or 0) & 0xFF for v in self._parse_data(row["data"])
-                ),
-                "tx_rtr": int(row["rtr"].isChecked()),
-                "delay_ms": delay,
-                "tx_count": count,
-                "tx_interval_ms": interval,
-                "group_seq": seq,
-            })
-            records.append(record)
         return records
 
     def _cache_row_record(
@@ -1715,6 +1869,9 @@ class CanTriggerTab(QWidget):
         block["group"].setChecked(False)
         block["cache"]["cache_check"].setChecked(False)
         self._on_cache_active_changed(index, Qt.CheckState.Unchecked.value)
+        block["recv"]["listen_echo"].setChecked(True)
+        block["recv"]["fire_check"].setChecked(False)
+        block["recv"]["fire_spin"].setValue(1)
         self._set_row(block["recv"], {}, "recv")
         self._set_response_rows(block["response"], [])
         self._set_cache(block["cache"], {})
@@ -1947,11 +2104,11 @@ class CanTriggerTab(QWidget):
                     projected = [values]
                 for values in projected:
                     if not self._is_empty_trigger(values):
-                        local.append(pack_trigger(values))
+                        local.append(self._pack_record(values))
             except Exception:  # noqa: BLE001
                 continue
         try:
-            remote = sorted(pack_trigger(r) for r in records)
+            remote = sorted(self._pack_record(r) for r in records)
         except Exception:  # noqa: BLE001
             return False
         return sorted(local) == remote
@@ -1989,7 +2146,7 @@ class CanTriggerTab(QWidget):
                 raise TriggerValidationAborted("; ".join(warnings))
         changed = 0
         staged: List[Tuple[int, bytes]] = []
-        default_payload = pack_trigger({})
+        default_payload = self._pack_record({})
         try:
             with self._serial_manager.control_session():
                 changed = self._write_to_device_locked(default_payload, staged)
@@ -2089,7 +2246,7 @@ class CanTriggerTab(QWidget):
             else:
                 self._device_managed[block_index] = True
             for values in records:
-                target.append((block_index, pack_trigger(values)))
+                target.append((block_index, self._pack_record(values)))
         if len(target) > TRIGGER_MAX_SLOTS:
             raise RuntimeError(
                 tr("Триггеры разворачиваются в {0} записей, на устройстве "
@@ -2240,6 +2397,8 @@ class CanTriggerTab(QWidget):
         """Обновляет статические строки вкладки триггеров."""
         for i, block in enumerate(self._blocks):
             block["group"].setTitle(tr("Триггер {0}").format(i + 1))
+            block["recv"]["listen_echo"].setText(tr("Слушать отправляемое"))
+            block["recv"]["fire_check"].setText(tr("Кол-во сработок до смены DATA"))
             block["cache"]["cache_check"].setText(tr("Автоматическая запись DATA в Кэш"))
             block["response"]["group"].setTitle(tr("Ответ"))
             block["response"]["header_label"].setText(tr("Фреймы ответа"))
@@ -2258,6 +2417,8 @@ class CanTriggerTab(QWidget):
                 row["delay_between_label"].setText(tr("Пауза между пакетами"))
                 row["count_label"].setText(tr("Кол-во отправок"))
                 row["remove_button"].setToolTip(tr("Удалить строку"))
+                row["listen_echo"].setText(tr("Слушать отправляемое"))
+                row["fire_check"].setText(tr("Кол-во сработок до смены DATA"))
 
     def _parse_id(self, text: str) -> Optional[int]:
         return hex_to_int(text.strip())
@@ -2312,6 +2473,12 @@ class CanTriggerTab(QWidget):
                 "recv_rtr": int(block["recv"]["rtr"].isChecked()),
                 "recv_data": self._parse_data(block["recv"]["data"]),
                 "recv_channel": block["recv"]["channel"].currentIndex(),
+                "recv_listen_echo": block["recv"]["listen_echo"].isChecked(),
+                "recv_fire_limit": (
+                    block["recv"]["fire_spin"].value()
+                    if block["recv"]["fire_check"].isChecked()
+                    else 0
+                ),
                 "cache": block["cache"]["cache_check"].isChecked(),
                 "responses": self._collect_responses(block["response"]["rows"]),
                 "cache_rows": self._collect_cache(block["cache"]),
@@ -2367,6 +2534,9 @@ class CanTriggerTab(QWidget):
             "delay_between": row["delay_between"].value(),
             "count": row["count"].value(),
             "next_delay": row["next_delay"].value(),
+            "listen_echo": row["listen_echo"].isChecked(),
+            "fire_limit_enabled": row["fire_check"].isChecked(),
+            "fire_limit": row["fire_spin"].value(),
         }
 
     def _load_config(self) -> None:
@@ -2389,6 +2559,8 @@ class CanTriggerTab(QWidget):
         triggers = self._collect_config()
         # Фильтры могли измениться — старый кэш им уже не отвечает.
         self._pc_cache.clear()
+        self._pc_rx_state.clear()
+        self._pc_src_state.clear()
         self._config.set("triggers", triggers)
         self._memory_indicator.show_trigger_usage(count_configured_triggers(triggers))
 
@@ -2435,6 +2607,9 @@ class CanTriggerTab(QWidget):
                 "delay_between": row["delay_between"].value(),
                 "count": row["count"].value(),
                 "next_delay": row["next_delay"].value(),
+                "listen_echo": int(row["listen_echo"].isChecked()),
+                "fire_limit_enabled": int(row["fire_check"].isChecked()),
+                "fire_limit": row["fire_spin"].value(),
             })
         config = {
             "active": block["group"].isChecked(),
@@ -2444,6 +2619,9 @@ class CanTriggerTab(QWidget):
             "recv_id": block["recv"]["id"].text(),
             "recv_dlc": block["recv"]["dlc"].value(),
             "recv_rtr": int(block["recv"]["rtr"].isChecked()),
+            "recv_listen_echo": int(block["recv"]["listen_echo"].isChecked()),
+            "recv_fire_limit_enabled": int(block["recv"]["fire_check"].isChecked()),
+            "recv_fire_limit": block["recv"]["fire_spin"].value(),
             # Пустой байт приёма — wildcard, пишется явным «X».
             "recv_data": " ".join(
                 e.text() or "X"
@@ -2698,6 +2876,11 @@ class CanTriggerTab(QWidget):
             self._ensure_blocks(len(triggers))
             self._device_managed = [False] * len(self._blocks)
             self._pc_suspended = [suspend_execution] * len(self._blocks)
+            # Новая конфигурация — новые фильтры: кэш и счётчики сработок
+            # PC-исполнения относятся к прежним условиям.
+            self._pc_cache.clear()
+            self._pc_rx_state.clear()
+            self._pc_src_state.clear()
             for i in range(len(self._blocks)):
                 self._apply_config_trigger(i, triggers[i])
         finally:
@@ -2722,8 +2905,14 @@ class CanTriggerTab(QWidget):
             self._on_cache_active_changed(index, Qt.CheckState.Checked.value if cache_active else Qt.CheckState.Unchecked.value)
 
             self._set_row(block["recv"], trigger, "recv")
+            recv = block["recv"]
             recv_rtr = int(trigger.get("recv_rtr", 0))
-            block["recv"]["rtr"].setChecked(bool(recv_rtr))
+            recv["rtr"].setChecked(bool(recv_rtr))
+            recv["listen_echo"].setChecked(bool(trigger.get("recv_listen_echo", 1)))
+            recv["fire_check"].setChecked(bool(trigger.get("recv_fire_limit_enabled", 0)))
+            recv["fire_spin"].setValue(
+                max(1, min(9999, int(trigger.get("recv_fire_limit", 1) or 1)))
+            )
             self._set_data_enabled(
                 block["recv"]["data"], 0 if recv_rtr else block["recv"]["dlc"].value()
             )
@@ -2824,6 +3013,14 @@ class CanTriggerTab(QWidget):
         row["delay_between"].setValue(int(data.get("delay_between", data.get("delay", 0))))
         row["count"].setValue(max(1, int(data.get("count", 1))))
         row["next_delay"].setValue(int(data.get("next_delay", 0)))
+        row["listen_echo"].setChecked(bool(data.get("listen_echo", 1)))
+        # Из конфига приходит «fire_limit_enabled»+«fire_limit», из
+        # вычитки устройства — только fire_limit (0 = выкл).
+        fire_limit = int(data.get("fire_limit", 0))
+        row["fire_check"].setChecked(
+            bool(data.get("fire_limit_enabled", fire_limit > 0))
+        )
+        row["fire_spin"].setValue(max(1, min(9999, fire_limit or 1)))
         self._set_data_enabled(row["from_data"], row["dlc"].value())
         self._set_data_enabled(row["to_data"], row["dlc"].value())
 
@@ -2860,6 +3057,9 @@ class CanTriggerTab(QWidget):
         frame_id = int(frame["id"])
         frame_channel = int(frame["channel"])
         data = bytes(frame["data"])
+        # tx_echo — кадр отправлен самим МК (ответ триггера/программы МК);
+        # «Слушать отправляемое» выключено — такие кадры не матчатся.
+        tx_echo = bool(frame.get("tx_echo"))
 
         triggers = self._build_internal_triggers()
         for trigger in triggers:
@@ -2867,7 +3067,8 @@ class CanTriggerTab(QWidget):
             # кадр может быть источником данных для одного триггера и
             # условием срабатывания для другого.
             self._update_cache(
-                trigger, frame_id, frame_channel, data, bool(frame.get("extended"))
+                trigger, frame_id, frame_channel, data,
+                bool(frame.get("extended")), tx_echo,
             )
         for trigger in triggers:
             if trigger.get("device_managed"):
@@ -2879,31 +3080,56 @@ class CanTriggerTab(QWidget):
                 # записан в устройство кнопкой «Сохранить» — на шине
                 # молчим, файл лишь заполняет поля.
                 continue
-            if not self._match_condition(
-                trigger, frame_id, frame_channel, data, bool(frame.get("rtr"))
+            if tx_echo and not trigger.get("recv_listen_echo", True):
+                continue
+            # Заголовок (ID/канал/RTR) и Data разделены — «смена DATA»
+            # для счётчика сработок отслеживается на уровне заголовка,
+            # как rx_header_matches/fire_track в прошивке.
+            if not self._match_rx_header(
+                trigger, frame_id, frame_channel, bool(frame.get("rtr"))
+            ):
+                continue
+            rx_state = None
+            rx_limit = int(trigger.get("recv_fire_limit", 0))
+            if rx_limit:
+                rx_state = self._pc_rx_state.setdefault(
+                    trigger["index"], self._new_fire_state()
+                )
+                self._fire_track_data(rx_state, data)
+            if (rx_state is not None and rx_state["suppress"]) or not self._match_rx_data(
+                trigger, data, bool(frame.get("rtr"))
             ):
                 continue
             if trigger["cache"]:
                 self._send_cached_frames(trigger)
             else:
                 self._send_responses(trigger)
+            if rx_state is not None:
+                rx_state["count"] += 1
+                if rx_state["count"] >= rx_limit:
+                    rx_state["suppress"] = True
 
-    def _match_condition(
+    def _match_rx_header(
         self,
         trigger: Dict[str, Any],
         frame_id: int,
         frame_channel: int,
-        data: bytes,
         frame_rtr: bool = False,
     ) -> bool:
+        """Условие приёма без данных: ID, канал, режим «только RTR»."""
         if trigger["recv_id"] != frame_id:
             return False
         if trigger.get("recv_rtr") and not frame_rtr:
             # Режим «только RTR-запрос»: обычные кадры не срабатывают.
             return False
         recv_channel = int(trigger["recv_channel"])
-        if recv_channel != 2 and recv_channel + 1 != frame_channel:
-            return False
+        return recv_channel == 2 or recv_channel + 1 == frame_channel
+
+    @staticmethod
+    def _match_rx_data(
+        trigger: Dict[str, Any], data: bytes, frame_rtr: bool = False
+    ) -> bool:
+        """Побайтовое сравнение Data: None в шаблоне — wildcard «X»."""
         if trigger.get("recv_rtr"):
             return True  # RTR-кадр не несёт Data — сравнивать нечего
         for idx, expected in enumerate(trigger["recv_data"]):
@@ -2977,10 +3203,14 @@ class CanTriggerTab(QWidget):
         frame_channel: int,
         data: bytes,
         extended: bool = False,
+        tx_echo: bool = False,
     ) -> None:
         """Сохраняет кадр в кэши всех подошедших строк — один входящий
         кадр может пополнить несколько строк кэша. Wildcard-байты («X»)
-        при захвате обнуляются — в ответе на их месте уйдёт 0x00."""
+        при захвате обнуляются — в ответе на их месте уйдёт 0x00.
+        tx_echo — кадр отправлен самим МК: строка со снятым «Слушать
+        отправляемое» его не кэширует. «Кол-во сработок» останавливает
+        захват после N одинаковых Data до их смены (как в прошивке)."""
         if not trigger["cache"]:
             return
         for row_index, row in enumerate(trigger["cache_rows"]):
@@ -2990,6 +3220,21 @@ class CanTriggerTab(QWidget):
                 continue
             src_channel = int(row["channel"])
             if src_channel != 2 and src_channel + 1 != frame_channel:
+                continue
+            if tx_echo and not row.get("listen_echo", True):
+                continue
+            # Совпадение на уровне ID достигнуто — для счётчика сработок
+            # здесь отслеживается «смена DATA» (порт fire_track).
+            src_state = None
+            src_limit = (
+                int(row.get("fire_limit", 0)) if row.get("fire_limit_enabled") else 0
+            )
+            if src_limit:
+                src_state = self._pc_src_state.setdefault(
+                    (trigger["index"], row_index), self._new_fire_state()
+                )
+                self._fire_track_data(src_state, data)
+            if src_state is not None and src_state["suppress"]:
                 continue
             dlc = row["dlc"]
             wild = row["wild"]
@@ -3006,6 +3251,10 @@ class CanTriggerTab(QWidget):
                 "data": bytes(captured),
                 "channel": frame_channel,
             }
+            if src_state is not None:
+                src_state["count"] += 1
+                if src_state["count"] >= src_limit:
+                    src_state["suppress"] = True
 
     @staticmethod
     def _cache_src_matches(

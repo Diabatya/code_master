@@ -37,19 +37,29 @@ extern "C" {
  * больше нет, прошивка может расти, не сдвигая формат хранения.
  * Записи v2 из старой фиксированной области 0x0803E000 импортируются
  * при первой загрузке и переписываются в новый формат при ближайшем
- * COMMIT. Запись по-прежнему 82 Б (rx_rtr занял байт reserved_pad):
- * 0 = матч любого кадра (как раньше), 1 = только RTR-запрос,
- * 2 = только кадр с данными. */
+ * COMMIT. Формат записи v3 — 90 Б: к 82 байтам v2 добавились
+ * rx_fire_limit/rx_flags и src_fire_limit/src_flags (функции «кол-во
+ * сработок до смены DATA» и «слушать отправляемое»). Хранилище v3
+ * (записи 82 Б) читается и поднимается в RAM; следующий COMMIT пишет
+ * хранилище v4 с записями 90 Б. */
 #define TRIGGER_POOL_BASE     0x0803E000U /* первая страница над config */
 #define TRIGGER_FLASH_END     0x08040000U /* конец Flash F105RCT6 */
 #define TRIGGER_FLASH_PAGE    2048U
 #define TRIGGER_POOL_PAGES    ((TRIGGER_FLASH_END - TRIGGER_POOL_BASE) / TRIGGER_FLASH_PAGE)
 #define TRIGGER_HEADER_MAGIC  0x54524748U /* "TRGH" */
 #define TRIGGER_HEADER_SIZE   16U
-#define TRIGGER_STORE_VERSION 3U
+#define TRIGGER_STORE_VERSION 4U
+#define TRIGGER_STORE_VERSION_V3 3U /* записи 82 Б — читаются, мигрируют */
 #define TRIGGER_MAGIC         0x54524732U /* "TRG2" */
-#define TRIGGER_FORMAT_VERSION 2U
-#define TRIGGER_RECORD_SIZE    82U
+#define TRIGGER_FORMAT_VERSION 3U
+#define TRIGGER_FORMAT_VERSION_V2 2U
+#define TRIGGER_RECORD_SIZE    90U
+#define TRIGGER_RECORD_SIZE_V2 82U
+/* Флаги rx_flags/src_flags: 1 — игнорировать кадры, отправленные самим
+ * МК (TX-эхо); 0 — слушать и внешние, и свои (поведение v2). Бит
+ * инвертирован относительно галочки UI «Слушать отправляемое», чтобы
+ * старые записи (flags=0) сохраняли прежнюю реакцию на эхо. */
+#define TRIGGER_F_MUTE_ECHO   0x01U
 /* Предел по RAM, а не по пулу: триггеры, staging-буфер и кэши живут в
  * ОЗУ — 70 записей ≈ 3 страницы пула из 4 (четвёртая остаётся запасом
  * на рост записи/пула). При росте RAM-бюджета можно поднять до 99. */
@@ -97,9 +107,17 @@ typedef struct __attribute__((packed)) {
   uint16_t tx_interval_ms;  /* пауза между повторными отправками */
   uint8_t  tx_count;        /* кол-во отправок (0 трактуется как 1) */
   uint8_t  rx_rtr;          /* приём: 0=любой кадр, 1=только RTR, 2=только data */
-  uint8_t  reserved_pad;
+  uint8_t  group_seq;       /* связка записей одного UI-триггера (хост) */
+  /* --- поля формата v3 (82..89) --- */
+  uint16_t rx_fire_limit;   /* «кол-во сработок до смены DATA» приёма: N
+                             * срабатываний на неизменной Data, затем
+                             * игнор до смены содержимого. 0 = выкл. */
+  uint8_t  rx_flags;        /* TRIGGER_F_* — бит 0: MUTE_ECHO */
+  uint16_t src_fire_limit;  /* то же для захвата кэша (по src-фильтру) */
+  uint8_t  src_flags;       /* TRIGGER_F_* — бит 0: MUTE_ECHO */
+  uint8_t  pad[2];          /* выравнивание до чётного размера */
   uint8_t  crc8;
-} trigger_t; /* 82 bytes */
+} trigger_t; /* 90 bytes */
 
 /* Loads all triggers from Flash into RAM (call once at boot). Any slot
  * with a bad magic/CRC is treated as "disabled, all zero". */
@@ -137,6 +155,10 @@ uint8_t Trigger_Count(void);
  * переписывает весь активный список, но только реально занятые страницы
  * (пустые страницы пула не стираются). */
 uint8_t Trigger_Set(uint8_t index, const trigger_t *trig);
+
+/* Запись с провода (82 Б v2 или 90 Б v3) → runtime trigger_t. Хвост
+ * короткой записи нулями — новые поля v3 выключены. */
+uint8_t Trigger_FromWire(const uint8_t *src, uint32_t len, trigger_t *out);
 
 /* Stages one trigger in RAM and commits the list in one Flash pass.
  * COMMIT принимает итоговую длину списка: позиции без staged-записи
