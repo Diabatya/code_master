@@ -363,7 +363,9 @@ class IdHistoryDialog(QDialog):
         super().__init__(parent)
         self.can_id = can_id
         self.setWindowTitle(tr("История ID 0x{0:X} — CAN{1}").format(can_id, channel))
-        self.resize(640, 480)
+        # Окно анализа — сразу на весь доступный экран: таблица и
+        # график читаются без прокрутки, кнопки остаются видимыми.
+        self.setWindowState(Qt.WindowState.WindowMaximized)
         # Сырые сэмплы для пересчёта при смене источника графика
         # (весь DATA или конкретный байт) и инверсии.
         self._samples_raw: List[Tuple[float, bytes, bool, int]] = []
@@ -446,6 +448,10 @@ class IdHistoryDialog(QDialog):
         return _data_percent(data, dlc, self._byte_index) if not rtr else 0.0
 
     def _append_row(self, t: float, data: bytes, rtr: bool, dlc: int, repaint: bool = True) -> None:
+        # Автопрокрутка — только при бегунке внизу: иначе в потоке кадров
+        # таблицу невозможно прокрутить вверх.
+        scrollbar = self._table.verticalScrollBar()
+        was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
         if self._table.rowCount() >= self.MAX_ROWS:
             self._table.removeRow(0)
         row = self._table.rowCount()
@@ -464,7 +470,8 @@ class IdHistoryDialog(QDialog):
         if repaint:
             shown = 100.0 - pct if self._invert_button.isChecked() else pct
             self._percent_label.setText(f"{shown:.1f}%")
-            self._table.scrollToBottom()
+            if was_at_bottom:
+                self._table.scrollToBottom()
 
     def add_sample(self, t: float, data: bytes, rtr: bool, dlc: int) -> None:
         """Вызывается монитором при новом фрейме с этим ID."""
@@ -680,8 +687,12 @@ class CanChannelMonitor(QWidget):
         self._table.setHorizontalHeaderLabels(
             [tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("Счётчик"), tr("ASCII"), tr("Пояснение")]
         )
-        self._table.setFont(font)
+        # Таблица чуть компактнее остального UI: шрифт 8 pt и уменьшенная
+        # высота строк — в плотном потоке влезает больше кадров на экран.
+        self._table.setFont(QFont("Segoe UI", 8))
         self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(20)
+        self._table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
@@ -886,7 +897,11 @@ class CanChannelMonitor(QWidget):
         self._send_dlc_spin.setValue(dlc)
         data = parsed.get("data", [])
         for i, edit in enumerate(self._send_data_edits):
-            edit.setText(f"{data[i]:02X}" if i < len(data) else "")
+            # «X» (wildcard из триггеров) в обычных hex-полях не
+            # выразима — позиция остаётся пустой, а не «00».
+            edit.setText(
+                f"{data[i]:02X}" if i < len(data) and data[i] is not None else ""
+            )
         self._on_send_dlc_changed(dlc)
 
     def _on_cyclic_toggled(self, checked: bool) -> None:
@@ -1078,18 +1093,23 @@ class CanChannelMonitor(QWidget):
                 tx_fail = device.get("tx_fail_count", 0)
                 if tx_fail:
                     text += tr(" | TXfail: {0}").format(tx_fail)
+                # FIFOpoll: кадры, спасённые backstop-опросом — RX0-IRQ их
+                # пропустило. Рост счётчика = проблема с доставкой IRQ.
+                fifo_poll = device.get("fifo_poll_count", 0)
+                if fifo_poll:
+                    text += tr(" | FIFOpoll: {0}").format(fifo_poll)
                 # Полевая телеметрия: по дельтам счётчиков между опросами
                 # в логе видно, где теряется время — МК медленный
                 # (last_cmd_ms велик, poll_count замирает) или ПК не
                 # забирает данные (tx_busy_waits растёт).
                 logger.debug(
-                    "CAN%d stats: rx=%d tx=%d lost=%d err=%d busoff=%d baud=%d txfail=%d | "
+                    "CAN%d stats: rx=%d tx=%d lost=%d err=%d busoff=%d baud=%d txfail=%d fifopoll=%d | "
                     "usb drop=%d busy=%d cmd=%d cmdms=%d loop=%d",
                     self._channel,
                     device["rx_count"], device["tx_count"],
                     device["lost_count"], device["error_count"],
                     device["busoff_count"], device.get("baud_kbps", -1),
-                    tx_fail,
+                    tx_fail, fifo_poll,
                     usb["tx_dropped"], usb.get("tx_busy_waits", -1),
                     usb.get("cmd_count", -1), usb.get("last_cmd_ms", -1),
                     usb.get("poll_count", -1),
@@ -1197,6 +1217,11 @@ class CanChannelMonitor(QWidget):
         self._id_tx_echo[frame_id] = tx_echo
         if self._filter_enabled and self._matches_filter(frame_id, data):
             return
+        # Автопрокрутка — только когда бегунок уже внизу: при потоке
+        # кадров пользователь иначе не может прокрутить таблицу вверх —
+        # каждый новый кадр сносил позицию на конец списка.
+        scrollbar = self._table.verticalScrollBar()
+        was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
 
         self._received_count += 1
         # Оценка бит кадра для нагрузки шины: ~45 служебных + dlc*8
@@ -1288,7 +1313,8 @@ class CanChannelMonitor(QWidget):
         ):
             self._update_decoded_panel()
 
-        self._table.scrollToBottom()
+        if was_at_bottom:
+            self._table.scrollToBottom()
 
     def _matches_filter(self, frame_id: int, data: bytes) -> bool:
         if frame_id in self._ignored_ids:

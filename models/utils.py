@@ -105,14 +105,18 @@ def bytes_to_hex_string(data: bytes) -> str:
 def parse_packet_string(text: str) -> Optional[Dict[str, Any]]:
     """Парсит строку вида ID=<hex> DLC=<n> DATA=<hex hex ...>.
 
+    Токен «X» в DATA — wildcard-байт триггеров, в списке data он
+    представлен как None (поля без поддержки wildcard пропускают его).
+
     Args:
         text: Строка из буфера обмена.
 
     Returns:
-        Словарь {"id": int, "dlc": int, "data": List[int]} или None.
+        Словарь {"id": int, "dlc": int, "data": List[Optional[int]]}
+        или None.
     """
     match = re.match(
-        r"ID\s*=\s*([0-9A-Fa-f]+)\s+DLC\s*=\s*(\d+)\s+DATA\s*=\s*([0-9A-Fa-f ]+)",
+        r"ID\s*=\s*([0-9A-Fa-f]+)\s+DLC\s*=\s*(\d+)\s+DATA\s*=\s*([0-9A-Fa-fXx ]+)",
         text.strip(),
     )
     if not match:
@@ -120,7 +124,11 @@ def parse_packet_string(text: str) -> Optional[Dict[str, Any]]:
     can_id = hex_to_int(match.group(1))
     dlc = int(match.group(2))
     data_values = match.group(3).strip().split()
-    data = [v for v in (hex_to_int(t) for t in data_values) if v is not None]
+    # Позиции сохраняются: «X» → None (wildcard), битый токен → None.
+    data: List[Optional[int]] = [
+        None if "X" in token.upper() else hex_to_int(token)
+        for token in data_values
+    ]
     return {"id": can_id, "dlc": dlc, "data": data}
 
 

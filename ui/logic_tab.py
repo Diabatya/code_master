@@ -171,7 +171,9 @@ class _LogicRow(QWidget):
         self._dlc_spin.setValue(dlc)
         data = parsed.get("data", [])
         for i, edit in enumerate(self._data_edits):
-            edit.setText(f"{data[i]:02X}" if i < len(data) else "")
+            edit.setText(
+                f"{data[i]:02X}" if i < len(data) and data[i] is not None else ""
+            )
         self._on_dlc_changed(dlc)
 
     def get_config(self) -> Dict[str, Any]:

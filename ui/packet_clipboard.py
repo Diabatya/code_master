@@ -111,6 +111,10 @@ def _copy_packet(
         data_parts: List[str] = []
         for i in range(dlc):
             text = data_edits[i].text().strip() if i < len(data_edits) else ""
+            if "X" in text.upper():
+                # Wildcard-байт триггера — копируется «X», а не «00».
+                data_parts.append("X")
+                continue
             val = hex_to_int(text)
             if val is not None:
                 data_parts.append(f"{val & 0xFF:02X}")
@@ -164,16 +168,20 @@ def _paste_packet(
     # Установка ID
     id_edit.setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
 
-    # Парсим данные
-    parsed_bytes: List[int] = []
+    # Парсим данные: токены «X» сохраняются как wildcard (поля триггеров
+    # с allow_x принимают их, обычные hex-поля — пропускают).
+    parsed_tokens: List[str] = []
     if data_str:
         for token in data_str.split():
             token = token.strip().replace("0x", "").replace("0X", "")
             if not token:
                 continue
+            if "X" in token.upper():
+                parsed_tokens.append("X")
+                continue
             val = hex_to_int(token)
             if val is not None:
-                parsed_bytes.append(val & 0xFF)
+                parsed_tokens.append(f"{val & 0xFF:02X}")
 
     # Определяем DLC
     max_dlc = len(data_edits) if data_edits else 8
@@ -187,8 +195,8 @@ def _paste_packet(
     dlc = max(1, min(dlc, max_dlc))
 
     # Если данных больше, чем DLC, увеличиваем DLC
-    if len(parsed_bytes) > dlc and len(parsed_bytes) <= max_dlc:
-        dlc = len(parsed_bytes)
+    if len(parsed_tokens) > dlc and len(parsed_tokens) <= max_dlc:
+        dlc = len(parsed_tokens)
 
     # Устанавливаем DLC (valueChanged вызовет _set_data_enabled)
     if dlc_spin is not None:
@@ -197,16 +205,21 @@ def _paste_packet(
         else:
             dlc_spin.setText(str(dlc))
 
-    # Заполняем Data
+    # Заполняем Data. «X» попадает только в поля, умеющие wildcard
+    # (HexDataEdit с allow_x) — в обычных hex-полях она не выразима,
+    # там ставим пусто вместо молчаливой подмены на «00».
     if data_edits:
         for i, edit in enumerate(data_edits):
-            if i < dlc and i < len(parsed_bytes):
-                edit.setText(f"{parsed_bytes[i]:02X}")
+            if i < dlc and i < len(parsed_tokens):
+                token = parsed_tokens[i]
+                if token == "X" and not getattr(edit, "_allow_x", False):
+                    token = ""
+                edit.setText(token)
             else:
                 edit.setText("")
     elif data_edit is not None:
-        data_tokens = [f"{parsed_bytes[i]:02X}" for i in range(dlc) if i < len(parsed_bytes)]
-        data_edit.setText(" ".join(data_tokens))
+        tokens = [t for t in parsed_tokens[:dlc] if t != "X"]
+        data_edit.setText(" ".join(tokens))
 
     if on_paste is not None:
         on_paste()
