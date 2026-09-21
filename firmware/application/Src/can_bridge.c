@@ -4,6 +4,7 @@
 #include <string.h>
 #include "main.h"
 #include "can_bridge.h"
+#include "event_log.h"
 
 CAN_HandleTypeDef hcan1;
 CAN_HandleTypeDef hcan2;
@@ -165,10 +166,12 @@ void CanBridge_PollHealth(void)
         s_busoff_pending[channel] = 1U;
         s_error_pending[channel] = 1U;
         s_last_error_code[channel] |= HAL_CAN_ERROR_BOF;
+        EventLog_Add((uint8_t)EVLOG_CAN_BUSOFF, channel, 0U);
       }
     } else if (s_busoff_active[channel]) {
       s_busoff_active[channel] = 0U;
       s_recovery_count[channel]++;
+      EventLog_Add((uint8_t)EVLOG_CAN_BUSOFF_RECOVER, channel, 0U);
     }
     /* Ошибки приёма считаем опросом ESR.LEC, а не прерыванием
      * (CAN_IT_LAST_ERROR_CODE): LEC защёлкивает последнюю ошибку —
@@ -179,6 +182,12 @@ void CanBridge_PollHealth(void)
       s_error_count[channel]++;
       s_error_pending[channel] = 1U;
       s_last_error_code[channel] |= lec_to_hal_error(lec);
+      /* Код журнала — само LEC[2:0] (1..7, см. RM: 1=stuff, 2=form,
+       * 3=ack, 4=bit recessive, 5=bit dominant, 6=CRC, 7=set by
+       * software), а не HAL_CAN_ERROR_* — тот для CRC (0x100) не влезает
+       * в байт события без потери значения. */
+      EventLog_Add((uint8_t)EVLOG_CAN_ERROR, channel,
+                   (uint8_t)(lec >> CAN_ESR_LEC_Pos));
       CLEAR_BIT(handles[channel]->Instance->ESR, CAN_ESR_LEC);
     }
     if ((esr & (CAN_ESR_EWGF | CAN_ESR_EPVF)) != 0U) {
@@ -218,6 +227,15 @@ void CanBridge_PollHealth(void)
       frame.echo = 0U;
       ring_push(channel, &frame);
       s_fifo_poll_count[channel]++;
+      EventLog_Add((uint8_t)EVLOG_CAN_FIFO_POLL, channel, 0U);
+    }
+    /* Переполнение RX-кольца (drop-oldest, см. ring_push): API уже
+     * существовала (CanBridge_TookOverflow), но раньше её никто не
+     * вызывал — событие было не видно ни в статистике, ни теперь в
+     * журнале. Здесь единственный потребитель, конфликтов по очистке
+     * sticky-флага нет. */
+    if (CanBridge_TookOverflow(channel)) {
+      EventLog_Add((uint8_t)EVLOG_CAN_OVERFLOW, channel, 0U);
     }
   }
 }

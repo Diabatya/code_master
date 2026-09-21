@@ -8,9 +8,11 @@
 #include "bootloader.h"
 
 USBD_HandleTypeDef hUsbDeviceFS;
+static IWDG_HandleTypeDef hiwdg;
 
 static void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_IWDG_Init(void);
 
 void Error_Handler(void)
 {
@@ -19,11 +21,17 @@ void Error_Handler(void)
   }
 }
 
+void App_KickWatchdog(void)
+{
+  HAL_IWDG_Refresh(&hiwdg);
+}
+
 int main(void)
 {
   HAL_Init();
   SystemClock_Config();
   MX_GPIO_Init();
+  MX_IWDG_Init();
 
   if (!Bootloader_ShouldStay()) {
     Bootloader_JumpToApplication(APP_START_ADDRESS);
@@ -35,7 +43,28 @@ int main(void)
   USBD_Start(&hUsbDeviceFS);
 
   while (1) {
+    App_KickWatchdog();
     Bootloader_Task();
+  }
+}
+
+static void MX_IWDG_Init(void)
+{
+  /* Аудит: раньше бутлоадер не имел watchdog вообще — зависший
+   * USB-обмен или застрявшая операция Flash требовали ручного
+   * отключения питания. Период выбран большим намеренно: ~26 с
+   * (Prescaler=256, Reload=4095, LSI~40 кГц) — с большим запасом
+   * покрывает самую длинную блокирующую операцию, mass-erase 112
+   * страниц приложения (~4.5 с одним вызовом HAL_FLASHEx_Erase, внутри
+   * которого кормить IWDG невозможно — вызов не возвращает управление
+   * до завершения), и не должен ложно сработать во время обычного
+   * протокола AN3155 (таймауты чтения байт — 200/1000 мс). Кормится
+   * из главного цикла и явно вокруг erase (см. bootloader.c). */
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_256;
+  hiwdg.Init.Reload = 4095U;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK) {
+    Error_Handler();
   }
 }
 

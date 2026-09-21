@@ -41,6 +41,7 @@ C_SOURCES = \
   Src/protocol.c \
   Src/can_bridge.c \
   Src/trigger.c \
+  Src/event_log.c \
   Src/device_config.c \
   Src/usbd_cdc_if.c \
   Src/usbd_conf.c \

@@ -30,6 +30,7 @@ from core.can_protocol import (
     CMD_DEVICE_ID_RESP,
     CMD_DEVICE_INFO,
     CMD_DEVICE_INFO_RESP,
+    CMD_EVENT_LOG,
     DEVICE_TYPE_BASIC,
     MARKER_RX,
     MARKER_RX_EXT,
@@ -947,7 +948,58 @@ class SerialManager(QObject):
             info["usb_disconnect_count"] = payload[58]
         if len(payload) >= 64:
             info["rx_overflow_bytes"] = int.from_bytes(payload[60:64], "little")
+        # Худший зафиксированный запас стека с момента старта МК (байты,
+        # см. App_GetStackFreeBytes() в main.c) — аудит показал, что два
+        # CAN-кольца съедают большую часть RAM; полезно видеть, не близко
+        # ли устройство подходит к переполнению стека.
+        if len(payload) >= 68:
+            info["stack_free_bytes"] = int.from_bytes(payload[64:68], "little")
         return info
+
+    def read_event_log(self, after_seq: int = 0, max_count: int = 23) -> list[dict[str, int]]:
+        """Читает одну страницу Flash-журнала событий МК (CMD_EVENT_LOG).
+
+        after_seq — вернуть только записи новее указанного seq (0 = с начала
+        журнала). max_count — до 23 (лимит по размеру ответа, см.
+        firmware/PROTOCOL.md); больше не запрашиваем даже если попросили.
+        Старые прошивки (нет команды CMD_EVENT_LOG) ответят статусом
+        «неизвестная команда» — request_control поднимет RuntimeError.
+        """
+        max_count = max(1, min(23, max_count))
+        payload = (after_seq & 0xFFFFFFFF).to_bytes(4, "little") + bytes((max_count,))
+        resp = self.request_control(CMD_EVENT_LOG, payload)
+        if len(resp) < 1:
+            raise RuntimeError("Некорректный ответ CMD_EVENT_LOG")
+        count = resp[0]
+        entries: list[dict[str, int]] = []
+        offset = 1
+        for _ in range(count):
+            if offset + 11 > len(resp):
+                break
+            entries.append({
+                "seq": int.from_bytes(resp[offset:offset + 4], "little"),
+                "timestamp_ms": int.from_bytes(resp[offset + 4:offset + 8], "little"),
+                "type": resp[offset + 8],
+                "channel": resp[offset + 9],
+                "code": resp[offset + 10],
+            })
+            offset += 11
+        return entries
+
+    def read_full_event_log(self, after_seq: int = 0, limit: int = 4000) -> list[dict[str, int]]:
+        """Постранично вычитывает весь журнал (до limit записей за раз)."""
+        all_entries: list[dict[str, int]] = []
+        seq = after_seq
+        with self.control_session():
+            while len(all_entries) < limit:
+                batch = self.read_event_log(seq, 23)
+                if not batch:
+                    break
+                all_entries.extend(batch)
+                seq = batch[-1]["seq"]
+                if len(batch) < 23:
+                    break
+        return all_entries
 
     def ping_device(self) -> bool:
         """Отправляет устройству запрос ID и возвращает True, если есть ответ."""

@@ -37,6 +37,19 @@ CMD_TRIGGER_COMMIT = 0xCB
 CMD_USB_STATS = 0xCC
 CMD_CAN_MODE = 0xCD  # Управление режимом CAN (Normal/Silent) и терминатором
 CMD_CAN_SPEED = 0xCE  # Установка бод-рейта CAN-канала (применяется и персистится в МК)
+CMD_EVENT_LOG = 0xCF  # Постраничное чтение Flash-журнала событий МК (см. firmware/event_log.h)
+
+# Типы событий CMD_EVENT_LOG (event_log_type_t в прошивке).
+EVLOG_BOOT = 1
+EVLOG_CAN_ERROR = 2
+EVLOG_CAN_BUSOFF = 3
+EVLOG_CAN_BUSOFF_RECOVER = 4
+EVLOG_CAN_OVERFLOW = 5
+EVLOG_CAN_FIFO_POLL = 6
+EVLOG_USB_RESET = 7
+EVLOG_USB_DISCONNECT = 8
+EVLOG_USB_TX_STALL = 9
+EVLOG_USB_RX_OVERFLOW = 10
 
 # Версия протокола, которую ожидает хост. Прошивка отвечает её в
 # CMD_SYSTEM_INFO (payload[1]); меньше — функции нового протокола

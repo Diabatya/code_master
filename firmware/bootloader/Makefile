@@ -43,6 +43,7 @@ C_SOURCES = \
   $(CUBE)/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash_ex.c \
   $(CUBE)/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio.c \
   $(CUBE)/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio_ex.c \
+  $(CUBE)/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_iwdg.c \
   $(CUBE)/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pcd.c \
   $(CUBE)/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pcd_ex.c \
   $(CUBE)/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pwr.c \

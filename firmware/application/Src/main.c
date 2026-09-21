@@ -22,6 +22,7 @@
 #include "can_bridge.h"
 #include "device_config.h"
 #include "trigger.h"
+#include "event_log.h"
 #include "protocol.h"
 
 #define APP_DEVICE_TYPE     0x00U /* DEVICE_TYPE_BASIC, see PROTOCOL.md 1.2 */
@@ -35,6 +36,23 @@
  * CMD_AUTO_SPEED note and firmware/FIRMWARE_INPUT_REQUEST.md "CAN
  * auto-baud detection parameters" (ТЗ 12.1 worst-case: dual-bus @ 500k). */
 uint32_t g_can_baud_kbps[2] = { 500U, 500U };
+
+/* Аудит: два CAN-кольца (CAN_RING_DEPTH=1024 x2, can_bridge.c) занимают
+ * ~35 КБ из 64 КБ RAM — между концом .bss и вершиной стека остаётся
+ * всего ~5 КБ на стек+куча, а на этом Cortex-M3 без RTOS все прерывания
+ * исполняются на ОДНОМ стеке с главным циклом (нет отдельного PSP).
+ * Тихое переполнение стека (MPU не настроен) портило бы соседние
+ * статические данные без гарантированного HardFault — ровно то, что
+ * могло бы выглядеть как необъяснимое зависание/потеря связи. Вместо
+ * слепого урезания буферов (регрессия по ТЗ 12.2) — измеримая защёлка:
+ * область от конца .bss до текущего SP на старте закрашивается меткой,
+ * `App_GetStackFreeBytes()` потом отдаёт, сколько байт метки НЕ было
+ * тронуто ни разу — т.е. худший зафиксированный запас стека с момента
+ * старта. Видно через CMD_SYSTEM_INFO. */
+extern uint32_t _ebss;
+extern uint32_t _estack;
+#define STACK_CANARY_PATTERN 0xC5C5C5C5UL
+#define STACK_CANARY_MARGIN  64U /* не трогаем текущий кадр вызова */
 
 USBD_HandleTypeDef hUsbDeviceFS;
 static IWDG_HandleTypeDef hiwdg;
@@ -59,9 +77,46 @@ void Error_Handler(void)
   }
 }
 
+/* Закрашивает свободное ОЗУ меткой на самом раннем этапе — до неё уже
+ * успели исполниться HAL_Init() и пролог main(), так что первые
+ * несколько кадров вызовов в измерение не попадают (небольшая, но
+ * непринципиальная погрешность в сторону оптимистичной оценки). Не
+ * трогает STACK_CANARY_MARGIN байт непосредственно под текущим SP,
+ * чтобы не закрасить сам активный кадр этой функции. */
+static void paint_stack_canary(void)
+{
+  register uint32_t sp;
+  __asm volatile ("mov %0, sp" : "=r" (sp));
+  uint32_t *p = &_ebss;
+  uint32_t *limit = (uint32_t *)(sp - STACK_CANARY_MARGIN);
+  while (p < limit) {
+    *p++ = STACK_CANARY_PATTERN;
+  }
+}
+
+/* Сколько байт метки, закрашенной paint_stack_canary(), НЕ было тронуто
+ * ни разу с момента старта — т.е. худший зафиксированный запас между
+ * концом .bss и фактическим пиком использования стека (включая пики
+ * внутри вложенных прерываний — на этом MCU они делят стек с main()).
+ * Не абсолютная гарантия (стек мог кратковременно зайти глубже и
+ * вернуться, не тронув конкретно эту метку, если использованные там
+ * байты случайно совпали с самим паттерном), но для полевой
+ * диагностики достаточно — три случайных 0xC5C5C5C5 подряд статистически
+ * исключены. */
+uint32_t App_GetStackFreeBytes(void)
+{
+  const uint32_t *p = &_ebss;
+  const uint32_t *stack_top = &_estack;
+  while (p < stack_top && *p == STACK_CANARY_PATTERN) {
+    p++;
+  }
+  return (uint32_t)((const uint8_t *)p - (const uint8_t *)&_ebss);
+}
+
 int main(void)
 {
   HAL_Init();
+  paint_stack_canary();
   /* Читаем до любого возможного сброса backup-домена дальше по коду. */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_RCC_BKP_CLK_ENABLE();
@@ -81,6 +136,10 @@ int main(void)
    * (usbd_desc.c reads DeviceConfig_Get()). */
   DeviceConfig_Init();
   Trigger_Init();
+  /* После MX_IWDG_Init (см. выше) — EventLog_Init() может стирать/писать
+   * Flash (первый старт на этой странице после обновления прошивки), а
+   * IWDG уже должен быть настроен на случай долгого стирания. */
+  EventLog_Init();
 
   /* CAN + triggers must run standalone even with USB deactivated (ТЗ
    * 12.4), so bring the CAN bridge up unconditionally, before deciding
@@ -105,8 +164,37 @@ int main(void)
     usb_active = 1U;
   }
 
+  uint8_t last_usb_reset_count = CDC_GetUsbResetCount();
+  uint8_t last_usb_disconnect_count = CDC_GetUsbDisconnectCount();
+  uint32_t last_rx_overflow_bytes = CDC_GetRxOverflowCount();
+
   while (1) {
     HAL_IWDG_Refresh(&hiwdg);
+
+    /* USB reset/disconnect считаются из IRQ (HAL_PCD_Reset/DisconnectCallback
+     * в usbd_conf.c, см. CDC_NoteUsbEvent) — Flash-запись только отсюда,
+     * из главного цикла, по дельте счётчика. */
+    uint8_t usb_reset_now = CDC_GetUsbResetCount();
+    if (usb_reset_now != last_usb_reset_count) {
+      EventLog_Add((uint8_t)EVLOG_USB_RESET, 0xFFU, usb_reset_now);
+      last_usb_reset_count = usb_reset_now;
+    }
+    uint8_t usb_disconnect_now = CDC_GetUsbDisconnectCount();
+    if (usb_disconnect_now != last_usb_disconnect_count) {
+      EventLog_Add((uint8_t)EVLOG_USB_DISCONNECT, 0xFFU, usb_disconnect_now);
+      last_usb_disconnect_count = usb_disconnect_now;
+    }
+    /* Программный RX FIFO (usbd_cdc_if.c, 2 КБ) переполнился — главный
+     * цикл не успевал вычитывать поток команд/кадров. code — байт со
+     * знаком «было» (насыщение на 0xFF), точное число уже отдаёт
+     * CMD_SYSTEM_INFO/rx_overflow_bytes; здесь важен факт и момент. */
+    uint32_t rx_overflow_now = CDC_GetRxOverflowCount();
+    if (rx_overflow_now != last_rx_overflow_bytes) {
+      uint32_t delta = rx_overflow_now - last_rx_overflow_bytes;
+      EventLog_Add((uint8_t)EVLOG_USB_RX_OVERFLOW, 0xFFU,
+                   (delta > 0xFFU) ? 0xFFU : (uint8_t)delta);
+      last_rx_overflow_bytes = rx_overflow_now;
+    }
 
     uint8_t vbus_now = VBUS_Present();
     if (APPLICATION_USE_VBUS_SENSE && vbus_now && !usb_active) {

@@ -901,6 +901,36 @@ class Translator:
                 "CAN{0}: скорость {1} кбит/с": "CAN{0}: speed {1} kbit/s",
                 "CAN{0}: режим и терминатор": "CAN{0}: mode and terminator",
                 "Сохранение настроек в устройство…": "Saving settings to device…",
+                "Лог МК": "MCU log",
+                "Считать лог": "Read log",
+                "Экспорт в файл": "Export to file",
+                "Очистить таблицу": "Clear table",
+                "Время МК": "MCU time",
+                "Событие": "Event",
+                "Детали": "Details",
+                "Записей: {0}": "Entries: {0}",
+                "Не удалось прочитать журнал МК: {0}": "Could not read MCU log: {0}",
+                "Журнал хранится в Flash устройства и переживает отключение "
+                "питания. Читается только по кнопке — устройство его не "
+                "стирает и не останавливает запись новых событий.":
+                    "The log is stored in the device's Flash and survives a "
+                    "power loss. It is only read on button press — the "
+                    "device never erases it or stops recording new events.",
+                "Причина: {0}": "Cause: {0}",
+                "Крах перед сбросом": "Crash before reset",
+                "Старт МК": "MCU boot",
+                "Ошибка CAN": "CAN error",
+                "Bus-off": "Bus-off",
+                "Восстановление после bus-off": "Bus-off recovery",
+                "Переполнение приёмного кольца": "RX ring overflow",
+                "Backstop FIFO (IRQ пропустил кадр)": "FIFO backstop (IRQ missed a frame)",
+                "USB reset (реэнумерация)": "USB reset (re-enumeration)",
+                "USB отключение (физическое)": "USB disconnect (physical)",
+                "USB TX голодал >100 мс": "USB TX starved >100 ms",
+                "Переполнение RX-буфера USB": "USB RX buffer overflow",
+                " байт (насыщение)": " bytes (saturated)",
+                " байт": " bytes",
+                "Неизвестное событие": "Unknown event",
             },
         }
 

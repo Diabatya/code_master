@@ -100,6 +100,11 @@ uint8_t App_GetResetFlags(void);
  * Одноразовый — читается и очищается при старте приложения. */
 uint8_t App_GetFaultCode(void);
 void App_NoteFault(uint8_t code);
+/* Худший зафиксированный запас между концом .bss и пиком использования
+ * стека с момента старта (см. paint_stack_canary() в main.c) — байты.
+ * Диагностика тесноты RAM (два CAN-кольца съедают ~35 КБ из 64 КБ);
+ * отдаётся в CMD_SYSTEM_INFO. */
+uint32_t App_GetStackFreeBytes(void);
 
 #ifdef __cplusplus
 }

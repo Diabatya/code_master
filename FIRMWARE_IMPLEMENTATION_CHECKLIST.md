@@ -33,10 +33,12 @@
 ## 0.2. Зафиксировать базовую карту памяти
 
 - [x] Bootloader: `0x08000000–0x08007FFF`.
-- [x] Application: `0x08008000–0x0803CFFF`.
+- [x] Application: `0x08008000–0x0803AFFF` (204 КБ — сокращено при
+      выделении региона журнала событий, см. ниже).
+- [x] Журнал событий (event log, Flash-кольцо): `0x0803B000–0x0803CFFF`.
 - [x] Application metadata: `0x0803D000–0x0803D7FF`.
 - [x] Config page: `0x0803D800–0x0803DFFF`.
-- [x] Trigger storage: `0x0803E000–0x0803FFFF`.
+- [x] Trigger storage (динамический пул, растёт вниз от `0x08040000`): `0x0803E000–0x0803FFFF`.
 - [x] Размер Flash STM32F105RCT6: 256 КБ.
 - [x] Размер страницы: 2048 байт.
 - [x] Сверить карту в `.ld`, `device_config.h`, `trigger.h`, `PROTOCOL.md`, Python-коде.

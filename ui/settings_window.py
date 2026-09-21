@@ -56,6 +56,7 @@ from ui.can_gateway_tab import CanGatewayTab
 from ui.can_monitor_tab import CanMonitorTab, CanSettingsReadbackMismatch
 from ui.can_topology import CanTopologyWidget
 from ui.can_trigger_tab import CanTriggerTab, TriggerValidationAborted
+from ui.event_log_tab import EventLogTab
 from ui.flexible_logic_tab import FlexibleLogicTab
 from ui.hex_edit import HexDataEdit
 from ui.library_browser import LibraryBrowser
@@ -399,6 +400,7 @@ class SettingsWindow(QMainWindow):
         self._library_tab = LibraryBrowser(self._trigger_tab, self._flexible_tab, self)
         self._analyzer_tab = CanAnalyzer(self._serial_manager, self)
         self._topology_tab = CanTopologyWidget(self)
+        self._event_log_tab = EventLogTab(self._serial_manager, self)
         self._analog_tab: Optional[AnalogPortsTab] = None
 
         self._tabs.addTab(self._trigger_tab, "⚡ " + tr("Триггеры"))
@@ -408,6 +410,7 @@ class SettingsWindow(QMainWindow):
         self._tabs.addTab(self._library_tab, "📚 " + tr("Библиотека"))
         self._tabs.addTab(self._analyzer_tab, "🔬 " + tr("Трэйс"))
         self._tabs.addTab(self._topology_tab, "🌐 " + tr("Топология"))
+        self._tabs.addTab(self._event_log_tab, "🧾 " + tr("Лог МК"))
         self._update_analog_tab()
         self._serial_manager.device_identified.connect(self._update_analog_tab)
         self._serial_manager.device_identified.connect(self._update_device_info)
@@ -1182,6 +1185,7 @@ class SettingsWindow(QMainWindow):
             self._library_tab: "📚 " + tr("Библиотека"),
             self._analyzer_tab: "🔬 " + tr("Трэйс"),
             self._topology_tab: "🌐 " + tr("Топология"),
+            self._event_log_tab: "🧾 " + tr("Лог МК"),
         }
         if self._analog_tab is not None:
             titles[self._analog_tab] = "🌊 " + tr("Аналоговые порты")
@@ -1203,6 +1207,7 @@ class SettingsWindow(QMainWindow):
             self._library_tab,
             self._analyzer_tab,
             self._topology_tab,
+            self._event_log_tab,
         ):
             if hasattr(tab, "retranslate_ui"):
                 tab.retranslate_ui()

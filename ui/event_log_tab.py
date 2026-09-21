@@ -1,0 +1,256 @@
+"""Вкладка «Лог МК»: постраничное чтение Flash-журнала событий устройства.
+
+Журнал (см. firmware/application/Inc/event_log.h) переживает и мягкий
+сброс, и отключение питания — в отличие от обычных счётчиков статистики
+(CMD_CAN_STATS/CMD_USB_STATS), он хранит хронологию: что происходило на
+устройстве, когда связь с ПК уже пропала (полевой симптом: разрыв CAN/USB,
+устраняется только отключением одного из CAN-проводов). Вкладка только
+читает журнал по требованию — устройство ничего не стирает по команде
+с ПК, журнал живёт своей жизнью в кольце Flash независимо от того, читают
+его или нет.
+"""
+
+from typing import List, Optional
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from core.can_protocol import (
+    EVLOG_BOOT,
+    EVLOG_CAN_BUSOFF,
+    EVLOG_CAN_BUSOFF_RECOVER,
+    EVLOG_CAN_ERROR,
+    EVLOG_CAN_FIFO_POLL,
+    EVLOG_CAN_OVERFLOW,
+    EVLOG_USB_DISCONNECT,
+    EVLOG_USB_RESET,
+    EVLOG_USB_RX_OVERFLOW,
+    EVLOG_USB_TX_STALL,
+)
+from core.serial_manager import SerialManager
+from models.logger import get_logger
+from models.translations import _ as tr
+from ui.ui_utils import setup_button
+
+logger = get_logger(__name__)
+
+# LEC[2:0] (см. RM CAN_ESR) — расшифровка code для EVLOG_CAN_ERROR.
+_LEC_NAMES = {
+    1: "Stuff",
+    2: "Form",
+    3: "ACK",
+    4: "Bit recessive",
+    5: "Bit dominant",
+    6: "CRC",
+    7: "-",
+}
+# Причина сброса МК (RCC->CSR[31:24]) — расшифровка code для EVLOG_BOOT.
+_RESET_FLAG_NAMES = (
+    (0x80, "LPWR"),
+    (0x40, "WWDG"),
+    (0x20, "IWDG"),
+    (0x10, "SOFT"),
+    (0x08, "POR"),
+    (0x04, "PIN"),
+)
+_FAULT_NAMES = {0: None, 1: "HardFault", 2: "MemManage", 3: "BusFault", 4: "UsageFault"}
+
+
+def _format_channel(channel: int) -> str:
+    if channel == 0:
+        return "CAN1"
+    if channel == 1:
+        return "CAN2"
+    return "-"
+
+
+def _decode_reset_flags(flags: int) -> str:
+    names = [name for bit, name in _RESET_FLAG_NAMES if flags & bit]
+    return "+".join(names) if names else "?"
+
+
+class EventLogTab(QWidget):
+    """Читает и показывает Flash-журнал событий МК (CMD_EVENT_LOG)."""
+
+    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._serial_manager = serial_manager
+        self._entries: List[dict] = []
+        self._create_widgets()
+        self._build_layout()
+
+    def _create_widgets(self) -> None:
+        self._read_button = QPushButton(tr("Считать лог"))
+        setup_button(self._read_button)
+        self._read_button.clicked.connect(self._on_read_clicked)
+
+        self._export_button = QPushButton(tr("Экспорт в файл"))
+        setup_button(self._export_button)
+        self._export_button.clicked.connect(self._on_export_clicked)
+        self._export_button.setEnabled(False)
+
+        self._clear_button = QPushButton(tr("Очистить таблицу"))
+        setup_button(self._clear_button)
+        self._clear_button.clicked.connect(self._on_clear_clicked)
+
+        self._status_label = QLabel("")
+
+        self._table = QTableWidget(0, 5)
+        self._table.setHorizontalHeaderLabels([
+            "#", tr("Время МК"), tr("Событие"), tr("Канал"), tr("Детали"),
+        ])
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setAlternatingRowColors(True)
+
+    def _build_layout(self) -> None:
+        layout = QVBoxLayout(self)
+        top = QHBoxLayout()
+        top.addWidget(self._read_button)
+        top.addWidget(self._export_button)
+        top.addWidget(self._clear_button)
+        top.addStretch(1)
+        layout.addLayout(top)
+        layout.addWidget(self._status_label)
+        layout.addWidget(self._table)
+
+        note = QLabel(
+            tr(
+                "Журнал хранится в Flash устройства и переживает отключение "
+                "питания. Читается только по кнопке — устройство его не "
+                "стирает и не останавливает запись новых событий."
+            )
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #888;")
+        layout.addWidget(note)
+
+    def retranslate_ui(self) -> None:
+        self._read_button.setText(tr("Считать лог"))
+        self._export_button.setText(tr("Экспорт в файл"))
+        self._clear_button.setText(tr("Очистить таблицу"))
+        self._table.setHorizontalHeaderLabels([
+            "#", tr("Время МК"), tr("Событие"), tr("Канал"), tr("Детали"),
+        ])
+        self._render_table()
+
+    # ------------------------------------------------------------------
+
+    def _on_read_clicked(self) -> None:
+        if not self._serial_manager.is_open():
+            QMessageBox.warning(self, tr("Ошибка"), tr("Порт не подключен"))
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            entries = self._serial_manager.read_full_event_log()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось прочитать журнал МК: %s", exc)
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(
+                self,
+                tr("Ошибка"),
+                tr("Не удалось прочитать журнал МК: {0}").format(exc),
+            )
+            return
+        QApplication.restoreOverrideCursor()
+        self._entries = entries
+        self._render_table()
+        self._export_button.setEnabled(bool(self._entries))
+        self._status_label.setText(tr("Записей: {0}").format(len(self._entries)))
+
+    def _on_clear_clicked(self) -> None:
+        self._entries = []
+        self._render_table()
+        self._export_button.setEnabled(False)
+        self._status_label.setText("")
+
+    def _on_export_clicked(self) -> None:
+        if not self._entries:
+            return
+        path, _filter = QFileDialog.getSaveFileName(
+            self, tr("Экспорт в файл"), "event_log.txt", "Text (*.txt)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                for entry in self._entries:
+                    fh.write(self._format_row(entry, sep=" | ") + "\n")
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Ошибка"), tr("Не удалось открыть файл") + f": {exc}")
+
+    # ------------------------------------------------------------------
+
+    def _format_row(self, entry: dict, sep: str = "\t") -> str:
+        seq = entry["seq"]
+        ts_ms = entry["timestamp_ms"]
+        etype = entry["type"]
+        channel = entry["channel"]
+        code = entry["code"]
+        time_str = self._format_uptime(ts_ms)
+        name, detail = self._decode_event(etype, channel, code)
+        chan_str = _format_channel(channel) if etype not in (EVLOG_BOOT,) else "-"
+        return sep.join((str(seq), time_str, name, chan_str, detail))
+
+    @staticmethod
+    def _format_uptime(ts_ms: int) -> str:
+        total_s, ms = divmod(ts_ms, 1000)
+        h, rem = divmod(total_s, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+    def _decode_event(self, etype: int, channel: int, code: int) -> tuple:
+        if etype == EVLOG_BOOT:
+            fault = _FAULT_NAMES.get(channel)
+            detail = tr("Причина: {0}").format(_decode_reset_flags(code))
+            if fault:
+                detail += f" | {tr('Крах перед сбросом')}: {fault}"
+            return tr("Старт МК"), detail
+        if etype == EVLOG_CAN_ERROR:
+            return tr("Ошибка CAN"), _LEC_NAMES.get(code, f"0x{code:02X}")
+        if etype == EVLOG_CAN_BUSOFF:
+            return tr("Bus-off"), ""
+        if etype == EVLOG_CAN_BUSOFF_RECOVER:
+            return tr("Восстановление после bus-off"), ""
+        if etype == EVLOG_CAN_OVERFLOW:
+            return tr("Переполнение приёмного кольца"), ""
+        if etype == EVLOG_CAN_FIFO_POLL:
+            return tr("Backstop FIFO (IRQ пропустил кадр)"), ""
+        if etype == EVLOG_USB_RESET:
+            return tr("USB reset (реэнумерация)"), f"#{code}"
+        if etype == EVLOG_USB_DISCONNECT:
+            return tr("USB отключение (физическое)"), f"#{code}"
+        if etype == EVLOG_USB_TX_STALL:
+            return tr("USB TX голодал >100 мс"), ""
+        if etype == EVLOG_USB_RX_OVERFLOW:
+            detail = f"+{code}" + (tr(" байт (насыщение)") if code == 0xFF else tr(" байт"))
+            return tr("Переполнение RX-буфера USB"), detail
+        return tr("Неизвестное событие"), f"type={etype} code=0x{code:02X}"
+
+    def _render_table(self) -> None:
+        self._table.setRowCount(len(self._entries))
+        for row, entry in enumerate(self._entries):
+            seq = entry["seq"]
+            etype = entry["type"]
+            channel = entry["channel"]
+            code = entry["code"]
+            name, detail = self._decode_event(etype, channel, code)
+            chan_str = _format_channel(channel) if etype not in (EVLOG_BOOT,) else "-"
+            values = (str(seq), self._format_uptime(entry["timestamp_ms"]), name, chan_str, detail)
+            for col, value in enumerate(values):
+                self._table.setItem(row, col, QTableWidgetItem(value))

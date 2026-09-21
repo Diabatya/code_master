@@ -1,11 +1,34 @@
 /* Interrupt handlers for the application.
  *
- * NOTE: on the F105 connectivity-line devices, CAN1 shares its TX/RX0
- * interrupt vectors with the USB (USB_HP_CAN1_TX / USB_LP_CAN1_RX0) — this
- * is a real silicon sharing, not a mistake; both HAL_PCD_IRQHandler and
- * HAL_CAN_IRQHandler must be called from those two handlers. See RM0008
- * (STM32F105/107 reference manual), vector table section, and the vendored
- * startup_stm32f105xc.s which already names the vectors this way.
+ * CORRECTION (audit finding): an earlier version of this note claimed
+ * CAN1 "shares" its TX/RX0 vectors with USB on the F105 and required
+ * HAL_PCD_IRQHandler to be called from USB_HP_CAN1_TX/USB_LP_CAN1_RX0.
+ * That is NOT the case for this board: the legacy names
+ * USB_HP_CAN1_TX_IRQn/USB_LP_CAN1_RX0_IRQn are just CMSIS aliases for
+ * CAN1_TX_IRQn/CAN1_RX0_IRQn (see stm32f105xc.h: "#define
+ * USB_LP_CAN1_RX0_IRQn CAN1_RX0_IRQn") — they exist for source
+ * compatibility with F103-style code where the legacy USB device
+ * peripheral truly does share those vectors with CAN1. This firmware
+ * uses the F105/F107 OTG_FS peripheral instead, which has its own,
+ * entirely separate OTG_FS_IRQn (67) — see usbd_conf.c's
+ * HAL_NVIC_EnableIRQ(OTG_FS_IRQn). So on THIS hardware there is no real
+ * vector sharing: CAN1_RX0 (priority 5, can_bridge.c) and OTG_FS
+ * (priority 6) are two independent NVIC lines, and CAN1's higher
+ * priority means a running OTG_FS handler cannot even delay it via
+ * preemption. The handlers below only ever service CAN, never USB.
+ *
+ * This means the original justification for CanBridge_PollHealth()'s
+ * RX FIFO0 backstop poll ("USB starves the shared CAN1_RX0 vector") is
+ * probably wrong for this board — the poll itself is still a harmless,
+ * cheap safety net (see can_bridge.c), but the real cause of any
+ * observed CAN frame loss under USB/CAN load is more likely elsewhere
+ * (e.g. Flash erase/program stalling code fetch — STM32F1 is a single
+ * Flash bank, execution from Flash is not guaranteed during an
+ * erase/program cycle — see trigger.c/device_config.c/event_log.c,
+ * which all write Flash from the main loop). Worth correlating
+ * fifo_poll/lost_count with CMD_CFG_WRITE/CMD_TRIGGER_COMMIT timing and
+ * with the event log's own page-erase-on-wrap before assuming this is
+ * fully explained.
  */
 
 #include "main.h"
@@ -53,7 +76,10 @@ void SysTick_Handler(void)
   HAL_IncTick();
 }
 
-/* Shared USB/CAN1 vectors (see file header note). */
+/* CAN1 TX/RX0 vectors. Named USB_HP_CAN1_TX/USB_LP_CAN1_RX0 only because
+ * that's the CMSIS legacy alias name (see file header note) — with the
+ * OTG_FS peripheral in use here, these vectors carry ONLY CAN1, never
+ * USB (OTG_FS_IRQHandler below is the real, separate USB vector). */
 void USB_HP_CAN1_TX_IRQHandler(void)
 {
   HAL_CAN_IRQHandler(&hcan1);
@@ -61,12 +87,6 @@ void USB_HP_CAN1_TX_IRQHandler(void)
 
 void USB_LP_CAN1_RX0_IRQHandler(void)
 {
-  /* On this MCU family, when USB OTG_FS is selected (as here, per
-   * SystemClock_Config/MX_USB init) the OTG_FS peripheral uses its own
-   * dedicated OTG_FS_IRQn vector below rather than the legacy USB_LP
-   * vector, so this handler only ever needs to service CAN1 RX0. Kept as a
-   * distinct name (not aliased to OTG_FS_IRQHandler) to match RM0008
-   * nomenclature and avoid confusing future maintainers. */
   HAL_CAN_IRQHandler(&hcan1);
 }
 

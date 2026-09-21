@@ -10,6 +10,7 @@
 #include "can_bridge.h"
 #include "device_config.h"
 #include "trigger.h"
+#include "event_log.h"
 
 /* Markers, see firmware/PROTOCOL.md 1.1 (must match core/can_protocol.py) */
 #define MARKER_RX_STD        0xAAU /* device -> PC, standard ID */
@@ -43,6 +44,7 @@
 #define CMD_USB_STATS            0xCCU
 #define CMD_CAN_MODE             0xCDU /* управление режимом и терминатором CAN */
 #define CMD_CAN_SPEED            0xCEU /* установка бод-рейта CAN-канала (runtime + persist) */
+#define CMD_EVENT_LOG            0xCFU /* постраничное чтение Flash-журнала событий, см. event_log.h */
 
 /* Защита деструктивных команд от фантомного срабатывания при рассинхроне
  * CDC-потока: парсер после битого кадра пересматривает следующие байты
@@ -186,15 +188,28 @@ static void send_new_cmd_response(uint8_t cmd, uint8_t status, const uint8_t *pa
     memcpy(&buf[3], payload, len);
   }
   /* Command responses must NOT be silently dropped: under a busy CAN bus
-   * forwarded frames keep the CDC IN endpoint busy, CDC_Transmit_FS()
-   * gives up after ~100ms and the PC then reports a command timeout
-   * (e.g. "Таймаут ответа на команду 0xCA" during trigger writes — which
-   * also aborted multi-command STAGE+COMMIT sequences halfway, leaving
-   * Flash unwritten). CAN frames are best-effort and may drop, control
-   * answers may not: retry with a wider bound. Worst case the CAN ring
-   * buffers absorb traffic while we wait inside Protocol_Poll. */
+   * forwarded frames keep the CDC IN endpoint busy, CDC_Transmit_FS_Resume()
+   * gives up on a chunk after ~100ms and the PC then reports a command
+   * timeout (e.g. "Таймаут ответа на команду 0xCA" during trigger writes —
+   * which also aborted multi-command STAGE+COMMIT sequences halfway,
+   * leaving Flash unwritten). CAN frames are best-effort and may drop,
+   * control answers may not: retry with a wider bound.
+   *
+   * Retrying resumes from `sent`, NOT from byte 0: for any response
+   * longer than one 64-byte USB chunk (SYSTEM_INFO 67 Б, TRIGGER_READ
+   * 93 Б, EVENT_LOG до 257 Б), re-sending the whole buffer from scratch
+   * after a partial chunk failure would put already-transmitted bytes on
+   * the wire a second time — the PC's positional parser
+   * (buffer[3:3+length]) would then slice into the duplicated tail and
+   * hand back a corrupted response instead of a clean retry. */
   uint32_t start = HAL_GetTick();
-  while (CDC_Transmit_FS(buf, (uint16_t)(3U + len)) != 0U) {
+  uint16_t total = (uint16_t)(3U + len);
+  uint16_t sent = 0U;
+  while (sent < total) {
+    sent = CDC_Transmit_FS_Resume(buf, sent, total);
+    if (sent >= total) {
+      break;
+    }
     /* Занятый TX — легальное состояние, а не зависание: кормим IWDG,
      * иначе ~900 мс ожидания ответа плюс текущая работа цикла могли
      * перешагнуть ~1-секундный период вотчдога и сбросить МК посреди
@@ -526,14 +541,49 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       break;
     }
 
+    case CMD_EVENT_LOG: {
+      /* payload (опционален): [after_seq:4 LE][max_count:1]. Пустой
+       * payload = с начала журнала, лимит по умолчанию.
+       * Ответ: [count:1] + count * [seq:4 LE][timestamp_ms:4 LE][type:1]
+       * [channel:1][code:1] (11 Б/запись) — до 23 записей за вызов
+       * (буфер ответа 255 Б); ПК вычитывает журнал постранично, передавая
+       * в следующий запрос after_seq = seq последней полученной записи. */
+      #define EVENT_LOG_MAX_PER_CALL 23U
+      uint32_t after_seq = 0U;
+      uint8_t max_count = EVENT_LOG_MAX_PER_CALL;
+      if (payload_len >= 4U) {
+        memcpy(&after_seq, &payload[0], 4U);
+      }
+      if (payload_len >= 5U && payload[4] > 0U && payload[4] < EVENT_LOG_MAX_PER_CALL) {
+        max_count = payload[4];
+      }
+      event_log_entry_t entries[EVENT_LOG_MAX_PER_CALL];
+      uint8_t n = EventLog_Read(after_seq, entries, max_count);
+      uint8_t out[1U + EVENT_LOG_MAX_PER_CALL * 11U];
+      out[0] = n;
+      for (uint8_t i = 0U; i < n; i++) {
+        uint8_t *p = &out[1U + (uint32_t)i * 11U];
+        memcpy(&p[0], &entries[i].seq, 4U);
+        memcpy(&p[4], &entries[i].timestamp_ms, 4U);
+        p[8] = entries[i].type;
+        p[9] = entries[i].channel;
+        p[10] = entries[i].code;
+      }
+      send_new_cmd_response(cmd, 0x00U, out, (uint8_t)(1U + (uint32_t)n * 11U));
+      #undef EVENT_LOG_MAX_PER_CALL
+      break;
+    }
+
     case CMD_SYSTEM_INFO: {
       const device_config_t *cfg = DeviceConfig_Get();
       const uint8_t *metadata = (const uint8_t *)APP_METADATA_ADDR;
       /* 16 байт базовой части (как раньше) + UID96 + дата/время сборки +
        * git commit + диагностический хвост [56..63]: причина сброса,
-       * счётчики USB reset/disconnect и потерянные байты RX FIFO.
-       * Старые версии ПК читают только первые 16 байт. */
-      uint8_t out[64] = {
+       * счётчики USB reset/disconnect и потерянные байты RX FIFO;
+       * [64..67]: худший зафиксированный запас стека в байтах (аудит —
+       * два CAN-кольца съедают большую часть RAM, см. main.c). Старые
+       * версии ПК читают только первые 16 байт. */
+      uint8_t out[68] = {
         s_device_version,
         4U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
              * деструктивных команд; 4 = записи триггеров v3 (90 Б —
@@ -574,6 +624,10 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       {
         uint32_t ovf = CDC_GetRxOverflowCount();
         memcpy(&out[60], &ovf, 4U);
+      }
+      {
+        uint32_t stack_free = App_GetStackFreeBytes();
+        memcpy(&out[64], &stack_free, 4U);
       }
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
@@ -755,8 +809,8 @@ static uint16_t try_parse_one(void)
     return 1U;
   }
 
-  /* --- New commands (0xC0-0xCE), see PROTOCOL.md Part 2 --- */
-  if (marker >= 0xC0U && marker <= 0xCEU) {
+  /* --- New commands (0xC0-0xCF), see PROTOCOL.md Part 2 --- */
+  if (marker >= 0xC0U && marker <= 0xCFU) {
     if (avail < 2U) {
       return wait_more_or_resync();
     }

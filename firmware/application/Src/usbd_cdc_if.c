@@ -69,10 +69,10 @@ uint8_t CDC_PeekRxByte(uint16_t offset, uint8_t *out)
   return 1U;
 }
 
-uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
+uint16_t CDC_Transmit_FS_Resume(uint8_t *Buf, uint16_t offset, uint16_t Len)
 {
   USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
-  uint16_t sent = 0;
+  uint16_t sent = offset;
 
   while (sent < Len) {
     uint16_t chunk = Len - sent;
@@ -97,10 +97,16 @@ uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
         if ((HAL_GetTick() - wait_start) >= 100U) {
           /* Отдельный счётчик «хост не забирал IN» — в поле отвечает на
            * вопрос «МК медленный или ПК не читает»: растёт именно когда
-           * TxState занят >100 мс, т.е. на шине не было IN-токенов. */
+           * TxState занят >100 мс, т.е. на шине не было IN-токенов.
+           * Возвращаем sent (а не 0/ошибку) — вызывающая сторона (см.
+           * send_new_cmd_response) продолжает досылку С ЭТОЙ позиции, а
+           * не пересылает уже ушедшие чанки заново: раньше повтор с
+           * начала того же буфера дублировал байты на линии и ломал
+           * позиционный разбор многочанкового ответа на ПК (SYSTEM_INFO,
+           * TRIGGER_READ, EVENT_LOG — всё, что длиннее 64 байт). */
           tx_busy_waits++;
           tx_dropped++;
-          return 1U;
+          return sent;
         }
       }
     }
@@ -108,11 +114,16 @@ uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
     USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, chunk);
     if (USBD_CDC_TransmitPacket(&hUsbDeviceFS) != USBD_OK) {
       tx_dropped++;
-      return 1U;
+      return sent;
     }
     sent += chunk;
   }
-  return 0U;
+  return sent;
+}
+
+uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
+{
+  return (CDC_Transmit_FS_Resume(Buf, 0U, Len) == Len) ? 0U : 1U;
 }
 
 uint32_t CDC_GetTxDropped(void)

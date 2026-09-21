@@ -299,9 +299,15 @@ static bool bl_flash_erase_app(void)
   erase.PageAddress = APP_START;
   erase.NbPages = APP_PAGES_TOTAL;
 
+  /* Самая долгая блокирующая операция бутлоадера (~4.5 с на 112
+   * страниц) — HAL_FLASHEx_Erase() не возвращает управление до
+   * завершения, кормить IWDG внутри невозможно; кормим до и после, с
+   * запасом периода (~26 с, см. MX_IWDG_Init) на саму операцию. */
+  App_KickWatchdog();
   HAL_FLASH_Unlock();
   bool ok = (HAL_FLASHEx_Erase(&erase, &error) == HAL_OK);
   HAL_FLASH_Lock();
+  App_KickWatchdog();
   return ok;
 }
 
@@ -469,6 +475,9 @@ static bool bl_flash_erase_pages(const uint16_t *pages, uint16_t count)
       HAL_FLASH_Lock();
       return false;
     }
+    /* До count страниц (<= APP_PAGES_TOTAL=112) по ~40 мс — кормим
+     * между страницами, а не только в начале/конце. */
+    App_KickWatchdog();
     erase.PageAddress = FLASH_START + ((uint32_t)pages[i] * 2048U);
     if (HAL_FLASHEx_Erase(&erase, &error) != HAL_OK) {
       HAL_FLASH_Lock();
