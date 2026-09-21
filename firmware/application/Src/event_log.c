@@ -123,7 +123,15 @@ static uint8_t erase_page_for_slot(uint16_t slot)
     .NbPages     = 1U,
   };
   uint32_t page_error = 0U;
-  return (HAL_FLASHEx_Erase(&erase_init, &page_error) == HAL_OK) ? 1U : 0U;
+  /* Аудит: HAL_FLASHEx_Erase() требует разблокированный Flash — раньше
+   * эта функция вызывала её без HAL_FLASH_Unlock() (Unlock происходил
+   * только позже, перед программированием в EventLog_Add()), из-за
+   * чего первое стирание страницы (обновление прошивки/оборот кольца)
+   * не проходило. */
+  HAL_FLASH_Unlock();
+  uint8_t ok = (HAL_FLASHEx_Erase(&erase_init, &page_error) == HAL_OK) ? 1U : 0U;
+  HAL_FLASH_Lock();
+  return ok;
 }
 
 void EventLog_Add(uint8_t type, uint8_t channel, uint8_t code)
