@@ -23,6 +23,8 @@ jobs:
         run: |
           ruff check .
           python3 -m compileall core ui models
+      - name: Generate version_info.py from models/version.py
+        run: python tools/generate_version_info.py
       - name: Build with PyInstaller
         run: pyinstaller build_win.spec
       - name: Upload Windows artifact
