@@ -1220,6 +1220,7 @@ class SettingsWindow(QMainWindow):
         self._serial_manager.new_can_frame.connect(self._analyzer_tab.process_frame)
         self._serial_manager.new_can_frame.connect(self._topology_tab.add_frame)
         self._serial_manager.error_occurred.connect(self._on_serial_error)
+        self._serial_manager.critical_error.connect(self._on_critical_error)
         self._serial_manager.connection_changed.connect(self._on_connection_changed)
         self._serial_manager.connecting.connect(self._on_connecting)
         self._serial_manager.reconnect_scheduled.connect(
@@ -1507,6 +1508,14 @@ class SettingsWindow(QMainWindow):
 
     def _on_serial_error(self, message: str) -> None:
         logger.error("Ошибка COM-порта: %s", message)
+
+    def _on_critical_error(self, message: str) -> None:
+        """Поток чтения остановлен: соединение мертво, нужно переподключение."""
+        logger.critical("Критическая ошибка COM-порта: %s", message)
+        if self._serial_manager.auto_reconnect_enabled:
+            return  # автопереподключение само восстановит порт
+        if self.isVisible():
+            QMessageBox.critical(self, tr("Связь с устройством потеряна"), message)
 
     def _device_name_for_filename(self) -> str:
         # Имя файла — от имени устройства, записанного при

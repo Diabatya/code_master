@@ -198,6 +198,11 @@ class SerialReader(QThread):
     new_frame = Signal(dict)
     new_raw_data = Signal(bytes, float)
     error = Signal(str)
+    # Поток остановлен после серии ошибок чтения — соединение мертво и
+    # восстановления без переподключения не будет. Отдельный сигнал,
+    # чтобы UI мог показать это как критическое событие, а не очередную
+    # строку в общем потоке error_occurred.
+    fatal_error = Signal(str)
     heartbeat = Signal()
 
     def __init__(self, port: SerialPort, parent: Optional[QObject] = None) -> None:
@@ -283,6 +288,10 @@ class SerialReader(QThread):
                 self.error.emit(str(exc))
                 if self._error_count >= 5:
                     logger.error("Превышено допустимое количество ошибок чтения, поток остановлен")
+                    self.fatal_error.emit(
+                        "Чтение из COM-порта остановлено после нескольких ошибок подряд "
+                        f"(последняя: {exc}). Отключите устройство и подключите его заново."
+                    )
                     self._running = False
                 self.msleep(100)
         logger.info("Поток чтения COM-порта остановлен")
@@ -327,6 +336,9 @@ class SerialManager(QObject):
     # попытки) — UI показывает «Переподключение через N с…» вместо
     # молчаливого шторма попыток каждые 3 секунды.
     reconnect_scheduled = Signal(int, int)
+    # Поток чтения остановлен после серии ошибок: требуется ручное
+    # переподключение устройства (если автопереподключение выключено).
+    critical_error = Signal(str)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         """Создаёт менеджер без открытого порта."""
@@ -385,6 +397,11 @@ class SerialManager(QObject):
             if self._port is None:
                 return ""
             return getattr(self._port, "port", "")
+
+    @property
+    def auto_reconnect_enabled(self) -> bool:
+        """Включено ли автопереподключение при потере порта."""
+        return self._auto_reconnect
 
     def device_protocol_version(self) -> int:
         """Версия протокола прошивки из последнего CMD_SYSTEM_INFO.
@@ -1277,6 +1294,7 @@ class SerialManager(QObject):
             self._reader.new_frame.connect(self.new_can_frame)
             self._reader.new_raw_data.connect(self.raw_data)
             self._reader.error.connect(self.error_occurred)
+            self._reader.fatal_error.connect(self.critical_error)
             self._reader.heartbeat.connect(self.heartbeat)
             self._reader.finished.connect(self._on_reader_finished)
             self._reader.start()

@@ -55,6 +55,7 @@ class _FakeSerialManager(QObject):
 
     connection_changed = Signal(bool)
     connecting = Signal()
+    critical_error = Signal(str)
     device_identified = Signal()
     error_occurred = Signal(str)
     new_can_frame = Signal(int, bytes, int)

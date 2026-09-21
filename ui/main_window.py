@@ -286,6 +286,7 @@ class MainWindow(QMainWindow):
             lambda _info: self._update_port_indicator()
         )
         self._serial_manager.error_occurred.connect(self._on_serial_error)
+        self._serial_manager.critical_error.connect(self._on_critical_error)
         self._serial_manager.heartbeat.connect(self._on_heartbeat)
 
     def _setup_shortcuts(self) -> None:
@@ -594,6 +595,15 @@ class MainWindow(QMainWindow):
         """Показывает ошибку COM-порта."""
         logger.error("Ошибка COM-порта: %s", message)
         self._status_label.setText(tr("Ошибка порта"))
+
+    def _on_critical_error(self, message: str) -> None:
+        """Поток чтения остановлен: соединение мертво, нужно переподключение."""
+        logger.critical("Критическая ошибка COM-порта: %s", message)
+        self._status_label.setText(tr("Связь потеряна"))
+        if self._serial_manager.auto_reconnect_enabled:
+            return  # автопереподключение само восстановит порт
+        if self.isVisible():
+            QMessageBox.critical(self, tr("Связь с устройством потеряна"), message)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         """Корректно закрывает приложение."""
