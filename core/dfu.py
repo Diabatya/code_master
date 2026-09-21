@@ -308,20 +308,28 @@ class DfuDevice:
             try:
                 status = self._status(timeout=5000)
             except usb.core.USBError:
-                return
-            if len(status) < 6:
-                return
-            state = status[4]
-            if state == STATE_DFU_IDLE:
-                return
-            try:
-                if state == STATE_DFU_ERROR:
-                    self._ctrl(DFU_REQUEST_SEND, DFU_CLRSTATUS, timeout=5000)
-                else:
-                    self._ctrl(DFU_REQUEST_SEND, DFU_ABORT, timeout=5000)
-            except usb.core.USBError:
-                pass
+                status = b""
+            if len(status) >= 6:
+                state = status[4]
+                if state == STATE_DFU_IDLE:
+                    return
+                try:
+                    if state == STATE_DFU_ERROR:
+                        self._ctrl(DFU_REQUEST_SEND, DFU_CLRSTATUS, timeout=5000)
+                    else:
+                        self._ctrl(DFU_REQUEST_SEND, DFU_ABORT, timeout=5000)
+                except usb.core.USBError:
+                    pass
             time.sleep(0.02)
+        # Раньше при исчерпании попыток функция просто возвращалась, и
+        # mass_erase()/page_erase()/_set_address() продолжали работу с
+        # недостоверным состоянием автомата: команда 0x41/0x21, слетевшая
+        # из dfuDNLOAD_IDLE, ROM трактует как данные — «стирание»
+        # существовало только в логе. Теперь операция прерывается явно.
+        raise RuntimeError(
+            "DFU: устройство не перешло в состояние dfuIDLE за 6 попыток — "
+            "операция прервана"
+        )
 
     def abort(self) -> None:
         """Прерывает текущую DFU-операцию и возвращает устройство в dfuIDLE."""
