@@ -1,5 +1,6 @@
 """Отдельное COM-логгер окно с мониторингом и отправкой байт."""
 
+import contextlib
 import re
 import threading
 import time
@@ -129,10 +130,8 @@ class ComLoggerReader(QThread):
         finally:
             with self._port_lock:
                 if self._ser is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         self._ser.close()
-                    except Exception:  # noqa: S110
-                        pass
                     self._ser = None
             self.connection_changed.emit(False)
             self.state_changed.emit(tr("Отключено"))
@@ -486,7 +485,10 @@ class ComLoggerWindow(QDialog):
         checked = state == Qt.CheckState.Checked.value
         self._config.set("com_logger_proxy", checked)
         if checked:
-            self._main_checkbox.setStyleSheet("QCheckBox { background-color: #4CAF50; color: #FFFFFF; padding: 4px 8px; border-radius: 4px; }")
+            self._main_checkbox.setStyleSheet(
+                "QCheckBox { background-color: #4CAF50; color: #FFFFFF; "
+                "padding: 4px 8px; border-radius: 4px; }"
+            )
             self._port_label.setText(tr("Реальный порт"))
             self._virtual_port_label.setVisible(True)
             self._virtual_port_combo.setVisible(True)
@@ -582,10 +584,7 @@ class ComLoggerWindow(QDialog):
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.warning(self, tr("Ошибка"), str(exc))
                 return
-        if self._main_listener:
-            ok = self._serial_manager.send_data(data)
-        else:
-            ok = self._reader.write(data)
+        ok = self._serial_manager.send_data(data) if self._main_listener else self._reader.write(data)
         if ok:
             self._add_row(tr("TX"), data, time.time(), self._tx_color())
 

@@ -183,7 +183,11 @@ class TriggerSimDialog(QDialog):
     def _run(self) -> None:
         self._log.clear()
         if not self._frames:
-            QMessageBox.information(self, tr("Симуляция"), tr("Нет входных кадров — загрузите лог или добавьте вручную."))
+            QMessageBox.information(
+                self,
+                tr("Симуляция"),
+                tr("Нет входных кадров — загрузите лог или добавьте вручную."),
+            )
             return
         try:
             records = self._records_provider() or []

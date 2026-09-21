@@ -61,6 +61,7 @@ from ui.hex_edit import HexDataEdit
 from ui.library_browser import LibraryBrowser
 from ui.memory_indicator import MemoryIndicator
 from ui.toast import show_toast
+import contextlib
 
 try:
     from serial.tools.list_ports import comports
@@ -227,21 +228,17 @@ class ConnectionTab(QWidget):
         вызывать слоты уже удалённого виджета («Internal C++ object
         QComboBox already deleted» при повторном входе в настройки).
         """
-        try:
+        # Детектор может уже умереть вместе с вкладкой — отписка от
+        # сигналов SerialManager всё равно должна добежать, иначе слоты
+        # останутся в списке подключённых навсегда.
+        with contextlib.suppress(RuntimeError):
             self._stop_baud_detector()
-        except RuntimeError:
-            # Детектор уже умер вместе с вкладкой — отписка от сигналов
-            # SerialManager всё равно должна добежать, иначе слоты
-            # останутся в списке подключённых навсегда.
-            pass
         for signal, slot in (
             (self._serial_manager.connection_changed, self._update_ui_state),
             (self._serial_manager.device_identified, self._identified_slot),
         ):
-            try:
+            with contextlib.suppress(RuntimeError, TypeError):
                 signal.disconnect(slot)
-            except (RuntimeError, TypeError):
-                pass
 
     def _stop_baud_detector(self) -> None:
         """Останавливает предыдущий поток автоопределения, если он ещё жив."""
@@ -635,10 +632,9 @@ class SettingsWindow(QMainWindow):
             child = event.child()
             if isinstance(child, QWidget):
                 def _track(w: QWidget = child) -> None:
-                    try:
+                    # виджет может быть уже уничтожен
+                    with contextlib.suppress(RuntimeError):
                         self._install_dirty_tracking(w)
-                    except RuntimeError:
-                        pass  # виджет уже уничтожен
 
                 QTimer.singleShot(0, _track)
             self._mark_dirty()
@@ -813,10 +809,8 @@ class SettingsWindow(QMainWindow):
         for tab in (self._trigger_tab, self._flexible_tab, self._gateway_tab):
             save = getattr(tab, "_save_config", None)
             if callable(save):
-                try:
+                with contextlib.suppress(Exception):
                     save()
-                except Exception:  # noqa: BLE001
-                    pass
         data = self._config.all()
         return {key: data.get(key) for key in self._DIFF_KEYS}
 
@@ -1123,7 +1117,9 @@ class SettingsWindow(QMainWindow):
                 and not self._config.get("emulation", False)
             ):
                 info = self._serial_manager.read_system_info()
-                text = tr("Firmware: app {0}, protocol {1}, Flash {2} KB, size {3} B, CRC32 {4}, config v{5} ({6})").format(
+                text = tr(
+                    "Firmware: app {0}, protocol {1}, Flash {2} KB, size {3} B, CRC32 {4}, config v{5} ({6})"
+                ).format(
                     info["application_version"],
                     info["protocol_version"],
                     info["flash_size_kb"],
@@ -1382,9 +1378,7 @@ class SettingsWindow(QMainWindow):
             return True
         if len(text) <= 1:
             return True
-        if text.startswith("D") and len(text) == 2 and text[1].isdigit() and 0 <= int(text[1]) <= 7:
-            return True
-        return False
+        return text.startswith("D") and len(text) == 2 and text[1].isdigit() and 0 <= int(text[1]) <= 7
 
     def _extract_widget_texts(self, widget: QWidget) -> list[str]:
         """Извлекает текстовые метки из виджета."""
@@ -1398,14 +1392,12 @@ class SettingsWindow(QMainWindow):
                 texts.append(title)
         if hasattr(widget, "text") and callable(widget.text):
             text = widget.text().strip()
-            if text and text not in texts:
-                if not self._is_noise_text(text):
-                    texts.append(text)
+            if text and text not in texts and not self._is_noise_text(text):
+                texts.append(text)
         if hasattr(widget, "placeholderText") and callable(widget.placeholderText):
             placeholder = widget.placeholderText().strip()
-            if placeholder and placeholder not in texts:
-                if not self._is_noise_text(placeholder):
-                    texts.append(placeholder)
+            if placeholder and placeholder not in texts and not self._is_noise_text(placeholder):
+                texts.append(placeholder)
         if hasattr(widget, "toolTip") and callable(widget.toolTip):
             tooltip = widget.toolTip().strip()
             if tooltip and tooltip not in texts:

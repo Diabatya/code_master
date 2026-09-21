@@ -252,7 +252,10 @@ class LogicTab(QWidget):
     def _create_block_widget(self, title: str) -> QGroupBox:
         group = QGroupBox(title)
         group.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        group.setStyleSheet("QGroupBox { border: 1px solid #444444; border-radius: 6px; margin-top: 8px; padding-top: 8px; }")
+        group.setStyleSheet(
+            "QGroupBox { border: 1px solid #444444; border-radius: 6px; "
+            "margin-top: 8px; padding-top: 8px; }"
+        )
         layout = QVBoxLayout(group)
         layout.setSpacing(6)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -296,7 +299,8 @@ class LogicTab(QWidget):
             group._rows_widget.setStyleSheet("")
         else:
             group._rows_widget.setStyleSheet(
-                "QWidget { color: #555555; } QLineEdit, QComboBox, QSpinBox { color: #555555; background-color: #2B2B3C; }"
+                "QWidget { color: #555555; } "
+                "QLineEdit, QComboBox, QSpinBox { color: #555555; background-color: #2B2B3C; }"
             )
 
     def _build_layout(self) -> None:
@@ -349,7 +353,11 @@ class LogicTab(QWidget):
     def _collect_group(self, group: QGroupBox) -> dict[str, Any]:
         return {
             "enabled": group._enable_check.isChecked(),
-            "rows": [group._rows_layout.itemAt(i).widget().get_config() for i in range(group._rows_layout.count() - 1) if group._rows_layout.itemAt(i).widget() is not None],
+            "rows": [
+                group._rows_layout.itemAt(i).widget().get_config()
+                for i in range(group._rows_layout.count() - 1)
+                if group._rows_layout.itemAt(i).widget() is not None
+            ],
         }
 
     def _apply_group(self, group: QGroupBox, data: dict[str, Any]) -> None:

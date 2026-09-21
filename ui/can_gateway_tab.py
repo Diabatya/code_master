@@ -345,7 +345,10 @@ class CanGatewayTab(QWidget):
         self._internal_rules = self._build_internal_rules()
         self._ignore_set = self._build_ignore_set()
         self._running = True
-        logger.info("CAN-шлюз запущен: %d правил, игнорирование %s", len(self._internal_rules), "включено" if self._ignore_set else "выключено")
+        logger.info(
+            "CAN-шлюз запущен: %d правил, игнорирование %s",
+            len(self._internal_rules), "включено" if self._ignore_set else "выключено",
+        )
         QMessageBox.information(self, tr("CAN-шлюз"), tr("Шлюз запущен"))
 
     def _stop(self) -> None:
@@ -409,7 +412,10 @@ class CanGatewayTab(QWidget):
         if not path:
             return
         try:
-            Path(path).write_text(json.dumps(self._config.get("gateway_rules", []), ensure_ascii=False, indent=2), encoding="utf-8")
+            Path(path).write_text(
+                json.dumps(self._config.get("gateway_rules", []), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             logger.info("Правила шлюза сохранены в %s", path)
         except Exception as exc:  # noqa: BLE001
             logger.error("Ошибка сохранения правил шлюза: %s", exc)

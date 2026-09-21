@@ -1,5 +1,6 @@
 """Вкладка «Мониторинг CAN» с двумя каналами."""
 
+import contextlib
 import csv
 import time
 from collections import deque
@@ -1023,9 +1024,8 @@ class CanChannelMonitor(QWidget):
         data = self._data_from_send_edits(dlc)
         rtr = self._rtr_button.isChecked() if self._rtr_button is not None else False
         self._cyclic_frame = pack_can_frame(self._channel_byte, can_id, data, rtr=rtr, dlc=dlc)
-        if self._send_cyclic_frame():
-            if self._cyclic_button.isChecked():
-                self._start_cyclic_timer()
+        if self._send_cyclic_frame() and self._cyclic_button.isChecked():
+            self._start_cyclic_timer()
 
     def _data_from_send_edits(self, dlc: int) -> bytes:
         values = [edit.text() for edit in self._send_data_edits[:dlc]]
@@ -1077,7 +1077,9 @@ class CanChannelMonitor(QWidget):
                     device = self._serial_manager.read_can_stats(self._channel)
                     usb = self._serial_manager.read_usb_stats()
                 ready = tr("OK") if device.get("ready") else tr("INIT FAIL")
-                text += tr(" | Ready: {0} | RX: {1} TX: {2} Потеряно: {3} Errors: {4} Bus-off: {5} Recovery: {6}").format(
+                text += tr(
+                    " | Ready: {0} | RX: {1} TX: {2} Потеряно: {3} Errors: {4} Bus-off: {5} Recovery: {6}"
+                ).format(
                     ready,
                     device["rx_count"],
                     device["tx_count"],
@@ -1230,7 +1232,10 @@ class CanChannelMonitor(QWidget):
         self._last_packet_time = time.time()
 
         now = time.time()
-        stats = self._id_stats.setdefault(frame_id, {"count": 0, "last_time": None, "last_data": b"", "last_receive_time": None})
+        stats = self._id_stats.setdefault(
+            frame_id,
+            {"count": 0, "last_time": None, "last_data": b"", "last_receive_time": None},
+        )
         stats["count"] += 1
         period = self._format_period(frame_id, now)
         prev_data = stats.get("last_data")
@@ -1323,14 +1328,10 @@ class CanChannelMonitor(QWidget):
         allow_rules = [r for r in self._filter_rules if r.get("mode") == "show"]
         hide_rules = [r for r in self._filter_rules if r.get("mode") != "show"]
 
-        if allow_rules:
-            if not self._rule_matches(allow_rules, frame_id, data):
-                return True
-
-        if self._rule_matches(hide_rules, frame_id, data):
+        if allow_rules and not self._rule_matches(allow_rules, frame_id, data):
             return True
 
-        return False
+        return bool(self._rule_matches(hide_rules, frame_id, data))
 
     def _rule_matches(self, rules: list[dict[str, Any]], frame_id: int, data: bytes) -> bool:
         for rule in rules:
@@ -1473,7 +1474,10 @@ class CanChannelMonitor(QWidget):
             QApplication.clipboard().setText(item.text())
 
     def _copy_selected_row(self, row: int) -> None:
-        values = [self._table.item(row, col).text() if self._table.item(row, col) is not None else "" for col in range(self._table.columnCount())]
+        values = [
+            self._table.item(row, col).text() if self._table.item(row, col) is not None else ""
+            for col in range(self._table.columnCount())
+        ]
         QApplication.clipboard().setText("  ".join(values))
 
     def _create_trigger_from_row(self, row: int) -> None:
@@ -1840,10 +1844,8 @@ class CanMonitorTab(QWidget):
                 data = bytes(int(part, 16) for part in text.split())
             except ValueError:
                 return
-        try:
+        with contextlib.suppress(Exception):
             self._serial_manager.send_data(pack_can_frame(row["channel"].currentIndex() + 1, can_id, data[:8]))
-        except Exception:  # noqa: BLE001
-            pass
 
     def _layout_widgets(self) -> None:
         layout = QVBoxLayout(self)
@@ -2059,12 +2061,14 @@ class CanMonitorTab(QWidget):
         """Цветовая индикация включённого терминатора 120 Ом — зелёная кнопка."""
         if button.isChecked():
             button.setStyleSheet(
-                "QPushButton { background-color: #4CAF50; color: #FFFFFF; border: none; border-radius: 4px; padding: 4px 10px; }"
+                "QPushButton { background-color: #4CAF50; color: #FFFFFF; border: none; "
+                "border-radius: 4px; padding: 4px 10px; }"
                 "QPushButton:hover { background-color: #45A049; }"
             )
         else:
             button.setStyleSheet(
-                "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 4px 10px; }"
+                "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
+                "border-radius: 4px; padding: 4px 10px; }"
                 "QPushButton:hover { background-color: #4A4A6A; }"
             )
 
@@ -2163,7 +2167,9 @@ class CanMonitorTab(QWidget):
     def _start_recording(self, path: str) -> None:
         try:
             self._csv_path = Path(path)
-            self._csv_file = open(self._csv_path, "w", newline="", encoding="utf-8")
+            # SIM115 осознанно: файл живёт в self._csv_file до
+            # _stop_recording — context manager закрыл бы его на выходе.
+            self._csv_file = self._csv_path.open("w", newline="", encoding="utf-8")  # noqa: SIM115
             self._csv_writer = csv.writer(self._csv_file)
             self._csv_writer.writerow(["timestamp", "channel", "dir", "id", "dlc", "data"])
             self._recording = True
@@ -2193,4 +2199,6 @@ class CanMonitorTab(QWidget):
         # самим МК (tx_echo — ответ триггера/программы МК или ретрансляция
         # кадра ПК). В трейсе видно, что устройство передало само.
         direction = "TX" if frame.get("tx_echo") else "RX"
-        self._csv_writer.writerow([timestamp, frame["channel"], direction, int_to_hex(frame_id, 8), len(data), bytes_to_hex_string(data)])
+        self._csv_writer.writerow(
+            [timestamp, frame["channel"], direction, int_to_hex(frame_id, 8), len(data), bytes_to_hex_string(data)]
+        )

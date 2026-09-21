@@ -357,7 +357,10 @@ class CanTriggerTab(QWidget):
         rows_layout.setSpacing(4)
         group_layout.addLayout(rows_layout)
 
-        block = {"group": group, "header_label": header_label, "rows_layout": rows_layout, "add_button": add_button, "rows": []}
+        block = {
+            "group": group, "header_label": header_label,
+            "rows_layout": rows_layout, "add_button": add_button, "rows": [],
+        }
         add_button.clicked.connect(lambda: self._add_response_row(block, font))
         self._add_response_row(block, font)
         return block
@@ -1231,7 +1234,8 @@ class CanTriggerTab(QWidget):
         self._add_trigger_button = QPushButton(tr("Добавить триггер"))
         self._add_trigger_button.setFont(QFont("Segoe UI", 9))
         self._add_trigger_button.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 6px 14px; }"
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
+            "border-radius: 4px; padding: 6px 14px; }"
             "QPushButton:hover { background-color: #4A4A6A; }"
             "QPushButton:disabled { color: #777777; }"
         )
@@ -1240,7 +1244,8 @@ class CanTriggerTab(QWidget):
         self._sim_button = QPushButton(tr("Симуляция…"))
         self._sim_button.setFont(QFont("Segoe UI", 9))
         self._sim_button.setStyleSheet(
-            "QPushButton { background-color: #2A4A3A; color: #FFFFFF; border: none; border-radius: 4px; padding: 6px 14px; }"
+            "QPushButton { background-color: #2A4A3A; color: #FFFFFF; border: none; "
+            "border-radius: 4px; padding: 6px 14px; }"
             "QPushButton:hover { background-color: #3A6A4A; }"
         )
         self._sim_button.setToolTip(
@@ -1251,7 +1256,8 @@ class CanTriggerTab(QWidget):
         self._template_button = QPushButton(tr("Шаблон ▾"))
         self._template_button.setFont(QFont("Segoe UI", 9))
         self._template_button.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 6px 14px; }"
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
+            "border-radius: 4px; padding: 6px 14px; }"
             "QPushButton:hover { background-color: #4A4A6A; }"
         )
         template_menu = QMenu(self._template_button)
@@ -1543,7 +1549,7 @@ class CanTriggerTab(QWidget):
         recv["id"].setText(int_to_hex(values["rx_id"], 8 if values["rx_extended"] else 3))
         recv["dlc"].setValue(max(1, min(8, values["rx_dlc"] or 8)))
         rx_data_mask = bytes(values.get("rx_data_mask", b"\xff" * 8))
-        for i, (edit, value) in enumerate(zip(recv["data"], values["rx_data"])):
+        for i, (edit, value) in enumerate(zip(recv["data"], values["rx_data"], strict=True)):
             # Байт с нулевой маской — wildcard: показываем «X», а не «00».
             edit.setText("X" if i < len(rx_data_mask) and rx_data_mask[i] == 0 else f"{value:02X}")
         recv["rtr"].setChecked(values.get("rx_rtr", 0) == 1)
@@ -1660,7 +1666,10 @@ class CanTriggerTab(QWidget):
                 responses[row_index]["delay_before_send"] = max(0, gap - 9999)
             self._set_response_rows(block["response"], responses)
         cache["cache_check"].setChecked(cache_enabled)
-        self._on_cache_active_changed(index, Qt.CheckState.Checked.value if cache_enabled else Qt.CheckState.Unchecked.value)
+        self._on_cache_active_changed(
+            index,
+            Qt.CheckState.Checked.value if cache_enabled else Qt.CheckState.Unchecked.value,
+        )
 
     @staticmethod
     def _config_trigger_expandable(trigger: dict[str, Any]) -> bool:
@@ -2093,7 +2102,7 @@ class CanTriggerTab(QWidget):
         проецируются тем же развёртыванием, что и при записи, поэтому
         многофреймовый триггер сравнивается со своей группой записей."""
         local: list[bytes] = []
-        for index, block in enumerate(self._blocks):
+        for index, _block in enumerate(self._blocks):
             try:
                 projected = self._project_block_records(index)
                 if projected is None:
@@ -2264,7 +2273,7 @@ class CanTriggerTab(QWidget):
         for block_index, payload in target[:15]:
             record = unpack_trigger(payload)
             target_desc.append(
-                "0x{0:X}→0x{1:X}{2}{3}".format(
+                "0x{:X}→0x{:X}{}{}".format(
                     record.get("rx_id", 0),
                     record.get("tx_id", 0),
                     "" if record.get("enabled") else " (выкл)",
@@ -2520,7 +2529,7 @@ class CanTriggerTab(QWidget):
         data_from, wild_from = self._parse_data_triple(row["from_data"])
         data_to, wild_to = self._parse_data_triple(row["to_data"])
         # «X» хотя бы в одном из полей пары — байт игнорируется целиком.
-        wild = [a or b for a, b in zip(wild_from, wild_to)]
+        wild = [a or b for a, b in zip(wild_from, wild_to, strict=True)]
         return {
             "id": self._parse_id(row["id"].text()),
             "channel": row["channel"].currentIndex(),
@@ -2836,9 +2845,10 @@ class CanTriggerTab(QWidget):
                         continue
                     pingpong_seen.add(pair)
                     warnings.append(
-                        tr("Пинг-понг: триггер {0} отвечает в приём триггера {1} и наоборот — сработает ограничение эха").format(
-                            rx_i, other
-                        )
+                        tr(
+                            "Пинг-понг: триггер {0} отвечает в приём триггера {1} "
+                            "и наоборот — сработает ограничение эха"
+                        ).format(rx_i, other)
                     )
         return errors, warnings
 
@@ -2902,7 +2912,10 @@ class CanTriggerTab(QWidget):
             block["group"].setChecked(bool(trigger.get("active", True)))
             cache_active = bool(trigger.get("cache", False))
             block["cache"]["cache_check"].setChecked(cache_active)
-            self._on_cache_active_changed(index, Qt.CheckState.Checked.value if cache_active else Qt.CheckState.Unchecked.value)
+            self._on_cache_active_changed(
+                index,
+                Qt.CheckState.Checked.value if cache_active else Qt.CheckState.Unchecked.value,
+            )
 
             self._set_row(block["recv"], trigger, "recv")
             recv = block["recv"]
@@ -3279,9 +3292,8 @@ class CanTriggerTab(QWidget):
 
     def create_trigger_from_packet(self, packet: dict[str, object]) -> None:
         """Создаёт первый триггер из пакета мониторинга."""
-        if not self._blocks:
-            if self._add_trigger_block() is None:
-                return
+        if not self._blocks and self._add_trigger_block() is None:
+            return
         block = self._blocks[0]
         block["group"].setChecked(True)
         can_id = int(packet["id"])

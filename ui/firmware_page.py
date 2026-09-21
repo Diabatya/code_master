@@ -1,5 +1,6 @@
 """Страница «Прошивка» с тремя столбцами: ПО блока, Автомобиль, Конфигурация."""
 
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -109,15 +110,13 @@ class BootloaderWorker(QThread):
         except Exception:  # noqa: S110
             pass
         if self._was_open and self._port_name:
-            try:
-                # auto_reconnect обязателен: open_port по умолчанию сбрасывает
-                # флаг, и после прошивки устройство при обрыве больше не
-                # переподключалось («не произошло переподключения»).
+            # auto_reconnect обязателен: open_port по умолчанию сбрасывает
+            # флаг, и после прошивки устройство при обрыве больше не
+            # переподключалось («не произошло переподключения»).
+            with contextlib.suppress(Exception):
                 self._serial_manager.open_port(
                     self._port_name, self._baudrate, auto_reconnect=True
                 )
-            except Exception:  # noqa: S110
-                pass
 
     def run(self) -> None:
         try:

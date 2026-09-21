@@ -98,10 +98,7 @@ def _copy_packet(
         id_text = "0x" + id_text
 
     if dlc_spin is not None:
-        if hasattr(dlc_spin, "value"):
-            dlc = int(dlc_spin.value())
-        else:
-            dlc = int(dlc_spin.text())
+        dlc = int(dlc_spin.value()) if hasattr(dlc_spin, "value") else int(dlc_spin.text())
     elif data_edits:
         dlc = len(data_edits)
     else:

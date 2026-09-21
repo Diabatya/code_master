@@ -90,6 +90,7 @@ from models.config import Config
 from ui.com_settings_dialog import ComSettingsDialog
 from models.logger import get_logger
 from models.translations import _ as tr
+import contextlib
 
 logger = get_logger(__name__)
 
@@ -137,7 +138,10 @@ def _format_chip_id(value: int | None) -> str:
 class HexHighlighter(QSyntaxHighlighter):
     """Подсветка изменённых и занятых (не 0xFF) байт в HEX и ASCII представлениях."""
 
-    def __init__(self, document: Any, changed_offsets: set[int], occupied_offsets: set[int], bytes_per_line: int, ascii_mode: bool = False):
+    def __init__(
+        self, document: Any, changed_offsets: set[int], occupied_offsets: set[int],
+        bytes_per_line: int, ascii_mode: bool = False,
+    ):
         super().__init__(document)
         self._changed_offsets = changed_offsets
         self._occupied_offsets = occupied_offsets
@@ -232,12 +236,18 @@ class HexEditorDialog(QDialog):
         self._hex_edit = QPlainTextEdit(self)
         self._hex_edit.setFont(font)
         self._hex_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        HexHighlighter(self._hex_edit.document(), self._changed_offsets, self._occupied_offsets, self.BYTES_PER_LINE, ascii_mode=False)
+        HexHighlighter(
+            self._hex_edit.document(), self._changed_offsets,
+            self._occupied_offsets, self.BYTES_PER_LINE, ascii_mode=False,
+        )
 
         self._ascii_edit = QPlainTextEdit(self)
         self._ascii_edit.setFont(font)
         self._ascii_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        HexHighlighter(self._ascii_edit.document(), self._changed_offsets, self._occupied_offsets, self.BYTES_PER_LINE, ascii_mode=True)
+        HexHighlighter(
+            self._ascii_edit.document(), self._changed_offsets,
+            self._occupied_offsets, self.BYTES_PER_LINE, ascii_mode=True,
+        )
 
         for edit in (self._kb_edit, self._offset_edit, self._hex_edit, self._ascii_edit):
             sb = edit.verticalScrollBar()
@@ -569,10 +579,8 @@ class ConnectWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             return False, {"error": str(exc)}
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 bl.port.close()
-            except Exception:  # noqa: S110
-                pass
 
     def _try_usb_cdc(self) -> tuple[bool, dict[str, Any]]:
         port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_BOOTLOADER_PID)
@@ -597,10 +605,8 @@ class ConnectWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             return False, {"error": str(exc)}
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 bl.port.close()
-            except Exception:  # noqa: S110
-                pass
 
     def try_method(self, method: str) -> tuple[bool, dict[str, Any]]:
         """Публичная обёртка над `_try_method()` для повторного использования
@@ -884,18 +890,14 @@ class FlashWorker(QThread):
                     logger.warning("GO после UART-прошивки не удался: %s", exc)
                 return True, tr("UART прошивка завершена: {0}").format(file_path)
             finally:
-                try:
+                with contextlib.suppress(OSError):
                     Path(bin_path).unlink(missing_ok=True)
-                except OSError:
-                    pass
         except Exception as exc:  # noqa: BLE001
             logger.exception("UART прошивка ошибка: %s", file_path)
             return False, str(exc)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 bl.port.close()
-            except Exception:  # noqa: S110
-                pass
 
     def _flash_usb_cdc(self, file_path: str) -> tuple[bool, str]:
         port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_BOOTLOADER_PID)
@@ -948,18 +950,14 @@ class FlashWorker(QThread):
                     logger.warning("GO после USB CDC-прошивки не удался: %s", exc)
                 return True, tr("USB CDC прошивка завершена: {0}").format(file_path)
             finally:
-                try:
+                with contextlib.suppress(OSError):
                     Path(bin_path).unlink(missing_ok=True)
-                except OSError:
-                    pass
         except Exception as exc:  # noqa: BLE001
             logger.exception("USB CDC прошивка ошибка: %s", file_path)
             return False, str(exc)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 bl.port.close()
-            except Exception:  # noqa: S110
-                pass
 
     def _flash_usb(self, file_path: str) -> tuple[bool, str]:
         if not _PYUSB:
@@ -1370,10 +1368,8 @@ class ReadWorker(QThread):
             data = bl.read_memory(start, self._size)
             return data, start
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 bl.port.close()
-            except Exception:  # noqa: S110
-                pass
 
     def _read_usb_cdc(self) -> tuple[bytes, int]:
         port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_BOOTLOADER_PID)
@@ -1390,10 +1386,8 @@ class ReadWorker(QThread):
             data = bl.read_memory(start, self._size)
             return data, start
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 bl.port.close()
-            except Exception:  # noqa: S110
-                pass
 
     def _read_usb(self) -> tuple[bytes, int]:
         if not _PYUSB:
@@ -1401,8 +1395,10 @@ class ReadWorker(QThread):
         from core.dfu import DfuDevice, find_dfu_device
         try:
             dev = find_dfu_device()
-        except usb.core.NoBackendError:
-            raise RuntimeError(tr("USB backend не найден. Установите libusb-package или WinUSB-драйвер через Zadig."))
+        except usb.core.NoBackendError as exc:
+            raise RuntimeError(
+                tr("USB backend не найден. Установите libusb-package или WinUSB-драйвер через Zadig.")
+            ) from exc
         with DfuDevice(dev) as dfu:
             start = self._start
             data = dfu.upload(start, self._size)
@@ -1468,10 +1464,8 @@ class EraseWorker(QThread):
             bl.sync()
             bl.erase(extended=True)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 bl.port.close()
-            except Exception:  # noqa: S110
-                pass
 
     def _erase_usb_cdc(self) -> None:
         port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_BOOTLOADER_PID)
@@ -1486,10 +1480,8 @@ class EraseWorker(QThread):
             bl.sync()
             bl.erase(extended=True)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 bl.port.close()
-            except Exception:  # noqa: S110
-                pass
 
     def _erase_usb(self) -> None:
         if not _PYUSB:
@@ -1611,7 +1603,9 @@ class FlashDialog(QDialog):
         self._read_size_label = QLabel(tr("Размер памяти (КБ)"))
         self._read_size_edit = QComboBox()
         self._read_size_edit.setEditable(True)
-        self._read_size_edit.addItems(["16", "32", "64", "128", "256", "512", "1024", "2048", "4096", "8192", "16384", "32768"])
+        self._read_size_edit.addItems(
+            ["16", "32", "64", "128", "256", "512", "1024", "2048", "4096", "8192", "16384", "32768"]
+        )
         self._read_size_edit.setCurrentText("256")
         self._read_size_edit.setMaximumWidth(90)
 
@@ -2373,7 +2367,9 @@ class FlashDialog(QDialog):
                     QMessageBox.warning(self, tr("Внимание"), message)
                     return
                 name, serial = legacy
-                message = tr("Найдена старая конфигурация: {0} / {1}. Запишите её заново для миграции.").format(name, serial)
+                message = tr(
+                    "Найдена старая конфигурация: {0} / {1}. Запишите её заново для миграции."
+                ).format(name, serial)
                 self._log(message)
                 QMessageBox.warning(self, tr("Внимание"), message)
             else:

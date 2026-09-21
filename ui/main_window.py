@@ -1,5 +1,6 @@
 """Главное окно приложения «Код Мастер»."""
 
+import contextlib
 import subprocess
 import sys
 import traceback
@@ -410,10 +411,8 @@ class MainWindow(QMainWindow):
             # shutdown() не должен помешать очистке ссылки — иначе
             # исключение оставляло self._connection_dialog указывающим
             # на мёртвый диалог и следующее «Настроить» падало.
-            try:
+            with contextlib.suppress(Exception):
                 connection.shutdown()
-            except Exception:  # noqa: BLE001
-                pass
             self._on_connection_finished()
 
         dialog.finished.connect(_finish)
@@ -625,7 +624,11 @@ def show_exception_box(exc_type, exc_value, exc_tb) -> None:
     logger.critical("Необработанное исключение: %s", message)
     try:
         if QApplication.instance() is not None:
-            QMessageBox.critical(None, tr("Критическая ошибка"), tr("Произошла непредвиденная ошибка:\n{0}").format(exc_value))
+            QMessageBox.critical(
+                None,
+                tr("Критическая ошибка"),
+                tr("Произошла непредвиденная ошибка:\n{0}").format(exc_value),
+            )
     except Exception:  # noqa: BLE001
         pass
     print(message, file=sys.stderr)

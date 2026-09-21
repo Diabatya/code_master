@@ -434,7 +434,10 @@ class FlexibleLogicTab(QWidget):
             # Проверка данных по маске
             match = True
             for i in range(8):
-                if rule["mask"][i] and (frame_data[i] & rule["mask"][i]) != (rule["condition_data"][i] & rule["mask"][i]):
+                if (
+                    rule["mask"][i]
+                    and (frame_data[i] & rule["mask"][i]) != (rule["condition_data"][i] & rule["mask"][i])
+                ):
                     match = False
                     break
             if not match:

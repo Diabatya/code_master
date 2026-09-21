@@ -119,9 +119,10 @@ class CanAnalyzer(QWidget):
     def _build_table(self, font: QFont) -> QTableWidget:
         table = QTableWidget()
         table.setColumnCount(8)
-        table.setHorizontalHeaderLabels(
-            [tr("Время"), tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("ASCII"), tr("Пояснение"), tr("Направление")]
-        )
+        table.setHorizontalHeaderLabels([
+            tr("Время"), tr("ID"), tr("DLC"), tr("DATA"), tr("Период"),
+            tr("ASCII"), tr("Пояснение"), tr("Направление"),
+        ])
         table.setFont(font)
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -437,7 +438,10 @@ class CanAnalyzer(QWidget):
                 writer.writerow(["channel", "time", "id", "dlc", "data", "period", "ascii", "explanation", "dir"])
                 for table, channel in ((self._table1, 1), (self._table2, 2)):
                     for row in range(table.rowCount()):
-                        writer.writerow([channel] + [table.item(row, col).text() if table.item(row, col) else "" for col in range(8)])
+                        writer.writerow(
+                            [channel]
+                            + [table.item(row, col).text() if table.item(row, col) else "" for col in range(8)]
+                        )
         except Exception as exc:  # noqa: BLE001
             logger.error("Ошибка экспорта CSV: %s", exc)
 
@@ -451,7 +455,10 @@ class CanAnalyzer(QWidget):
                     f.write(f"[CAN{channel}]\n")
                     for row in range(table.rowCount()):
                         values = [table.item(row, col).text() if table.item(row, col) else "" for col in range(8)]
-                        f.write(f"{values[0]} ID={values[1]} DLC={values[2]} DATA={values[3]} PERIOD={values[4]} ASCII={values[5]} EXPL={values[6]} DIR={values[7]}\n")
+                        f.write(
+                            f"{values[0]} ID={values[1]} DLC={values[2]} DATA={values[3]} "
+                            f"PERIOD={values[4]} ASCII={values[5]} EXPL={values[6]} DIR={values[7]}\n"
+                        )
         except Exception as exc:  # noqa: BLE001
             logger.error("Ошибка экспорта .trace: %s", exc)
 
@@ -466,10 +473,7 @@ class CanAnalyzer(QWidget):
             return
         loaded = 0
         try:
-            if path.lower().endswith(".csv"):
-                loaded = self._load_csv(path)
-            else:
-                loaded = self._load_trace(path)
+            loaded = self._load_csv(path) if path.lower().endswith(".csv") else self._load_trace(path)
         except Exception as exc:  # noqa: BLE001
             logger.error("Ошибка загрузки лога %s: %s", path, exc)
             return
