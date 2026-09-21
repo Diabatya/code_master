@@ -2519,6 +2519,20 @@ class FlashDialog(QDialog):
             self._log_file = None
 
     def closeEvent(self, event) -> None:
+        if self._flash_worker and self._flash_worker.isRunning():
+            # Закрытие окна посреди записи прерывает поток terminate() —
+            # спрашиваем явно, чтобы случайный Esc/крестик не оборвал
+            # прошивку на половине.
+            answer = QMessageBox.question(
+                self,
+                tr("Прошивка не завершена"),
+                tr("Прошивка ещё не завершена. Закрыть окно и прервать процесс?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
         if self._connect_worker and self._connect_worker.isRunning():
             self._connect_worker.terminate()
             self._connect_worker.wait(1000)
