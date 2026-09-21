@@ -18,8 +18,21 @@ def _parse_intel_hex(text: str) -> Tuple[bytes, int]:
             addr = int(line[3:7], 16)
             rtype = int(line[7:9], 16)
             payload = bytes.fromhex(line[9 : 9 + count * 2])
+            checksum = int(line[9 + count * 2 : 9 + count * 2 + 2], 16)
         except ValueError:
             continue
+        # Контрольная сумма Intel HEX: дополнение до двух суммы
+        # count+addr_hi+addr_lo+rtype+данные (см. _save_intel_hex ниже,
+        # где она считается так же при записи). Раньше строка с битым
+        # checksum молча пропускалась через continue при ValueError, но
+        # НЕ проверялась вовсе, если хекс-цифры валидны, а сама сумма
+        # повреждена — испорченный байт прошивки тихо принимался.
+        computed = (-(count + (addr >> 8) + (addr & 0xFF) + rtype + sum(payload))) & 0xFF
+        if computed != checksum:
+            raise ValueError(
+                f"Неверная контрольная сумма строки Intel HEX: {line!r} "
+                f"(ожидалось 0x{computed:02X}, получено 0x{checksum:02X})"
+            )
         if rtype == 0x00:
             for i, b in enumerate(payload):
                 records[base + addr + i] = b
