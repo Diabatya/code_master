@@ -1,6 +1,9 @@
 """Управление настройками приложения «Код Мастер».
 
-Настройки хранятся в формате JSON в файле config.json рядом с приложением.
+Настройки хранятся в формате JSON в файле config.json в пользовательской
+папке данных (platformdirs.user_data_dir("CodeMaster"): ~/Library/
+Application Support/CodeMaster на macOS, %LOCALAPPDATA%\\CodeMaster на
+Windows, ~/.local/share/CodeMaster на Linux) — не рядом с приложением.
 Класс Config реализован как синглтон, чтобы все части программы работали
 с одним и тем же набором параметров.
 """
