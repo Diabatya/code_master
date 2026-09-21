@@ -471,13 +471,20 @@ class DfuDevice:
             block_num = 2 + offset // block_size
             logger.debug("DFU upload fast: offset %d, блок %d, запрошено %d байт", offset, block_num, chunk_len)
             chunk = bytes(self._ctrl(DFU_REQUEST_RECEIVE, DFU_UPLOAD, block_num, chunk_len, timeout=10000))
-            if not chunk:
-                break
             result.extend(chunk)
             offset += len(chunk)
             if progress:
                 progress(offset, total)
             if len(chunk) < chunk_len:
+                if offset < total:
+                    # Устройство вернуло меньше запрошенного в середине
+                    # диапазона — молчаливый break отдавал усечённый
+                    # образ за полный (и readback-верификация прошивки
+                    # могла «пройти» по неполным данным).
+                    raise RuntimeError(
+                        f"DFU upload fast: получено {len(chunk)} из {chunk_len} "
+                        f"запрошенных байт (прочитано {offset} из {total})"
+                    )
                 break
         if progress:
             progress(offset, total)
@@ -503,13 +510,19 @@ class DfuDevice:
             self.abort()
             logger.debug("DFU upload slow: адрес 0x%08X, запрошено %d байт", address + offset, chunk_len)
             chunk = bytes(self._ctrl(DFU_REQUEST_RECEIVE, DFU_UPLOAD, 2, chunk_len, timeout=10000))
-            if not chunk:
-                break
             result.extend(chunk)
             offset += len(chunk)
             if progress:
                 progress(offset, total)
             if len(chunk) < chunk_len:
+                if offset < total:
+                    # Та же защита, что в _upload_fast: короткий/пустой
+                    # чанк в середине диапазона — это ошибка чтения, а не
+                    # конец данных.
+                    raise RuntimeError(
+                        f"DFU upload slow: получено {len(chunk)} из {chunk_len} "
+                        f"запрошенных байт (прочитано {offset} из {total})"
+                    )
                 break
         if progress:
             progress(offset, total)
