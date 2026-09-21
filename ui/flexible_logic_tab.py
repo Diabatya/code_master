@@ -417,6 +417,11 @@ class FlexibleLogicTab(QWidget):
         """Проверяет входящий кадр на совпадение с активными правилами."""
         if not self._active:
             return
+        if frame.get("tx_echo"):
+            # Эхо собственной передачи МК — не внешний кадр; без этого
+            # фильтра ответ правила, совпадающий с условием, мог
+            # перезапускать то же правило бесконечно.
+            return
         if not getattr(self, "_internal_rules", []):
             return
 

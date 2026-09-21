@@ -356,6 +356,12 @@ class CanGatewayTab(QWidget):
     def process_frame(self, frame: Dict[str, Any]) -> None:
         if not self._running:
             return
+        if frame.get("tx_echo"):
+            # Эхо собственной передачи МК (bxCAN себя не слышит, прошивка
+            # возвращает свои TX в RX-поток). Это не внешний кадр — если
+            # применить к нему правила шлюза, кадр может зациклиться
+            # между каналами или подменяться повторно.
+            return
         frame_id = int(frame["id"])
         frame_channel = int(frame["channel"])
         data = bytes(frame["data"])
