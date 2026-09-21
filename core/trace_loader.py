@@ -62,10 +62,7 @@ def _frame(time_ms, channel, can_id, dlc, data, tx) -> dict[str, Any]:
 
 def parse_trace_frames(path: str) -> list[dict[str, Any]]:
     """Читает .trace/.csv в кадры с относительными time_ms."""
-    if path.lower().endswith(".csv"):
-        frames = _parse_csv(path)
-    else:
-        frames = _parse_trace(path)
+    frames = _parse_csv(path) if path.lower().endswith(".csv") else _parse_trace(path)
     frames = [f for f in frames if f["id"] is not None]
     if frames:
         t0 = float(frames[0]["time_ms"])

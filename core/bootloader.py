@@ -5,6 +5,7 @@
 из фонового потока, чтобы не блокировать интерфейс.
 """
 
+import contextlib
 import time
 from typing import Any
 from collections.abc import Callable
@@ -268,10 +269,8 @@ class Bootloader:
             for p in comports():
                 if p.vid == self.USB_VID and p.pid == self.USB_BOOTLOADER_PID:
                     logger.info("Bootloader-порт найден: %s", p.device)
-                    try:
+                    with contextlib.suppress(Exception):
                         self.port.close()
-                    except Exception:  # noqa: S110
-                        pass
                     self.port.port = p.device
                     try:
                         self._open_port_with_retry()

@@ -79,9 +79,7 @@ class TriggerSimulator:
         if (int(t.get("rx_id", 0)) & mask) != (int(frame["id"]) & mask):
             return False
         dlc = int(frame.get("dlc", len(frame.get("data", b""))))
-        if t.get("rx_dlc", 0) and int(t["rx_dlc"]) != dlc:
-            return False
-        return True
+        return not t.get("rx_dlc", 0) or int(t["rx_dlc"]) == dlc
 
     @staticmethod
     def _rx_data_matches(t: dict[str, Any], frame: dict[str, Any]) -> bool:

@@ -8,6 +8,7 @@ Windows, ~/.local/share/CodeMaster на Linux) — не рядом с прило
 с одним и тем же набором параметров.
 """
 
+import contextlib
 import json
 import os
 import struct
@@ -222,10 +223,8 @@ class Config:
             os.replace(tmp_path, self._file_path)
         except OSError as exc:
             logger.error("Ошибка сохранения конфигурации: %s", exc)
-            try:
+            with contextlib.suppress(OSError):
                 tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     _BACKUP_KEEP = 10
 
@@ -264,10 +263,8 @@ class Config:
                 key=lambda p: p.name,
             )
             for old in snapshots[: max(0, len(snapshots) - self._BACKUP_KEEP)]:
-                try:
+                with contextlib.suppress(OSError):
                     old.unlink()
-                except OSError:
-                    pass
             return path
         except OSError as exc:
             logger.warning("Не удалось создать снапшот конфигурации: %s", exc)

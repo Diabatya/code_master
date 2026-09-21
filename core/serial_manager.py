@@ -4,10 +4,9 @@ SerialManager инкапсулирует работу с pyserial.Serial (или
 запускает поток чтения, парсит CAN-кадры и испускает сигналы для UI.
 """
 
+import contextlib
 import threading
 import time
-from typing import Union
-
 from PySide6.QtCore import QObject, QThread, Signal, QTimer
 
 from core.can_protocol import (
@@ -82,7 +81,7 @@ class _PortWriteTimeout(TimeoutError):
     """
 
 
-SerialPort = Union[serial.Serial, FakeSerial]
+SerialPort = serial.Serial | FakeSerial
 
 # Предохранитель от бесконечного роста буфера при потоке мусора без валидных кадров
 MAX_BUFFER_SIZE = 65536
@@ -410,7 +409,10 @@ class SerialManager(QObject):
         в этом случае деструктивные команды слать в легаси-формате. """
         return self._device_protocol_version
 
-    def open_port(self, port_name: str, baudrate: int, emulation: bool = False, auto_reconnect: bool = False, error_probability: int = 0) -> bool:
+    def open_port(
+        self, port_name: str, baudrate: int, emulation: bool = False,
+        auto_reconnect: bool = False, error_probability: int = 0,
+    ) -> bool:
         """Открывает COM-порт (реальный или эмулированный).
 
         Args:
@@ -451,7 +453,10 @@ class SerialManager(QObject):
                         timeout=0.1,
                         write_timeout=1,
                     )
-                    logger.info("Открыт реальный порт %s на скорости %d (dtr=%s, rts=%s)", port_name, baudrate, self._port.dtr, self._port.rts)
+                    logger.info(
+                        "Открыт реальный порт %s на скорости %d (dtr=%s, rts=%s)",
+                        port_name, baudrate, self._port.dtr, self._port.rts,
+                    )
 
                 self._start_reader()
                 # Сообщаем UI, что порт открыт и началась идентификация —
@@ -487,9 +492,10 @@ class SerialManager(QObject):
                             )
                     except Exception:  # noqa: BLE001
                         logger.debug("Устройство не отдало SYSTEM_INFO")
-                self._config.set_bulk(
-                    {"port": port_name, "baudrate": baudrate, "emulation": emulation, "auto_reconnect": auto_reconnect, "error_probability": error_probability}
-                )
+                self._config.set_bulk({
+                    "port": port_name, "baudrate": baudrate, "emulation": emulation,
+                    "auto_reconnect": auto_reconnect, "error_probability": error_probability,
+                })
                 self._reconnect_attempts = 0
                 self.connection_changed.emit(True)
                 return True
@@ -511,10 +517,8 @@ class SerialManager(QObject):
             self._closing = True
             self._stop_reconnect_timer()
             if self._reader is not None:
-                try:
+                with contextlib.suppress(RuntimeError):
                     self._reader.finished.disconnect(self._on_reader_finished)
-                except RuntimeError:
-                    pass
                 self._reader.stop()
                 self._reader = None
 
@@ -662,10 +666,8 @@ class SerialManager(QObject):
             self._closing = True
             self._stop_reader()
             if self._port is not None:
-                try:
+                with contextlib.suppress(Exception):
                     self._port.close()
-                except Exception:  # noqa: BLE001
-                    pass
                 self._port = None
                 self.connection_changed.emit(False)
             self._closing = False
@@ -1058,10 +1060,8 @@ class SerialManager(QObject):
         self._closing = True
         try:
             if self._reader is not None:
-                try:
+                with contextlib.suppress(RuntimeError):
                     self._reader.finished.disconnect(self._on_reader_finished)
-                except RuntimeError:
-                    pass
                 self._reader.stop()
                 self._reader = None
         except Exception:  # noqa: S110
@@ -1203,10 +1203,16 @@ class SerialManager(QObject):
                     "total_memory": total_memory,
                 })
                 self.device_identified.emit(device_type, device_version)
-                logger.info("Устройство идентифицировано: type=0x%02X version=%d serial=%s mem=%d", device_type, device_version, device_serial or "-", total_memory)
+                logger.info(
+                    "Устройство идентифицировано: type=0x%02X version=%d serial=%s mem=%d",
+                    device_type, device_version, device_serial or "-", total_memory,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.error("Ошибка определения устройства: %s", exc)
-                self._config.set_bulk({"device_type": DEVICE_TYPE_BASIC, "device_version": 0, "device_serial": "", "total_memory": 65536})
+                self._config.set_bulk({
+                    "device_type": DEVICE_TYPE_BASIC, "device_version": 0,
+                    "device_serial": "", "total_memory": 65536,
+                })
                 self.device_identified.emit(DEVICE_TYPE_BASIC, 0)
             finally:
                 self._start_reader()
@@ -1252,10 +1258,8 @@ class SerialManager(QObject):
         """Останавливает поток чтения и ждёт его завершения."""
         with self._lock:
             if self._reader is not None:
-                try:
+                with contextlib.suppress(RuntimeError):
                     self._reader.finished.disconnect(self._on_reader_finished)
-                except RuntimeError:
-                    pass
                 self._reader.stop()
                 tail = self._reader.pending_tail()
                 if tail:
@@ -1278,10 +1282,8 @@ class SerialManager(QObject):
             # «Поток чтения запущен» дважды подряд без остановки →
             # таймауты команд, пока сирота жил).
             if self._reader is not None:
-                try:
+                with contextlib.suppress(RuntimeError):
                     self._reader.finished.disconnect(self._on_reader_finished)
-                except RuntimeError:
-                    pass
                 self._reader.stop()
                 tail = self._reader.pending_tail()
                 if tail:

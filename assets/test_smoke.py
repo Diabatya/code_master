@@ -36,7 +36,11 @@ print(f"after check fields enabled: {cache['fields_widget'].isEnabled()}", flush
 print(f"after check response enabled: {block['response']['group'].isEnabled()}", flush=True)
 
 monitor_tab = sw._monitor_tab
-print(f"cyclic font: {monitor_tab._monitor1._cyclic_button.font().family()} {monitor_tab._monitor1._cyclic_button.font().pointSize()}", flush=True)
+print(
+    f"cyclic font: {monitor_tab._monitor1._cyclic_button.font().family()} "
+    f"{monitor_tab._monitor1._cyclic_button.font().pointSize()}",
+    flush=True,
+)
 
 # auto focus data test
 edits = block["recv"]["data"]

@@ -176,10 +176,7 @@ class FakeSerial:
 
         channel = random.choice([0x01, 0x02])
         # 25% пакетов с Extended CAN-ID
-        if random.random() < 0.25:
-            can_id = random.randint(0x800, 0x1FFFFFFF)
-        else:
-            can_id = random.randint(0x000, 0x7FF)
+        can_id = random.randint(0x800, 0x1FFFFFFF) if random.random() < 0.25 else random.randint(0x000, 0x7FF)
         length = random.randint(1, 8)
         data = bytes(random.randint(0, 255) for _ in range(length))
         # В эмуляторе используем маркер приёма
@@ -308,7 +305,7 @@ class FakeSerial:
         command = data[0]
         if command == 0x00:  # Get
             self._append_response(bytes([0x79, 0x01, 0x00, 0x79]))
-        elif command == 0x11 or command == 0x21 or command == 0x31 or command == 0x43 or command == 0x44 or command == 0xFF:  # Read Memory
+        elif command in (0x11, 0x21, 0x31, 0x43, 0x44, 0xFF):  # Read Memory
             self._append_response(bytes([0x79]))
 
         return len(data)

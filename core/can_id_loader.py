@@ -250,7 +250,9 @@ class CanIdLoader:
                 if set(parts) <= {"-", ":"}:
                     continue
                 if headers:
-                    row = dict(zip(headers, parts))
+                    # strict=False осознанно: строки файла могут быть
+                    # короче заголовка — недостающие поля отсутствуют.
+                    row = dict(zip(headers, parts, strict=False))
                     make = row.get("make") or row.get("brand") or make
                     model = row.get("model") or model
                     try:
@@ -271,16 +273,20 @@ class CanIdLoader:
             "Toyota": {
                 "Camry": {
                     2018: [
-                        {"id": 0x0C0, "bit": 0, "dlc": 8, "name": "EngineSpeed", "description": "Обороты двигателя", "data": "00 00 00 00 00 00 00 00", "signals": []},
-                        {"id": 0x0B0, "bit": 0, "dlc": 8, "name": "VehicleSpeed", "description": "Скорость автомобиля", "data": "00 00 00 00 00 00 00 00", "signals": []},
+                        {"id": 0x0C0, "bit": 0, "dlc": 8, "name": "EngineSpeed",
+                         "description": "Обороты двигателя", "data": "00 00 00 00 00 00 00 00", "signals": []},
+                        {"id": 0x0B0, "bit": 0, "dlc": 8, "name": "VehicleSpeed",
+                         "description": "Скорость автомобиля", "data": "00 00 00 00 00 00 00 00", "signals": []},
                     ]
                 }
             },
             "Kia": {
                 "Rio": {
                     2019: [
-                        {"id": 0x130, "bit": 0, "dlc": 8, "name": "DoorStatus", "description": "Статус дверей", "data": "00 00 00 00 00 00 00 00", "signals": []},
-                        {"id": 0x3A0, "bit": 0, "dlc": 8, "name": "LightStatus", "description": "Статус освещения", "data": "00 00 00 00 00 00 00 00", "signals": []},
+                        {"id": 0x130, "bit": 0, "dlc": 8, "name": "DoorStatus",
+                         "description": "Статус дверей", "data": "00 00 00 00 00 00 00 00", "signals": []},
+                        {"id": 0x3A0, "bit": 0, "dlc": 8, "name": "LightStatus",
+                         "description": "Статус освещения", "data": "00 00 00 00 00 00 00 00", "signals": []},
                     ]
                 }
             },

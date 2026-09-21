@@ -188,10 +188,7 @@ def unpack_can_frame(raw: bytes, tx: bool = False) -> dict[str, object] | None:
 
     channel_byte = frame[1]
     channel = channel_byte & 0x7F
-    if extended:
-        can_id = int.from_bytes(frame[2:6], "little")
-    else:
-        can_id = frame[2] | (frame[3] << 8)
+    can_id = int.from_bytes(frame[2:6], "little") if extended else frame[2] | (frame[3] << 8)
     data = frame[header_length:-1] if not rtr else b""
     return {
         "channel": channel,

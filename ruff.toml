@@ -6,3 +6,8 @@ extend-exclude = [
 
 [lint]
 select = ["E9", "F", "E", "W", "B", "SIM", "UP"]
+
+[lint.per-file-ignores]
+# Словарь переводов — таблица данных «ключ: значение»; дробить строки
+# ради лимита длины только ухудшит читаемость и diff-ы.
+"models/translations.py" = ["E501"]

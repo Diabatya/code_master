@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import Callable
 
@@ -71,10 +72,8 @@ class DfuDevice:
 
     def open(self) -> None:
         """Инициализирует устройство, отключает kernel driver и занимает интерфейс."""
-        try:
+        with contextlib.suppress(usb.core.USBError):
             self.dev.set_configuration()
-        except usb.core.USBError:
-            pass
         try:
             cfg = self.dev.get_active_configuration()
         except usb.core.USBError as exc:
@@ -247,10 +246,8 @@ class DfuDevice:
                 continue
             if state == STATE_DFU_ERROR:
                 error_code = bstatus
-                try:
+                with contextlib.suppress(usb.core.USBError):
                     self._ctrl(DFU_REQUEST_SEND, DFU_CLRSTATUS, timeout=5000)
-                except usb.core.USBError:
-                    pass
                 raise RuntimeError(f"DFU ошибка: state=dfuERROR, bStatus=0x{error_code:02X}")
             if bstatus != DFU_STATUS_OK:
                 raise RuntimeError(f"DFU статус ошибки: 0x{bstatus:02X}, state=0x{state:02X}")
@@ -370,7 +367,10 @@ class DfuDevice:
             page += page_size
 
         total = len(pages_to_erase)
-        logger.info("DFU: стирание страниц от 0x%08X до 0x%08X (page_size=%d, skip_blank=%s)", start, end - 1, page_size, skip_blank)
+        logger.info(
+            "DFU: стирание страниц от 0x%08X до 0x%08X (page_size=%d, skip_blank=%s)",
+            start, end - 1, page_size, skip_blank,
+        )
         for i, (page, page_len) in enumerate(pages_to_erase, 1):
             if progress:
                 progress(i, total)
@@ -558,27 +558,20 @@ class DfuDevice:
         Для STM32 нужно установить Address Pointer на вектор сброса,
         затем выполнить zero-length DNLOAD с wValue=0.
         """
-        try:
+        with contextlib.suppress(Exception):
             self._set_address(BOOTLOADER_BASE_ADDR)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
+        # устройство перезагружается и отваливается
+        with contextlib.suppress(usb.core.USBError, OSError):
             self._ctrl(DFU_REQUEST_SEND, DFU_DNLOAD, 0, b"", timeout=1000)
-        except (usb.core.USBError, OSError):
-            pass  # устройство перезагружается и отваливается
 
     def close(self) -> None:
         """Освобождает USB интерфейс и закрывает дескриптор устройства."""
         if self.intf is not None:
-            try:
+            with contextlib.suppress(usb.core.USBError, OSError):
                 usb.util.release_interface(self.dev, self.intf.bInterfaceNumber)
-            except (usb.core.USBError, OSError):
-                pass
             self.intf = None
-        try:
+        with contextlib.suppress(Exception):
             usb.util.dispose_resources(self.dev)
-        except Exception:  # noqa: S110
-            pass
 
     def __enter__(self):
         self.open()

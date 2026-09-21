@@ -146,9 +146,8 @@ class DBCManager:
         lines = [f"{message.get('name', 'Unknown')} (ID 0x{can_id:X})"]
         for signal in message.get("signals", []):
             raw = _extract_raw(data, signal.get("start", 0), signal.get("length", 1), signal.get("byte_order", 1))
-            if signal.get("signed", False):
-                if raw >= 2 ** (signal.get("length", 1) - 1):
-                    raw -= 2 ** signal.get("length", 1)
+            if signal.get("signed", False) and raw >= 2 ** (signal.get("length", 1) - 1):
+                raw -= 2 ** signal.get("length", 1)
             physical = raw * signal.get("factor", 1.0) + signal.get("offset", 0.0)
             unit = signal.get("unit", "")
             enum = signal.get("values", {}).get(raw)

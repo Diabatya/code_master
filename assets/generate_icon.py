@@ -37,7 +37,7 @@ def make_icon(size: int = 1024) -> Image.Image:
     top_h = top_font.getbbox(top_text)[3]
     x = (size - top_total) // 2
     y_top = int(size * 0.28)
-    for ch, w in zip(top_text, top_ws):
+    for ch, w in zip(top_text, top_ws, strict=True):
         color = orange if ch == "О" else white
         draw.text((x, y_top), ch, font=top_font, fill=color)
         x += w
@@ -48,7 +48,7 @@ def make_icon(size: int = 1024) -> Image.Image:
     bottom_total = sum(bottom_ws)
     x = (size - bottom_total) // 2
     y_bottom = y_top + int(top_h * 1.15)
-    for ch, w in zip(bottom_text, bottom_ws):
+    for ch, w in zip(bottom_text, bottom_ws, strict=True):
         draw.text((x, y_bottom), ch, font=bottom_font, fill=white)
         x += w
 
@@ -65,10 +65,7 @@ def make_icns(png_1024: Path, out: Path) -> None:
         for scale in (1, 2):
             px = s * scale
             im = src.resize((px, px), Image.Resampling.LANCZOS)
-            if scale == 1:
-                name = f"icon_{s}x{s}.png"
-            else:
-                name = f"icon_{s}x{s}@2x.png"
+            name = f"icon_{s}x{s}.png" if scale == 1 else f"icon_{s}x{s}@2x.png"
             im.save(iconset / name, "PNG")
     import subprocess
     subprocess.run(["iconutil", "-c", "icns", str(iconset)], check=True)

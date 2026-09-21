@@ -7,6 +7,7 @@
 Декодирует SLIP/CAN-поток, пишет CSV-лог и предоставляет готовые пакеты UI.
 """
 
+import contextlib
 import csv
 import struct
 import threading
@@ -125,7 +126,9 @@ class _DecoderWorker(QThread):
             if not self._running:
                 break
             is_rx, raw = item
-            self._decoder.feed(raw, lambda buf: self._emit_packet(buf, is_rx))
+            # B023 осознанно: callback вызывается синхронно внутри feed(),
+            # is_rx не успевает измениться до возврата.
+            self._decoder.feed(raw, lambda buf: self._emit_packet(buf, is_rx))  # noqa: B023
         logger.info("Поток декодирования логера остановлен")
 
     def _emit_packet(self, buffer: bytearray, is_rx: bool) -> None:
@@ -227,7 +230,9 @@ class ListenOnlyMode(QObject):
         log_dir.mkdir(parents=True, exist_ok=True)
         self._log_path = log_dir / f"{name}_{stamp}.csv"
         try:
-            self._log_file = open(self._log_path, "w", newline="", encoding="utf-8")
+            # SIM115 осознанно: файл живёт в self._log_file до остановки
+            # сессии — context manager закрыл бы его на выходе из метода.
+            self._log_file = self._log_path.open("w", newline="", encoding="utf-8")  # noqa: SIM115
             self._csv_writer = csv.writer(self._log_file)
             self._csv_writer.writerow(["Timestamp_us", "Bus", "Type", "ID", "DLC", "Data"])
             return True
@@ -244,10 +249,8 @@ class ListenOnlyMode(QObject):
 
     def _stop_decoder(self) -> None:
         if self._decoder is not None:
-            try:
+            with contextlib.suppress(RuntimeError, TypeError):
                 self._decoder.packet_ready.disconnect(self._on_packet)
-            except (RuntimeError, TypeError):
-                pass
             self._decoder.stop()
             self._decoder = None
         while not self._raw_queue.empty():
@@ -258,10 +261,8 @@ class ListenOnlyMode(QObject):
 
     def _close_csv(self) -> None:
         if self._log_file is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._log_file.close()
-            except Exception:  # noqa: BLE001
-                pass
             self._log_file = None
 
     def enable(
@@ -349,14 +350,10 @@ class ListenOnlyMode(QObject):
             return
 
         if self._mode == "embedded" and self._serial_manager is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._serial_manager.raw_data.disconnect(self._on_raw_data)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 self._serial_manager.raw_tx.disconnect(self._on_raw_tx)
-            except Exception:  # noqa: BLE001
-                pass
 
         for worker in self._proxy_workers:
             worker.stop()
@@ -374,10 +371,8 @@ class ListenOnlyMode(QObject):
     def _close_proxy_ports(self) -> None:
         for ser in (self._real_ser, self._virtual_ser):
             if ser is not None and ser.is_open:
-                try:
+                with contextlib.suppress(Exception):
                     ser.close()
-                except Exception:  # noqa: BLE001
-                    pass
         self._real_ser = None
         self._virtual_ser = None
 

@@ -6,6 +6,7 @@
 """
 
 import argparse
+import contextlib
 import sys
 
 from PySide6.QtCore import Qt
@@ -64,10 +65,8 @@ def _cli_flash(args: argparse.Namespace) -> int:
         return 1
     finally:
         if bootloader is not None:
-            try:
+            with contextlib.suppress(Exception):
                 bootloader.port.close()
-            except Exception:  # noqa: S110
-                pass
 
 
 def main() -> int:
