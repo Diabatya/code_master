@@ -1,6 +1,6 @@
 """Страница «Триггеры» — блоки условий и ответов, слоты во Flash МК."""
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 from PySide6.QtCore import QEvent, QPoint, QRegularExpression, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QRegularExpressionValidator
@@ -140,35 +140,35 @@ class CanTriggerTab(QWidget):
     # вычитки и прогрузки триггеров в МК.
     progress_updated = Signal(int, str)
 
-    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, serial_manager: SerialManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._config = Config()
-        self._blocks: List[Dict[str, Any]] = []
+        self._blocks: list[dict[str, Any]] = []
         self._applying_device_state = False
         # device_managed[i] == True: триггер i записан во Flash устройства и
         # исполняется самим МК — приложение не должно дублировать ответ
         # (иначе на шине были бы двойные фреймы). Список параллелен
         # _blocks и растёт/сжимается вместе с ним. Сбрасывается при любом
         # редактировании блока и при отключении порта.
-        self._device_managed: List[bool] = []
+        self._device_managed: list[bool] = []
         # pc_suspended[i] == True: блок пришёл из «Загрузить конфигурацию»
         # и ещё не подтверждён «Сохранить» — приложение НЕ исполняет его,
         # иначе загрузка файла сразу запускала ответы на шине, как будто
         # конфиг прогрузили в МК. Снимается успешной write_to_device или
         # вычиткой устройства.
-        self._pc_suspended: List[bool] = []
+        self._pc_suspended: list[bool] = []
         # Персистентный кэш PC-исполнения: (индекс блока, строка кэша) →
         # последний подошедший кадр. Живёт между кадрами (как s_cache в
         # прошивке); сбрасывается при сохранении конфигурации — фильтры
         # могли измениться и старые данные уже не отвечают им.
-        self._pc_cache: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        self._pc_cache: dict[tuple[int, int], dict[str, Any]] = {}
         # Состояние «кол-во сработок до смены DATA» при PC-исполнении:
         # приём — по индексу блока, источник кэша — по (блок, строка).
         # Порт fire_state_t прошивки: last/have — последняя DATA,
         # count/suppress — счётчик и защёлка лимита.
-        self._pc_rx_state: Dict[int, Dict[str, Any]] = {}
-        self._pc_src_state: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        self._pc_rx_state: dict[int, dict[str, Any]] = {}
+        self._pc_src_state: dict[tuple[int, int], dict[str, Any]] = {}
         self._memory_indicator = MemoryIndicator(self)
 
         self._create_widgets()
@@ -193,7 +193,7 @@ class CanTriggerTab(QWidget):
 
     def _make_data_edits(
         self, font: QFont, allow_x: bool = False
-    ) -> Tuple[List[QLineEdit], QWidget]:
+    ) -> tuple[list[QLineEdit], QWidget]:
         return create_data_field_widget(font, 8, edit_width=42, allow_x=allow_x)
 
     def _make_channel_combo(self, font: QFont) -> QComboBox:
@@ -235,7 +235,7 @@ class CanTriggerTab(QWidget):
         spin.setFixedWidth(90)
         return spin
 
-    def _create_receive_row(self, font: QFont, label: str) -> Dict[str, Any]:
+    def _create_receive_row(self, font: QFont, label: str) -> dict[str, Any]:
         layout = QHBoxLayout()
         layout.setSpacing(4)
         layout.addWidget(QLabel(label))
@@ -330,7 +330,7 @@ class CanTriggerTab(QWidget):
         can_id.set_fill_callback(lambda parsed, r=row: self._fill_row_from_packet(r, parsed))
         return row
 
-    def _create_response_block(self, font: QFont) -> Dict[str, Any]:
+    def _create_response_block(self, font: QFont) -> dict[str, Any]:
         """Создаёт блок динамического списка фреймов ответа."""
         group = QGroupBox(tr("Ответ"))
         group.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
@@ -362,7 +362,7 @@ class CanTriggerTab(QWidget):
         self._add_response_row(block, font)
         return block
 
-    def _create_response_row(self, font: QFont, block: Dict[str, Any]) -> Dict[str, Any]:
+    def _create_response_row(self, font: QFont, block: dict[str, Any]) -> dict[str, Any]:
         """Создаёт одну строку фрейма ответа с полями в одном ряду."""
         widget = QWidget()
         row_layout = QHBoxLayout(widget)
@@ -507,7 +507,7 @@ class CanTriggerTab(QWidget):
 
         return widget
 
-    def _add_response_row(self, block: Dict[str, Any], font: QFont) -> None:
+    def _add_response_row(self, block: dict[str, Any], font: QFont) -> None:
         """Добавляет строку фрейма в блок ответа (максимум 5)."""
         if len(block["rows"]) >= MAX_RESPONSE_FRAMES:
             return
@@ -523,7 +523,7 @@ class CanTriggerTab(QWidget):
         self._rebuild_response_rows(block)
         self._update_response_buttons(block)
 
-    def _remove_response_row(self, block: Dict[str, Any], row: Dict[str, Any]) -> None:
+    def _remove_response_row(self, block: dict[str, Any], row: dict[str, Any]) -> None:
         """Удаляет строку фрейма из блока ответа (минимум 1)."""
         if len(block["rows"]) <= 1:
             return
@@ -538,7 +538,7 @@ class CanTriggerTab(QWidget):
         self._rebuild_response_rows(block)
         self._update_response_buttons(block)
 
-    def _rebuild_response_rows(self, block: Dict[str, Any]) -> None:
+    def _rebuild_response_rows(self, block: dict[str, Any]) -> None:
         """Перестраивает layout фреймов и видимость пауз."""
         for row in block["rows"]:
             block["rows_layout"].removeWidget(row["widget"])
@@ -555,14 +555,14 @@ class CanTriggerTab(QWidget):
                 block["rows_layout"].addWidget(row["pause_widget"])
                 row["pause_widget"].show()
 
-    def _update_response_buttons(self, block: Dict[str, Any]) -> None:
+    def _update_response_buttons(self, block: dict[str, Any]) -> None:
         """Активирует/деактивирует кнопки +/- в зависимости от количества строк."""
         can_add = len(block["rows"]) < MAX_RESPONSE_FRAMES
         block["add_button"].setEnabled(can_add)
         for row in block["rows"]:
             row["remove_button"].setEnabled(len(block["rows"]) > 1)
 
-    def _create_cache_block(self, font: QFont, index: int) -> Dict[str, Any]:
+    def _create_cache_block(self, font: QFont, index: int) -> dict[str, Any]:
         """Блок кэша — динамический список строк, как «Фреймы ответа»:
         у каждой строки свой источник (канал/ID/DLC/диапазон От-До) и
         своя отправка (канал, паузы, количество). Один входящий кадр
@@ -616,7 +616,7 @@ class CanTriggerTab(QWidget):
         self._add_cache_row(cache, font)
         return cache
 
-    def _create_cache_row(self, font: QFont, cache: Dict[str, Any]) -> Dict[str, Any]:
+    def _create_cache_row(self, font: QFont, cache: dict[str, Any]) -> dict[str, Any]:
         """Одна строка кэша: источник (канал/ID/DLC/диапазон От-До) и
         отправка закэшированного кадра (канал/паузы/количество).
         «X» в полях От/До — байт игнорируется при сравнении, а в ответе
@@ -764,7 +764,7 @@ class CanTriggerTab(QWidget):
         )
         return row
 
-    def _add_cache_row(self, cache: Dict[str, Any], font: QFont) -> None:
+    def _add_cache_row(self, cache: dict[str, Any], font: QFont) -> None:
         """Добавляет строку кэша (максимум как у фреймов ответа)."""
         if len(cache["rows"]) >= MAX_RESPONSE_FRAMES:
             return
@@ -784,7 +784,7 @@ class CanTriggerTab(QWidget):
         self._rebuild_cache_rows(cache)
         self._update_cache_buttons(cache)
 
-    def _remove_cache_row(self, cache: Dict[str, Any], row: Dict[str, Any]) -> None:
+    def _remove_cache_row(self, cache: dict[str, Any], row: dict[str, Any]) -> None:
         """Удаляет строку кэша (минимум 1)."""
         if len(cache["rows"]) <= 1:
             return
@@ -796,7 +796,7 @@ class CanTriggerTab(QWidget):
         self._rebuild_cache_rows(cache)
         self._update_cache_buttons(cache)
 
-    def _rebuild_cache_rows(self, cache: Dict[str, Any]) -> None:
+    def _rebuild_cache_rows(self, cache: dict[str, Any]) -> None:
         """Перестраивает layout строк кэша и видимость пауз — как у
         фреймов ответа: «Пауза перед отправкой» только в первой строке,
         между строками — «Пауза перед следующим»."""
@@ -815,14 +815,14 @@ class CanTriggerTab(QWidget):
                 cache["rows_layout"].addWidget(row["pause_widget"])
                 row["pause_widget"].show()
 
-    def _update_cache_buttons(self, cache: Dict[str, Any]) -> None:
+    def _update_cache_buttons(self, cache: dict[str, Any]) -> None:
         """Активирует/деактивирует кнопки +/- строк кэша."""
         can_add = len(cache["rows"]) < MAX_RESPONSE_FRAMES
         cache["add_button"].setEnabled(can_add)
         for row in cache["rows"]:
             row["remove_button"].setEnabled(len(cache["rows"]) > 1)
 
-    def _set_data_enabled(self, edits: List[QLineEdit], count: int) -> None:
+    def _set_data_enabled(self, edits: list[QLineEdit], count: int) -> None:
         for i, edit in enumerate(edits):
             if i >= count:
                 edit.setText("")
@@ -831,7 +831,7 @@ class CanTriggerTab(QWidget):
                 edit.setEnabled(True)
 
     def _on_row_rtr_toggled(
-        self, checked: bool, edits: List[QLineEdit], widget: QWidget, dlc: QSpinBox
+        self, checked: bool, edits: list[QLineEdit], widget: QWidget, dlc: QSpinBox
     ) -> None:
         """RTR в строке ответа триггера: поле Data этой строки блокируется и
         бледнеет, редактируемыми остаются только ID и DLC."""
@@ -839,7 +839,7 @@ class CanTriggerTab(QWidget):
         widget.setEnabled(not checked)
         self._set_widget_opacity(widget, 0.35 if checked else 1.0)
 
-    def _fill_row_from_packet(self, row: Dict[str, Any], parsed: Dict[str, Any]) -> None:
+    def _fill_row_from_packet(self, row: dict[str, Any], parsed: dict[str, Any]) -> None:
         """Заполняет строку (ID, DLC, Data) из распарсенного пакета."""
         can_id = parsed.get("id")
         if can_id is None:
@@ -860,7 +860,7 @@ class CanTriggerTab(QWidget):
         rtr = row["rtr"].isChecked() if "rtr" in row else False
         self._set_data_enabled(row["data"], 0 if rtr else dlc)
 
-    def _fill_cache_row_from_packet(self, row: Dict[str, Any], parsed: Dict[str, Any]) -> None:
+    def _fill_cache_row_from_packet(self, row: dict[str, Any], parsed: dict[str, Any]) -> None:
         """Заполняет строку кэша (ID, DLC, От/До) из распарсенного пакета."""
         can_id = parsed.get("id")
         if can_id is None:
@@ -890,7 +890,7 @@ class CanTriggerTab(QWidget):
         # загрузкой конфига или синхронизацией с устройством. Заводское
         # состояние — один пустой блок.
 
-    def _create_trigger_block(self, index: int) -> Dict[str, Any]:
+    def _create_trigger_block(self, index: int) -> dict[str, Any]:
         """Создаёт виджеты одного блока триггера (позиция = index)."""
         font = self._font
         group = QGroupBox(tr("Триггер {0}").format(index + 1))
@@ -930,7 +930,7 @@ class CanTriggerTab(QWidget):
             "delete_button": delete_button,
         }
 
-    def _layout_trigger_block(self, block: Dict[str, Any], index: int) -> None:
+    def _layout_trigger_block(self, block: dict[str, Any], index: int) -> None:
         """Собирает layout блока и добавляет его в контейнер."""
         group_layout = QVBoxLayout(block["group"])
         group_layout.setSpacing(5)
@@ -1005,7 +1005,7 @@ class CanTriggerTab(QWidget):
         # отсюда мерцание кнопки «Сохранить».
         return False
 
-    def _align_delete_button(self, block: Dict[str, Any]) -> None:
+    def _align_delete_button(self, block: dict[str, Any]) -> None:
         """Ставит крестик по высоте напротив поля Data в «Приём», а по
         горизонтали — ровно над «+» добавления фрейма ответа."""
         data_widget = block["recv"]["data_widget"]
@@ -1046,7 +1046,7 @@ class CanTriggerTab(QWidget):
         host.setParent(None)
         host.deleteLater()
 
-    def _remove_trigger_block(self, block: Dict[str, Any]) -> None:
+    def _remove_trigger_block(self, block: dict[str, Any]) -> None:
         """Удаляет блок триггера из UI и из будущей записи в устройство."""
         if self._applying_device_state:
             return
@@ -1062,7 +1062,7 @@ class CanTriggerTab(QWidget):
         self._mark_dirty()
         self._save_config()
 
-    def _add_trigger_block(self) -> Optional[int]:
+    def _add_trigger_block(self) -> int | None:
         """Добавляет блок триггера. Лимит — ёмкость пула Flash
         (TRIGGER_COUNT записей по 82 Б + заголовок в 8 КБ над config)."""
         if len(self._blocks) >= TRIGGER_COUNT:
@@ -1093,7 +1093,7 @@ class CanTriggerTab(QWidget):
         if self._add_trigger_block() is not None:
             self._mark_dirty(len(self._blocks) - 1)
 
-    def _sim_records(self) -> List[Dict[str, Any]]:
+    def _sim_records(self) -> list[dict[str, Any]]:
         """Записи в формате firmware для симулятора — то же, что ушло бы
         в МК по «Сохранить» (непустые блоки, enabled как в UI)."""
         records = []
@@ -1110,7 +1110,7 @@ class CanTriggerTab(QWidget):
         dialog.exec()
 
     @staticmethod
-    def _templates() -> Dict[str, Dict[str, Any]]:
+    def _templates() -> dict[str, dict[str, Any]]:
         """Готовые сценарии триггеров — заполненный блок в один клик,
         дальше оператор правит ID/данные под себя."""
         return {
@@ -1205,7 +1205,7 @@ class CanTriggerTab(QWidget):
             },
         }
 
-    def _add_template_trigger(self, preset: Dict[str, Any]) -> None:
+    def _add_template_trigger(self, preset: dict[str, Any]) -> None:
         """Добавляет блок триггера из шаблона (тем же путём, что загрузка
         конфига: текущие блоки + пресет → set_config)."""
         from copy import deepcopy
@@ -1284,7 +1284,7 @@ class CanTriggerTab(QWidget):
         # «Добавить триггер», загрузкой конфига или вычиткой из МК.
         self._update_add_trigger_button()
 
-    def _watch_block_signals(self, block: Dict[str, Any]) -> None:
+    def _watch_block_signals(self, block: dict[str, Any]) -> None:
         """Подписывает пользовательские изменения всех полей блока на
         _mark_dirty: снимает флаг device_managed и сообщает окну настроек,
         что появились несохранённые изменения. Индекс блока вычисляется
@@ -1306,7 +1306,7 @@ class CanTriggerTab(QWidget):
         self._watch_widget_tree(block["group"], block, skip)
 
     @staticmethod
-    def _inside_any(widget: QWidget, containers: List[QWidget]) -> bool:
+    def _inside_any(widget: QWidget, containers: list[QWidget]) -> bool:
         parent = widget
         while parent is not None:
             if parent in containers:
@@ -1315,7 +1315,7 @@ class CanTriggerTab(QWidget):
         return False
 
     def _watch_widget_tree(
-        self, root: QWidget, block: Dict[str, Any], skip: Optional[List[QWidget]] = None
+        self, root: QWidget, block: dict[str, Any], skip: list[QWidget] | None = None
     ) -> None:
         """Подписывает на _mark_dirty все поля ввода внутри виджета root,
         кроме виджетов внутри контейнеров skip (кнопки копипасты)."""
@@ -1349,7 +1349,7 @@ class CanTriggerTab(QWidget):
                 widget.clicked.connect(mark)
 
     @staticmethod
-    def _fire_track_data(state: Dict[str, Any], data: bytes) -> None:
+    def _fire_track_data(state: dict[str, Any], data: bytes) -> None:
         """Порт fire_track() прошивки: кадр с новой Data сбрасывает
         защёлку лимита — триггер снова исполняет N сработок."""
         last = bytes(data[:8])
@@ -1360,10 +1360,10 @@ class CanTriggerTab(QWidget):
             state["suppress"] = False
 
     @staticmethod
-    def _new_fire_state() -> Dict[str, Any]:
+    def _new_fire_state() -> dict[str, Any]:
         return {"have": False, "last": b"", "count": 0, "suppress": False}
 
-    def _mark_dirty(self, index: Optional[int] = None) -> None:
+    def _mark_dirty(self, index: int | None = None) -> None:
         """Помечает конфигурацию изменённой пользователем."""
         if self._applying_device_state:
             return
@@ -1377,8 +1377,8 @@ class CanTriggerTab(QWidget):
         self.settings_changed.emit()
 
     def _device_trigger_values(
-        self, index: int, cache_row: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+        self, index: int, cache_row: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         block = self._blocks[index]
         recv = block["recv"]
         # rx_channel/tx_channel хранятся 0-based как индекс комбобокса:
@@ -1521,7 +1521,7 @@ class CanTriggerTab(QWidget):
         label.setStyleSheet(f"color: {color};")
 
     def _apply_device_trigger(
-        self, index: int, group: List[Dict[str, Any]]
+        self, index: int, group: list[dict[str, Any]]
     ) -> None:
         values = group[0]
         self._applying_device_state = True
@@ -1532,7 +1532,7 @@ class CanTriggerTab(QWidget):
         self._set_trigger_status(index, "enabled" if values["enabled"] else "disabled")
 
     def _apply_device_group(
-        self, index: int, group: List[Dict[str, Any]]
+        self, index: int, group: list[dict[str, Any]]
     ) -> None:
         block = self._blocks[index]
         recv = block["recv"]
@@ -1562,8 +1562,8 @@ class CanTriggerTab(QWidget):
             # что у фреймов ответа: записи строки (seq 0..127) дают
             # строку, фрагменты (0x80|f) добавляют свой count.
             # Инвертированный диапазон (from>to) показываем как «X».
-            row_records: List[Dict[str, Any]] = []
-            row_counts: List[int] = []
+            row_records: list[dict[str, Any]] = []
+            row_counts: list[int] = []
             for record in group:
                 if record.get("group_seq", 0) & GROUP_SEQ_FRAGMENT and row_counts:
                     row_counts[-1] += max(1, record.get("tx_count") or 1)
@@ -1619,8 +1619,8 @@ class CanTriggerTab(QWidget):
             # обратно: пауза между строками → next_delay предыдущей,
             # остаток сверх спина (9999 мс) — в скрытый
             # delay_before_send следующей строки, тайминг сохраняется.
-            row_records: List[Dict[str, Any]] = []
-            row_counts: List[int] = []
+            row_records: list[dict[str, Any]] = []
+            row_counts: list[int] = []
             for record in group:
                 if record.get("group_seq", 0) & GROUP_SEQ_FRAGMENT and row_counts:
                     row_counts[-1] += max(1, record.get("tx_count") or 1)
@@ -1663,7 +1663,7 @@ class CanTriggerTab(QWidget):
         self._on_cache_active_changed(index, Qt.CheckState.Checked.value if cache_enabled else Qt.CheckState.Unchecked.value)
 
     @staticmethod
-    def _config_trigger_expandable(trigger: Dict[str, Any]) -> bool:
+    def _config_trigger_expandable(trigger: dict[str, Any]) -> bool:
         """True, если триггер разворачивается в записи МК (одну или
         группу). Развёртке мешает только переполнение расписания —
         суммарная задержка >65 с или >127 строк ответа; такой триггер
@@ -1690,7 +1690,7 @@ class CanTriggerTab(QWidget):
         return expand_schedule(filled) is not None
 
     @staticmethod
-    def _config_trigger_device_representable(trigger: Dict[str, Any]) -> bool:
+    def _config_trigger_device_representable(trigger: dict[str, Any]) -> bool:
         """То же правило, что у _is_device_representable, но для записи
         конфигурации (dict) — нужно валидации до сборки виджетов и
         восстановлению PC-only записей при вычитке."""
@@ -1709,7 +1709,7 @@ class CanTriggerTab(QWidget):
                 return False
         return True
 
-    def _is_device_representable(self, block: Dict[str, Any]) -> bool:
+    def _is_device_representable(self, block: dict[str, Any]) -> bool:
         """True, если триггер целиком выразим ОДНОЙ записью trigger_t.
 
         Многофреймовые триггеры сюда не попадают, но на МК всё равно
@@ -1731,7 +1731,7 @@ class CanTriggerTab(QWidget):
         return TRIGGER_FORMAT_VERSION_V2
 
     @staticmethod
-    def _record_uses_v3(record: Dict[str, Any]) -> bool:
+    def _record_uses_v3(record: dict[str, Any]) -> bool:
         """Запись несёт опции формата v3 — старая прошивка их не
         исполнит, такой триггер остаётся на PC-исполнении."""
         return bool(
@@ -1741,10 +1741,10 @@ class CanTriggerTab(QWidget):
             or not record.get("src_listen_echo", True)
         )
 
-    def _pack_record(self, values: Dict[str, Any]) -> bytes:
+    def _pack_record(self, values: dict[str, Any]) -> bytes:
         return pack_trigger(values, fmt_version=self._record_fmt_version())
 
-    def _project_block_records(self, index: int) -> Optional[List[Dict[str, Any]]]:
+    def _project_block_records(self, index: int) -> list[dict[str, Any]] | None:
         """Раскладывает блок триггера на записи trigger_t для устройства.
 
         Многофреймовый ответ (несколько строк «Фреймы ответа», пауза
@@ -1762,7 +1762,7 @@ class CanTriggerTab(QWidget):
         if self._is_empty_trigger(values):
             return []
         block = self._blocks[index]
-        records: List[Dict[str, Any]] = []
+        records: list[dict[str, Any]] = []
         if block["cache"]["cache_check"].isChecked():
             # Каждая строка кэша — отдельная запись с собственным
             # src-фильтром и своим слотом кэша в прошивке. Строки
@@ -1831,12 +1831,12 @@ class CanTriggerTab(QWidget):
     def _cache_row_record(
         self,
         index: int,
-        cache_row: Dict[str, Any],
+        cache_row: dict[str, Any],
         delay: int,
         count: int,
         interval: int,
         seq: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Запись trigger_t одной строки кэша: её src-фильтр и канал
         отправки + абсолютный тайминг из расписания expand_schedule."""
         record = self._device_trigger_values(index, cache_row)
@@ -1849,7 +1849,7 @@ class CanTriggerTab(QWidget):
         return record
 
     @staticmethod
-    def _is_empty_trigger(values: Dict[str, Any]) -> bool:
+    def _is_empty_trigger(values: dict[str, Any]) -> bool:
         """True, если запись устройства «заводская» — не была настроена."""
         return (
             not values["enabled"]
@@ -1882,12 +1882,12 @@ class CanTriggerTab(QWidget):
         while len(self._blocks) < min(count, TRIGGER_COUNT):
             self._add_trigger_block()
 
-    def _read_device_triggers(self) -> List[Dict[str, Any]]:
+    def _read_device_triggers(self) -> list[dict[str, Any]]:
         """Читает упакованный список триггеров устройства до ответа 0x01
         («за границей списка») — на пустом устройстве вернёт пустой
         список. Пустые записи (старшая прошивка с фиксированными слотами)
         пропускаются, блоки под них не создаются."""
-        records: List[Dict[str, Any]] = []
+        records: list[dict[str, Any]] = []
         # Один сеанс на все чтения: reader останавливается один раз,
         # иначе stop/start QThread на каждый запрос растягивал вычитку
         # до десятков секунд.
@@ -1986,8 +1986,8 @@ class CanTriggerTab(QWidget):
 
     @staticmethod
     def _group_device_records(
-        records: List[Dict[str, Any]],
-    ) -> List[List[Dict[str, Any]]]:
+        records: list[dict[str, Any]],
+    ) -> list[list[dict[str, Any]]]:
         """Склеивает записи устройства в группы одного триггера.
 
         Многофреймовый триггер пишется несколькими записями подряд,
@@ -1996,7 +1996,7 @@ class CanTriggerTab(QWidget):
         текущей строки. Запись с seq>0 без базовой перед ней считается
         отдельным триггером (защита от чужих/повреждённых данных).
         """
-        groups: List[List[Dict[str, Any]]] = []
+        groups: list[list[dict[str, Any]]] = []
         for record in records:
             if record.get("group_seq", 0) == 0 or not groups:
                 groups.append([record])
@@ -2004,7 +2004,7 @@ class CanTriggerTab(QWidget):
                 groups[-1].append(record)
         return groups
 
-    def _heal_pc_only_triggers(self, groups: List[List[Dict[str, Any]]]) -> None:
+    def _heal_pc_only_triggers(self, groups: list[list[dict[str, Any]]]) -> None:
         """Реанимирует томбстоуны триггеров, исполняемых приложением.
 
         Триггер, не разворачивающийся в записи trigger_t (суммарная
@@ -2022,7 +2022,7 @@ class CanTriggerTab(QWidget):
             t for t in self._config.get("triggers", []) or []
             if isinstance(t, dict) and not self._config_trigger_is_empty(t)
         ]
-        used: Set[int] = set()
+        used: set[int] = set()
         for index, group in enumerate(groups):
             if index >= len(self._blocks) or len(group) != 1:
                 continue
@@ -2050,10 +2050,10 @@ class CanTriggerTab(QWidget):
 
     def _find_config_trigger(
         self,
-        values: Dict[str, Any],
-        config_triggers: List[Dict[str, Any]],
-        used: Set[int],
-    ) -> Optional[int]:
+        values: dict[str, Any],
+        config_triggers: list[dict[str, Any]],
+        used: set[int],
+    ) -> int | None:
         """Индекс записи config.json, из которой сделана запись МК:
         совпадают ID приёма, режим кэша и первый фрейм ответа (запись МК
         хранит только его)."""
@@ -2087,12 +2087,12 @@ class CanTriggerTab(QWidget):
             return i
         return None
 
-    def _ui_matches_device(self, records: List[Dict[str, Any]]) -> bool:
+    def _ui_matches_device(self, records: list[dict[str, Any]]) -> bool:
         """Сравнивает UI с устройством через сериализованные записи —
         не зависит от порядка блоков и представления полей. Блоки
         проецируются тем же развёртыванием, что и при записи, поэтому
         многофреймовый триггер сравнивается со своей группой записей."""
-        local: List[bytes] = []
+        local: list[bytes] = []
         for index, block in enumerate(self._blocks):
             try:
                 projected = self._project_block_records(index)
@@ -2145,7 +2145,7 @@ class CanTriggerTab(QWidget):
             if answer != QMessageBox.StandardButton.Yes:
                 raise TriggerValidationAborted("; ".join(warnings))
         changed = 0
-        staged: List[Tuple[int, bytes]] = []
+        staged: list[tuple[int, bytes]] = []
         default_payload = self._pack_record({})
         try:
             with self._serial_manager.control_session():
@@ -2166,7 +2166,7 @@ class CanTriggerTab(QWidget):
         return changed
 
     def _write_to_device_locked(
-        self, default_payload: bytes, staged: List[Tuple[int, bytes]]
+        self, default_payload: bytes, staged: list[tuple[int, bytes]]
     ) -> int:
         """Тело write_to_device внутри control_session: все команды
         STAGE/READ/COMMIT идут при однократно остановленном reader'е.
@@ -2184,7 +2184,7 @@ class CanTriggerTab(QWidget):
             QApplication.processEvents()
 
         # Реальный список устройства (до ответа 0x01 «за границей»).
-        device: List[bytes] = []
+        device: list[bytes] = []
         for index in range(TRIGGER_COUNT):
             _report(
                 int((index + 1) * 35 / TRIGGER_COUNT),
@@ -2231,7 +2231,7 @@ class CanTriggerTab(QWidget):
         # Целевой список: только настроенные (непустые) блоки.
         # Многофреймовый триггер разворачивается в группу записей —
         # устройство исполняет его само, приложение не нужно.
-        target: List[Tuple[int, bytes]] = []
+        target: list[tuple[int, bytes]] = []
         for block_index in range(len(self._blocks)):
             records = self._project_block_records(block_index)
             if records is None:
@@ -2352,7 +2352,7 @@ class CanTriggerTab(QWidget):
         """Сбрасывает флаги исполнения на МК (при отключении порта)."""
         self._device_managed = [False] * len(self._blocks)
 
-    def _on_trigger_toggled_by_block(self, block: Dict[str, Any], enabled: bool) -> None:
+    def _on_trigger_toggled_by_block(self, block: dict[str, Any], enabled: bool) -> None:
         try:
             index = self._blocks.index(block)
         except ValueError:
@@ -2382,7 +2382,7 @@ class CanTriggerTab(QWidget):
             effect.setOpacity(opacity)
             widget.setGraphicsEffect(effect)
 
-    def _set_cache_enabled(self, block: Dict[str, Any], enabled: bool) -> None:
+    def _set_cache_enabled(self, block: dict[str, Any], enabled: bool) -> None:
         """Включает либо блок ответа, либо блок кэша в зависимости от чекбокса."""
         response_group = block["response"]["group"]
         cache_fields = block["cache"]["fields_widget"]
@@ -2420,11 +2420,11 @@ class CanTriggerTab(QWidget):
                 row["listen_echo"].setText(tr("Слушать отправляемое"))
                 row["fire_check"].setText(tr("Кол-во сработок до смены DATA"))
 
-    def _parse_id(self, text: str) -> Optional[int]:
+    def _parse_id(self, text: str) -> int | None:
         return hex_to_int(text.strip())
 
-    def _parse_data(self, edits: List[QLineEdit]) -> List[Optional[int]]:
-        result: List[Optional[int]] = []
+    def _parse_data(self, edits: list[QLineEdit]) -> list[int | None]:
+        result: list[int | None] = []
         for edit in edits:
             text = edit.text().strip()
             if "X" in text.upper():
@@ -2439,13 +2439,13 @@ class CanTriggerTab(QWidget):
 
     @staticmethod
     def _parse_data_triple(
-        edits: List[QLineEdit],
-    ) -> Tuple[List[Optional[int]], List[bool]]:
+        edits: list[QLineEdit],
+    ) -> tuple[list[int | None], list[bool]]:
         """Разбор полей данных с wildcard: (значения, флаги «X»).
         Пустое поле — None без флага wild (в диапазонах это граница по
         умолчанию), «X» — None с флагом (байт игнорируется/обнуляется)."""
-        values: List[Optional[int]] = []
-        wild: List[bool] = []
+        values: list[int | None] = []
+        wild: list[bool] = []
         for edit in edits:
             text = edit.text().strip()
             if "X" in text.upper():
@@ -2459,7 +2459,7 @@ class CanTriggerTab(QWidget):
                 wild.append(False)
         return values, wild
 
-    def _build_internal_triggers(self) -> List[Dict[str, Any]]:
+    def _build_internal_triggers(self) -> list[dict[str, Any]]:
         triggers = []
         for i, block in enumerate(self._blocks):
             if not block["group"].isChecked():
@@ -2487,8 +2487,8 @@ class CanTriggerTab(QWidget):
             })
         return triggers
 
-    def _collect_responses(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        result: List[Dict[str, Any]] = []
+    def _collect_responses(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
         for row in rows:
             can_id = self._parse_id(row["id"].text())
             if can_id is None:
@@ -2506,14 +2506,14 @@ class CanTriggerTab(QWidget):
             })
         return result
 
-    def _collect_cache(self, cache: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _collect_cache(self, cache: dict[str, Any]) -> list[dict[str, Any]]:
         """Строки кэша блока с заданным ID — по одному фильтру источника
         на строку. Строки без ID пропускаются: в прошивку они не
         проецируются, и PC-расписание не должно тратить на них паузы."""
         rows = [self._collect_cache_row(row) for row in cache["rows"]]
         return [row for row in rows if row["id"] is not None]
 
-    def _collect_cache_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+    def _collect_cache_row(self, row: dict[str, Any]) -> dict[str, Any]:
         """Собирает строку кэша в dict: фильтр источника (канал/бит/ID/
         DLC + побайтовый диапазон От/До с флагами wildcard «X») и
         параметры отправки закэшированного кадра."""
@@ -2564,11 +2564,11 @@ class CanTriggerTab(QWidget):
         self._config.set("triggers", triggers)
         self._memory_indicator.show_trigger_usage(count_configured_triggers(triggers))
 
-    def _collect_config(self) -> List[Dict[str, Any]]:
+    def _collect_config(self) -> list[dict[str, Any]]:
         return [self._collect_block_config(block) for block in self._blocks]
 
     @staticmethod
-    def _collect_block_config(block: Dict[str, Any]) -> Dict[str, Any]:
+    def _collect_block_config(block: dict[str, Any]) -> dict[str, Any]:
         responses = []
         for row in block["response"]["rows"]:
             responses.append({
@@ -2648,7 +2648,7 @@ class CanTriggerTab(QWidget):
         return config
 
     @staticmethod
-    def _config_trigger_is_empty(trigger: Dict[str, Any]) -> bool:
+    def _config_trigger_is_empty(trigger: dict[str, Any]) -> bool:
         """Запись конфигурации не несёт настройки: ни условия, ни ответов,
         ни кэша. Старые файлы сохраняли запись на КАЖДЫЙ блок, включая
         пустые — без фильтра они воскресали «пустыми триггерами» поверх
@@ -2670,7 +2670,7 @@ class CanTriggerTab(QWidget):
         return True
 
     @staticmethod
-    def _check_id_range(text: str, extended: int, label: str) -> List[str]:
+    def _check_id_range(text: str, extended: int, label: str) -> list[str]:
         """ID обязан парситься как hex и лежать в диапазоне кадра:
         11-бит ≤ 0x7FF, 29-бит ≤ 0x1FFFFFFF."""
         value = hex_to_int(text)
@@ -2688,11 +2688,11 @@ class CanTriggerTab(QWidget):
         return []
 
     @staticmethod
-    def _check_data(text: str, dlc: int, label: str) -> Tuple[List[str], List[str]]:
+    def _check_data(text: str, dlc: int, label: str) -> tuple[list[str], list[str]]:
         """Данные ≤ 8 байт (ошибка — прошивка отрежет молча); длина ≠ DLC
         (предупреждение — шина пошлёт DLC байт, не заявленное число)."""
-        errors: List[str] = []
-        warnings: List[str] = []
+        errors: list[str] = []
+        warnings: list[str] = []
         # Токен «X» — валидный wildcard-байт и тоже считается байтом.
         tokens = [t for t in text.split() if t.strip()]
         data_len = sum(
@@ -2711,16 +2711,16 @@ class CanTriggerTab(QWidget):
         return errors, warnings
 
     def _validate_config(
-        self, triggers: List[Dict[str, Any]]
-    ) -> Tuple[List[str], List[str]]:
+        self, triggers: list[dict[str, Any]]
+    ) -> tuple[list[str], list[str]]:
         """Проверка триггеров перед записью. Не меняет полей: ошибки
         блокируют запись, предупреждения требуют подтверждения — необычные,
         но допустимые конфигурации остаются возможными."""
-        errors: List[str] = []
-        warnings: List[str] = []
-        rx_seen: Dict[Tuple[int, str], List[int]] = {}
-        rx_map: Dict[Tuple[int, str], int] = {}
-        tx_map: Dict[Tuple[int, str], int] = {}
+        errors: list[str] = []
+        warnings: list[str] = []
+        rx_seen: dict[tuple[int, str], list[int]] = {}
+        rx_map: dict[tuple[int, str], int] = {}
+        tx_map: dict[tuple[int, str], int] = {}
         for i, trigger in enumerate(triggers, 1):
             if self._config_trigger_is_empty(trigger):
                 continue
@@ -2820,7 +2820,7 @@ class CanTriggerTab(QWidget):
                         can_id.upper(), channel + 1, ", ".join(map(str, indices))
                     )
                 )
-        pingpong_seen: Set[frozenset] = set()
+        pingpong_seen: set[frozenset] = set()
         for key, rx_i in rx_map.items():
             if key in tx_map and tx_map[key] != rx_i:
                 # A принимает то, что шлёт B — опасно только при
@@ -2843,7 +2843,7 @@ class CanTriggerTab(QWidget):
         return errors, warnings
 
     def set_config(
-        self, triggers: List[Dict[str, Any]], suspend_execution: bool = False
+        self, triggers: list[dict[str, Any]], suspend_execution: bool = False
     ) -> None:
         """Загружает конфигурацию триггеров из списка.
 
@@ -2888,7 +2888,7 @@ class CanTriggerTab(QWidget):
         self._update_add_trigger_button()
         self._memory_indicator.show_trigger_usage(count_configured_triggers(triggers))
 
-    def _apply_config_trigger(self, index: int, trigger: Dict[str, Any]) -> None:
+    def _apply_config_trigger(self, index: int, trigger: dict[str, Any]) -> None:
         """Применяет запись конфигурации к блоку — все поля + активность.
 
         `active` по умолчанию True: старые файлы/выгрузки ключа не имели,
@@ -2923,7 +2923,7 @@ class CanTriggerTab(QWidget):
 
     @staticmethod
     def _set_data_fields(
-        edits: List[QLineEdit], text: str, allow_x: bool = False
+        edits: list[QLineEdit], text: str, allow_x: bool = False
     ) -> None:
         """Заполняет байтовые поля из строки токенов позиционно: токен i
         попадает в поле i («X» — только в wildcard-полях, пустой/битый
@@ -2937,7 +2937,7 @@ class CanTriggerTab(QWidget):
                 value = hex_to_int(token)
                 edit.setText(f"{value:02X}" if value is not None else "")
 
-    def _set_row(self, row: Dict[str, Any], data: Dict[str, Any], prefix: str) -> None:
+    def _set_row(self, row: dict[str, Any], data: dict[str, Any], prefix: str) -> None:
         row["channel"].setCurrentIndex(int(data.get(f"{prefix}_channel", 0)))
         row["bit"].setCurrentIndex(int(data.get(f"{prefix}_bit", 0)))
         row["id"].setText(str(data.get(f"{prefix}_id", "")))
@@ -2945,7 +2945,7 @@ class CanTriggerTab(QWidget):
         self._set_data_fields(row["data"], str(data.get(f"{prefix}_data", "")), allow_x=True)
         self._set_data_enabled(row["data"], row["dlc"].value())
 
-    def _set_response_rows(self, response_block: Dict[str, Any], responses: List[Dict[str, Any]]) -> None:
+    def _set_response_rows(self, response_block: dict[str, Any], responses: list[dict[str, Any]]) -> None:
         """Заполняет динамический список фреймов ответа из конфигурации."""
         rows = response_block["rows"]
         for r, row in enumerate(rows):
@@ -2957,7 +2957,7 @@ class CanTriggerTab(QWidget):
             self._add_response_row(response_block, self._font)
             self._set_response(response_block["rows"][-1], responses[r])
 
-    def _set_response(self, response: Dict[str, Any], data: Dict[str, Any]) -> None:
+    def _set_response(self, response: dict[str, Any], data: dict[str, Any]) -> None:
         response["channel"].setCurrentIndex(int(data.get("channel", 0)))
         response["bit"].setCurrentIndex(int(data.get("bit", 0)))
         response["id"].setText(str(data.get("id", "")))
@@ -2970,7 +2970,7 @@ class CanTriggerTab(QWidget):
         response["count"].setValue(int(data.get("count", 1)))
         response["next_delay"].setValue(int(data.get("next_delay", 0)))
 
-    def _set_cache(self, cache: Dict[str, Any], data: Dict[str, Any]) -> None:
+    def _set_cache(self, cache: dict[str, Any], data: dict[str, Any]) -> None:
         rows = data.get("cache_rows")
         if not isinstance(rows, list):
             # Легаси-конфиг: одиночный кэш в плоских полях cache_*.
@@ -2989,7 +2989,7 @@ class CanTriggerTab(QWidget):
             }]
         self._set_cache_rows(cache, rows)
 
-    def _set_cache_rows(self, cache: Dict[str, Any], rows: List[Dict[str, Any]]) -> None:
+    def _set_cache_rows(self, cache: dict[str, Any], rows: list[dict[str, Any]]) -> None:
         """Заполняет динамический список строк кэша — как _set_response_rows."""
         widget_rows = cache["rows"]
         for r, row in enumerate(widget_rows):
@@ -3001,7 +3001,7 @@ class CanTriggerTab(QWidget):
             self._add_cache_row(cache, self._font)
             self._set_cache_row(cache["rows"][-1], rows[r])
 
-    def _set_cache_row(self, row: Dict[str, Any], data: Dict[str, Any]) -> None:
+    def _set_cache_row(self, row: dict[str, Any], data: dict[str, Any]) -> None:
         row["channel"].setCurrentIndex(int(data.get("channel", 0)))
         row["tx_channel"].setCurrentIndex(int(data.get("tx_channel", 0)))
         row["bit"].setCurrentIndex(int(data.get("bit", 0)))
@@ -3024,7 +3024,7 @@ class CanTriggerTab(QWidget):
         self._set_data_enabled(row["from_data"], row["dlc"].value())
         self._set_data_enabled(row["to_data"], row["dlc"].value())
 
-    def _data_from_response(self, response: Dict[str, Any]) -> bytes:
+    def _data_from_response(self, response: dict[str, Any]) -> bytes:
         """Формирует байты данных фрейма ответа с учётом DLC."""
         dlc = int(response["dlc"])
         parsed = response["data"]
@@ -3040,7 +3040,7 @@ class CanTriggerTab(QWidget):
         data: bytes,
         channel_index: int,
         rtr: bool = False,
-        dlc: Optional[int] = None,
+        dlc: int | None = None,
     ) -> None:
         """Отправляет один CAN-кадр в указанный канал."""
         if not self._serial_manager.is_open():
@@ -3053,7 +3053,7 @@ class CanTriggerTab(QWidget):
             self._serial_manager.send_data(pack_can_frame(1, can_id, data, rtr=rtr, dlc=dlc))
             self._serial_manager.send_data(pack_can_frame(2, can_id, data, rtr=rtr, dlc=dlc))
 
-    def process_frame(self, frame: Dict[str, Any]) -> None:
+    def process_frame(self, frame: dict[str, Any]) -> None:
         frame_id = int(frame["id"])
         frame_channel = int(frame["channel"])
         data = bytes(frame["data"])
@@ -3111,7 +3111,7 @@ class CanTriggerTab(QWidget):
 
     def _match_rx_header(
         self,
-        trigger: Dict[str, Any],
+        trigger: dict[str, Any],
         frame_id: int,
         frame_channel: int,
         frame_rtr: bool = False,
@@ -3127,7 +3127,7 @@ class CanTriggerTab(QWidget):
 
     @staticmethod
     def _match_rx_data(
-        trigger: Dict[str, Any], data: bytes, frame_rtr: bool = False
+        trigger: dict[str, Any], data: bytes, frame_rtr: bool = False
     ) -> bool:
         """Побайтовое сравнение Data: None в шаблоне — wildcard «X»."""
         if trigger.get("recv_rtr"):
@@ -3139,7 +3139,7 @@ class CanTriggerTab(QWidget):
                 return False
         return True
 
-    def _send_responses(self, trigger: Dict[str, Any]) -> None:
+    def _send_responses(self, trigger: dict[str, Any]) -> None:
         """Последовательно отправляет фреймы ответа с задержками и паузами."""
         cumulative = 0
         for i, response in enumerate(trigger["responses"]):
@@ -3164,7 +3164,7 @@ class CanTriggerTab(QWidget):
             if i < len(trigger["responses"]) - 1:
                 cumulative += response["next_delay"]
 
-    def _send_cached_frames(self, trigger: Dict[str, Any]) -> None:
+    def _send_cached_frames(self, trigger: dict[str, Any]) -> None:
         """Отправляет кэшированные кадры по строкам — как _send_responses:
         у каждой строки своя пауза перед отправкой, пауза между пакетами
         и количество; между строками — «Пауза перед следующим».
@@ -3198,7 +3198,7 @@ class CanTriggerTab(QWidget):
 
     def _update_cache(
         self,
-        trigger: Dict[str, Any],
+        trigger: dict[str, Any],
         frame_id: int,
         frame_channel: int,
         data: bytes,
@@ -3259,9 +3259,9 @@ class CanTriggerTab(QWidget):
     @staticmethod
     def _cache_src_matches(
         data: bytes,
-        data_from: List[Optional[int]],
-        data_to: List[Optional[int]],
-        wild: List[bool],
+        data_from: list[int | None],
+        data_to: list[int | None],
+        wild: list[bool],
         dlc: int,
     ) -> bool:
         """Побайтовая проверка [От, До]: байт i подходит, если
@@ -3277,7 +3277,7 @@ class CanTriggerTab(QWidget):
                 return False
         return True
 
-    def create_trigger_from_packet(self, packet: Dict[str, object]) -> None:
+    def create_trigger_from_packet(self, packet: dict[str, object]) -> None:
         """Создаёт первый триггер из пакета мониторинга."""
         if not self._blocks:
             if self._add_trigger_block() is None:

@@ -3,7 +3,7 @@
 «подтянул хлам и перезаписал всё»)."""
 
 import sys
-from typing import Any, Dict, List
+from typing import Any
 
 import pytest
 
@@ -21,7 +21,7 @@ class _FakeConfig:
     """Изолирует тест от реального config.json разработчика."""
 
     def __init__(self) -> None:
-        self._data: Dict[str, Any] = {}
+        self._data: dict[str, Any] = {}
 
     def get(self, key: str, default: Any = None) -> Any:
         return self._data.get(key, default)
@@ -30,7 +30,7 @@ class _FakeConfig:
         self._data[key] = value
 
 
-def _cfg_trigger(recv_id: str = "111", tx_id: str = "222") -> Dict[str, Any]:
+def _cfg_trigger(recv_id: str = "111", tx_id: str = "222") -> dict[str, Any]:
     return {
         "active": True,
         "recv_id": recv_id,
@@ -45,7 +45,7 @@ def _cfg_trigger(recv_id: str = "111", tx_id: str = "222") -> Dict[str, Any]:
     }
 
 
-def _device_records(tab: CanTriggerTab, indexes: List[int]) -> List[Dict[str, Any]]:
+def _device_records(tab: CanTriggerTab, indexes: list[int]) -> list[dict[str, Any]]:
     """Записи устройства в том виде, в каком их вернёт вычитка —
     многофреймовый триггер разворачивается в группу записей, как при
     реальной записи."""
@@ -140,7 +140,7 @@ def test_file_loaded_triggers_do_not_execute_until_save(tab) -> None:
     исполняет пришедшие из файла триггеры и на шину ничего не уходит,
     пока оператор не нажмёт «Сохранить» (полевая жалоба — устройство
     «отвечало» сразу после загрузки, как будто конфиг прогрузили в МК)."""
-    sent: List[Dict[str, Any]] = []
+    sent: list[dict[str, Any]] = []
     tab._send_responses = sent.append
     tab._send_cached_frames = sent.append
     tab.set_config([_cfg_trigger()], suspend_execution=True)
@@ -183,7 +183,7 @@ def test_commit_payload_normal_unchanged() -> None:
     assert trigger_module._commit_payload(5, 2) == b"\x05"
 
 
-def _multi_response_trigger() -> Dict[str, Any]:
+def _multi_response_trigger() -> dict[str, Any]:
     """Многофреймовый триггер: два фрейма ответа — разворачивается в
     группу записей МК (group_seq), исполняет устройство."""
     trigger = _cfg_trigger()
@@ -193,7 +193,7 @@ def _multi_response_trigger() -> Dict[str, Any]:
     return trigger
 
 
-def _unexpandable_trigger() -> Dict[str, Any]:
+def _unexpandable_trigger() -> dict[str, Any]:
     """PC-only триггер: расписание не влезает в записи МК (суммарная
     задержка >65 с) — на МК пишется томбстоун с enabled=0, исполняет
     приложение."""
@@ -208,7 +208,7 @@ def _unexpandable_trigger() -> Dict[str, Any]:
     return trigger
 
 
-def _tombstone(recv_id: int = 0x111, tx_id: int = 0x222) -> Dict[str, Any]:
+def _tombstone(recv_id: int = 0x111, tx_id: int = 0x222) -> dict[str, Any]:
     """Запись МК, как её возвращает вычитка для PC-only триггера:
     enabled=0, хранит только первый фрейм ответа."""
     return unpack_trigger(pack_trigger({"enabled": 0, "rx_id": recv_id, "tx_id": tx_id}))
@@ -400,7 +400,7 @@ def test_validate_silent_for_normal_trigger(tab) -> None:
     assert not any("выключен" in w or "приложением" in w for w in warnings)
 
 
-def _cache_cfg() -> Dict[str, Any]:
+def _cache_cfg() -> dict[str, Any]:
     """Триггер с двумя строками кэша и wildcard «X» в приёме и диапазонах."""
     return {
         "active": True,
@@ -503,7 +503,7 @@ def test_pc_cache_wildcard_zeroing(tab) -> None:
     assert (0, 0) not in tab._pc_cache
     # Срабатывание по приёму → ответ из кэша на канале строки (CAN2).
     tab.process_frame(src)
-    sent: List[tuple] = []
+    sent: list[tuple] = []
     tab._send_frame = lambda *a, **k: sent.append(a)
     tab.process_frame({"id": 0x111, "channel": 1, "data": bytes([0xAA, 0x00, 0x33]),
                        "extended": False, "rtr": False})

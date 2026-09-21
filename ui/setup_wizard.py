@@ -1,6 +1,5 @@
 """Мастер первого запуска приложения «Код Мастер»."""
 
-from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -28,7 +27,7 @@ except Exception:  # noqa: BLE001
 class _WelcomePage(QWizardPage):
     """Страница приветствия."""
 
-    def __init__(self, parent: Optional[Qt.Widget] = None) -> None:
+    def __init__(self, parent: Qt.Widget | None = None) -> None:
         super().__init__(parent)
         self.setTitle(tr("Добро пожаловать"))
         self.setSubTitle(tr("Этот мастер поможет настроить приложение для первого использования"))
@@ -48,7 +47,7 @@ class _WelcomePage(QWizardPage):
 class _LanguagePage(QWizardPage):
     """Страница выбора языка."""
 
-    def __init__(self, wizard_ref: "SetupWizard", parent: Optional[Qt.Widget] = None) -> None:
+    def __init__(self, wizard_ref: "SetupWizard", parent: Qt.Widget | None = None) -> None:
         super().__init__(parent)
         self._wizard = wizard_ref
         self._config = Config()
@@ -79,7 +78,7 @@ class _LanguagePage(QWizardPage):
 class _DeviceTypePage(QWizardPage):
     """Страница выбора типа устройства."""
 
-    def __init__(self, parent: Optional[Qt.Widget] = None) -> None:
+    def __init__(self, parent: Qt.Widget | None = None) -> None:
         super().__init__(parent)
         self._config = Config()
         self.setTitle(tr("Тип устройства"))
@@ -107,7 +106,7 @@ class _DeviceTypePage(QWizardPage):
 class _ConnectionPage(QWizardPage):
     """Страница выбора COM-порта."""
 
-    def __init__(self, parent: Optional[Qt.Widget] = None) -> None:
+    def __init__(self, parent: Qt.Widget | None = None) -> None:
         super().__init__(parent)
         self._config = Config()
         self.setTitle(tr("Подключение"))
@@ -165,7 +164,7 @@ class _ConnectionPage(QWizardPage):
 class _FinishPage(QWizardPage):
     """Завершающая страница мастера."""
 
-    def __init__(self, parent: Optional[Qt.Widget] = None) -> None:
+    def __init__(self, parent: Qt.Widget | None = None) -> None:
         super().__init__(parent)
         self.setTitle(tr("Настройка завершена"))
         self.setSubTitle(tr("Приложение готово к работе"))
@@ -182,7 +181,7 @@ class _FinishPage(QWizardPage):
 class SetupWizard(QWizard):
     """Мастер первого запуска."""
 
-    def __init__(self, parent: Optional[Qt.Widget] = None) -> None:
+    def __init__(self, parent: Qt.Widget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("Мастер настройки"))
         self.setWizardStyle(QWizard.WizardStyle.ModernStyle)

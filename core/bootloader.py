@@ -6,7 +6,8 @@
 """
 
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
+from collections.abc import Callable
 
 import serial
 
@@ -57,7 +58,7 @@ class Bootloader:
     # Команда перезагрузки из приложения в bootloader (принимается прошивкой приложения)
     REBOOT_TO_BOOTLOADER_MAGIC = b"\x00REBOOT_TO_BOOTLOADER\n"
 
-    def __init__(self, port: serial.Serial, progress_callback: Optional[Callable[[int], None]] = None) -> None:
+    def __init__(self, port: serial.Serial, progress_callback: Callable[[int], None] | None = None) -> None:
         """Создаёт объект бутлоадера.
 
         Args:
@@ -77,7 +78,7 @@ class Bootloader:
         port_name: str,
         baudrate: int = 115200,
         timeout: float = 1.0,
-        progress_callback: Optional[Callable[[int], None]] = None,
+        progress_callback: Callable[[int], None] | None = None,
     ) -> "Bootloader":
         """Открывает COM-порт с параметрами bootloader-протокола AN3155
         (8 бит, чётность Even, 1 стоп-бит) и возвращает готовый Bootloader.
@@ -97,7 +98,7 @@ class Bootloader:
         Raises:
             serial.SerialException: если порт не удалось открыть.
         """
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         for attempt in range(cls.OPEN_RETRIES):
             try:
                 port = serial.Serial(
@@ -153,7 +154,7 @@ class Bootloader:
         ERROR_GEN_FAILURE (31)/ERROR_ACCESS_DENIED, хотя порт уже виден в
         ``comports()``.
         """
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         for attempt in range(self.OPEN_RETRIES):
             try:
                 self.port.open()
@@ -209,7 +210,7 @@ class Bootloader:
                 raise BootloaderError(f"Команда 0x{command:02X} не подтверждена (ответ 0x{response:02X})")
 
     @classmethod
-    def find_device_port(cls, vid: int = 0, pid: int = 0, timeout: float = 0.0) -> Optional[str]:
+    def find_device_port(cls, vid: int = 0, pid: int = 0, timeout: float = 0.0) -> str | None:
         """Ищет COM-порт устройства по VID/PID.
 
         Args:
@@ -237,7 +238,7 @@ class Bootloader:
                 return None
             time.sleep(0.05)
 
-    def _port_info(self) -> Optional[Any]:
+    def _port_info(self) -> Any | None:
         """Возвращает информацию о текущем COM-порте."""
         for p in comports():
             if p.device == self.port.port:
@@ -388,7 +389,7 @@ class Bootloader:
             return
         end = start + len(data)
         page = (start // page_size) * page_size
-        pages_to_erase: List[int] = []
+        pages_to_erase: list[int] = []
         while page < end:
             seg_start = max(start, page)
             seg_end = min(end, page + page_size)
@@ -584,7 +585,7 @@ class Bootloader:
         logger.info("BL device ID: 0x%08X", device_id)
         return device_id
 
-    def diagnostics(self) -> Dict[str, int]:
+    def diagnostics(self) -> dict[str, int]:
         """Выполняет синхронизацию и возвращает версию и ID устройства.
 
         Returns:
@@ -647,8 +648,8 @@ class Bootloader:
         base_address: int = APPLICATION_BASE_ADDR,
         page_size: int = 2048,
         skip_blank: bool = True,
-        status_callback: Optional[Callable[[str], None]] = None,
-    ) -> List[Tuple[int, bytes]]:
+        status_callback: Callable[[str], None] | None = None,
+    ) -> list[tuple[int, bytes]]:
         """Записывает файл прошивки в память STM32.
 
         Поддерживает .bin, .hex (Intel HEX) и .elf.
@@ -717,7 +718,7 @@ class Bootloader:
         # DEVICE_CONFIG_PAGE_ADDR пишем отдельным регионом — прямое
         # пересечение config-страницы validate_write_region запрещает,
         # а здесь запись конфигурации явно запрошена оператором.
-        cfg_tail: Optional[bytes] = None
+        cfg_tail: bytes | None = None
         cfg_rel = DEVICE_CONFIG_PAGE_ADDR - base_address
         if 0 < cfg_rel < len(firmware):
             cfg_tail = firmware[cfg_rel:]
@@ -804,7 +805,7 @@ class Bootloader:
         status(f"Запись {len(code)} байт с 0x{base_address:08X}")
         total = len(code) + (len(meta) if meta else 0) + (len(cfg_tail) if cfg_tail else 0)
         written = self._write_region(base_address, code, 0, total, skip_blank)
-        regions: List[Tuple[int, bytes]] = [(base_address, code)]
+        regions: list[tuple[int, bytes]] = [(base_address, code)]
         if cfg_tail is not None:
             status(f"Запись config-страницы ({len(cfg_tail)} байт)")
             written = self._write_region(

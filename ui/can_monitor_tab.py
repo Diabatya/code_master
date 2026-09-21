@@ -4,7 +4,7 @@ import csv
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, TextIO, Tuple
+from typing import Any, TextIO
 
 from PySide6.QtCore import QPointF, QRect, QRegularExpression, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -113,7 +113,7 @@ class _IdValidator:
 class DataVariantsDialog(QDialog):
     """Диалог со списком уникальных наборов данных для выбранного ID."""
 
-    def __init__(self, can_id: int, variants: Set[bytes], parent: Optional[QWidget] = None) -> None:
+    def __init__(self, can_id: int, variants: set[bytes], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("Варианты данных для ID {0}").format(int_to_hex(can_id, 8 if can_id > 0x7FF else 3)))
         self.resize(500, 300)
@@ -149,7 +149,7 @@ def _is_dark_theme() -> bool:
         return False
 
 
-def _tx_echo_colors() -> Tuple[QColor, QColor]:
+def _tx_echo_colors() -> tuple[QColor, QColor]:
     """Фон и текст строки кадра, отправленного самим МК (tx_echo):
     тёмная тема — оранжевый фон с чёрным текстом, светлая — чёрный
     фон с белым текстом."""
@@ -158,7 +158,7 @@ def _tx_echo_colors() -> Tuple[QColor, QColor]:
     return QColor("#000000"), QColor("#FFFFFF")
 
 
-def _data_percent(data: bytes, dlc: int, byte_index: Optional[int] = None) -> float:
+def _data_percent(data: bytes, dlc: int, byte_index: int | None = None) -> float:
     """DATA как процент заполнения: 00..00 → 0%, FF..FF → 100%.
 
     byte_index=None — весь DATA целиком; иначе — один байт (0x00→0%, 0xFF→100%).
@@ -184,12 +184,12 @@ class _PercentGraph(QWidget):
 
     LINE_COLOR = QColor("#4CAF50")
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._samples: List[Tuple[float, float]] = []  # (time, percent)
+        self._samples: list[tuple[float, float]] = []  # (time, percent)
         self._window_s = 30.0
         self._inverted = False
-        self._hover_x: Optional[float] = None
+        self._hover_x: float | None = None
         self.setMinimumHeight(150)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
@@ -208,7 +208,7 @@ class _PercentGraph(QWidget):
             del self._samples[: len(self._samples) - 10_000]
         self.update()
 
-    def set_samples(self, samples: List[Tuple[float, float]]) -> None:
+    def set_samples(self, samples: list[tuple[float, float]]) -> None:
         self._samples = list(samples)
         self.update()
 
@@ -225,7 +225,7 @@ class _PercentGraph(QWidget):
         return QPointF(x, y)
 
     @staticmethod
-    def _smooth_path(points: List[QPointF]) -> QPainterPath:
+    def _smooth_path(points: list[QPointF]) -> QPainterPath:
         """Сглаживание Catmull-Rom → кубические Bezier (плавная кривая)."""
         path = QPainterPath()
         if not points:
@@ -357,8 +357,8 @@ class IdHistoryDialog(QDialog):
         self,
         can_id: int,
         channel: int,
-        samples: List[Tuple[float, bytes, bool, int]],
-        parent: Optional[QWidget] = None,
+        samples: list[tuple[float, bytes, bool, int]],
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.can_id = can_id
@@ -368,8 +368,8 @@ class IdHistoryDialog(QDialog):
         self.setWindowState(Qt.WindowState.WindowMaximized)
         # Сырые сэмплы для пересчёта при смене источника графика
         # (весь DATA или конкретный байт) и инверсии.
-        self._samples_raw: List[Tuple[float, bytes, bool, int]] = []
-        self._byte_index: Optional[int] = None
+        self._samples_raw: list[tuple[float, bytes, bool, int]] = []
+        self._byte_index: int | None = None
 
         font = QFont("Segoe UI", 9)
         layout = QVBoxLayout(self)
@@ -528,7 +528,7 @@ class IdHistoryDialog(QDialog):
 class BitmapDialog(QDialog):
     """Диалог с битовой картой 8×8 для последнего кадра ID."""
 
-    def __init__(self, can_id: int, data: bytes, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, can_id: int, data: bytes, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("Битовая карта ID {0}").format(int_to_hex(can_id, 8 if can_id > 0x7FF else 3)))
         layout = QGridLayout(self)
@@ -550,12 +550,12 @@ class BitmapDialog(QDialog):
 class DbcSignalDialog(QDialog):
     """Диалог выбора сообщения и сигнала из DBC для автозаполнения."""
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("Выбор сигнала из DBC"))
         self.resize(360, 180)
         self._dbc_manager = DBCManager()
-        self._result: Optional[Any] = None
+        self._result: Any | None = None
         layout = QVBoxLayout(self)
         self._message_combo = QComboBox()
         self._signal_combo = QComboBox()
@@ -602,7 +602,7 @@ class DbcSignalDialog(QDialog):
             return
         self.accept()
 
-    def get_result(self) -> Optional[Any]:
+    def get_result(self) -> Any | None:
         return self._result
 
 
@@ -612,7 +612,7 @@ class CanChannelMonitor(QWidget):
     create_trigger_requested = Signal(dict)
     monitoring_state_changed = Signal(int, bool)
 
-    def __init__(self, channel: int, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, channel: int, serial_manager: SerialManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._channel = channel
         self._channel_byte = channel
@@ -621,23 +621,23 @@ class CanChannelMonitor(QWidget):
         self._running = False
         self._received_count = 0
         self._sent_count = 0
-        self._packet_times: deque[Tuple[float, int]] = deque()  # (t, бит кадра)
-        self._last_packet_time: Optional[float] = None
-        self._cyclic_frame: Optional[bytes] = None
+        self._packet_times: deque[tuple[float, int]] = deque()  # (t, бит кадра)
+        self._last_packet_time: float | None = None
+        self._cyclic_frame: bytes | None = None
         self._dbc_manager = DBCManager()
 
-        self._id_to_row: Dict[int, int] = {}
-        self._id_stats: Dict[int, Dict[str, Any]] = {}
-        self._id_data_variants: Dict[int, Set[bytes]] = {}
+        self._id_to_row: dict[int, int] = {}
+        self._id_stats: dict[int, dict[str, Any]] = {}
+        self._id_data_variants: dict[int, set[bytes]] = {}
         # Последнее направление кадра по каждому ID: True — кадр
         # отправлен самим МК (tx_echo), строка подсвечивается цветом
         # направления (тёмная тема — оранжевый, светлая — чёрный).
-        self._id_tx_echo: Dict[int, bool] = {}
+        self._id_tx_echo: dict[int, bool] = {}
         # История фреймов по каждому ID (время, data, rtr, dlc) — для
         # диалога «История ID» из контекстного меню таблицы.
-        self._id_history: Dict[int, deque] = {}
-        self._history_dialogs: List[IdHistoryDialog] = []
-        self._highlight_timers: Dict[int, QTimer] = {}
+        self._id_history: dict[int, deque] = {}
+        self._history_dialogs: list[IdHistoryDialog] = []
+        self._highlight_timers: dict[int, QTimer] = {}
         self._ignored_ids: set[int] = set()
         # Предыдущие значения счётчиков ошибок — для визуальных предупреждений
         # (чек-лист 4.2): bus-off/рост потерь подсвечивают строку статуса.
@@ -678,7 +678,7 @@ class CanChannelMonitor(QWidget):
         self._search_edit.setPlaceholderText(tr("Поиск по ID или данным…"))
         self._search_edit.textChanged.connect(self._apply_search)
 
-        self._filter_rules: List[Dict[str, Any]] = []
+        self._filter_rules: list[dict[str, Any]] = []
         self._filter_enabled = False
         self._highlight_interval_ms = 500
 
@@ -886,7 +886,7 @@ class CanChannelMonitor(QWidget):
             else:
                 edit.setEnabled(True)
 
-    def _fill_send_from_packet(self, parsed: Dict[str, Any]) -> None:
+    def _fill_send_from_packet(self, parsed: dict[str, Any]) -> None:
         """Заполняет панель отправки из распарсенного пакета."""
         can_id = parsed.get("id")
         if can_id is None:
@@ -1130,7 +1130,7 @@ class CanChannelMonitor(QWidget):
             f"QProgressBar::chunk {{ background: {color}; border-radius: 3px; }}"
         )
 
-    def _update_error_warnings(self, device: Dict[str, int]) -> None:
+    def _update_error_warnings(self, device: dict[str, int]) -> None:
         """Подсвечивает строку статуса при bus-off или росте потерь кадров."""
         busoff = int(device.get("busoff_count", 0))
         lost = int(device.get("lost_count", 0))
@@ -1189,7 +1189,7 @@ class CanChannelMonitor(QWidget):
 
     def _build_row_items(
         self, frame_id: int, dlc: int, data: bytes, rtr: bool, timestamp: str, period: str, count: int
-    ) -> List[str]:
+    ) -> list[str]:
         id_width = 8 if frame_id > 0x7FF else 3
         signals = "" if rtr else self._format_signals(frame_id, data)
         return [
@@ -1202,7 +1202,7 @@ class CanChannelMonitor(QWidget):
             signals,
         ]
 
-    def add_frame(self, frame: Dict[str, object]) -> None:
+    def add_frame(self, frame: dict[str, object]) -> None:
         if not self._running:
             return
         frame_id = int(frame["id"])
@@ -1332,7 +1332,7 @@ class CanChannelMonitor(QWidget):
 
         return False
 
-    def _rule_matches(self, rules: List[Dict[str, Any]], frame_id: int, data: bytes) -> bool:
+    def _rule_matches(self, rules: list[dict[str, Any]], frame_id: int, data: bytes) -> bool:
         for rule in rules:
             id_from = rule.get("id_from")
             id_to = rule.get("id_to")
@@ -1532,14 +1532,14 @@ class CanChannelMonitor(QWidget):
         """Уведомляет канал о смене DBC."""
         self._apply_search(self._search_edit.text())
 
-    def set_filter(self, enabled: bool, rules: List[Dict[str, Any]], ignored_ids: List[int], interval_ms: int) -> None:
+    def set_filter(self, enabled: bool, rules: list[dict[str, Any]], ignored_ids: list[int], interval_ms: int) -> None:
         """Устанавливает правила фильтрации и интервал подсветки."""
         self._filter_enabled = enabled
         self._filter_rules = rules
         self._ignored_ids = set(ignored_ids)
         self._highlight_interval_ms = max(0, interval_ms)
 
-    def get_known_ids(self) -> List[int]:
+    def get_known_ids(self) -> list[int]:
         """Возвращает список ID, которые уже были получены в канале."""
         return list(self._id_to_row.keys())
 
@@ -1565,14 +1565,14 @@ class CanMonitorTab(QWidget):
     # окно настроек показывает процентный индикатор во время «Сохранить».
     progress_updated = Signal(int, str)
 
-    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, serial_manager: SerialManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._config = Config()
         self._recording = False
-        self._csv_file: Optional[TextIO] = None
-        self._csv_writer: Optional[csv.writer] = None
-        self._csv_path: Optional[Path] = None
+        self._csv_file: TextIO | None = None
+        self._csv_writer: csv.writer | None = None
+        self._csv_path: Path | None = None
         self._dbc_manager = DBCManager()
         self._memory_indicator = MemoryIndicator(self)
         self._syncing_config = False
@@ -1714,7 +1714,7 @@ class CanMonitorTab(QWidget):
         self._can2_speed_combo.currentIndexChanged.connect(self._on_can2_speed_changed)
         self._can2_speed_combo.lineEdit().editingFinished.connect(self._on_can2_speed_changed)
 
-        self._cyclic_rows: List[Dict[str, Any]] = []
+        self._cyclic_rows: list[dict[str, Any]] = []
         self._cyclic_group = self._create_cyclic_panel(compact_font)
 
     def _create_cyclic_panel(self, font: QFont) -> QGroupBox:
@@ -1802,13 +1802,13 @@ class CanMonitorTab(QWidget):
         self._cyclic_rows.append(row)
         self._cyclic_rows_layout.addWidget(row_widget)
 
-    def _remove_cyclic_row(self, row: Dict[str, Any]) -> None:
+    def _remove_cyclic_row(self, row: dict[str, Any]) -> None:
         row["timer"].stop()
         self._cyclic_rows.remove(row)
         row["widget"].setParent(None)
         row["widget"].deleteLater()
 
-    def _on_cyclic_toggled(self, row: Dict[str, Any], checked: bool) -> None:
+    def _on_cyclic_toggled(self, row: dict[str, Any], checked: bool) -> None:
         if not checked:
             row["timer"].stop()
             return
@@ -1825,7 +1825,7 @@ class CanMonitorTab(QWidget):
         row["timer"].start()
         self._send_cyclic_row(row)
 
-    def _send_cyclic_row(self, row: Dict[str, Any]) -> None:
+    def _send_cyclic_row(self, row: dict[str, Any]) -> None:
         if not self._serial_manager.is_open():
             row["active"].setChecked(False)
             row["timer"].stop()
@@ -1909,7 +1909,7 @@ class CanMonitorTab(QWidget):
             self._monitor1._start()
             self._monitor2._start()
 
-    def _get_known_ids(self) -> List[int]:
+    def _get_known_ids(self) -> list[int]:
         return list(set(self._monitor1.get_known_ids() + self._monitor2.get_known_ids()))
 
     def _on_highlight_interval_changed(self, value: int) -> None:
@@ -1961,7 +1961,7 @@ class CanMonitorTab(QWidget):
         steps_done = 0
         total_steps = 6  # speed + mode + readback на каждый из двух каналов
         self.progress_updated.emit(0, tr("Применение CAN-настроек"))
-        mismatches: List[str] = []
+        mismatches: list[str] = []
         with self._serial_manager.control_session():
             for channel in (1, 2):
                 kbps = self._speed_combo_kbps(
@@ -2125,7 +2125,7 @@ class CanMonitorTab(QWidget):
             effect.setOpacity(0.5)
             self._sleep_time_spin.setStyleSheet("QSpinBox { color: #888888; }")
 
-    def process_frame(self, frame: Dict[str, object]) -> None:
+    def process_frame(self, frame: dict[str, object]) -> None:
         channel = int(frame["channel"])
         if channel == 1:
             self._monitor1.add_frame(frame)
@@ -2183,7 +2183,7 @@ class CanMonitorTab(QWidget):
                 self._csv_file = None
                 self._csv_writer = None
 
-    def _write_frame_to_csv(self, frame: Dict[str, object]) -> None:
+    def _write_frame_to_csv(self, frame: dict[str, object]) -> None:
         if not self._recording or self._csv_writer is None:
             return
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S") + f".{int((time.time() % 1) * 1000):03d}"

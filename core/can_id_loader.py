@@ -3,7 +3,7 @@
 import csv
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from models.logger import get_logger
 
@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 class CanIdLoader:
     """Сканирует library/can_id и строит единый словарь CAN ID."""
 
-    def __init__(self, root: Optional[Path] = None) -> None:
+    def __init__(self, root: Path | None = None) -> None:
         if root is None:
             from models.utils import get_library_root
             root = get_library_root() / "can_id"
@@ -22,10 +22,10 @@ class CanIdLoader:
         project_root = Path(__file__).resolve().parent.parent / "library" / "can_id"
         if project_root.exists() and project_root not in self._roots:
             self._roots.append(project_root)
-        self._data: Dict[str, Dict[str, Dict[int, List[Dict[str, Any]]]]] = {}
+        self._data: dict[str, dict[str, dict[int, list[dict[str, Any]]]]] = {}
 
     @property
-    def data(self) -> Dict[str, Dict[str, Dict[int, List[Dict[str, Any]]]]]:
+    def data(self) -> dict[str, dict[str, dict[int, list[dict[str, Any]]]]]:
         return self._data
 
     def load(self) -> None:
@@ -57,7 +57,7 @@ class CanIdLoader:
             return
         self._data.setdefault(make, {}).setdefault(model, {}).setdefault(year, [])
 
-    def _add(self, make: str, model: str, year: int, message: Dict[str, Any]) -> None:
+    def _add(self, make: str, model: str, year: int, message: dict[str, Any]) -> None:
         make = make.strip()
         model = model.strip()
         if not make or not model:
@@ -66,7 +66,7 @@ class CanIdLoader:
             return
         self._data.setdefault(make, {}).setdefault(model, {}).setdefault(year, []).append(message)
 
-    def _parse_id(self, value: Any) -> Optional[int]:
+    def _parse_id(self, value: Any) -> int | None:
         if isinstance(value, int):
             return value
         if isinstance(value, str):
@@ -102,7 +102,7 @@ class CanIdLoader:
                 return 0
         return 1 if can_id > 0x7FF else 0
 
-    def _build_message(self, raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _build_message(self, raw: dict[str, Any]) -> dict[str, Any] | None:
         can_id = self._parse_id(raw.get("id") or raw.get("can_id") or raw.get("canid") or raw.get("address"))
         if can_id is None:
             return None
@@ -165,7 +165,7 @@ class CanIdLoader:
                 for make, models in payload.items():
                     self._load_json_item({"make": make, **(models if isinstance(models, dict) else {})}, path)
 
-    def _load_json_item(self, raw: Dict[str, Any], path: Optional[Path] = None) -> None:
+    def _load_json_item(self, raw: dict[str, Any], path: Path | None = None) -> None:
         make = raw.get("make") or raw.get("brand") or (path.stem if path else "Unknown")
         model = raw.get("model") or (path.stem if path else "Unknown")
         year = raw.get("year", 0)
@@ -237,7 +237,7 @@ class CanIdLoader:
         make = path.parent.name or path.stem
         model = path.stem
         year = 0
-        headers: List[str] = []
+        headers: list[str] = []
         for line in text.splitlines():
             if "|" in line:
                 parts = [p.strip().lower() for p in line.split("|") if p.strip()]
@@ -291,12 +291,12 @@ class CanIdLoader:
                     for m in messages:
                         self._add(make, model, year, m)
 
-    def get_tree(self) -> Dict[str, Dict[str, Dict[int, List[Dict[str, Any]]]]]:
+    def get_tree(self) -> dict[str, dict[str, dict[int, list[dict[str, Any]]]]]:
         return self._data
 
-    def make_flat(self) -> List[Dict[str, Any]]:
+    def make_flat(self) -> list[dict[str, Any]]:
         """Возвращает плоский список всех сообщений с полями make/model/year."""
-        result: List[Dict[str, Any]] = []
+        result: list[dict[str, Any]] = []
         for make, models in self._data.items():
             for model, years in models.items():
                 for year, messages in years.items():

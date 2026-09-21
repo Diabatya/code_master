@@ -1,6 +1,5 @@
 """Встроенная справка приложения «Код Мастер»."""
 
-from typing import Optional
 
 from PySide6.QtWidgets import (
     QDialog,
@@ -18,7 +17,7 @@ from models.version import VERSION
 class HelpWidget(QWidget):
     """Виджет справки с вкладками по разделам приложения."""
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._create_widgets()
         self._build_layout()
@@ -153,7 +152,7 @@ class HelpWidget(QWidget):
         self._about_edit.setPlainText(self._about_text())
 
 
-def show_help(parent: Optional[QWidget] = None) -> None:
+def show_help(parent: QWidget | None = None) -> None:
     """Открывает виджет справки в модальном диалоге."""
     dialog = QDialog(parent)
     dialog.setWindowTitle(tr("Справка"))

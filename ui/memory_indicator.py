@@ -1,6 +1,6 @@
 """Индикатор использования памяти для вкладок приложения."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -13,7 +13,7 @@ from models.translations import _ as tr
 class MemoryIndicator(QWidget):
     """Показывает процент использования памяти устройства."""
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._config = Config()
         self._create_widgets()
@@ -79,8 +79,8 @@ class MemoryIndicator(QWidget):
         except Exception:
             return 0
 
-    def estimate_triggers(self, triggers: List[Dict[str, Any]]) -> int:
+    def estimate_triggers(self, triggers: list[dict[str, Any]]) -> int:
         return self.estimate_bytes(triggers)
 
-    def estimate_rules(self, rules: List[Dict[str, Any]]) -> int:
+    def estimate_rules(self, rules: list[dict[str, Any]]) -> int:
         return self.estimate_bytes(rules)

@@ -8,7 +8,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List
+from typing import Any
+from collections.abc import Callable
 
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
@@ -40,12 +41,12 @@ class TriggerSimDialog(QDialog):
 
     def __init__(
         self,
-        records_provider: Callable[[], List[Dict[str, Any]]],
+        records_provider: Callable[[], list[dict[str, Any]]],
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._records_provider = records_provider
-        self._frames: List[Dict[str, Any]] = []
+        self._frames: list[dict[str, Any]] = []
         self.setWindowTitle(tr("Симуляция триггеров"))
         self.setMinimumSize(720, 560)
         font = QFont("Segoe UI", 9)
@@ -198,7 +199,7 @@ class TriggerSimDialog(QDialog):
             )
             return
         result = simulate(records, self._frames)
-        matched: Dict[int, int] = {}
+        matched: dict[int, int] = {}
         for event in result["events"]:
             kind = event["kind"]
             t_ms = float(event["time_ms"])

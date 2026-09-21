@@ -3,7 +3,7 @@
 import csv
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont
@@ -41,23 +41,23 @@ def _ascii_from_data(data: bytes) -> str:
 class CanAnalyzer(QWidget):
     """Виджет трэйса CAN-шины с двумя таблицами."""
 
-    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, serial_manager: SerialManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._dbc_manager = DBCManager()
         self._analyzing = False
         self._start_time = 0.0
-        self._id_last_time: Dict[int, float] = {}
+        self._id_last_time: dict[int, float] = {}
         # Обратная отправка строк таблицы в шину: очередь строк,
         # таймер рассылки и позиция «по кадрам» — на каждую таблицу.
-        self._send_queues: Dict[QTableWidget, List[int]] = {}
-        self._send_timers: Dict[QTableWidget, QTimer] = {}
-        self._step_rows: Dict[QTableWidget, List[int]] = {}
-        self._step_pos: Dict[QTableWidget, int] = {}
-        self._table_channel: Dict[QTableWidget, int] = {}
-        self._send_buttons: Dict[QTableWidget, tuple] = {}
-        self._send_timed: Dict[QTableWidget, bool] = {}
-        self._send_prev_ms: Dict[QTableWidget, "float | None"] = {}
+        self._send_queues: dict[QTableWidget, list[int]] = {}
+        self._send_timers: dict[QTableWidget, QTimer] = {}
+        self._step_rows: dict[QTableWidget, list[int]] = {}
+        self._step_pos: dict[QTableWidget, int] = {}
+        self._table_channel: dict[QTableWidget, int] = {}
+        self._send_buttons: dict[QTableWidget, tuple] = {}
+        self._send_timed: dict[QTableWidget, bool] = {}
+        self._send_prev_ms: dict[QTableWidget, float | None] = {}
         self._create_widgets()
         self._build_layout()
 
@@ -222,14 +222,14 @@ class CanAnalyzer(QWidget):
         self._table2.scrollToBottom()
         logger.info("Трэйс остановлен")
 
-    def process_frame(self, frame: Dict[str, Any]) -> None:
+    def process_frame(self, frame: dict[str, Any]) -> None:
         if not self._analyzing:
             return
         channel = int(frame.get("channel", 0))
         table = self._table1 if channel == 1 else self._table2
         self._add_trace_row(table, frame)
 
-    def _add_trace_row(self, table: QTableWidget, frame: Dict[str, Any]) -> None:
+    def _add_trace_row(self, table: QTableWidget, frame: dict[str, Any]) -> None:
         can_id = int(frame.get("id", 0))
         data = bytes(frame.get("data", b""))
         now = time.time()
@@ -271,12 +271,12 @@ class CanAnalyzer(QWidget):
 
     # ---- Обратная отправка кадров в шину -------------------------------
 
-    def _target_rows(self, table: QTableWidget) -> List[int]:
+    def _target_rows(self, table: QTableWidget) -> list[int]:
         """Выделенные строки по возрастанию; без выделения — вся таблица."""
         selected = sorted({idx.row() for idx in table.selectedIndexes()})
         return selected if selected else list(range(table.rowCount()))
 
-    def _row_to_packet(self, table: QTableWidget, row: int) -> Optional[bytes]:
+    def _row_to_packet(self, table: QTableWidget, row: int) -> bytes | None:
         """Строка таблицы → проводной CAN-кадр для send_data()."""
         id_item = table.item(row, 1)
         if id_item is None:
@@ -475,7 +475,7 @@ class CanAnalyzer(QWidget):
             return
         logger.info("Загружено %d кадров из %s", loaded, path)
 
-    def _append_loaded_row(self, table: QTableWidget, values: List[str]) -> None:
+    def _append_loaded_row(self, table: QTableWidget, values: list[str]) -> None:
         # 8-я колонка «Направление» появилась позже: старые файлы без неё
         # считаются приёмом с шины (RX).
         values = list(values[:8]) + ["RX"] * max(0, 8 - len(values))
@@ -548,5 +548,5 @@ class CanAnalyzer(QWidget):
         return loaded
 
     @staticmethod
-    def parse_packet_string(text: str) -> Optional[Dict[str, Any]]:
+    def parse_packet_string(text: str) -> dict[str, Any] | None:
         return parse_packet_string(text)

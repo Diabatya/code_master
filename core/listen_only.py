@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any, Callable, List, Optional
+from typing import Any
+from collections.abc import Callable
 
 import serial
 from PySide6.QtCore import QObject, QThread, Signal
@@ -108,7 +109,7 @@ class _DecoderWorker(QThread):
 
     packet_ready = Signal(object)
 
-    def __init__(self, raw_queue: Queue, parent: Optional[QObject] = None) -> None:
+    def __init__(self, raw_queue: Queue, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._raw_queue = raw_queue
         self._running = True
@@ -147,7 +148,7 @@ class _ProxyWorker(QThread):
         dst: serial.Serial,
         is_rx: bool,
         callback: Callable[[bool, bytes], None],
-        parent: Optional[QObject] = None,
+        parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._src = src
@@ -187,18 +188,18 @@ class ListenOnlyMode(QObject):
     is_active_changed = Signal(bool)
     error = Signal(str)
 
-    def __init__(self, parent: Optional[QObject] = None) -> None:
+    def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._mode: str = ""
-        self._serial_manager: Optional[Any] = None
-        self._real_ser: Optional[serial.Serial] = None
-        self._virtual_ser: Optional[serial.Serial] = None
-        self._proxy_workers: List[_ProxyWorker] = []
+        self._serial_manager: Any | None = None
+        self._real_ser: serial.Serial | None = None
+        self._virtual_ser: serial.Serial | None = None
+        self._proxy_workers: list[_ProxyWorker] = []
         self._raw_queue: Queue = Queue()
-        self._decoder: Optional[_DecoderWorker] = None
-        self._log_file: Optional[Any] = None
-        self._csv_writer: Optional[Any] = None
-        self._log_path: Optional[Path] = None
+        self._decoder: _DecoderWorker | None = None
+        self._log_file: Any | None = None
+        self._csv_writer: Any | None = None
+        self._log_path: Path | None = None
         self._active = False
         self._lock = threading.Lock()
         self._packet_count = 0
@@ -213,7 +214,7 @@ class ListenOnlyMode(QObject):
             return self._packet_count
 
     @property
-    def log_path(self) -> Optional[str]:
+    def log_path(self) -> str | None:
         return str(self._log_path) if self._log_path else None
 
     @property
@@ -268,9 +269,9 @@ class ListenOnlyMode(QObject):
         log_dir: Path,
         device_name: str = "",
         mode: str = "embedded",
-        serial_manager: Optional[Any] = None,
-        real_port: Optional[str] = None,
-        virtual_port: Optional[str] = None,
+        serial_manager: Any | None = None,
+        real_port: str | None = None,
+        virtual_port: str | None = None,
         baudrate: int = 115200,
     ) -> bool:
         """Включает режим 'Только слушать' в выбранном режиме."""

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import struct
-from typing import Dict, Any, Optional
+from typing import Any
 
 TRIGGER_MAGIC = 0x54524732
 TRIGGER_FORMAT_VERSION = 3
@@ -95,7 +95,7 @@ GROUP_SEQ_BASE = 0
 GROUP_SEQ_FRAGMENT = 0x80
 
 
-def expand_schedule(responses: list) -> Optional[list]:
+def expand_schedule(responses: list) -> list | None:
     """Раскладывает список фреймов ответа в расписание записей trigger_t.
 
     Возвращает список кортежей (row_index, delay_ms, tx_count,
@@ -139,7 +139,7 @@ def crc8(data: bytes) -> int:
     return value
 
 
-def pack_trigger(values: Dict[str, Any], fmt_version: int = TRIGGER_FORMAT_VERSION) -> bytes:
+def pack_trigger(values: dict[str, Any], fmt_version: int = TRIGGER_FORMAT_VERSION) -> bytes:
     """Pack a trigger_t-compatible record and calculate firmware CRC8.
 
     fmt_version=3 (по умолчанию) — запись 90 Б с новыми полями;
@@ -195,7 +195,7 @@ def pack_trigger(values: Dict[str, Any], fmt_version: int = TRIGGER_FORMAT_VERSI
     return bytes(raw)
 
 
-def unpack_trigger(payload: bytes) -> Dict[str, Any]:
+def unpack_trigger(payload: bytes) -> dict[str, Any]:
     """Validate and unpack a trigger_t-compatible payload (v2/v3)."""
     if len(payload) == TRIGGER_SIZE:
         values = struct.unpack(_TRIGGER_FORMAT, payload)

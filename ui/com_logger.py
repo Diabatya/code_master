@@ -5,7 +5,6 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
 
 import serial
 from serial.tools.list_ports import comports
@@ -41,7 +40,7 @@ from models.translations import _ as tr
 
 logger = get_logger(__name__)
 
-BAUDRATES: List[int] = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600]
+BAUDRATES: list[int] = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600]
 
 MAX_ROWS = 10000
 
@@ -59,15 +58,15 @@ class ComLoggerReader(QThread):
     connection_changed = Signal(bool)
     state_changed = Signal(str)
 
-    def __init__(self, port_name: str, baudrate: int, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, port_name: str, baudrate: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._port_name = port_name
         self._baudrate = baudrate
         self._running = True
         self._port_lock = threading.Lock()
-        self._ser: Optional[serial.Serial] = None
+        self._ser: serial.Serial | None = None
 
-    def _open_port(self) -> Optional[serial.Serial]:
+    def _open_port(self) -> serial.Serial | None:
         """Открывает порт с минимальным воздействием на линии DTR/RTS."""
         try:
             if self._port_name == "FAKE":
@@ -163,7 +162,7 @@ class ComLoggerReader(QThread):
 class ComLoggerWindow(QDialog):
     """Отдельное окно COM-логгера."""
 
-    def __init__(self, serial_manager: Optional[SerialManager] = None, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, serial_manager: SerialManager | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("COM логгер"))
         self.resize(950, 700)
@@ -175,7 +174,7 @@ class ComLoggerWindow(QDialog):
 
         self._config = Config()
         self._serial_manager = serial_manager
-        self._reader: Optional[ComLoggerReader] = None
+        self._reader: ComLoggerReader | None = None
         self._main_listener: bool = False
         self._listen_mode = ListenOnlyMode(self)
         self._listen_mode.packet_ready.connect(self._on_packet)

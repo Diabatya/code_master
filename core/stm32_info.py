@@ -1,6 +1,5 @@
 """Справочные данные о моделях STM32, используемых в прошивке."""
 
-from typing import Dict, Optional, Tuple
 
 # Единая точка истины для базовых адресов Flash (см. CURSOR_FIX_PROMPT.md 3.4):
 # раньше UART/USB CDC-путь (`ui/flash_dialog.py`) использовал магический
@@ -52,7 +51,7 @@ def device_config_crc8(data: bytes) -> int:
 def build_device_config_page(
     name: str,
     serial: str,
-    existing_page: Optional[bytes] = None,
+    existing_page: bytes | None = None,
 ) -> bytes:
     """Формирует полную 2-КБ страницу конфигурации firmware.
 
@@ -87,7 +86,7 @@ def build_device_config_page(
     return bytes(page)
 
 
-def parse_device_config(page: bytes) -> Optional[Tuple[str, str, int, int]]:
+def parse_device_config(page: bytes) -> tuple[str, str, int, int] | None:
     """Проверяет и разбирает запись device_config_t из страницы Flash."""
     if len(page) < 32 or int.from_bytes(page[:4], "little") != DEVICE_CONFIG_MAGIC:
         return None
@@ -108,7 +107,7 @@ def parse_device_config(page: bytes) -> Optional[Tuple[str, str, int, int]]:
     return name, serial, vid, pid
 
 
-def parse_legacy_device_config(page: bytes) -> Optional[Tuple[str, str]]:
+def parse_legacy_device_config(page: bytes) -> tuple[str, str] | None:
     """Разбирает старый GUI-формат name@8..17/serial@18..27."""
     if len(page) < 28:
         return None
@@ -153,7 +152,7 @@ def build_app_metadata(image: bytes) -> bytes:
 
 
 # Модель → размер Flash в КБ
-STM32_FLASH_SIZES: Dict[str, int] = {
+STM32_FLASH_SIZES: dict[str, int] = {
     "STM32F103C8T6": 64,
     "STM32F103RBT6": 128,
     "STM32F105RCT6": 256,
@@ -168,7 +167,7 @@ STM32_FLASH_SIZES: Dict[str, int] = {
 }
 
 # Модель → размер страницы flash в байтах. Для F1 — 1/2 КБ, F2/F4 — сектора 16+ КБ.
-STM32_PAGE_SIZES: Dict[str, int] = {
+STM32_PAGE_SIZES: dict[str, int] = {
     "STM32F103C8T6": 1024,
     "STM32F103RBT6": 1024,
     "STM32F105RCT6": 2048,
@@ -183,7 +182,7 @@ STM32_PAGE_SIZES: Dict[str, int] = {
 }
 
 # ST-LINK Device ID (например, 0x418) → модель по datasheet
-DEVICE_ID_TO_MODEL: Dict[str, str] = {
+DEVICE_ID_TO_MODEL: dict[str, str] = {
     "0x410": "STM32F103RBT6",
     "0x412": "STM32F103C8T6",
     "0x413": "STM32F407VGT6",
@@ -198,7 +197,7 @@ DEVICE_ID_TO_MODEL: Dict[str, str] = {
 }
 
 # Chip ID (из Get ID) → размер Flash в КБ (как строка, т.к. у некоторых чипов диапазон)
-CHIP_FLASH_SIZE_KB: Dict[int, str] = {
+CHIP_FLASH_SIZE_KB: dict[int, str] = {
     0x412: "64/128",
     0x410: "128/256",
     0x414: "256/512",

@@ -4,12 +4,12 @@ import re
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from platformdirs import user_data_dir
 
 
-def hex_to_int(text: str) -> Optional[int]:
+def hex_to_int(text: str) -> int | None:
     """Преобразует строку с HEX-значением в целое число.
 
     Args:
@@ -42,7 +42,7 @@ def int_to_hex(value: int, width: int = 2) -> str:
     return f"{value:0{width}X}"
 
 
-def parse_data_bytes(fields: List[str]) -> List[int]:
+def parse_data_bytes(fields: list[str]) -> list[int]:
     """Преобразует список строковых HEX-полей в список байт.
 
     Пустые строки игнорируются.
@@ -53,7 +53,7 @@ def parse_data_bytes(fields: List[str]) -> List[int]:
     Returns:
         Список целых чисел от 0 до 255.
     """
-    result: List[int] = []
+    result: list[int] = []
     for field in fields:
         value = hex_to_int(field)
         if value is not None:
@@ -61,7 +61,7 @@ def parse_data_bytes(fields: List[str]) -> List[int]:
     return result
 
 
-def format_data_bytes(data: bytes) -> List[str]:
+def format_data_bytes(data: bytes) -> list[str]:
     """Преобразует байты в список HEX-строк.
 
     Args:
@@ -102,7 +102,7 @@ def bytes_to_hex_string(data: bytes) -> str:
     return " ".join(f"{b:02X}" for b in data)
 
 
-def parse_packet_string(text: str) -> Optional[Dict[str, Any]]:
+def parse_packet_string(text: str) -> dict[str, Any] | None:
     """Парсит строку вида ID=<hex> DLC=<n> DATA=<hex hex ...>.
 
     Токен «X» в DATA — wildcard-байт триггеров, в списке data он
@@ -125,7 +125,7 @@ def parse_packet_string(text: str) -> Optional[Dict[str, Any]]:
     dlc = int(match.group(2))
     data_values = match.group(3).strip().split()
     # Позиции сохраняются: «X» → None (wildcard), битый токен → None.
-    data: List[Optional[int]] = [
+    data: list[int | None] = [
         None if "X" in token.upper() else hex_to_int(token)
         for token in data_values
     ]

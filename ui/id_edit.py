@@ -1,6 +1,7 @@
 """Поле ввода ID с автоматическим парсингом вставленного пакета."""
 
-from typing import Any, Callable, Dict, Optional
+from typing import Any
+from collections.abc import Callable
 
 from PySide6.QtCore import Qt, QMimeData
 from PySide6.QtGui import QKeyEvent
@@ -14,13 +15,13 @@ class IdPasteEdit(QLineEdit):
 
     def __init__(
         self,
-        fill_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        fill_callback: Callable[[dict[str, Any]], None] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._fill_callback = fill_callback
 
-    def set_fill_callback(self, fill_callback: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+    def set_fill_callback(self, fill_callback: Callable[[dict[str, Any]], None] | None) -> None:
         self._fill_callback = fill_callback
 
     def keyPressEvent(self, event: QKeyEvent) -> None:

@@ -3,7 +3,6 @@
 import subprocess
 import sys
 import traceback
-from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QKeySequence, QShortcut
@@ -46,7 +45,7 @@ logger = get_logger(__name__)
 class MainWindow(QMainWindow):
     """Главное окно приложения «Код Мастер»."""
 
-    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, serial_manager: SerialManager, parent: QWidget | None = None) -> None:
         """Создаёт главное окно."""
         super().__init__(parent)
         install_exception_hook()
@@ -66,8 +65,8 @@ class MainWindow(QMainWindow):
         central = QWidget(self)
         self.setCentralWidget(central)
 
-        self._settings_window: Optional[SettingsWindow] = None
-        self._connection_dialog: Optional[QDialog] = None
+        self._settings_window: SettingsWindow | None = None
+        self._connection_dialog: QDialog | None = None
         self._create_widgets()
         self._build_layout()
         self._connect_signals()
@@ -166,7 +165,7 @@ class MainWindow(QMainWindow):
         self._com_logger_button.setToolTip(tr("Открыть COM-логгер"))
         self._com_logger_button.clicked.connect(self._on_com_logger_clicked)
 
-        self._com_logger_window: Optional[ComLoggerWindow] = None
+        self._com_logger_window: ComLoggerWindow | None = None
 
         # Главное меню
         self._central_stack = QStackedWidget()

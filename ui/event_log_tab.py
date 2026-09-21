@@ -10,7 +10,6 @@
 его или нет.
 """
 
-from typing import List, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -85,10 +84,10 @@ def _decode_reset_flags(flags: int) -> str:
 class EventLogTab(QWidget):
     """Читает и показывает Flash-журнал событий МК (CMD_EVENT_LOG)."""
 
-    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, serial_manager: SerialManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
-        self._entries: List[dict] = []
+        self._entries: list[dict] = []
         self._create_widgets()
         self._build_layout()
 

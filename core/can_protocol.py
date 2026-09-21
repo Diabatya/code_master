@@ -4,7 +4,6 @@
 длину данных, сами данные и контрольную сумму XOR.
 """
 
-from typing import Dict, List, Optional
 
 
 MARKER_TX = 0xBB  # Маркер исходящего кадра
@@ -88,7 +87,7 @@ def xor_checksum(data: bytes) -> int:
 
 
 def pack_can_frame(
-    channel: int, can_id: int, data: bytes, rtr: bool = False, dlc: Optional[int] = None
+    channel: int, can_id: int, data: bytes, rtr: bool = False, dlc: int | None = None
 ) -> bytes:
     """Формирует байтовый кадр для передачи через UART-мост.
 
@@ -130,7 +129,7 @@ _EXT_MARKERS = (MARKER_RX_EXT, MARKER_TX_EXT, MARKER_RX_RTR_EXT, MARKER_TX_RTR_E
 _RTR_MARKERS = (MARKER_RX_RTR, MARKER_TX_RTR, MARKER_RX_RTR_EXT, MARKER_TX_RTR_EXT)
 
 
-def unpack_can_frame(raw: bytes, tx: bool = False) -> Optional[Dict[str, object]]:
+def unpack_can_frame(raw: bytes, tx: bool = False) -> dict[str, object] | None:
     """Ищет и распаковывает один CAN-кадр из байтового потока.
 
     Args:
@@ -206,7 +205,7 @@ def unpack_can_frame(raw: bytes, tx: bool = False) -> Optional[Dict[str, object]
     }
 
 
-def parse_all_frames(raw: bytes, tx: bool = False) -> tuple[List[Dict[str, object]], bytes]:
+def parse_all_frames(raw: bytes, tx: bool = False) -> tuple[list[dict[str, object]], bytes]:
     """Извлекает все полные CAN-кадры из буфера.
 
     Args:
@@ -216,7 +215,7 @@ def parse_all_frames(raw: bytes, tx: bool = False) -> tuple[List[Dict[str, objec
     Returns:
         Кортеж: список распакованных кадров и оставшийся неполный буфер.
     """
-    frames: List[Dict[str, object]] = []
+    frames: list[dict[str, object]] = []
     while True:
         frame = unpack_can_frame(raw, tx=tx)
         if frame is None:

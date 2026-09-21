@@ -14,14 +14,14 @@ from __future__ import annotations
 
 import csv
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 _TRACE_LINE_RE = re.compile(
     r"^(\S+)\s+ID=(\S+)\s+DLC=(\S+)\s+DATA=(.*?)\s+PERIOD=(.*?)\s+ASCII=(.*?)\s+EXPL=(.*?)(?:\s+DIR=(\S+))?$"
 )
 
 
-def _time_to_ms(text: str) -> Optional[float]:
+def _time_to_ms(text: str) -> float | None:
     """«HH:MM:SS.mmm» → миллисекунды."""
     try:
         hms, _, frac = text.partition(".")
@@ -41,14 +41,14 @@ def _parse_data(text: str) -> bytes:
         return b""
 
 
-def _parse_id(text: str) -> Optional[int]:
+def _parse_id(text: str) -> int | None:
     try:
         return int(text.strip(), 16)
     except ValueError:
         return None
 
 
-def _frame(time_ms, channel, can_id, dlc, data, tx) -> Dict[str, Any]:
+def _frame(time_ms, channel, can_id, dlc, data, tx) -> dict[str, Any]:
     return {
         "time_ms": time_ms,
         "channel": channel,
@@ -60,7 +60,7 @@ def _frame(time_ms, channel, can_id, dlc, data, tx) -> Dict[str, Any]:
     }
 
 
-def parse_trace_frames(path: str) -> List[Dict[str, Any]]:
+def parse_trace_frames(path: str) -> list[dict[str, Any]]:
     """Читает .trace/.csv в кадры с относительными time_ms."""
     if path.lower().endswith(".csv"):
         frames = _parse_csv(path)
@@ -76,8 +76,8 @@ def parse_trace_frames(path: str) -> List[Dict[str, Any]]:
     return frames
 
 
-def _parse_trace(path: str) -> List[Dict[str, Any]]:
-    frames: List[Dict[str, Any]] = []
+def _parse_trace(path: str) -> list[dict[str, Any]]:
+    frames: list[dict[str, Any]] = []
     channel = 1
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -109,8 +109,8 @@ def _parse_trace(path: str) -> List[Dict[str, Any]]:
     return frames
 
 
-def _parse_csv(path: str) -> List[Dict[str, Any]]:
-    frames: List[Dict[str, Any]] = []
+def _parse_csv(path: str) -> list[dict[str, Any]]:
+    frames: list[dict[str, Any]] = []
     with open(path, newline="", encoding="utf-8-sig") as f:
         for values in csv.reader(f):
             if len(values) < 4 or values[0].lower() == "channel":

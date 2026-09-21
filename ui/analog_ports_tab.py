@@ -1,6 +1,6 @@
 """Заглушка вкладки «Аналоговые порты» для устройств с аналоговыми входами."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont
@@ -20,7 +20,7 @@ from models.translations import _ as tr
 class AnalogPortsTab(QWidget):
     """Вкладка настройки аналоговых портов (имя, цвет, пин)."""
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._config = Config()
         self._create_widgets()
@@ -68,7 +68,7 @@ class AnalogPortsTab(QWidget):
             for _ in range(4):
                 self._add_port()
 
-    def _add_port(self, data: Optional[Dict[str, Any]] = None) -> None:
+    def _add_port(self, data: dict[str, Any] | None = None) -> None:
         row = self._table.rowCount()
         self._table.insertRow(row)
         data = data or {}
@@ -91,7 +91,7 @@ class AnalogPortsTab(QWidget):
         if row >= 0:
             self._table.removeRow(row)
 
-    def collect_config(self) -> List[Dict[str, Any]]:
+    def collect_config(self) -> list[dict[str, Any]]:
         ports = []
         for row in range(self._table.rowCount()):
             name_item = self._table.item(row, 0)

@@ -3,7 +3,7 @@
 import shutil
 import threading
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 import cantools.database
 
@@ -39,9 +39,9 @@ class DBCManager:
             return
         self._initialized = True
         self._config = Config()
-        self._data: Dict[int, Dict[str, object]] = {}
-        self._cantools_db: Optional[cantools.database.Database] = None
-        self._loaded_path: Optional[str] = None
+        self._data: dict[int, dict[str, object]] = {}
+        self._cantools_db: cantools.database.Database | None = None
+        self._loaded_path: str | None = None
         self._ensure_dir()
         self._load_last()
 
@@ -94,29 +94,29 @@ class DBCManager:
         logger.info("Загружен DBC: %s (%d сообщений)", self._loaded_path, len(data))
         return True
 
-    def get_cantools_db(self) -> Optional[cantools.database.Database]:
+    def get_cantools_db(self) -> cantools.database.Database | None:
         """Возвращает загруженную базу cantools."""
         return self._cantools_db
 
-    def get_message(self, can_id: int) -> Optional[Dict[str, object]]:
+    def get_message(self, can_id: int) -> dict[str, object] | None:
         """Возвращает описание сообщения по ID."""
         return self._data.get(can_id)
 
-    def get_message_by_name(self, name: str) -> Optional[Dict[str, object]]:
+    def get_message_by_name(self, name: str) -> dict[str, object] | None:
         """Возвращает описание сообщения по имени."""
         for message in self._data.values():
             if message.get("name") == name:
                 return message
         return None
 
-    def get_id_by_name(self, name: str) -> Optional[int]:
+    def get_id_by_name(self, name: str) -> int | None:
         """Возвращает CAN ID по имени сообщения."""
         for can_id, message in self._data.items():
             if message.get("name") == name:
                 return can_id
         return None
 
-    def get_signal_by_name(self, can_id: int, name: str) -> Optional[Dict[str, object]]:
+    def get_signal_by_name(self, can_id: int, name: str) -> dict[str, object] | None:
         """Возвращает сигнал по ID сообщения и имени сигнала."""
         message = self._data.get(can_id)
         if message is None:
@@ -126,7 +126,7 @@ class DBCManager:
                 return signal
         return None
 
-    def get_all(self) -> Dict[int, Dict[str, object]]:
+    def get_all(self) -> dict[int, dict[str, object]]:
         """Возвращает полный словарь DBC."""
         return self._data
 
@@ -134,7 +134,7 @@ class DBCManager:
         """Возвращает True, если загружен хотя бы один DBC."""
         return bool(self._data)
 
-    def loaded_path(self) -> Optional[str]:
+    def loaded_path(self) -> str | None:
         """Возвращает путь к загруженному DBC."""
         return self._loaded_path
 

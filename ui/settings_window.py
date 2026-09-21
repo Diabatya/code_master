@@ -2,7 +2,6 @@
 
 import os
 from pathlib import Path
-from typing import List, Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal, QPropertyAnimation, QEasingCurve, QEvent
 from shiboken6 import isValid
@@ -77,11 +76,11 @@ class ConnectionTab(QWidget):
 
     connected = Signal()  # type: ignore[var-defined]
 
-    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, serial_manager: SerialManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._config = Config()
-        self._baud_detector: Optional[BaudRateDetector] = None
+        self._baud_detector: BaudRateDetector | None = None
         self._init_ui()
         self._load_defaults()
         self._update_ui_state()
@@ -304,7 +303,7 @@ class ConnectionTab(QWidget):
         else:
             self._set_status(tr("Ошибка подключения"), error=True)
 
-    def _update_ui_state(self, _connected: Optional[bool] = None) -> None:
+    def _update_ui_state(self, _connected: bool | None = None) -> None:
         if not isValid(self):
             return
         is_open = self._serial_manager.is_open()
@@ -335,8 +334,8 @@ class SettingsWindow(QMainWindow):
     def __init__(
         self,
         serial_manager: SerialManager,
-        main_window: Optional[QWidget] = None,
-        parent: Optional[QWidget] = None,
+        main_window: QWidget | None = None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
@@ -401,7 +400,7 @@ class SettingsWindow(QMainWindow):
         self._analyzer_tab = CanAnalyzer(self._serial_manager, self)
         self._topology_tab = CanTopologyWidget(self)
         self._event_log_tab = EventLogTab(self._serial_manager, self)
-        self._analog_tab: Optional[AnalogPortsTab] = None
+        self._analog_tab: AnalogPortsTab | None = None
 
         self._tabs.addTab(self._trigger_tab, "⚡ " + tr("Триггеры"))
         self._tabs.addTab(self._monitor_tab, "🔍 " + tr("Мониторинг"))
@@ -435,8 +434,8 @@ class SettingsWindow(QMainWindow):
         self._search_model = QStandardItemModel(self)
         self._completer.setModel(self._search_model)
 
-        self._highlight_timer: Optional[QTimer] = None
-        self._highlighted_widget: Optional[QWidget] = None
+        self._highlight_timer: QTimer | None = None
+        self._highlighted_widget: QWidget | None = None
         self._original_style: str = ""
         self._build_search_index()
 
@@ -846,11 +845,11 @@ class SettingsWindow(QMainWindow):
         state = tr("вкл") if trigger.get("active") else tr("выкл")
         return tr("{0}: приём {1} ID {2} → ответ ID {3}").format(state, ch, rx_id, tx_id)
 
-    def _settings_diff_lines(self) -> List[str]:
+    def _settings_diff_lines(self) -> list[str]:
         """Человекочитаемый список отличий полей от последней записи."""
         baseline = self._baseline_config
         current = self._settings_snapshot()
-        lines: List[str] = []
+        lines: list[str] = []
         for key in self._DIFF_KEYS:
             old, new = baseline.get(key), current.get(key)
             if old == new:
@@ -1327,11 +1326,11 @@ class SettingsWindow(QMainWindow):
         tab_index: int,
         tab_title: str,
         widget: QWidget,
-        texts: List[str],
+        texts: list[str],
     ) -> None:
         """Добавляет один элемент поиска с несколькими текстами."""
         primary = texts[0]
-        match_parts: List[str] = []
+        match_parts: list[str] = []
         for text in texts:
             match_parts.extend(self._collect_text_translations(text))
         match_parts.extend(self._collect_text_translations(tab_title))
@@ -1387,9 +1386,9 @@ class SettingsWindow(QMainWindow):
             return True
         return False
 
-    def _extract_widget_texts(self, widget: QWidget) -> List[str]:
+    def _extract_widget_texts(self, widget: QWidget) -> list[str]:
         """Извлекает текстовые метки из виджета."""
-        texts: List[str] = []
+        texts: list[str] = []
         if isinstance(widget, QTabWidget):
             return texts
 
@@ -1425,7 +1424,7 @@ class SettingsWindow(QMainWindow):
                 texts.append(prefix)
         return texts
 
-    def _collect_text_translations(self, text: str) -> List[str]:
+    def _collect_text_translations(self, text: str) -> list[str]:
         """Возвращает список вариантов строки на всех доступных языках."""
         text = text.strip()
         if not text:

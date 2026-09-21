@@ -1,6 +1,7 @@
 """Диалог настройки фильтра мониторинга CAN."""
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
+from collections.abc import Callable
 
 from PySide6.QtCore import QRegularExpression, Qt, QTimer
 from PySide6.QtGui import QFont, QRegularExpressionValidator
@@ -32,10 +33,10 @@ class FilterDialog(QDialog):
 
     def __init__(
         self,
-        rules: List[Dict[str, Any]],
+        rules: list[dict[str, Any]],
         enabled: bool,
-        ignored_ids: List[int],
-        get_ids_callback: Callable[[], List[int]],
+        ignored_ids: list[int],
+        get_ids_callback: Callable[[], list[int]],
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -44,7 +45,7 @@ class FilterDialog(QDialog):
         self._font = QFont("Segoe UI", 9)
         self._get_ids_callback = get_ids_callback
         self._ignored_ids = set(ignored_ids)
-        self._rules_widgets: List[Dict[str, Any]] = []
+        self._rules_widgets: list[dict[str, Any]] = []
 
         self._enabled_check = QCheckBox(tr("Включить фильтр"))
         self._enabled_check.setFont(self._font)
@@ -120,7 +121,7 @@ class FilterDialog(QDialog):
     def _add_rule(self) -> None:
         self._add_rule_widget({"mode": "show", "id_from": "", "id_to": "", "data_from": "", "data_to": ""})
 
-    def _add_rule_widget(self, rule: Dict[str, Any]) -> None:
+    def _add_rule_widget(self, rule: dict[str, Any]) -> None:
         widget = QWidget()
         row = QVBoxLayout(widget)
         row.setSpacing(4)
@@ -170,8 +171,8 @@ class FilterDialog(QDialog):
         data_layout = QHBoxLayout()
         data_layout.setSpacing(4)
         data_layout.addWidget(QLabel(tr("Data от")))
-        from_edits: List[HexDataEdit] = []
-        to_edits: List[HexDataEdit] = []
+        from_edits: list[HexDataEdit] = []
+        to_edits: list[HexDataEdit] = []
         for i in range(8):
             fe = HexDataEdit(f"F{i}")
             fe.setFixedWidth(32)
@@ -235,7 +236,7 @@ class FilterDialog(QDialog):
         if not self._accepted_list.isVisible():
             return
         current_ids = set(self._get_ids_callback())
-        existing: Dict[int, QListWidgetItem] = {}
+        existing: dict[int, QListWidgetItem] = {}
         i = 0
         while i < self._accepted_list.count():
             item = self._accepted_list.item(i)
@@ -261,10 +262,10 @@ class FilterDialog(QDialog):
         self._refresh_timer.stop()
         super().closeEvent(event)
 
-    def get_result(self) -> Optional[Dict[str, Any]]:
+    def get_result(self) -> dict[str, Any] | None:
         if self.result() != QDialog.DialogCode.Accepted:
             return None
-        rules: List[Dict[str, Any]] = []
+        rules: list[dict[str, Any]] = []
         for rule in self._rules_widgets:
             mode = "hide" if rule["hide_radio"].isChecked() else "show"
             id_from = hex_to_int(rule["id_from"].text())
@@ -278,7 +279,7 @@ class FilterDialog(QDialog):
                 "data_from": data_from,
                 "data_to": data_to,
             })
-        ignored_ids: List[int] = []
+        ignored_ids: list[int] = []
         for i in range(self._accepted_list.count()):
             item = self._accepted_list.item(i)
             if item.checkState() == Qt.CheckState.Checked:

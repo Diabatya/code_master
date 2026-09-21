@@ -1,7 +1,7 @@
 """Страница «Прошивка» с тремя столбцами: ПО блока, Автомобиль, Конфигурация."""
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QFont
@@ -35,7 +35,7 @@ except Exception:  # noqa: BLE001
 
 logger = get_logger(__name__)
 
-DEMO_FW_VERSIONS: Dict[str, str] = {
+DEMO_FW_VERSIONS: dict[str, str] = {
     "v1.0.0": "",
     "v1.1.0": "",
     "v1.2.5": "",
@@ -43,7 +43,7 @@ DEMO_FW_VERSIONS: Dict[str, str] = {
     "v2.1.3": "",
 }
 
-DEMO_CARS: Dict[str, str] = {
+DEMO_CARS: dict[str, str] = {
     "Toyota Camry — v2.1.3": "",
     "Ford Focus — v1.2.5": "",
     "BMW E46 — v2.0.0": "",
@@ -65,15 +65,15 @@ class BootloaderWorker(QThread):
         serial_manager: SerialManager,
         mode: str,
         firmware_path: str = "",
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._mode = mode
         self._firmware_path = firmware_path
         self._config = Config()
-        self._port: Optional[Any] = None
-        self._bootloader: Optional[Bootloader] = None
+        self._port: Any | None = None
+        self._bootloader: Bootloader | None = None
         self._was_open = False
         self._port_name = ""
         self._baudrate = 115200
@@ -154,7 +154,7 @@ class BootloaderWorker(QThread):
 class FirmwarePage(QWidget):
     """Страница выбора типа устройства для прошивки."""
 
-    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, serial_manager: SerialManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._config = Config()

@@ -1,7 +1,8 @@
 """Кнопки и функции копирования/вставки пакетов ID+DLC+Data."""
 
 import re
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
+from collections.abc import Callable
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QFont
@@ -36,11 +37,11 @@ def _style_clipboard_button(button: QPushButton) -> None:
 def create_clipboard_buttons(
     parent: QWidget,
     id_edit: Any,
-    dlc_spin: Optional[Any] = None,
-    data_edits: Optional[List[Any]] = None,
-    bit_combo: Optional[Any] = None,
-    on_paste: Optional[Callable[[], None]] = None,
-    data_edit: Optional[Any] = None,
+    dlc_spin: Any | None = None,
+    data_edits: list[Any] | None = None,
+    bit_combo: Any | None = None,
+    on_paste: Callable[[], None] | None = None,
+    data_edit: Any | None = None,
 ) -> QWidget:
     """Создаёт виджет с кнопками «Копировать» и «Вставить» для пакета.
 
@@ -86,9 +87,9 @@ def create_clipboard_buttons(
 
 def _copy_packet(
     id_edit: Any,
-    dlc_spin: Optional[Any],
-    data_edits: List[Any],
-    data_edit: Optional[Any] = None,
+    dlc_spin: Any | None,
+    data_edits: list[Any],
+    data_edit: Any | None = None,
 ) -> None:
     """Формирует строку ID=0x... DLC=N DATA=... и копирует в буфер обмена."""
     can_id = hex_to_int(id_edit.text())
@@ -108,7 +109,7 @@ def _copy_packet(
 
     if data_edits:
         dlc = max(0, min(dlc, len(data_edits)))
-        data_parts: List[str] = []
+        data_parts: list[str] = []
         for i in range(dlc):
             text = data_edits[i].text().strip() if i < len(data_edits) else ""
             if "X" in text.upper():
@@ -137,11 +138,11 @@ def _copy_packet(
 
 def _paste_packet(
     id_edit: Any,
-    dlc_spin: Optional[Any],
-    data_edits: List[Any],
-    bit_combo: Optional[Any],
-    on_paste: Optional[Callable[[], None]],
-    data_edit: Optional[Any] = None,
+    dlc_spin: Any | None,
+    data_edits: list[Any],
+    bit_combo: Any | None,
+    on_paste: Callable[[], None] | None,
+    data_edit: Any | None = None,
 ) -> None:
     """Парсит строку из буфера обмена и заполняет поля."""
     clipboard = QApplication.clipboard()
@@ -170,7 +171,7 @@ def _paste_packet(
 
     # Парсим данные: токены «X» сохраняются как wildcard (поля триггеров
     # с allow_x принимают их, обычные hex-поля — пропускают).
-    parsed_tokens: List[str] = []
+    parsed_tokens: list[str] = []
     if data_str:
         for token in data_str.split():
             token = token.strip().replace("0x", "").replace("0X", "")
@@ -227,7 +228,7 @@ def _paste_packet(
     logger.debug("Вставлен пакет: ID=0x%X DLC=%d", can_id, dlc)
 
 
-def parse_packet(text: str) -> Optional[Dict[str, Any]]:
+def parse_packet(text: str) -> dict[str, Any] | None:
     """Вспомогательная функция для парсинга пакета из строки.
 
     Возвращает словарь с ключами id, dlc, data или None.
@@ -245,7 +246,7 @@ def parse_packet(text: str) -> Optional[Dict[str, Any]]:
             dlc = int(dlc_str)
         except ValueError:
             dlc = 8
-    parsed_bytes: List[int] = []
+    parsed_bytes: list[int] = []
     if data_str:
         for token in data_str.split():
             token = token.strip().replace("0x", "").replace("0X", "")

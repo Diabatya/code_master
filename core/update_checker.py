@@ -4,7 +4,6 @@ import json
 import ssl
 import urllib.error
 import urllib.request
-from typing import Tuple
 
 from models.logger import get_logger
 from models.version import VERSION
@@ -21,7 +20,7 @@ def _create_ssl_context() -> ssl.SSLContext:
     return context
 
 
-def _parse_version(version: str) -> Tuple[int, ...]:
+def _parse_version(version: str) -> tuple[int, ...]:
     """Парсит версию в кортеж чисел для корректного сравнения."""
     parts = version.strip().lstrip("v").split(".")
     result: list[int] = []
@@ -37,7 +36,7 @@ def _parse_version(version: str) -> Tuple[int, ...]:
     return tuple(result)
 
 
-def check_for_updates() -> Tuple[bool, str]:
+def check_for_updates() -> tuple[bool, str]:
     """Проверяет, доступна ли новая версия приложения.
 
     Returns:

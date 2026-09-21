@@ -12,7 +12,7 @@ echo (глубина TX-эха, 0 для кадра с шины).
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 CAN_TX_ECHO_MAX = 8  # как в firmware/Inc/can_bridge.h
 
@@ -24,24 +24,24 @@ def _ch_name(ch: int) -> str:
 class TriggerSimulator:
     """Состояние движка: записи, кэш-данные, отложенные ответы."""
 
-    def __init__(self, records: List[Dict[str, Any]]) -> None:
+    def __init__(self, records: list[dict[str, Any]]) -> None:
         self._triggers = list(records)
-        self._cache: List[Optional[Dict[str, Any]]] = [None] * len(records)
+        self._cache: list[dict[str, Any] | None] = [None] * len(records)
         self._cache_valid = [False] * len(records)
-        self._pending: List[Optional[Dict[str, Any]]] = [None] * len(records)
+        self._pending: list[dict[str, Any] | None] = [None] * len(records)
         # Состояние «кол-во сработок до смены DATA» — порт fire_state_t.
         self._rx_state = [self._new_fire_state() for _ in records]
         self._src_state = [self._new_fire_state() for _ in records]
         self.fired_count = 0
         # События для UI: (time_ms, текст).
-        self.events: List[Dict[str, Any]] = []
+        self.events: list[dict[str, Any]] = []
 
     @staticmethod
-    def _new_fire_state() -> Dict[str, Any]:
+    def _new_fire_state() -> dict[str, Any]:
         return {"have": False, "last": b"", "count": 0, "suppress": False}
 
     @staticmethod
-    def _fire_track(state: Dict[str, Any], frame: Dict[str, Any]) -> None:
+    def _fire_track(state: dict[str, Any], frame: dict[str, Any]) -> None:
         """Порт fire_track(): смена DATA (на уровне ID-фильтра) сбрасывает
         защёлку лимита — триггер снова исполняет N сработок."""
         data = bytes(frame.get("data", b""))
@@ -54,7 +54,7 @@ class TriggerSimulator:
             state["suppress"] = False
 
     @staticmethod
-    def _listen_echo(t: Dict[str, Any], prefix: str) -> bool:
+    def _listen_echo(t: dict[str, Any], prefix: str) -> bool:
         """«Слушать отправляемое»: True (по умолчанию, как v2) — триггер
         видит и свои TX-эха; False — только кадры с шины."""
         return bool(t.get(f"{prefix}_listen_echo", True))
@@ -62,7 +62,7 @@ class TriggerSimulator:
     # --- матчеры: точный порт trigger.c --------------------------------
 
     @staticmethod
-    def _rx_header_matches(t: Dict[str, Any], frame: Dict[str, Any]) -> bool:
+    def _rx_header_matches(t: dict[str, Any], frame: dict[str, Any]) -> bool:
         """Условие приёма без Data: RTR-режим, канал, битность, ID по
         маске, DLC — порт rx_header_matches(). На этом уровне для
         счётчика сработок отслеживается «смена DATA»."""
@@ -84,7 +84,7 @@ class TriggerSimulator:
         return True
 
     @staticmethod
-    def _rx_data_matches(t: Dict[str, Any], frame: Dict[str, Any]) -> bool:
+    def _rx_data_matches(t: dict[str, Any], frame: dict[str, Any]) -> bool:
         """Побайтовое сравнение Data по маске (маска 0 — «X») — порт
         rx_data_matches(). В режиме «только RTR» данных нет — True."""
         if int(t.get("rx_rtr", 0)) == 1:
@@ -100,7 +100,7 @@ class TriggerSimulator:
         return True
 
     @staticmethod
-    def _src_id_matches(t: Dict[str, Any], frame: Dict[str, Any]) -> bool:
+    def _src_id_matches(t: dict[str, Any], frame: dict[str, Any]) -> bool:
         """Источник кэша на уровне ID (канал/битность/ID) — порт
         src_id_matches(); «смена DATA» счётчика кэша на этом уровне."""
         if t.get("src_channel", 0) != 2 and t.get("src_channel", 0) != frame["channel"]:
@@ -110,7 +110,7 @@ class TriggerSimulator:
         return int(t.get("src_id", 0)) == int(frame["id"])
 
     @staticmethod
-    def _src_range_matches(t: Dict[str, Any], frame: Dict[str, Any]) -> bool:
+    def _src_range_matches(t: dict[str, Any], frame: dict[str, Any]) -> bool:
         """Побайтовый диапазон «От/До»: каждый байт должен попасть в
         свой [from[i], to[i]]; from[i] > to[i] — wildcard «X» (игнор).
         Порт src_range_matches()."""
@@ -131,7 +131,7 @@ class TriggerSimulator:
 
     # --- ответы ---------------------------------------------------------
 
-    def _send_response(self, t: Dict[str, Any], index: int, echo: int, now_ms: float) -> List[Dict[str, Any]]:
+    def _send_response(self, t: dict[str, Any], index: int, echo: int, now_ms: float) -> list[dict[str, Any]]:
         """Формирует кадры ответа триггера (порт send_response)."""
         if t.get("cache_enabled"):
             if not self._cache_valid[index]:
@@ -158,7 +158,7 @@ class TriggerSimulator:
             frame["time_ms"] = now_ms
         return out
 
-    def _arm(self, index: int, t: Dict[str, Any], echo: int, now_ms: float) -> None:
+    def _arm(self, index: int, t: dict[str, Any], echo: int, now_ms: float) -> None:
         self._pending[index] = {
             "fire_at": now_ms + int(t.get("delay_ms", 0)),
             "remaining": int(t.get("tx_count", 0)) or 1,
@@ -168,9 +168,9 @@ class TriggerSimulator:
 
     # --- публичный API ---------------------------------------------------
 
-    def on_frame(self, frame: Dict[str, Any], now_ms: float) -> List[Dict[str, Any]]:
+    def on_frame(self, frame: dict[str, Any], now_ms: float) -> list[dict[str, Any]]:
         """Кадр с шины (или TX-эхо) → список отправленных кадров-ответов."""
-        sent: List[Dict[str, Any]] = []
+        sent: list[dict[str, Any]] = []
         for i, t in enumerate(self._triggers):
             if not t.get("enabled"):
                 continue
@@ -233,9 +233,9 @@ class TriggerSimulator:
                     rx_state["suppress"] = True
         return sent
 
-    def poll(self, now_ms: float) -> List[Dict[str, Any]]:
+    def poll(self, now_ms: float) -> list[dict[str, Any]]:
         """Обслуживание отложенных ответов (порт Trigger_Poll)."""
-        sent: List[Dict[str, Any]] = []
+        sent: list[dict[str, Any]] = []
         for i, pending in enumerate(self._pending):
             if not pending or now_ms < pending["fire_at"]:
                 continue
@@ -253,10 +253,10 @@ class TriggerSimulator:
 
 
 def simulate(
-    records: List[Dict[str, Any]],
-    frames: List[Dict[str, Any]],
+    records: list[dict[str, Any]],
+    frames: list[dict[str, Any]],
     tail_ms: float = 2000.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Прогоняет кадры через триггеры → журнал событий.
 
     frames: список dict {time_ms, channel(1-based, как в логе), id, data,
@@ -267,7 +267,7 @@ def simulate(
     end_ms = (float(timeline[-1]["time_ms"]) if timeline else 0.0) + tail_ms
     # Очередь: исходные кадры + порождённые TX-эхо по мере прогона.
     queue = list(timeline)
-    tx_frames: List[Dict[str, Any]] = []
+    tx_frames: list[dict[str, Any]] = []
     idx = 0
     while idx < len(queue):
         item = queue[idx]
@@ -298,9 +298,9 @@ def simulate(
 
 def _record_tx(
     sim: TriggerSimulator,
-    tx: Dict[str, Any],
-    queue: List[Dict[str, Any]],
-    tx_frames: List[Dict[str, Any]],
+    tx: dict[str, Any],
+    queue: list[dict[str, Any]],
+    tx_frames: list[dict[str, Any]],
     end_ms: float,
 ) -> None:
     """Отправленный кадр → журнал + возврат в поток как TX-эхо.

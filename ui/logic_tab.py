@@ -1,6 +1,6 @@
 """Вкладка «Логика»: цепочки Событие → Условия → Действия."""
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 from PySide6.QtCore import QRegularExpression, Qt
 from PySide6.QtGui import QFont, QRegularExpressionValidator
@@ -77,7 +77,7 @@ class _IdValidator:
 class _LogicRow(QWidget):
     """Одна строка события/условия/действия."""
 
-    def __init__(self, font: QFont, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, font: QFont, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._font = font
         self._create_widgets()
@@ -160,7 +160,7 @@ class _LogicRow(QWidget):
             if i >= value:
                 edit.setText("")
 
-    def _fill_from_packet(self, parsed: Dict[str, Any]) -> None:
+    def _fill_from_packet(self, parsed: dict[str, Any]) -> None:
         can_id = parsed.get("id")
         if can_id is None:
             return
@@ -176,8 +176,8 @@ class _LogicRow(QWidget):
             )
         self._on_dlc_changed(dlc)
 
-    def get_config(self) -> Dict[str, Any]:
-        config: Dict[str, Any] = {"type": "can" if self._type_combo.currentIndex() == 1 else "io"}
+    def get_config(self) -> dict[str, Any]:
+        config: dict[str, Any] = {"type": "can" if self._type_combo.currentIndex() == 1 else "io"}
         if config["type"] == "io":
             config["name"] = self._name_edit.text()
         else:
@@ -187,7 +187,7 @@ class _LogicRow(QWidget):
             config["data"] = " ".join(e.text() for e in self._data_edits)
         return config
 
-    def set_config(self, config: Dict[str, Any]) -> None:
+    def set_config(self, config: dict[str, Any]) -> None:
         if config.get("type") == "can":
             self._type_combo.setCurrentIndex(1)
             self._bit_combo.setCurrentIndex(config.get("bit", 0))
@@ -205,7 +205,7 @@ class _LogicRow(QWidget):
 class LogicTab(QWidget):
     """Редактор цепочек Событие → Условия → Действия."""
 
-    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, serial_manager: SerialManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._config = Config()
@@ -346,13 +346,13 @@ class LogicTab(QWidget):
                 break
         layout.addStretch()
 
-    def _collect_group(self, group: QGroupBox) -> Dict[str, Any]:
+    def _collect_group(self, group: QGroupBox) -> dict[str, Any]:
         return {
             "enabled": group._enable_check.isChecked(),
             "rows": [group._rows_layout.itemAt(i).widget().get_config() for i in range(group._rows_layout.count() - 1) if group._rows_layout.itemAt(i).widget() is not None],
         }
 
-    def _apply_group(self, group: QGroupBox, data: Dict[str, Any]) -> None:
+    def _apply_group(self, group: QGroupBox, data: dict[str, Any]) -> None:
         group._enable_check.setChecked(data.get("enabled", True))
         for i in range(group._rows_layout.count() - 1, -1, -1):
             widget = group._rows_layout.itemAt(i).widget()

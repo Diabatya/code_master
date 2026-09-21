@@ -1,7 +1,7 @@
 """Встроенная автономная библиотека CAN ID."""
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -37,12 +37,12 @@ LIBRARY_ROOT = get_library_root()
 USER_DATA_PATH = LIBRARY_ROOT / "can_id" / "user_data.json"
 
 
-def _save_user_data(records: List[Dict[str, Any]]) -> None:
+def _save_user_data(records: list[dict[str, Any]]) -> None:
     USER_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
     USER_DATA_PATH.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _load_user_data() -> List[Dict[str, Any]]:
+def _load_user_data() -> list[dict[str, Any]]:
     if not USER_DATA_PATH.exists():
         return []
     try:
@@ -54,7 +54,7 @@ def _load_user_data() -> List[Dict[str, Any]]:
 class _AddMessageDialog(QDialog):
     """Диалог добавления/редактирования CAN ID в библиотеке."""
 
-    def __init__(self, message: Optional[Dict[str, Any]] = None, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, message: dict[str, Any] | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("Добавить CAN ID") if message is None else tr("Редактировать CAN ID"))
         self.setMinimumWidth(360)
@@ -127,7 +127,7 @@ class _AddMessageDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def get_result(self) -> Optional[Dict[str, Any]]:
+    def get_result(self) -> dict[str, Any] | None:
         if self.result() != QDialog.DialogCode.Accepted:
             return None
         make = self._make.text().strip()
@@ -160,8 +160,8 @@ class LibraryBrowser(QWidget):
     def __init__(
         self,
         trigger_tab: CanTriggerTab,
-        flexible_logic_tab: Optional[QWidget] = None,
-        parent: Optional[QWidget] = None,
+        flexible_logic_tab: QWidget | None = None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._trigger_tab = trigger_tab
@@ -169,7 +169,7 @@ class LibraryBrowser(QWidget):
         self._loader.load()
         if not self._loader.data:
             self._loader.demo_fallback()
-        self._current_messages: List[Dict[str, Any]] = []
+        self._current_messages: list[dict[str, Any]] = []
         self._create_widgets()
         self._build_layout()
         self._build_tree()
@@ -320,7 +320,7 @@ class LibraryBrowser(QWidget):
 class _OpenDbcDialog(QDialog):
     """Диалог выбора DBC из локальной копии OpenDBC и создания триггера."""
 
-    def __init__(self, trigger_tab: CanTriggerTab, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, trigger_tab: CanTriggerTab, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._trigger_tab = trigger_tab
         self.setWindowTitle(tr("OpenDBC"))

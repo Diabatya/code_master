@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
@@ -36,7 +35,7 @@ logger = get_logger(__name__)
 class RuleRowWidget(QWidget):
     """Одна строка правила: три вертикальные колонки с CAN-параметрами."""
 
-    def __init__(self, tab: "FlexibleLogicTab", rule: Optional[Dict[str, object]] = None) -> None:
+    def __init__(self, tab: "FlexibleLogicTab", rule: dict[str, object] | None = None) -> None:
         super().__init__(tab)
         self._tab = tab
         self._rule = rule or {}
@@ -175,7 +174,7 @@ class RuleRowWidget(QWidget):
     def _on_remove(self) -> None:
         self._tab._remove_row(self)
 
-    def get_rule(self) -> Dict[str, object]:
+    def get_rule(self) -> dict[str, object]:
         """Собирает правило из полей строки."""
         can_id = hex_to_int(self._id_edit.text())
         id_text = self._id_edit.text().strip() if can_id is None else self._id_edit.text().strip()
@@ -215,14 +214,14 @@ class RuleRowWidget(QWidget):
 class FlexibleLogicTab(QWidget):
     """Вкладка гибкой логики с тремя колонками и неограниченными строками."""
 
-    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, serial_manager: SerialManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._config = Config()
         self._active = False
-        self._rules: List[Dict[str, object]] = []
-        self._rule_counters: List[int] = []
-        self._row_widgets: List[RuleRowWidget] = []
+        self._rules: list[dict[str, object]] = []
+        self._rule_counters: list[int] = []
+        self._row_widgets: list[RuleRowWidget] = []
         self._create_widgets()
         self._build_layout()
         self._load_config()
@@ -298,7 +297,7 @@ class FlexibleLogicTab(QWidget):
         self._rule_counters = [0] * len(rules)
         self._rebuild_rows()
 
-    def _collect_rules(self) -> List[Dict[str, object]]:
+    def _collect_rules(self) -> list[dict[str, object]]:
         """Собирает правила из всех строк."""
         return [row.get_rule() for row in self._row_widgets]
 
@@ -307,12 +306,12 @@ class FlexibleLogicTab(QWidget):
         self._rules = self._collect_rules()
         self._config.set("flexible_rules", self._rules)
 
-    def get_config(self) -> List[Dict[str, object]]:
+    def get_config(self) -> list[dict[str, object]]:
         """Возвращает текущие правила для экспорта."""
         self._save_config()
         return self._config.get("flexible_rules", [])
 
-    def set_config(self, rules: List[Dict[str, object]]) -> None:
+    def set_config(self, rules: list[dict[str, object]]) -> None:
         """Загружает правила из импортированного профиля."""
         self._config.set("flexible_rules", rules)
         self._load_config()
@@ -325,7 +324,7 @@ class FlexibleLogicTab(QWidget):
             self._add_row_widget(rule)
         self._rule_counters = [0] * len(self._row_widgets)
 
-    def _add_row_widget(self, rule: Optional[Dict[str, object]] = None) -> RuleRowWidget:
+    def _add_row_widget(self, rule: dict[str, object] | None = None) -> RuleRowWidget:
         """Добавляет виджет строки в конец списка."""
         row = RuleRowWidget(self, rule)
         self._row_widgets.append(row)
@@ -400,7 +399,7 @@ class FlexibleLogicTab(QWidget):
             })
 
     @staticmethod
-    def _pad_8(data: List[int]) -> List[int]:
+    def _pad_8(data: list[int]) -> list[int]:
         """Дополняет или обрезает список до 8 байт."""
         data = data[:8]
         return data + [0] * (8 - len(data))
@@ -413,7 +412,7 @@ class FlexibleLogicTab(QWidget):
         """Обновляет логику при смене DBC (заглушка)."""
         pass
 
-    def process_frame(self, frame: Dict[str, object]) -> None:
+    def process_frame(self, frame: dict[str, object]) -> None:
         """Проверяет входящий кадр на совпадение с активными правилами."""
         if not self._active:
             return

@@ -12,7 +12,7 @@ carbus-lib оставлена в зависимостях для будущей 
 
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import cantools
 
@@ -28,7 +28,7 @@ DBC_FILE_RE = re.compile(r"\.dbc$", re.IGNORECASE)
 # Legacy-совместимый парсер (регулярными выражениями)
 # -----------------------------------------------------------------------------
 
-def _parse_int(text: str) -> Optional[int]:
+def _parse_int(text: str) -> int | None:
     value = hex_to_int(text)
     if value is not None:
         return value
@@ -45,7 +45,7 @@ def _parse_float(text: str) -> float:
         return 0.0
 
 
-def _parse_signal(line: str) -> Optional[Dict[str, object]]:
+def _parse_signal(line: str) -> dict[str, object] | None:
     match = re.match(
         r"\s*SG_\s+(\S+)\s*:\s*(\d+)\|(\d+)@(\d+)([+-])\s*\(([^,]+),([^)]+)\)\s*\[([^|]+)\|([^]]+)\]\s*\"([^\"]*)\"\s*.*",
         line,
@@ -68,12 +68,12 @@ def _parse_signal(line: str) -> Optional[Dict[str, object]]:
     }
 
 
-def _extract_value_enum(line: str) -> Optional[Tuple[int, str, Dict[int, str]]]:
+def _extract_value_enum(line: str) -> tuple[int, str, dict[int, str]] | None:
     match = re.match(r"VAL_\s+(\d+)\s+(\S+)\s+(.+);", line)
     if not match:
         return None
     can_id, signal_name, rest = match.groups()
-    values: Dict[int, str] = {}
+    values: dict[int, str] = {}
     tokens = rest.split()
     for i in range(0, len(tokens) - 1, 2):
         try:
@@ -85,7 +85,7 @@ def _extract_value_enum(line: str) -> Optional[Tuple[int, str, Dict[int, str]]]:
     return (_parse_int(can_id) or int(can_id, 0), signal_name, values)
 
 
-def parse_dbc(filepath: str) -> Dict[int, Dict[str, object]]:
+def parse_dbc(filepath: str) -> dict[int, dict[str, object]]:
     """Читает DBC-файл через регулярные выражения и возвращает {can_id: {...}}.
 
     Оставлен для совместимости с компонентами, которые ожидают старый формат.
@@ -95,9 +95,9 @@ def parse_dbc(filepath: str) -> Dict[int, Dict[str, object]]:
         logger.error("DBC файл не найден: %s", filepath)
         return {}
 
-    messages: Dict[int, Dict[str, object]] = {}
-    current_id: Optional[int] = None
-    value_enums: List[Tuple[int, str, Dict[int, str]]] = []
+    messages: dict[int, dict[str, object]] = {}
+    current_id: int | None = None
+    value_enums: list[tuple[int, str, dict[int, str]]] = []
 
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
@@ -149,7 +149,7 @@ def parse_dbc(filepath: str) -> Dict[int, Dict[str, object]]:
 # Основной API на основе cantools
 # -----------------------------------------------------------------------------
 
-def load_dbc(filepath: str) -> Optional[cantools.db.Database]:
+def load_dbc(filepath: str) -> cantools.db.Database | None:
     """Загружает DBC-файл через cantools.
 
     Args:
@@ -171,7 +171,7 @@ def load_dbc(filepath: str) -> Optional[cantools.db.Database]:
         return None
 
 
-def decode_frame(db: cantools.db.Database, can_id: int, data: bytes) -> Optional[Dict[str, Any]]:
+def decode_frame(db: cantools.db.Database, can_id: int, data: bytes) -> dict[str, Any] | None:
     """Декодирует сырые CAN-данные в физические значения сигналов.
 
     Args:
@@ -194,7 +194,7 @@ def decode_frame(db: cantools.db.Database, can_id: int, data: bytes) -> Optional
         logger.error("Ошибка декодирования кадра 0x%X: %s", can_id, exc)
         return None
 
-    result: Dict[str, Any] = {}
+    result: dict[str, Any] = {}
     for signal_name, raw_value in decoded.items():
         signal = message.get_signal_by_name(signal_name)
         if signal is None:
@@ -206,9 +206,9 @@ def decode_frame(db: cantools.db.Database, can_id: int, data: bytes) -> Optional
     return result
 
 
-def dbc_to_dict(db: cantools.db.Database) -> Dict[int, Dict[str, object]]:
+def dbc_to_dict(db: cantools.db.Database) -> dict[int, dict[str, object]]:
     """Преобразует базу cantools в формат словаря, совместимого с DBCManager."""
-    result: Dict[int, Dict[str, object]] = {}
+    result: dict[int, dict[str, object]] = {}
     if db is None:
         return result
     for message in db.messages:

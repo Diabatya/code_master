@@ -1,6 +1,5 @@
 """Модальный диалог выбора и подключения COM-порта."""
 
-from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont
@@ -37,7 +36,7 @@ class BaudRateDetector(QThread):
     baud_found = Signal(int)
     finished_no_result = Signal()
 
-    def __init__(self, port_name: str, parent: Optional[QDialog] = None) -> None:
+    def __init__(self, port_name: str, parent: QDialog | None = None) -> None:
         super().__init__(parent)
         self._port_name = port_name
         self._baud_rates = [9600, 19200, 38400, 57600, 115200]
@@ -75,7 +74,7 @@ class ComSettingsDialog(QDialog):
 
     connected = Signal()
 
-    def __init__(self, serial_manager: SerialManager, parent: Optional[QDialog] = None) -> None:
+    def __init__(self, serial_manager: SerialManager, parent: QDialog | None = None) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._config = Config()

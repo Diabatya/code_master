@@ -7,7 +7,7 @@ QTabWidget меняет z-order детей при каждом переключ�
 (полевая жалоба: «то активна, то пропадает»)."""
 
 import sys
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 
@@ -20,10 +20,10 @@ from PySide6.QtWidgets import QApplication
 class _FakeConfig:
     """Изолирует тест от реального config.json разработчика."""
 
-    DEFAULT_CONFIG: Dict[str, Any] = {}
+    DEFAULT_CONFIG: dict[str, Any] = {}
 
     def __init__(self) -> None:
-        self._data: Dict[str, Any] = {}
+        self._data: dict[str, Any] = {}
 
     def get(self, key: str, default: Any = None) -> Any:
         return self._data.get(key, default)
@@ -31,13 +31,13 @@ class _FakeConfig:
     def set(self, key: str, value: Any) -> None:
         self._data[key] = value
 
-    def set_bulk(self, values: Dict[str, Any]) -> None:
+    def set_bulk(self, values: dict[str, Any]) -> None:
         self._data.update(values)
 
-    def all(self) -> Dict[str, Any]:
+    def all(self) -> dict[str, Any]:
         return dict(self._data)
 
-    def import_data(self, values: Dict[str, Any]) -> None:
+    def import_data(self, values: dict[str, Any]) -> None:
         self._data.update(values)
 
     def reset_to_defaults(self) -> None:

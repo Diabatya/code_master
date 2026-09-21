@@ -4,7 +4,8 @@ import re
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any
+from collections.abc import Callable
 
 try:
     from pyocd.core.helpers import ConnectHelper
@@ -92,7 +93,7 @@ from models.translations import _ as tr
 
 logger = get_logger(__name__)
 
-PROGRAMMER_METHODS: List[Tuple[str, str]] = [
+PROGRAMMER_METHODS: list[tuple[str, str]] = [
     ("stlink", "ST-Link"),
     ("jlink", "J-Link / Flasher"),
     ("uart", "UART (бутлоадер)"),
@@ -101,13 +102,13 @@ PROGRAMMER_METHODS: List[Tuple[str, str]] = [
     ("auto", "Авто"),
 ]
 
-DEVICE_TYPES: List[Tuple[int, str]] = [
+DEVICE_TYPES: list[tuple[int, str]] = [
     (DEVICE_TYPE_BASIC, "2 CAN"),
     (DEVICE_TYPE_ANALOG, "2 CAN +"),
     (DEVICE_TYPE_CAN_FD, "2 CAN FD"),
 ]
 
-def _flash_size_for_chip_id(chip_id: Optional[int]) -> str:
+def _flash_size_for_chip_id(chip_id: int | None) -> str:
     """Возвращает строку с размером флеш-памяти по chip ID или 'Неизвестно'."""
     if chip_id is None:
         return tr("Неизвестно")
@@ -126,7 +127,7 @@ def _is_valid_trigger_blob(blob: bytes) -> bool:
     return trgh in blob or trg2 in blob
 
 
-def _format_chip_id(value: Optional[int]) -> str:
+def _format_chip_id(value: int | None) -> str:
     """Форматирует chip ID как HEX-строку."""
     if value is None:
         return tr("Неизвестно")
@@ -136,7 +137,7 @@ def _format_chip_id(value: Optional[int]) -> str:
 class HexHighlighter(QSyntaxHighlighter):
     """Подсветка изменённых и занятых (не 0xFF) байт в HEX и ASCII представлениях."""
 
-    def __init__(self, document: Any, changed_offsets: Set[int], occupied_offsets: Set[int], bytes_per_line: int, ascii_mode: bool = False):
+    def __init__(self, document: Any, changed_offsets: set[int], occupied_offsets: set[int], bytes_per_line: int, ascii_mode: bool = False):
         super().__init__(document)
         self._changed_offsets = changed_offsets
         self._occupied_offsets = occupied_offsets
@@ -193,17 +194,17 @@ class HexEditorDialog(QDialog):
 
     BYTES_PER_LINE = 16
 
-    def __init__(self, file_path: Optional[str] = None, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, file_path: str | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._config = Config()
         self.setWindowTitle(tr("HEX-редактор"))
         self.resize(950, 650)
-        self._current_path: Optional[Path] = None
+        self._current_path: Path | None = None
         self._base_address = 0
         self._data = bytearray()
-        self._changed_offsets: Set[int] = set()
-        self._occupied_offsets: Set[int] = set()
-        self._saved_path: Optional[str] = None
+        self._changed_offsets: set[int] = set()
+        self._occupied_offsets: set[int] = set()
+        self._saved_path: str | None = None
         self._ignore_text_changes = False
         self._create_widgets()
         self._build_layout()
@@ -448,9 +449,7 @@ class HexEditorDialog(QDialog):
                 if offset < len(self._data):
                     old = self._data[offset]
                     expected = chr(old) if 32 <= old < 127 else "."
-                    if ch == expected:
-                        new_data.append(old)
-                    elif ch == "." and old < 32 and offset not in self._changed_offsets:
+                    if ch == expected or ch == "." and old < 32 and offset not in self._changed_offsets:
                         new_data.append(old)
                     else:
                         new_data.append(ord(ch) & 0xFF)
@@ -475,7 +474,7 @@ class HexEditorDialog(QDialog):
             self._changed_offsets.discard(o)
 
     @property
-    def current_path(self) -> Optional[str]:
+    def current_path(self) -> str | None:
         return self._saved_path or (str(self._current_path) if self._current_path else None)
 
 
@@ -485,7 +484,7 @@ class ConnectWorker(QThread):
     log_line = Signal(str)
     finished = Signal(bool, dict)
 
-    def __init__(self, method: str, config: Config, parent: Optional[QObject] = None) -> None:
+    def __init__(self, method: str, config: Config, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._method = method
         self._config = config
@@ -509,7 +508,7 @@ class ConnectWorker(QThread):
             logger.exception("Ошибка ConnectWorker")
             self.finished.emit(False, {"error": str(exc)})
 
-    def _try_method(self, method: str) -> Tuple[bool, Dict[str, Any]]:
+    def _try_method(self, method: str) -> tuple[bool, dict[str, Any]]:
         if method == "stlink":
             return self._try_stlink()
         if method == "jlink":
@@ -522,7 +521,7 @@ class ConnectWorker(QThread):
             return self._try_usb()
         return False, {"error": tr("Неизвестный метод")}
 
-    def _try_stlink(self) -> Tuple[bool, Dict[str, Any]]:
+    def _try_stlink(self) -> tuple[bool, dict[str, Any]]:
         if not _PYOCD:
             return False, {"error": tr("pyocd не установлен")}
         try:
@@ -536,7 +535,7 @@ class ConnectWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             return False, {"error": str(exc)}
 
-    def _try_jlink(self) -> Tuple[bool, Dict[str, Any]]:
+    def _try_jlink(self) -> tuple[bool, dict[str, Any]]:
         if not _PYLINK:
             return False, {"error": tr("pylink-square не установлен")}
         try:
@@ -548,7 +547,7 @@ class ConnectWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             return False, {"error": str(exc)}
 
-    def _try_uart(self) -> Tuple[bool, Dict[str, Any]]:
+    def _try_uart(self) -> tuple[bool, dict[str, Any]]:
         port = self._config.get("port", "")
         baud = self._config.get("baudrate", 115200)
         if not port:
@@ -575,7 +574,7 @@ class ConnectWorker(QThread):
             except Exception:  # noqa: S110
                 pass
 
-    def _try_usb_cdc(self) -> Tuple[bool, Dict[str, Any]]:
+    def _try_usb_cdc(self) -> tuple[bool, dict[str, Any]]:
         port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_BOOTLOADER_PID)
         if not port:
             port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_APPLICATION_PID)
@@ -603,13 +602,13 @@ class ConnectWorker(QThread):
             except Exception:  # noqa: S110
                 pass
 
-    def try_method(self, method: str) -> Tuple[bool, Dict[str, Any]]:
+    def try_method(self, method: str) -> tuple[bool, dict[str, Any]]:
         """Публичная обёртка над `_try_method()` для повторного использования
         авто-определения способа программирования вне ConnectWorker (см.
         `_auto_detect_method()` ниже, используется FlashWorker/ReadWorker)."""
         return self._try_method(method)
 
-    def _try_usb(self) -> Tuple[bool, Dict[str, Any]]:
+    def _try_usb(self) -> tuple[bool, dict[str, Any]]:
         if not _PYUSB:
             return False, {"error": tr("pyusb/libusb не установлен")}
         try:
@@ -646,14 +645,14 @@ class ConnectWorker(QThread):
 # прошивка устройства (наш bootloader может войти в режим программно — не
 # требует физического BOOT0/джампера), затем настоящий STM32 ROM DFU (нужен
 # BOOT0), и в конце отладочные пробники (могут требовать target_mcu/железо).
-AUTO_METHOD_ORDER: Tuple[str, ...] = ("usb_cdc", "uart", "usb", "stlink", "jlink")
+AUTO_METHOD_ORDER: tuple[str, ...] = ("usb_cdc", "uart", "usb", "stlink", "jlink")
 
 
 def _auto_detect_method(
     config: Config,
-    log_callback: Optional[Callable[[str], None]] = None,
-    order: Tuple[str, ...] = AUTO_METHOD_ORDER,
-) -> Tuple[Optional[str], Dict[str, Any]]:
+    log_callback: Callable[[str], None] | None = None,
+    order: tuple[str, ...] = AUTO_METHOD_ORDER,
+) -> tuple[str | None, dict[str, Any]]:
     """Перебирает способы программирования из `order` и возвращает первый,
     для которого реально нашлось устройство (тот же перебор, что делает
     ConnectWorker в режиме "Авто" при подключении, но переиспользуемый и для
@@ -685,12 +684,12 @@ class FlashWorker(QThread):
 
     def __init__(
         self,
-        files: List[str],
+        files: list[str],
         method: str,
         config: Config,
         verify: bool = True,
         preserve_triggers: bool = False,
-        parent: Optional[QObject] = None,
+        parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._files = files
@@ -721,7 +720,7 @@ class FlashWorker(QThread):
     def _scaled_progress(self, local: int) -> int:
         return int((self._current_index + local / 100) / self._total * 100)
 
-    def _resolve_method(self) -> Optional[str]:
+    def _resolve_method(self) -> str | None:
         """При методе "auto" определяет реально доступный способ один раз и
         запоминает его в self._method (чтобы остальные файлы в этом же
         запуске не проверялись заново)."""
@@ -734,7 +733,7 @@ class FlashWorker(QThread):
         self._method = method
         return method
 
-    def _flash_one(self, file_path: str) -> Tuple[bool, str]:
+    def _flash_one(self, file_path: str) -> tuple[bool, str]:
         method = self._resolve_method()
         if method is None:
             return False, tr("Не найдено ни одно поддерживаемое устройство (UART/USB CDC/USB DFU/ST-Link/J-Link)")
@@ -757,7 +756,7 @@ class FlashWorker(QThread):
             return self._flash_usb(file_path)
         return False, tr("Неизвестный способ программирования")
 
-    def _flash_stlink(self, file_path: str) -> Tuple[bool, str]:
+    def _flash_stlink(self, file_path: str) -> tuple[bool, str]:
         if not _PYOCD:
             return False, tr("pyocd не установлен")
         target = self._config.get("target_mcu", "")
@@ -794,7 +793,7 @@ class FlashWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
 
-    def _flash_jlink(self, file_path: str) -> Tuple[bool, str]:
+    def _flash_jlink(self, file_path: str) -> tuple[bool, str]:
         if not _PYLINK:
             return False, tr("pylink-square не установлен")
         target = self._config.get("target_mcu", "")
@@ -828,7 +827,7 @@ class FlashWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
 
-    def _flash_uart(self, file_path: str) -> Tuple[bool, str]:
+    def _flash_uart(self, file_path: str) -> tuple[bool, str]:
         port = self._config.get("port", "")
         baud = self._config.get("baudrate", 115200)
         if not port:
@@ -898,7 +897,7 @@ class FlashWorker(QThread):
             except Exception:  # noqa: S110
                 pass
 
-    def _flash_usb_cdc(self, file_path: str) -> Tuple[bool, str]:
+    def _flash_usb_cdc(self, file_path: str) -> tuple[bool, str]:
         port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_BOOTLOADER_PID)
         if not port:
             port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_APPLICATION_PID)
@@ -962,7 +961,7 @@ class FlashWorker(QThread):
             except Exception:  # noqa: S110
                 pass
 
-    def _flash_usb(self, file_path: str) -> Tuple[bool, str]:
+    def _flash_usb(self, file_path: str) -> tuple[bool, str]:
         if not _PYUSB:
             return False, tr("pyusb/libusb не установлены")
 
@@ -1002,11 +1001,11 @@ class FlashWorker(QThread):
                 for start, data in segments
             )
             meta_covered = any(
-                start < meta_end and APP_METADATA_PAGE_ADDR < start + len(data)
+                start < meta_end and start + len(data) > APP_METADATA_PAGE_ADDR
                 for start, data in segments
             )
             segments.sort(
-                key=lambda s: 1 if s[0] < meta_end and APP_METADATA_PAGE_ADDR < s[0] + len(s[1]) else 0
+                key=lambda s: 1 if s[0] < meta_end and s[0] + len(s[1]) > APP_METADATA_PAGE_ADDR else 0
             )
 
             total_bytes = sum(len(data) for _, data in segments)
@@ -1266,7 +1265,7 @@ class ReadWorker(QThread):
         config: Config,
         size: int = 0x10000,
         start: int = BOOTLOADER_BASE_ADDR,
-        parent: Optional[QObject] = None,
+        parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._method = method
@@ -1303,7 +1302,7 @@ class ReadWorker(QThread):
         self._method = method
         return method
 
-    def _read_one(self) -> Tuple[bytes, int]:
+    def _read_one(self) -> tuple[bytes, int]:
         method = self._resolve_method()
         if method == "stlink":
             return self._read_stlink()
@@ -1317,7 +1316,7 @@ class ReadWorker(QThread):
             return self._read_usb()
         raise RuntimeError(tr("Чтение не поддерживается для {0}").format(method))
 
-    def _read_stlink(self) -> Tuple[bytes, int]:
+    def _read_stlink(self) -> tuple[bytes, int]:
         if not _PYOCD:
             raise RuntimeError(tr("pyocd не установлен"))
         target = self._config.get("target_mcu", "")
@@ -1342,7 +1341,7 @@ class ReadWorker(QThread):
             target_obj.reset()
         return data, start
 
-    def _read_jlink(self) -> Tuple[bytes, int]:
+    def _read_jlink(self) -> tuple[bytes, int]:
         if not _PYLINK:
             raise RuntimeError(tr("pylink-square не установлен"))
         target = self._config.get("target_mcu", "")
@@ -1357,7 +1356,7 @@ class ReadWorker(QThread):
         jlink.close()
         return data, start
 
-    def _read_uart(self) -> Tuple[bytes, int]:
+    def _read_uart(self) -> tuple[bytes, int]:
         port = self._config.get("port", "")
         baud = self._config.get("baudrate", 115200)
         if not port:
@@ -1376,7 +1375,7 @@ class ReadWorker(QThread):
             except Exception:  # noqa: S110
                 pass
 
-    def _read_usb_cdc(self) -> Tuple[bytes, int]:
+    def _read_usb_cdc(self) -> tuple[bytes, int]:
         port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_BOOTLOADER_PID)
         if not port:
             port = Bootloader.find_device_port(Bootloader.USB_VID, Bootloader.USB_APPLICATION_PID)
@@ -1396,7 +1395,7 @@ class ReadWorker(QThread):
             except Exception:  # noqa: S110
                 pass
 
-    def _read_usb(self) -> Tuple[bytes, int]:
+    def _read_usb(self) -> tuple[bytes, int]:
         if not _PYUSB:
             raise RuntimeError(tr("pyusb/libusb не установлены"))
         from core.dfu import DfuDevice, find_dfu_device
@@ -1420,7 +1419,7 @@ class EraseWorker(QThread):
         self,
         method: str,
         config: Config,
-        parent: Optional[QObject] = None,
+        parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._method = method
@@ -1448,7 +1447,7 @@ class EraseWorker(QThread):
             logger.exception('Ошибка стирания Flash')
             self.finished.emit(False, str(exc))
 
-    def _resolve_method(self) -> Optional[str]:
+    def _resolve_method(self) -> str | None:
         if self._method != 'auto':
             return self._method
         method, info = _auto_detect_method(self._config, log_callback=self.log_line.emit)
@@ -1536,19 +1535,19 @@ class EraseWorker(QThread):
 class FlashDialog(QDialog):
     """Полноценный диалог прошивки микроконтроллера."""
 
-    def __init__(self, serial_manager: Any, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, serial_manager: Any, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._config = Config()
         self.setWindowTitle(tr("Прошить микроконтроллер"))
         self.resize(900, 700)
-        self._connect_worker: Optional[ConnectWorker] = None
-        self._flash_worker: Optional[FlashWorker] = None
-        self._read_worker: Optional[ReadWorker] = None
-        self._erase_worker: Optional[EraseWorker] = None
+        self._connect_worker: ConnectWorker | None = None
+        self._flash_worker: FlashWorker | None = None
+        self._read_worker: ReadWorker | None = None
+        self._erase_worker: EraseWorker | None = None
         self._connected = False
-        self._last_chip_info: Dict[str, Any] = {}
-        self._log_file: Optional[Path] = None
+        self._last_chip_info: dict[str, Any] = {}
+        self._log_file: Path | None = None
         self._create_widgets()
         self._build_layout()
         self._connect_signals()
@@ -1902,7 +1901,7 @@ class FlashDialog(QDialog):
 
         self._config_button.setStyleSheet("QPushButton { background-color: #4CAF50; color: #FFFFFF; }")
 
-    def _set_connect_status(self, connected: bool, info: Dict[str, Any]) -> None:
+    def _set_connect_status(self, connected: bool, info: dict[str, Any]) -> None:
         self._connected = connected
         if connected:
             self._connect_button.setText(tr("Подключено"))
@@ -1957,7 +1956,7 @@ class FlashDialog(QDialog):
         self._disconnect()
         self._start_connect()
 
-    def _on_connect_finished(self, success: bool, info: Dict[str, Any]) -> None:
+    def _on_connect_finished(self, success: bool, info: dict[str, Any]) -> None:
         logger.info("Подключение завершено: success=%s, info=%s", success, info)
         self._connect_button.setEnabled(True)
         if success and info.get("method") and info["method"] != self._method_combo.currentData():
@@ -2007,7 +2006,7 @@ class FlashDialog(QDialog):
         for item in self._files_list.selectedItems():
             self._files_list.takeItem(self._files_list.row(item))
 
-    def _collect_files_for_flash(self) -> List[str]:
+    def _collect_files_for_flash(self) -> list[str]:
         """Возвращает список файлов для прошивки.
 
         - Если выбран файл и включена запись конфигурации — дописывает
@@ -2019,7 +2018,7 @@ class FlashDialog(QDialog):
         if self._config_button.isChecked() and self._files_list.count() == 0:
             return [self._prepare_config_only_hex()]
 
-        files: List[str] = []
+        files: list[str] = []
         for i in range(self._files_list.count()):
             item = self._files_list.item(i)
             if item is not None:
@@ -2028,7 +2027,7 @@ class FlashDialog(QDialog):
         if not self._config_button.isChecked():
             return files
 
-        prepared: List[str] = []
+        prepared: list[str] = []
         for f in files:
             prepared.append(self._prepare_firmware_with_config(f))
         return prepared
@@ -2083,7 +2082,7 @@ class FlashDialog(QDialog):
         image.write_hex_file(tmp)
         return str(tmp)
 
-    def _warn_base_address_mismatch(self, method: str, files: List[str]) -> bool:
+    def _warn_base_address_mismatch(self, method: str, files: list[str]) -> bool:
         """Предупреждает, если базовый адрес прошивки не соответствует
         ожидаемому для выбранного способа программирования (см.
         CURSOR_FIX_PROMPT.md 3.4): UART/USB CDC работают через наш
@@ -2452,7 +2451,7 @@ class FlashDialog(QDialog):
         else:
             QMessageBox.critical(self, tr('Ошибка'), message)
 
-    def open_hex_editor(self, file_path: Optional[str] = None) -> None:
+    def open_hex_editor(self, file_path: str | None = None) -> None:
         if not file_path:
             selected = self._files_list.currentItem()
             file_path = selected.text() if selected else None

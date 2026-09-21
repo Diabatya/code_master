@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import usb.core
 import usb.util
@@ -67,7 +67,7 @@ class DfuDevice:
 
     def __init__(self, dev: usb.core.Device) -> None:
         self.dev = dev
-        self.intf: Optional[usb.core.Interface] = None
+        self.intf: usb.core.Interface | None = None
 
     def open(self) -> None:
         """Инициализирует устройство, отключает kernel driver и занимает интерфейс."""
@@ -141,7 +141,7 @@ class DfuDevice:
                 logger.debug("DFU ABORT не удался: %s", exc)
                 break
 
-    def _parse_transfer_size(self, raw) -> Optional[int]:
+    def _parse_transfer_size(self, raw) -> int | None:
         """Парсит wTransferSize из сырого DFU functional descriptor."""
         if not raw:
             return None
@@ -343,7 +343,7 @@ class DfuDevice:
         data: bytes,
         page_size: int = 2048,
         skip_blank: bool = True,
-        progress: Optional[Callable[[int, int], None]] = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> None:
         """Стирает только страницы, которые будут перезаписаны.
 
@@ -390,7 +390,7 @@ class DfuDevice:
         address: int,
         data: bytes,
         block_size: int,
-        progress: Optional[Callable[[int, int], None]] = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> None:
         """Быстрая запись через один set_address и нарастающий wBlockNum."""
         total = len(data)
@@ -411,7 +411,7 @@ class DfuDevice:
         address: int,
         data: bytes,
         block_size: int,
-        progress: Optional[Callable[[int, int], None]] = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> None:
         """Безопасная медленная запись: set_address на каждый чанк."""
         total = len(data)
@@ -431,8 +431,8 @@ class DfuDevice:
         self,
         address: int,
         data: bytes,
-        block_size: Optional[int] = None,
-        progress: Optional[Callable[[int, int], None]] = None,
+        block_size: int | None = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> None:
         """Записывает данные по указанному адресу.
 
@@ -457,7 +457,7 @@ class DfuDevice:
         address: int,
         length: int,
         block_size: int,
-        progress: Optional[Callable[[int, int], None]] = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> bytes:
         """Быстрое чтение через один set_address и нарастающий wBlockNum."""
         total = length
@@ -496,7 +496,7 @@ class DfuDevice:
         address: int,
         length: int,
         block_size: int,
-        progress: Optional[Callable[[int, int], None]] = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> bytes:
         """Безопасное медленное чтение: set_address + abort на каждый чанк."""
         total = length
@@ -533,8 +533,8 @@ class DfuDevice:
         self,
         address: int,
         length: int,
-        block_size: Optional[int] = None,
-        progress: Optional[Callable[[int, int], None]] = None,
+        block_size: int | None = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> bytes:
         """Читает length байт с address.
 

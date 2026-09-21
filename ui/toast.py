@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer
 from PySide6.QtGui import QFont
@@ -21,7 +20,7 @@ _FADE_MS = 350
 class Toast(QLabel):
     """Плавающий лейбл-уведомление поверх родительского окна."""
 
-    _active: "list[Toast]" = []
+    _active: list[Toast] = []
 
     def __init__(self, parent: QWidget, text: str, success: bool = True) -> None:
         super().__init__(text, parent)
@@ -41,8 +40,8 @@ class Toast(QLabel):
 
     @classmethod
     def show_message(
-        cls, parent: Optional[QWidget], text: str, success: bool = True
-    ) -> "Toast | None":
+        cls, parent: QWidget | None, text: str, success: bool = True
+    ) -> Toast | None:
         """Показывает тост в нижнем правом углу parent и самоуничтожается.
 
         Несколько тостов подряд стопкой уезжают вверх, а не перекрывают
@@ -98,6 +97,6 @@ class Toast(QLabel):
             y -= 8
 
 
-def show_toast(parent: Optional[QWidget], text: str, success: bool = True) -> None:
+def show_toast(parent: QWidget | None, text: str, success: bool = True) -> None:
     """Короткий помощник: показать тост поверх окна parent."""
     Toast.show_message(parent, text, success)

@@ -1,6 +1,5 @@
 """Вспомогательные функции для настройки UI-элементов."""
 
-from typing import Optional
 
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QPushButton, QSizePolicy
@@ -45,7 +44,7 @@ def _update_checkable_indicator(button: QPushButton, checked: bool) -> None:
         button.setText(base)
 
 
-def setCheckableWithIndicator(button: QPushButton, text: Optional[str] = None) -> None:
+def setCheckableWithIndicator(button: QPushButton, text: str | None = None) -> None:
     """Делает кнопку checkable и добавляет ✓ в начало текста при включении.
 
     Args:

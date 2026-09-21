@@ -6,7 +6,7 @@ SerialManager инкапсулирует работу с pyserial.Serial (или
 
 import threading
 import time
-from typing import Optional, Union
+from typing import Union
 
 from PySide6.QtCore import QObject, QThread, Signal, QTimer
 
@@ -146,7 +146,7 @@ def _parse_cfg_read_payload(data: bytes) -> "tuple[str, str]":
     return name, serial
 
 
-def _rx_frame_wire_len(buf: Union[bytes, bytearray]) -> Optional[int]:
+def _rx_frame_wire_len(buf: bytes | bytearray) -> int | None:
     """Длина CAN-кадра МК→ПК в начале буфера, байт.
 
     None — кадр ещё не собран (ждать данные); -1 — маркер есть, но кадр
@@ -205,7 +205,7 @@ class SerialReader(QThread):
     fatal_error = Signal(str)
     heartbeat = Signal()
 
-    def __init__(self, port: SerialPort, parent: Optional[QObject] = None) -> None:
+    def __init__(self, port: SerialPort, parent: QObject | None = None) -> None:
         """Создаёт поток чтения.
 
         Args:
@@ -340,11 +340,11 @@ class SerialManager(QObject):
     # переподключение устройства (если автопереподключение выключено).
     critical_error = Signal(str)
 
-    def __init__(self, parent: Optional[QObject] = None) -> None:
+    def __init__(self, parent: QObject | None = None) -> None:
         """Создаёт менеджер без открытого порта."""
         super().__init__(parent)
-        self._port: Optional[SerialPort] = None
-        self._reader: Optional[SerialReader] = None
+        self._port: SerialPort | None = None
+        self._reader: SerialReader | None = None
         # Недособранный хвост кадра, переносимый между остановкой и
         # запуском reader'а (и через предкомандную очистку порта) —
         # иначе кадр, разрезанный остановкой потока, терялся целиком.
@@ -352,7 +352,7 @@ class SerialManager(QObject):
         self._lock = threading.RLock()
         self._config = Config()
         self._auto_reconnect = False
-        self._reconnect_timer: Optional[QTimer] = None
+        self._reconnect_timer: QTimer | None = None
         self._reconnect_attempts = 0
         self._last_port_name = ""
         self._last_baudrate = 115200
@@ -365,7 +365,7 @@ class SerialManager(QObject):
         # «при закрытии приложения что-то отрабатывает»). open_port
         # снимает флаг — явное подключение снова разрешает реконнект.
         self._shutdown = False
-        self._replay_path: Optional[str] = None
+        self._replay_path: str | None = None
         # Пачка управляющих команд делит одну остановку reader'а
         # (см. control_session) — без этого каждый request_control
         # гонял бы QThread stop/start, и вычитка 49 слотов триггеров
@@ -529,7 +529,7 @@ class SerialManager(QObject):
             self.connection_changed.emit(False)
             self._closing = False
 
-    def set_replay_path(self, path: Optional[str]) -> None:
+    def set_replay_path(self, path: str | None) -> None:
         """Устанавливает путь к CSV-дампу для эмулятора."""
         self._replay_path = path
         logger.info("Установлен путь к дампу: %s", path)
@@ -609,7 +609,7 @@ class SerialManager(QObject):
                 # устройство может ещё доинициализироваться и проглотить
                 # первую команду молча — вместо «Таймаут ответа на 0xCA»
                 # повтор запроса спасает цикл сохранения.
-                last_timeout: Optional[TimeoutError] = None
+                last_timeout: TimeoutError | None = None
                 for _attempt in range(2):
                     try:
                         result = self._control_roundtrip(command, payload, timeout)
@@ -1212,7 +1212,7 @@ class SerialManager(QObject):
                 self._start_reader()
                 self._closing = False
 
-    def auto_detect_can_speed(self) -> Optional[int]:
+    def auto_detect_can_speed(self) -> int | None:
         """Останавливает чтение, отправляет 0xA0, ждёт 0xA1 с определённой скоростью.
 
         Returns:
@@ -1344,7 +1344,7 @@ class SerialManager(QObject):
             self._reconnect_timer.stop()
             self._reconnect_timer = None
 
-    def _find_app_port_by_usb(self) -> Optional[str]:
+    def _find_app_port_by_usb(self) -> str | None:
         """Ищет наш адаптер среди портов по USB VID/PID приложения.
 
         Нужно, когда устройство пере-энумеровалось на другом COM — Windows

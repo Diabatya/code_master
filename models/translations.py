@@ -1,6 +1,5 @@
 """Простая система локализации для приложения «Код Мастер»."""
 
-from typing import Dict, List
 
 
 class Translator:
@@ -8,7 +7,7 @@ class Translator:
 
     def __init__(self) -> None:
         self._lang = "ru"
-        self._strings: Dict[str, Dict[str, str]] = {
+        self._strings: dict[str, dict[str, str]] = {
             "ru": {},
             "en": {
                 "Код Мастер": "Code Master",
@@ -950,7 +949,7 @@ class Translator:
         """Возвращает перевод строки на указанный язык."""
         return self._strings.get(lang, {}).get(text, text)
 
-    def all_translations(self, text: str) -> List[str]:
+    def all_translations(self, text: str) -> list[str]:
         """Возвращает все известные переводы строки."""
         result: set = set()
         for lang in self._strings:
@@ -993,6 +992,6 @@ def get_translation(text: str, lang: str) -> str:
     return _translator.translate_for_lang(text, lang)
 
 
-def get_all_translations(text: str) -> List[str]:
+def get_all_translations(text: str) -> list[str]:
     """Возвращает список переводов строки на все языки (без дубликатов)."""
     return _translator.all_translations(text)

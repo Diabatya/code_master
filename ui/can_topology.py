@@ -1,6 +1,5 @@
 """Визуализация топологии CAN-сети."""
 
-from typing import Dict, Optional, Tuple
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
@@ -26,8 +25,8 @@ class _PacketDot:
     def __init__(
         self,
         item: QGraphicsEllipseItem,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         steps: int = 30,
     ) -> None:
         self.item = item
@@ -51,7 +50,7 @@ class _PacketDot:
 class CanTopologyWidget(QWidget):
     """Графическая сцена с двумя шинами, устройством и динамическими узлами."""
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
         self._view = QGraphicsView(self._scene, self)
@@ -63,9 +62,9 @@ class CanTopologyWidget(QWidget):
 
         self._scene.setSceneRect(0, 0, 800, 420)
 
-        self._nodes: Dict[Tuple[int, int], QGraphicsEllipseItem] = {}
-        self._node_texts: Dict[Tuple[int, int], QGraphicsProxyWidget] = {}
-        self._next_node_y: Dict[int, float] = {1: 80.0, 2: 80.0}
+        self._nodes: dict[tuple[int, int], QGraphicsEllipseItem] = {}
+        self._node_texts: dict[tuple[int, int], QGraphicsProxyWidget] = {}
+        self._next_node_y: dict[int, float] = {1: 80.0, 2: 80.0}
         self._packets: list[_PacketDot] = []
 
         self._create_static_scene()
@@ -130,7 +129,7 @@ class CanTopologyWidget(QWidget):
         can2_label.setPos(680, 25)
         self._scene.addItem(can2_label)
 
-    def add_frame(self, frame: Dict[str, object]) -> None:
+    def add_frame(self, frame: dict[str, object]) -> None:
         """Добавляет узел по ID и запускает анимацию пакета."""
         channel = int(frame.get("channel", 1))
         can_id = int(frame.get("id", 0))

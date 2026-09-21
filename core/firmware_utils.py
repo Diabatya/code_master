@@ -2,12 +2,11 @@
 
 import tempfile
 from pathlib import Path
-from typing import Dict, Optional, Tuple
 
 
-def _parse_intel_hex(text: str) -> Tuple[bytes, int]:
+def _parse_intel_hex(text: str) -> tuple[bytes, int]:
     """Парсит Intel HEX в бинарные данные и базовый адрес (fallback без intelhex)."""
-    records: Dict[int, int] = {}
+    records: dict[int, int] = {}
     base = 0
     for line in text.splitlines():
         line = line.strip()
@@ -54,7 +53,7 @@ def _save_intel_hex(data: bytes, base_address: int, path: Path) -> None:
     """Сохраняет данные в файл Intel HEX."""
     lines: list[str] = []
     pos = 0
-    current_high: Optional[int] = None
+    current_high: int | None = None
     while pos < len(data):
         addr = base_address + pos
         high = (addr >> 16) & 0xFFFF
@@ -77,7 +76,7 @@ def _save_intel_hex(data: bytes, base_address: int, path: Path) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _load_elf(path: Path) -> Tuple[bytes, int]:
+def _load_elf(path: Path) -> tuple[bytes, int]:
     """Пытается прочитать ELF-файл через pyelftools; иначе как raw."""
     try:
         from elftools.elf.elffile import ELFFile
@@ -107,7 +106,7 @@ def _load_elf(path: Path) -> Tuple[bytes, int]:
 def _is_intel_hex(path: Path) -> bool:
     """Проверяет, что файл по содержимому является Intel HEX."""
     try:
-        with open(path, "r", encoding="utf-8") as fp:
+        with open(path, encoding="utf-8") as fp:
             for line in fp:
                 line = line.strip()
                 if not line:
@@ -118,7 +117,7 @@ def _is_intel_hex(path: Path) -> bool:
     return False
 
 
-def load_firmware_bytes(file_path: str) -> Tuple[bytes, int]:
+def load_firmware_bytes(file_path: str) -> tuple[bytes, int]:
     """Загружает прошивку (.bin/.hex/.elf) и возвращает (данные, базовый адрес)."""
     path = Path(file_path)
     if path.suffix.lower() == ".elf":
@@ -156,7 +155,7 @@ def guess_firmware_base(data: bytes) -> int:
     return APPLICATION_BASE_ADDR
 
 
-def trim_to_application_region(data: bytes, base: int) -> Tuple[bytes, int]:
+def trim_to_application_region(data: bytes, base: int) -> tuple[bytes, int]:
     """Отрезает часть образа ниже 0x08008000 для записи через AN3155.
 
     Объединённый образ (bootloader + application) через UART/USB-CDC
@@ -176,7 +175,7 @@ def trim_to_application_region(data: bytes, base: int) -> Tuple[bytes, int]:
     return data[cut:], APPLICATION_BASE_ADDR
 
 
-def validate_application_vector(data: bytes, base_address: int) -> Tuple[bool, str]:
+def validate_application_vector(data: bytes, base_address: int) -> tuple[bool, str]:
     """Проверяет MSP/reset vector application до начала Flash erase."""
     from core.stm32_info import APPLICATION_BASE_ADDR, BOOTLOADER_BASE_ADDR
 
@@ -206,7 +205,7 @@ def validate_application_vector(data: bytes, base_address: int) -> Tuple[bool, s
     return True, ""
 
 
-def validate_write_region(base: int, size: int) -> Tuple[bool, str]:
+def validate_write_region(base: int, size: int) -> tuple[bool, str]:
     """Проверяет, что область записи [base, base+size) допустима для AN3155.
 
     Bootloader разрешает запись только в application + metadata + config
@@ -243,7 +242,7 @@ def validate_write_region(base: int, size: int) -> Tuple[bool, str]:
     return True, ""
 
 
-def prepare_bin_file(file_path: str, default_base: int = 0x08000000) -> Tuple[Optional[str], int]:
+def prepare_bin_file(file_path: str, default_base: int = 0x08000000) -> tuple[str | None, int]:
     """Подготавливает временный .bin для утилит, которым нужен бинарный файл."""
     path = Path(file_path)
     data, base = load_firmware_bytes(file_path)

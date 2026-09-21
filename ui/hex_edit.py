@@ -1,6 +1,5 @@
 """Поле ввода одного HEX-байта с автопереходом фокуса."""
 
-from typing import List, Tuple
 
 from PySide6.QtCore import QRegularExpression, Qt
 from PySide6.QtGui import QFont, QKeyEvent, QRegularExpressionValidator
@@ -23,12 +22,12 @@ class HexDataEdit(QLineEdit):
         pattern = "[0-9A-Fa-f]{0,2}" if not allow_x else "([0-9A-Fa-f]{0,2}|[Xx]{1,2})"
         self.setValidator(QRegularExpressionValidator(QRegularExpression(pattern)))
         self.textEdited.connect(self._on_text_edited)
-        self._siblings: List[QLineEdit] = []
+        self._siblings: list[QLineEdit] = []
         # Флаг подавляет автопереход на следующий байт при перезаписи
         # первого символа — курсор шагает посимвольно, а не побайтно.
         self._suppress_autofocus = False
 
-    def set_siblings(self, siblings: List[QLineEdit]) -> None:
+    def set_siblings(self, siblings: list[QLineEdit]) -> None:
         """Задаёт список соседних полей Data для перехода фокуса."""
         self._siblings = siblings
 
@@ -130,9 +129,9 @@ def create_data_field_widget(
     edit_width: int = 40,
     placeholder_prefix: str = "D",
     allow_x: bool = False,
-) -> Tuple[List[QLineEdit], QWidget]:
+) -> tuple[list[QLineEdit], QWidget]:
     """Создаёт виджет с count полями HexDataEdit. Для count > 8 оборачивает в QScrollArea."""
-    edits: List[QLineEdit] = []
+    edits: list[QLineEdit] = []
     container = QWidget()
     layout = QHBoxLayout(container)
     layout.setSpacing(2)

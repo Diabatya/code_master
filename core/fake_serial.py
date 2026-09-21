@@ -10,7 +10,6 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 from PySide6.QtCore import QTimer
 
@@ -32,7 +31,7 @@ from models.utils import hex_to_int
 logger = get_logger(__name__)
 
 
-def _parse_csv_time(time_str: str) -> Optional[float]:
+def _parse_csv_time(time_str: str) -> float | None:
     """Парсит строку времени из CSV в Unix timestamp."""
     for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%H:%M:%S.%f", "%H:%M:%S"):
         try:
@@ -62,12 +61,12 @@ class FakeSerial:
         self._is_open = False
         self._rx_buffer = bytearray()
         self._buffer_lock = threading.Lock()
-        self._timer: Optional[threading.Timer] = None
+        self._timer: threading.Timer | None = None
         self._bootloader_mode = False
         self._last_address = 0
 
         self._replay_enabled = False
-        self._replay_data: List[Tuple[float, int, int, bytes]] = []
+        self._replay_data: list[tuple[float, int, int, bytes]] = []
         self._replay_index = 0
         self._replay_start_time = 0.0
         self._replay_timer = QTimer()
@@ -83,7 +82,7 @@ class FakeSerial:
         if not path.exists():
             logger.error("Файл дампа не найден: %s", filepath)
             return False
-        records: List[Tuple[float, int, int, bytes]] = []
+        records: list[tuple[float, int, int, bytes]] = []
         try:
             with path.open("r", encoding="utf-8", newline="") as file:
                 reader = csv.reader(file)
@@ -97,7 +96,7 @@ class FakeSerial:
                 channel_idx = header_lower.index("channel") if "channel" in header_lower else 1
                 id_idx = header_lower.index("id") if "id" in header_lower else 2
 
-                first_time: Optional[float] = None
+                first_time: float | None = None
                 for row in reader:
                     if not row:
                         continue
@@ -309,17 +308,7 @@ class FakeSerial:
         command = data[0]
         if command == 0x00:  # Get
             self._append_response(bytes([0x79, 0x01, 0x00, 0x79]))
-        elif command == 0x11:  # Read Memory
-            self._append_response(bytes([0x79]))
-        elif command == 0x21:  # Go
-            self._append_response(bytes([0x79]))
-        elif command == 0x31:  # Write Memory
-            self._append_response(bytes([0x79]))
-        elif command == 0x43:  # Erase
-            self._append_response(bytes([0x79]))
-        elif command == 0x44:  # Extended Erase
-            self._append_response(bytes([0x79]))
-        elif command == 0xFF:  # Mass erase
+        elif command == 0x11 or command == 0x21 or command == 0x31 or command == 0x43 or command == 0x44 or command == 0xFF:  # Read Memory
             self._append_response(bytes([0x79]))
 
         return len(data)

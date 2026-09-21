@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -42,14 +42,14 @@ DIRECTIONS = [tr("Из CAN1 в CAN2"), tr("Из CAN2 в CAN1")]
 class CanGatewayTab(QWidget):
     """Вкладка CAN-шлюза: ретрансляция, игнорирование и подмена кадров."""
 
-    def __init__(self, serial_manager: SerialManager, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, serial_manager: SerialManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._config = Config()
         self._running = False
-        self._ignore_edits: List[QLineEdit] = []
-        self._rule_blocks: List[Dict[str, Any]] = []
-        self._internal_rules: List[Dict[str, Any]] = []
+        self._ignore_edits: list[QLineEdit] = []
+        self._rule_blocks: list[dict[str, Any]] = []
+        self._internal_rules: list[dict[str, Any]] = []
         self._ignore_set: set[int] = set()
         self._memory_indicator = MemoryIndicator(self)
         self._create_widgets()
@@ -113,7 +113,7 @@ class CanGatewayTab(QWidget):
         setup_button(self._load_button, height=28)
         self._load_button.clicked.connect(self._load_rules)
 
-    def _create_rule_block(self, index: int, font: QFont) -> Dict[str, Any]:
+    def _create_rule_block(self, index: int, font: QFont) -> dict[str, Any]:
         frame = QGroupBox(tr("Правило {0}").format(index + 1))
         frame.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         frame.setStyleSheet("QGroupBox { border: 1px solid #444444; margin-top: 6px; padding-top: 6px; }")
@@ -130,7 +130,7 @@ class CanGatewayTab(QWidget):
         recv_id.setMaxLength(8)
         recv_id.setPlaceholderText(tr("ID"))
 
-        recv_data: List[QLineEdit] = []
+        recv_data: list[QLineEdit] = []
         for d in range(8):
             edit = QLineEdit()
             edit.setFixedWidth(36)
@@ -145,7 +145,7 @@ class CanGatewayTab(QWidget):
         replace_id.setMaxLength(8)
         replace_id.setPlaceholderText(tr("ID"))
 
-        replace_data: List[QLineEdit] = []
+        replace_data: list[QLineEdit] = []
         for d in range(8):
             edit = QLineEdit()
             edit.setFixedWidth(36)
@@ -237,8 +237,8 @@ class CanGatewayTab(QWidget):
 
     def _load_config(
         self,
-        rules: Optional[List[Dict[str, Any]]] = None,
-        ignore_ids: Optional[List[Any]] = None,
+        rules: list[dict[str, Any]] | None = None,
+        ignore_ids: list[Any] | None = None,
     ) -> None:
         if rules is None:
             rules = self._config.get("gateway_rules", [])
@@ -267,7 +267,7 @@ class CanGatewayTab(QWidget):
             self._ignore_edits[i].setText(str(ignore_ids[i]) if i < len(ignore_ids) else "")
         self._on_ignore_changed()
 
-    def set_config(self, rules: List[Dict[str, Any]], ignore_ids: Optional[List[Any]] = None) -> None:
+    def set_config(self, rules: list[dict[str, Any]], ignore_ids: list[Any] | None = None) -> None:
         """Устанавливает правила шлюза из внешней конфигурации."""
         self._load_config(rules, ignore_ids)
 
@@ -288,12 +288,12 @@ class CanGatewayTab(QWidget):
         self._config.set("gateway_ignore", [edit.text().strip() for edit in self._ignore_edits])
         self._memory_indicator.update_usage(self._memory_indicator.estimate_rules(rules))
 
-    def _parse_id(self, text: str) -> Optional[int]:
+    def _parse_id(self, text: str) -> int | None:
         return hex_to_int(text.strip())
 
-    def _parse_data(self, edits: List[QLineEdit]) -> List[Optional[int]]:
+    def _parse_data(self, edits: list[QLineEdit]) -> list[int | None]:
         """Возвращает список 8 значений; None для пустых полей."""
-        result: List[Optional[int]] = []
+        result: list[int | None] = []
         for edit in edits:
             text = edit.text().strip()
             if text:
@@ -303,7 +303,7 @@ class CanGatewayTab(QWidget):
                 result.append(None)
         return result
 
-    def _build_internal_rules(self) -> List[Dict[str, Any]]:
+    def _build_internal_rules(self) -> list[dict[str, Any]]:
         rules = []
         for i, block in enumerate(self._rule_blocks):
             if not block["active"].isChecked():
@@ -353,7 +353,7 @@ class CanGatewayTab(QWidget):
         logger.info("CAN-шлюз остановлен")
         QMessageBox.information(self, tr("CAN-шлюз"), tr("Шлюз остановлен"))
 
-    def process_frame(self, frame: Dict[str, Any]) -> None:
+    def process_frame(self, frame: dict[str, Any]) -> None:
         if not self._running:
             return
         if frame.get("tx_echo"):
