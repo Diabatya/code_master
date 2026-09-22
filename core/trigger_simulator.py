@@ -41,13 +41,41 @@ class TriggerSimulator:
         return {"have": False, "last": b"", "count": 0, "suppress": False}
 
     @staticmethod
-    def _fire_track(state: dict[str, Any], frame: dict[str, Any]) -> None:
+    def _fire_byte_compared(t: dict[str, Any], is_src: bool, i: int) -> bool:
+        """Порт fire_byte_compared(): байт «X» не участвует в понятии
+        «смена DATA». rx — маска 0 (побитовая, RTR — данных нет);
+        src — инвертированный диапазон from>to или байт за src_dlc."""
+        if is_src:
+            src_from = bytes(t.get("src_from", b"\x00" * 8))
+            src_to = bytes(t.get("src_to", b"\xff" * 8))
+            return i < int(t.get("src_dlc", 0)) and src_from[i] <= src_to[i]
+        if int(t.get("rx_rtr", 0)) == 1:
+            return False
+        return bytes(t.get("rx_data_mask", b"\x00" * 8))[i] != 0
+
+    @classmethod
+    def _fire_track(cls, state: dict[str, Any], frame: dict[str, Any], t: dict[str, Any], is_src: bool) -> None:
         """Порт fire_track(): смена DATA (на уровне ID-фильтра) сбрасывает
-        защёлку лимита — триггер снова исполняет N сработок."""
+        защёлку лимита — триггер снова исполняет N сработок. Байты «X»
+        не считаются: меняющиеся wildcard-позиции не сбрасывают защёлку."""
         data = bytes(frame.get("data", b""))
         dlc = min(int(frame.get("dlc", len(data))), 8)
         last = data[:dlc]
-        if not state["have"] or state["last"] != last:
+        changed = not state["have"] or len(state["last"]) != dlc
+        if not changed:
+            rx_mask = bytes(t.get("rx_data_mask", b"\x00" * 8))
+            for i in range(8):
+                if not cls._fire_byte_compared(t, is_src, i):
+                    continue
+                cur = last[i] if i < len(last) else 0
+                prev = state["last"][i] if i < len(state["last"]) else 0
+                if not is_src:
+                    cur &= rx_mask[i]
+                    prev &= rx_mask[i]
+                if cur != prev:
+                    changed = True
+                    break
+        if changed:
             state["last"] = last
             state["have"] = True
             state["count"] = 0
@@ -183,7 +211,7 @@ class TriggerSimulator:
                 src_state = self._src_state[i]
                 src_limit = int(t.get("src_fire_limit", 0))
                 if src_limit:
-                    self._fire_track(src_state, frame)
+                    self._fire_track(src_state, frame, t, True)
                 if not src_state["suppress"] and self._src_range_matches(t, frame):
                     cached = dict(frame)
                     # Wildcard-позиции (from>to) обнуляются при захвате —
@@ -206,7 +234,7 @@ class TriggerSimulator:
             rx_state = self._rx_state[i]
             rx_limit = int(t.get("rx_fire_limit", 0))
             if rx_limit:
-                self._fire_track(rx_state, frame)
+                self._fire_track(rx_state, frame, t, False)
             if rx_state["suppress"] or not self._rx_data_matches(t, frame):
                 continue
             sends = int(t.get("tx_count", 0)) or 1

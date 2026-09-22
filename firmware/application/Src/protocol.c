@@ -591,7 +591,7 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * [64..67]: худший зафиксированный запас стека в байтах (аудит —
        * два CAN-кольца съедают большую часть RAM, см. main.c). Старые
        * версии ПК читают только первые 16 байт. */
-      uint8_t out[68] = {
+      uint8_t out[76] = {
         s_device_version,
         5U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
              * деструктивных команд; 4 = записи триггеров v3 (90 Б —
@@ -637,6 +637,16 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       {
         uint32_t stack_free = App_GetStackFreeBytes();
         memcpy(&out[64], &stack_free, 4U);
+      }
+      /* [68:72]=застеканный PC последнего фолта, [72:76]=CFSR — точный
+       * адрес инструкции краха и его класс (BKP->DR4..DR7, см.
+       * fault_capture в stm32f1xx_it.c). Полевой bootloop «не стартует
+       * на активной CAN-шине» иначе не локализуется без JTAG. */
+      {
+        uint32_t fault_pc = App_GetFaultPc();
+        uint32_t fault_cfsr = App_GetFaultCfsr();
+        memcpy(&out[68], &fault_pc, 4U);
+        memcpy(&out[72], &fault_cfsr, 4U);
       }
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;

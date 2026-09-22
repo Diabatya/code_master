@@ -1,5 +1,6 @@
 """Страница «Триггеры» — блоки условий и ответов, слоты во Flash МК."""
 
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QEvent, QPoint, QRegularExpression, Qt, QTimer, Signal
@@ -59,6 +60,8 @@ from ui.hex_edit import create_data_field_widget
 from ui.id_edit import IdPasteEdit
 from ui.memory_indicator import MemoryIndicator
 from ui.packet_clipboard import create_clipboard_buttons
+
+_CHECK_ICON = str((Path(__file__).parent.parent / "assets" / "icons" / "check.svg").resolve())
 
 logger = get_logger(__name__)
 
@@ -847,13 +850,16 @@ class CanTriggerTab(QWidget):
 
     @staticmethod
     def _set_toggle_checkbox_style(checkbox: QCheckBox, checked: bool) -> None:
-        """Подсвечивает чекбокс-переключатель голубым при включении —
-        без этого «Слушать отправляемое»/«Кол-во сработок»/«Кэш» было не
-        отличить вкл/выкл на общем фоне (полевая находка мастера)."""
+        """Подсвечивает ИНДИКАТОР чекбокса-переключателя голубым при
+        включении — без этого «Слушать отправляемое»/«Кол-во сработок»/
+        «Кэш» было не отличить вкл/выкл на общем фоне (полевая находка
+        мастера). Подсвечивается именно квадратик, а не фон за текстом."""
         if checked:
             checkbox.setStyleSheet(
-                "QCheckBox { background-color: #2196F3; color: #FFFFFF; "
-                "padding: 3px 6px; border-radius: 4px; }"
+                "QCheckBox { padding: 3px 6px; }"
+                "QCheckBox::indicator { background-color: #2196F3; "
+                "border: 1px solid #1976D2; }"
+                f'QCheckBox::indicator:checked {{ image: url("{_CHECK_ICON}"); }}'
             )
         else:
             # «Серым как сейчас» — без собственного фона; padding

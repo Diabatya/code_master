@@ -75,9 +75,12 @@ typedef struct __attribute__((packed)) {
  * (иначе N имён = N стираний страницы подряд). */
 #define TRIGGER_NAMES_OFFSET   (DEVICE_EXT_CONFIG_OFFSET + 16U) /* = 48 */
 #define TRIGGER_NAMES_MAGIC    0x544E4D30U /* "TNM0" */
-#define TRIGGER_NAMES_VERSION  1U
+/* version 2: имя 16→21 байт (отчёт мастера — кириллические названия
+ * резались до ~8 букв). Старая запись не пройдёт CRC — безвредно,
+ * имена просто перезапишутся при ближайшем сохранении. */
+#define TRIGGER_NAMES_VERSION  2U
 #define TRIGGER_NAME_MAX       24U
-#define TRIGGER_NAME_LEN       16U
+#define TRIGGER_NAME_LEN       21U
 
 typedef struct __attribute__((packed)) {
   uint32_t magic;
@@ -85,7 +88,7 @@ typedef struct __attribute__((packed)) {
   uint8_t  reserved[4]; /* выравнивание: запись пишется halfword'ами */
   char     names[TRIGGER_NAME_MAX][TRIGGER_NAME_LEN]; /* UTF-8, 0-термин. */
   uint8_t  crc8;
-} trigger_names_t; /* 4+1+4+384+1 = 394 bytes, чётный размер */
+} trigger_names_t; /* 4+1+4+504+1 = 514 bytes, чётный размер */
 
 /* Loads the config from Flash into the RAM mirror (call once at boot, before
  * MX_USB_DEVICE_Init() so the USB descriptors already see the right

@@ -38,7 +38,9 @@ TRIGGER_MAX_SLOTS = 70
 # RAM прошивки почти весь занят CAN-кольцами, имя в исполнении не
 # участвует. Индекс имени = слот базовой записи группы (group_seq==0)
 # в пуле триггеров — тот же индекс, что у CMD_TRIGGER_READ.
-TRIGGER_NAME_MAX_LEN = 16
+# 21 байт UTF-8 (синхронно с TRIGGER_NAME_LEN/TRIGGER_NAMES_VERSION=2
+# в device_config.h) — по отчёту мастера 16 резали кириллицу до ~8 букв.
+TRIGGER_NAME_MAX_LEN = 21
 TRIGGER_NAME_MAX_COUNT = 24
 
 

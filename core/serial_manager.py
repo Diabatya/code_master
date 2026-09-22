@@ -493,6 +493,16 @@ class SerialManager(QObject):
                                 int(info.get("usb_disconnect_count") or 0),
                                 int(info.get("rx_overflow_bytes") or 0),
                             )
+                            if info.get("fault_code"):
+                                # Адрес краха прошлого запуска — для
+                                # разбора bootloop без JTAG (см. лог МК).
+                                logger.warning(
+                                    "Последний запуск МК завершился крахом: "
+                                    "fault=%d, PC=0x%08X, CFSR=0x%08X",
+                                    int(info.get("fault_code") or 0),
+                                    int(info.get("fault_pc") or 0),
+                                    int(info.get("fault_cfsr") or 0),
+                                )
                     except Exception:  # noqa: BLE001
                         logger.debug("Устройство не отдало SYSTEM_INFO")
                 self._config.set_bulk({
@@ -972,6 +982,7 @@ class SerialManager(QObject):
             info["reset_flags"] = payload[56]
             info["usb_reset_count"] = payload[57]
             info["usb_disconnect_count"] = payload[58]
+            info["fault_code"] = payload[59]
         if len(payload) >= 64:
             info["rx_overflow_bytes"] = int.from_bytes(payload[60:64], "little")
         # Худший зафиксированный запас стека с момента старта МК (байты,
@@ -980,6 +991,12 @@ class SerialManager(QObject):
         # ли устройство подходит к переполнению стека.
         if len(payload) >= 68:
             info["stack_free_bytes"] = int.from_bytes(payload[64:68], "little")
+        # [68..75] — застеканный PC и CFSR последнего фолта (BKP DR4..DR7):
+        # точный адрес инструкции краха — полевой ответ на bootloop
+        # «МК не стартует на активной CAN-шине» без JTAG.
+        if len(payload) >= 76:
+            info["fault_pc"] = int.from_bytes(payload[68:72], "little")
+            info["fault_cfsr"] = int.from_bytes(payload[72:76], "little")
         return info
 
     def read_event_log(self, after_seq: int = 0, max_count: int = 23) -> list[dict[str, int]]:

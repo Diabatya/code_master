@@ -192,23 +192,24 @@ def test_count_configured_triggers() -> None:
 
 
 def test_encode_trigger_name() -> None:
-    """Имя кодируется UTF-8 и обрезается по границе символа, ≤16 байт."""
+    """Имя кодируется UTF-8 и обрезается по границе символа, ≤21 байт."""
     from core.trigger_protocol import (
         TRIGGER_NAME_MAX_LEN,
         decode_trigger_name,
         encode_trigger_name,
     )
 
+    assert TRIGGER_NAME_MAX_LEN == 21
     assert encode_trigger_name("Pump") == b"Pump"
     assert encode_trigger_name("") == b""
-    # 16 ASCII-символов = ровно лимит
-    assert len(encode_trigger_name("A" * 16)) == TRIGGER_NAME_MAX_LEN
+    # 21 ASCII-символ = ровно лимит
+    assert len(encode_trigger_name("A" * 21)) == TRIGGER_NAME_MAX_LEN
     # Длинное имя обрезается до лимита
     assert len(encode_trigger_name("A" * 30)) == TRIGGER_NAME_MAX_LEN
     # Кириллица: 2 байта/символ — неполный хвостовой кодпоинт отбрасывается
-    raw = encode_trigger_name("Ж" * 9)  # 18 байт → обрезка до 8 символов
-    assert len(raw) == TRIGGER_NAME_MAX_LEN
-    assert decode_trigger_name(raw) == "Ж" * 8
+    raw = encode_trigger_name("Ж" * 11)  # 22 байта → обрезка до 10 символов
+    assert len(raw) == TRIGGER_NAME_MAX_LEN - 1
+    assert decode_trigger_name(raw) == "Ж" * 10
 
 
 def test_decode_trigger_name() -> None:

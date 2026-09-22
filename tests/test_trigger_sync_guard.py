@@ -534,3 +534,36 @@ def test_simulator_src_wildcard() -> None:
     tx = result["tx_frames"]
     assert tx and tx[0]["id"] == 0x300
     assert tx[0]["data"] == bytes([0x15, 0x00]), "wildcard-байт уходит как 0x00"
+
+
+def test_simulator_fire_limit_ignores_x_bytes() -> None:
+    """«Кол-во сработок до смены DATA»: байт «X» (rx_data_mask=0) не
+    участвует в понятии «смена DATA» — его изменение не сбрасывает
+    защёлку лимита. Сбрасывает только изменение сравниваемого байта —
+    даже в несовпадающее значение (трекинг на уровне ID)."""
+    from core.trigger_simulator import simulate
+
+    record = unpack_trigger(pack_trigger({
+        "enabled": 1, "rx_channel": 0, "rx_id": 0x111,
+        "rx_id_mask": 0x7FF, "rx_dlc": 0,
+        "rx_data": bytes([0x11, 0x00] + [0x00] * 6),
+        "rx_data_mask": bytes([0xFF, 0x00] + [0x00] * 6),  # байт 1 — «X»
+        "rx_fire_limit": 1,
+        "tx_channel": 0, "tx_id": 0x222, "tx_dlc": 0,
+        "tx_count": 1, "delay_ms": 0, "tx_interval_ms": 0,
+    }))
+    frames = [
+        # Матч → сработка, лимит 1 исчерпан → защёлка.
+        {"time_ms": 0, "channel": 1, "id": 0x111, "data": bytes([0x11, 0xAA])},
+        # «X»-байт изменился — не смена DATA, защёлка остаётся.
+        {"time_ms": 10, "channel": 1, "id": 0x111, "data": bytes([0x11, 0xBB])},
+        {"time_ms": 20, "channel": 1, "id": 0x111, "data": bytes([0x11, 0xCC])},
+        # Сравниваемый байт 0 сменился (пусть и не в матч) — защёлка сброшена.
+        {"time_ms": 30, "channel": 1, "id": 0x111, "data": bytes([0x22, 0xCC])},
+        # Вернулся в матч → новая серия, сработка снова.
+        {"time_ms": 40, "channel": 1, "id": 0x111, "data": bytes([0x11, 0xCC])},
+        {"time_ms": 50, "channel": 1, "id": 0x111, "data": bytes([0x11, 0xDD])},
+    ]
+    result = simulate([record], frames)
+    tx_times = [tx["time_ms"] for tx in result["tx_frames"]]
+    assert tx_times == [0, 40], "изменение «X»-байта не должно реанимировать лимит"

@@ -522,22 +522,6 @@ uint8_t CanBridge_Init(uint32_t can1_baud_kbps, uint32_t can2_baud_kbps)
     return 0U;
   }
 
-  /* NVIC lines must be enabled explicitly: HAL_CAN_ActivateNotification()
-   * only programs CAN_IER inside the peripheral — without NVIC the CPU
-   * never vectors into the IRQ handlers and RX FIFO0 never gets drained.
-   * This was the root cause of "no reception": filters were pass-all and
-   * the callback was wired, but CANx_RX0/CANx_SCE were never unmasked in
-   * the NVIC. On F105 connectivity line CAN1 TX/RX0 share the legacy
-   * USB_HP/USB_LP vector names (see stm32f1xx_it.c header note). */
-  HAL_NVIC_SetPriority(USB_LP_CAN1_RX0_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(USB_LP_CAN1_RX0_IRQn);
-  HAL_NVIC_SetPriority(CAN1_SCE_IRQn, 6, 0);
-  HAL_NVIC_EnableIRQ(CAN1_SCE_IRQn);
-  HAL_NVIC_SetPriority(CAN2_RX0_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(CAN2_RX0_IRQn);
-  HAL_NVIC_SetPriority(CAN2_SCE_IRQn, 6, 0);
-  HAL_NVIC_EnableIRQ(CAN2_SCE_IRQn);
-
   /* Default both channels to Normal mode, termination off — actual
    * per-channel state (Normal/Silent, termination on/off) is a hardware
    * jumper/config concern per board and should be revisited once the real
@@ -546,6 +530,37 @@ uint8_t CanBridge_Init(uint32_t can1_baud_kbps, uint32_t can2_baud_kbps)
   CanBridge_SetTransceiverMode(1, 0, 0);
   s_can_ready = 1U;
   return 1U;
+}
+
+/* NVIC lines must be enabled explicitly: HAL_CAN_ActivateNotification()
+ * only programs CAN_IER inside the peripheral — without NVIC the CPU
+ * never vectors into the IRQ handlers and RX FIFO0 never gets drained.
+ * On F105 connectivity line CAN1 TX/RX0 share the legacy USB_HP/USB_LP
+ * vector names (see stm32f1xx_it.c header note).
+ *
+ * Вызывается из main() последним шагом инициализации, уже на входе в
+ * главный цикл. Раньше линии включались здесь же, в CanBridge_Init —
+ * и на активной шине RX-прерывания стреляли в середину
+ * DeviceConfig/Trigger/USB-инициализации: глубокие стековые цепочки
+ * инициализации плюс ISR-кадр на общем MSP. Полевой лог показал
+ * bootloop HardFault→IWDG именно при подаче питания с подключённой
+ * CAN-шиной. Пока NVIC выключен, приходящие кадры копятся в аппаратном
+ * FIFO0 (3 слота) и вычитываются backstop-опросом CanBridge_PollHealth()
+ * на первой итерации цикла — кадры не теряются, просто обрабатываются
+ * на сотню миллисекунд позже. */
+void CanBridge_StartInterrupts(void)
+{
+  if (!s_can_ready) {
+    return;
+  }
+  HAL_NVIC_SetPriority(USB_LP_CAN1_RX0_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(USB_LP_CAN1_RX0_IRQn);
+  HAL_NVIC_SetPriority(CAN1_SCE_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(CAN1_SCE_IRQn);
+  HAL_NVIC_SetPriority(CAN2_RX0_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(CAN2_RX0_IRQn);
+  HAL_NVIC_SetPriority(CAN2_SCE_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(CAN2_SCE_IRQn);
 }
 
 uint8_t CanBridge_SetBaud(uint8_t channel, uint32_t baud_kbps)

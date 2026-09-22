@@ -778,6 +778,7 @@ class Translator:
                 "Запись по триггеру": "Record by trigger",
                 "Запустить": "Start",
                 "Интервал подсветки": "Highlight interval",
+                "Подсветка смены DATA: 0 — все пакеты; N — только пакеты,\nидущие чаще, чем раз в N мс по одному ID. Длительность 500 мс.": "DATA change highlight: 0 — all packets; N — only packets\narriving more often than once per N ms per ID. Duration 500 ms.",
                 "Кликните по строке": "Click a row",
                 "Принято: 0 | Скорость: 0 пак/с": "Received: 0 | Rate: 0 frames/s",
                 "Принято: {0} | Скорость: {1} пак/с": "Received: {0} | Rate: {1} frames/s",

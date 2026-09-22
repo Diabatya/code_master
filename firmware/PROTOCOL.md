@@ -511,7 +511,7 @@ offset 16  poll_count:     uint32 LE — итерации Protocol_Poll (зам�
 
 Запрос: `[0xC9][0x00]`.
 
-Ответ payload: минимум 16 байт (базовая часть), актуальные прошивки — 68 байт:
+Ответ payload: минимум 16 байт (базовая часть), актуальные прошивки — 76 байт:
 
 ```text
 offset 0  application_version: uint8
@@ -537,6 +537,13 @@ offset 64 stack_free_bytes:    uint32 LE — App_GetStackFreeBytes(): худши
                                 (аудит: два CAN-кольца съедают ~35 КБ из
                                 64 КБ RAM, стек+куча делят оставшиеся ~5 КБ
                                 с прерываниями — см. main.c)
+offset 68 fault_pc:            uint32 LE — застеканный PC последнего фолта
+                                (BKP->DR4/DR5, fault_capture в
+                                stm32f1xx_it.c) — точный адрес инструкции
+                                краха; 0 — фолта не было
+offset 72 fault_cfsr:          uint32 LE — SCB->CFSR на момент фолта
+                                (BKP->DR6/DR7): класс — precise/imprecise
+                                bus, unalign, invstate и т.д.
 ```
 
 Читатель обязан проверять длину payload: старые прошивки отвечают

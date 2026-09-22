@@ -61,8 +61,12 @@ static IWDG_HandleTypeDef hiwdg;
  * 0 = загрузчик старый/не записал либо полный сброс backup-домена. */
 static uint8_t s_reset_flags;
 /* Код фолта, записанный обработчиком в BKP->DR3 перед зависанием —
- * пережил IWDG-ресет и доехал до этого старта. 0 = фолта не было. */
+ * пережил IWDG-ресет и доехал до этого старта. 0 = фолта не было.
+ * Застеканный PC и CFSR последнего фолта — DR4/DR5 и DR6/DR7: точный
+ * адрес инструкции краха для полевой диагностики без JTAG. */
 static uint8_t s_fault_code;
+static uint32_t s_fault_pc;
+static uint32_t s_fault_cfsr;
 
 static void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
@@ -122,9 +126,15 @@ int main(void)
   __HAL_RCC_BKP_CLK_ENABLE();
   s_reset_flags = (uint8_t)(BKP->DR2 & 0xFFU);
   s_fault_code = (uint8_t)(BKP->DR3 & 0xFFU);
+  s_fault_pc = ((uint32_t)BKP->DR5 << 16) | BKP->DR4;
+  s_fault_cfsr = ((uint32_t)BKP->DR7 << 16) | BKP->DR6;
   if (s_fault_code != 0U) {
     PWR->CR |= PWR_CR_DBP;
     BKP->DR3 = 0U; /* одноразовый маркер — потреблён */
+    BKP->DR4 = 0U;
+    BKP->DR5 = 0U;
+    BKP->DR6 = 0U;
+    BKP->DR7 = 0U;
   }
   SystemClock_Config();
   JTAG_Disable_SWD_Only();
@@ -167,6 +177,15 @@ int main(void)
     USBD_Start(&hUsbDeviceFS);
     usb_active = 1U;
   }
+
+  /* CAN-прерывания включаем последним шагом — уже на входе в главный
+   * цикл. На активной шине RX-IRQ иначе стреляли в середину
+   * DeviceConfig/Trigger/USB-инициализации (глубокие стековые цепочки +
+   * ISR-кадр на общем MSP): полевой лог показал bootloop
+   * HardFault→IWDG при подаче питания с подключённой шиной. Пока NVIC
+   * выключен, кадры копятся в аппаратном FIFO0 (3 слота) и вычитываются
+   * backstop-опросом CanBridge_PollHealth() на первой итерации. */
+  CanBridge_StartInterrupts();
 
   uint8_t last_usb_reset_count = CDC_GetUsbResetCount();
   uint8_t last_usb_disconnect_count = CDC_GetUsbDisconnectCount();
@@ -315,6 +334,16 @@ uint8_t App_GetResetFlags(void)
 uint8_t App_GetFaultCode(void)
 {
   return s_fault_code;
+}
+
+uint32_t App_GetFaultPc(void)
+{
+  return s_fault_pc;
+}
+
+uint32_t App_GetFaultCfsr(void)
+{
+  return s_fault_cfsr;
 }
 
 void App_NoteFault(uint8_t code)

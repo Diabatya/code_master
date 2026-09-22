@@ -99,6 +99,10 @@ uint8_t App_GetResetFlags(void);
  * 1=HardFault, 2=MemManage, 3=BusFault, 4=UsageFault, 0=фолта не было.
  * Одноразовый — читается и очищается при старте приложения. */
 uint8_t App_GetFaultCode(void);
+/* Застеканный PC и CFSR последнего фолта (BKP->DR4..DR7): точный адрес
+ * инструкции краха + класс фолта для полевой диагностики. 0 = не было. */
+uint32_t App_GetFaultPc(void);
+uint32_t App_GetFaultCfsr(void);
 void App_NoteFault(uint8_t code);
 /* Худший зафиксированный запас между концом .bss и пиком использования
  * стека с момента старта (см. paint_stack_canary() в main.c) — байты.

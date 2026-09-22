@@ -92,6 +92,14 @@ uint8_t CanBridge_IsReady(void);
 void CanBridge_GetStats(uint8_t channel, can_stats_t *out);
 void CanBridge_PollHealth(void);
 
+/* Включает NVIC-линии CANx_RX0/SCE — последний шаг инициализации,
+ * вызывается из main() уже на входе в главный цикл. На активной шине
+ * RX-прерывания не должны стрелять в середину DeviceConfig/Trigger/USB
+ * init: полевой лог показал bootloop HardFault→IWDG при подаче питания
+ * с подключённой CAN-шиной. До вызова кадры копятся в аппаратном FIFO0
+ * и дрейнит их backstop-опрос PollHealth на первой итерации. */
+void CanBridge_StartInterrupts(void);
+
 /* Returns 1 if channel's RX ring has overflowed at least once since the
  * last call (clears the flag on read) — surfaced to protocol.c so it can
  * be reported to the PC (ТЗ 12.2: drop-oldest + error flag on overflow). */

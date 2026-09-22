@@ -42,30 +42,46 @@ void NMI_Handler(void) { }
 
 /* Код фолта в BKP->DR3: регистр переживает IWDG/софт-ресет, следующий
  * старт приложения читает его и отдаёт в SYSTEM_INFO[59] — в полевом
- * логе видно, вис ли МК от краха, а не «просто перестал отвечать». */
-void HardFault_Handler(void)
+ * логе видно, вис ли МК от краха, а не «просто перестал отвечать».
+ *
+ * Дополнительно застеканный PC (точный адрес фолтящей инструкции) и
+ * CFSR (класс фолта: precise/imprecise/unalign/invstate...) пишутся в
+ * BKP->DR4..DR7 — SYSTEM_INFO[68..75]. Без этого полевой bootloop
+ * «МК не стартует на активной CAN-шине» остаётся недоказуемым: DR3
+ * говорил только ЧТО упало, но не ГДЕ. */
+/* Не static и used: на символ прыгает inline-asm трамплина — компилятор
+ * обязан сохранить функцию и пометить её Thumb-точкой входа. */
+__attribute__((noinline, used))
+void fault_capture(uint32_t *stacked, uint8_t code)
 {
-  App_NoteFault(1U);
+  App_NoteFault(code); /* DR3 + включение PWR/BKP clock и DBP */
+  uint32_t pc = stacked[6]; /* застеканный PC: r0,r1,r2,r3,r12,lr,pc,xpsr */
+  uint32_t cfsr = SCB->CFSR;
+  BKP->DR4 = (uint16_t)(pc & 0xFFFFU);
+  BKP->DR5 = (uint16_t)(pc >> 16);
+  BKP->DR6 = (uint16_t)(cfsr & 0xFFFFU);
+  BKP->DR7 = (uint16_t)(cfsr >> 16);
   while (1) { }
 }
 
-void MemManage_Handler(void)
-{
-  App_NoteFault(2U);
-  while (1) { }
-}
+/* Naked-трамплин: выбирает MSP/PSP по EXC_RETURN (lr бит 2) и передаёт
+ * адрес застеканного фрейма в fault_capture. r1 — код фолта. */
+#define FAULT_HANDLER(name, code)                                   \
+  __attribute__((naked)) void name(void)                            \
+  {                                                                 \
+    __asm volatile(                                                 \
+        "tst   lr, #4            \n\t"                              \
+        "ite   eq                \n\t"                              \
+        "mrseq r0, msp           \n\t"                              \
+        "mrsne r0, psp           \n\t"                              \
+        "movs  r1, #" #code "    \n\t"                              \
+        "b     fault_capture     \n\t");                            \
+  }
 
-void BusFault_Handler(void)
-{
-  App_NoteFault(3U);
-  while (1) { }
-}
-
-void UsageFault_Handler(void)
-{
-  App_NoteFault(4U);
-  while (1) { }
-}
+FAULT_HANDLER(HardFault_Handler, 1U)
+FAULT_HANDLER(MemManage_Handler, 2U)
+FAULT_HANDLER(BusFault_Handler, 3U)
+FAULT_HANDLER(UsageFault_Handler, 4U)
 
 void SVC_Handler(void) { }
 void DebugMon_Handler(void) { }

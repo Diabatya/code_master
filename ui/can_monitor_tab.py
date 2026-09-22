@@ -8,11 +8,13 @@ from typing import Any, TextIO
 
 from PySide6.QtCore import QPointF, QRect, QRegularExpression, Qt, QTimer, Signal
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QFont,
     QLinearGradient,
     QPainter,
     QPainterPath,
+    QPalette,
     QPen,
     QRegularExpressionValidator,
 )
@@ -37,6 +39,8 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -154,6 +158,70 @@ def _tx_echo_colors() -> tuple[QColor, QColor]:
     if _is_dark_theme():
         return QColor("#FF8C00"), QColor("#000000")
     return QColor("#000000"), QColor("#FFFFFF")
+
+
+def _row_base_bg() -> QColor:
+    """Фон обычной строки таблицы приёма — как общий фон окна, а не
+    более тёмный фон виджета-таблицы (в тёмной теме строки выглядели
+    почти чёрными — отчёт мастера)."""
+    return QApplication.palette().color(QPalette.ColorRole.Window)
+
+
+def _row_base_fg() -> QColor:
+    """Шрифт строк приёма: в тёмной теме явно белый (отчёт мастера),
+    в светлой — палитра."""
+    if _is_dark_theme():
+        return QColor("#FFFFFF")
+    return QApplication.palette().color(QPalette.ColorRole.Text)
+
+
+# Роль item-данных: множество индексов байтов DATA, которые делегат
+# рисует жёлтым шрифтом (подсветка «смена DATA» побайтно).
+_DATA_HL_ROLE = Qt.ItemDataRole.UserRole + 101
+
+
+class _DataByteDelegate(QStyledItemDelegate):
+    """DATA-ячейка таблицы приёма: рисует байты по одному, чтобы
+    подсветка «смена DATA» меняла цвет шрифта конкретного байта
+    (жёлтый), а не заливку фона строки (отчёт мастера). Индексы байтов
+    лежат в item.data(_DATA_HL_ROLE); пустое значение — обычная
+    отрисовка базовым классом."""
+
+    def paint(self, painter, option, index) -> None:  # noqa: N802
+        highlighted = index.data(_DATA_HL_ROLE)
+        if not highlighted:
+            super().paint(painter, option, index)
+            return
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = opt.text or ""
+        opt.text = ""
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        style.drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget
+        )
+
+        fm = opt.fontMetrics
+        rect = opt.rect
+        total_w = fm.horizontalAdvance(text)
+        x = rect.x() + max(0, (rect.width() - total_w) // 2)  # AlignCenter
+        y = rect.y() + (rect.height() + fm.ascent() - fm.descent()) // 2
+        fg = index.data(Qt.ItemDataRole.ForegroundRole)
+        if isinstance(fg, QBrush):
+            base = fg.color()
+        elif isinstance(fg, QColor):
+            base = fg
+        else:
+            base = opt.palette.color(QPalette.ColorRole.Text)
+        hl = QColor("#FFD54F") if _is_dark_theme() else QColor("#B26A00")
+        painter.save()
+        painter.setFont(opt.font)
+        for i in range((len(text) + 2) // 3):
+            seg = text[i * 3:i * 3 + 3]
+            painter.setPen(hl if i in highlighted else base)
+            painter.drawText(x, y, seg)
+            x += fm.horizontalAdvance(seg)
+        painter.restore()
 
 
 def _data_percent(data: bytes, dlc: int, byte_index: int | None = None) -> float:
@@ -709,6 +777,9 @@ class CanChannelMonitor(QWidget):
         self._table.cellDoubleClicked.connect(
             lambda row, _col: self._show_id_history(row)
         )
+        # DATA колонка — делегат побайтовой подсветки (жёлтый шрифт
+        # изменившегося байта, а не заливка строки — отчёт мастера).
+        self._table.setItemDelegateForColumn(2, _DataByteDelegate(self._table))
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.setColumnWidth(0, 90)
         self._table.setColumnWidth(1, 50)
@@ -1210,6 +1281,7 @@ class CanChannelMonitor(QWidget):
         stats["count"] += 1
         period = self._format_period(frame_id, now)
         prev_data = stats.get("last_data")
+        prev_time = stats.get("last_time")  # момент прошлого кадра этого ID
         stats["last_time"] = now
 
         timestamp = time.strftime("%H:%M:%S") + f".{int((now % 1) * 1000):03d}"
@@ -1237,10 +1309,21 @@ class CanChannelMonitor(QWidget):
                 if tooltip:
                     item.setToolTip(tooltip)
             self._paint_row_direction(row, tx_echo)
-            # Подсветка изменившихся данных: DATA того же ID изменилась →
-            # фон ячейки Data светлее на «Интервал подсветки» сверху.
-            if prev_data is not None and prev_data != data and self._highlight_interval_ms > 0:
-                self._highlight_data_cell(row)
+            # Подсветка изменившихся данных: жёлтый шрифт конкретного
+            # байта на 500 мс. «Интервал подсветки» — фильтр по темпу
+            # одного ID: 0 — подсвечивать все изменения; N — только если
+            # кадры этого ID идут чаще, чем раз в N мс (отчёт мастера).
+            if prev_data is not None and prev_data != data:
+                gap_ms = (now - prev_time) * 1000.0 if prev_time else float("inf")
+                if self._highlight_interval_ms == 0 or gap_ms < self._highlight_interval_ms:
+                    changed = {
+                        i
+                        for i in range(max(len(prev_data), len(data)))
+                        if (prev_data[i] if i < len(prev_data) else None)
+                        != (data[i] if i < len(data) else None)
+                    }
+                    if changed:
+                        self._highlight_data_cell(row, changed)
         else:
             if self._table.rowCount() >= MAX_TABLE_ROWS:
                 last_row = self._table.rowCount() - 1
@@ -1345,41 +1428,35 @@ class CanChannelMonitor(QWidget):
                 item.setBackground(bg)
                 item.setForeground(fg)
             else:
-                item.setBackground(QColor())
-                item.setForeground(QColor())
+                # Обычная строка — фон как общий фон окна, в тёмной теме
+                # шрифт явно белый (отчёт мастера: строки были почти
+                # чёрными на тёмном фоне).
+                item.setBackground(_row_base_bg())
+                item.setForeground(_row_base_fg())
         data_item = self._table.item(row, 2)
         if data_item is not None:
             data_item.setData(Qt.ItemDataRole.UserRole, bool(is_tx))
 
-    def _highlight_data_cell(self, row: int) -> None:
+    def _highlight_data_cell(self, row: int, changed_bytes: set[int]) -> None:
         if row in self._highlight_timers:
             self._highlight_timers[row].stop()
             del self._highlight_timers[row]
         data_item = self._table.item(row, 2)
         if data_item is None:
             return
-        data_item.setBackground(QColor("#464672"))
-        data_item.setForeground(QColor("#FFFFFF"))
+        # Подсветка — жёлтый шрифт изменившихся байтов (делегат колонки
+        # DATA), а не заливка фона; длительность фиксированные 500 мс.
+        data_item.setData(_DATA_HL_ROLE, sorted(changed_bytes))
         timer = QTimer(self)
         timer.setSingleShot(True)
         timer.timeout.connect(lambda r=row: self._reset_data_background(r))
-        # Длительность — из поля «Интервал подсветки» сверху, а не
-        # жёсткие 500 мс (поле раньше ни на что не влияло).
-        timer.start(max(50, self._highlight_interval_ms))
+        timer.start(500)
         self._highlight_timers[row] = timer
 
     def _reset_data_background(self, row: int) -> None:
         data_item = self._table.item(row, 2)
         if data_item is not None:
-            # TX-строка (кадр отправлен самим МК) возвращается в её цвет,
-            # обычная — в дефолтный фон.
-            if bool(data_item.data(Qt.ItemDataRole.UserRole)):
-                bg, fg = _tx_echo_colors()
-                data_item.setBackground(bg)
-                data_item.setForeground(fg)
-            else:
-                data_item.setBackground(QColor())
-                data_item.setForeground(QColor())
+            data_item.setData(_DATA_HL_ROLE, None)
         self._highlight_timers.pop(row, None)
 
     def _show_filter_dialog(self) -> None:
@@ -1575,6 +1652,10 @@ class CanMonitorTab(QWidget):
         self._highlight_interval_spin.setValue(500)
         self._highlight_interval_spin.setSuffix(tr(" мс"))
         self._highlight_interval_spin.setFont(compact_font)
+        self._highlight_interval_spin.setToolTip(
+            tr("Подсветка смены DATA: 0 — все пакеты; N — только пакеты,\n"
+               "идущие чаще, чем раз в N мс по одному ID. Длительность 500 мс.")
+        )
         self._highlight_interval_spin.valueChanged.connect(self._on_highlight_interval_changed)
 
         self._can1_speed_label = QLabel(tr("Скорость CAN1"))

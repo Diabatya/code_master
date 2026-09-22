@@ -688,15 +688,50 @@ static uint8_t src_range_matches(const trigger_t *t, const can_frame_t *frame)
   return 1U;
 }
 
+/* Участвует ли байт i в понятии «DATA» для счётчика сработок. Байты
+ * wildcard «X» полностью игнорируются (отчёт мастера): их изменение —
+ * не смена DATA и не должно сбрасывать защёлку лимита — иначе постоянно
+ * меняющиеся байты-счётчики никогда не давали бы лимиту сработать.
+ * rx-путь: «X» — это rx_data_mask[i]==0 (маска побитовая); для RTR-
+ * приёма данные не сравниваются вовсе. src-путь: «X» — инвертированный
+ * диапазон src_from[i] > src_to[i]; байты за пределами src_dlc фильтром
+ * не охвачены и тоже не считаются. */
+static uint8_t fire_byte_compared(const trigger_t *t, uint8_t is_src, uint8_t i)
+{
+  if (is_src != 0U) {
+    return (uint8_t)((i < t->src_dlc) && (t->src_from[i] <= t->src_to[i]));
+  }
+  return (uint8_t)(t->rx_rtr != 1U && t->rx_data_mask[i] != 0U);
+}
+
 /* «Кол-во сработок до смены DATA»: запоминает содержимое кадра на
  * уровне ID-фильтра; при смене DATA защёлка лимита сбрасывается —
  * триггер снова исполняет до rx/src_fire_limit сработок. Вызывается
  * только когда соответствующий лимит != 0. */
-static void fire_track(fire_state_t *st, const can_frame_t *frame)
+static void fire_track(fire_state_t *st, const can_frame_t *frame,
+                       const trigger_t *t, uint8_t is_src)
 {
   uint8_t dlc = frame->dlc > 8U ? 8U : frame->dlc;
-  if (!st->have || st->last_dlc != dlc
-      || memcmp(st->last, frame->data, dlc) != 0) {
+  uint8_t changed = (uint8_t)(!st->have || st->last_dlc != dlc);
+  if (changed == 0U) {
+    for (uint8_t i = 0; i < 8U; i++) {
+      if (fire_byte_compared(t, is_src, i) == 0U) {
+        continue;
+      }
+      uint8_t cur = (i < dlc) ? frame->data[i] : 0U;
+      /* rx-маска побитовая: сравниваются только значащие биты байта. */
+      uint8_t prev = st->last[i];
+      if (is_src == 0U) {
+        cur &= t->rx_data_mask[i];
+        prev &= t->rx_data_mask[i];
+      }
+      if (cur != prev) {
+        changed = 1U;
+        break;
+      }
+    }
+  }
+  if (changed != 0U) {
     memset(st->last, 0, sizeof(st->last));
     memcpy(st->last, frame->data, dlc);
     st->last_dlc = dlc;
@@ -770,7 +805,7 @@ void Trigger_OnFrame(const can_frame_t *frame)
         && !(frame->echo != 0U && (t->src_flags & TRIGGER_F_MUTE_ECHO) != 0U)
         && src_id_matches(t, frame)) {
       if (t->src_fire_limit != 0U) {
-        fire_track(&s_src_state[i], frame);
+        fire_track(&s_src_state[i], frame, t, 1U);
       }
       if (s_src_state[i].suppress == 0U && src_range_matches(t, frame)) {
         s_cache[i] = *frame;
@@ -796,7 +831,7 @@ void Trigger_OnFrame(const can_frame_t *frame)
       continue;
     }
     if (t->rx_fire_limit != 0U) {
-      fire_track(&s_rx_state[i], frame);
+      fire_track(&s_rx_state[i], frame, t, 0U);
     }
     if (s_rx_state[i].suppress != 0U || !rx_data_matches(t, frame)) {
       continue;
