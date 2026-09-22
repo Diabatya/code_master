@@ -62,6 +62,31 @@ typedef struct __attribute__((packed)) {
   uint8_t  crc8;
 } device_ext_config_t; /* 16 bytes */
 
+/* Таблица имён триггеров — третья запись той же config-страницы
+ * (сразу за расширенной). Имя не участвует в исполнении триггера и
+ * поэтому НЕ лежит в trigger_t: записей в пуле до 70, RAM почти весь
+ * занят CAN-кольцами и буферами — держать имя в каждой записи некуда.
+ * Индекс имени = слот базовой записи группы (group_seq==0) в пуле
+ * триггеров — тот же индекс, что принимает CMD_TRIGGER_READ.
+ * Ограничено первыми TRIGGER_NAME_MAX слотами пула; триггеры дальше
+ * работают как прежде, просто без сохранённого имени.
+ * Хост пишет имена по одному (CMD_TRIGGER_NAME_WRITE — только RAM),
+ * фиксация во Flash одной перезаписью страницы — CMD_TRIGGER_NAME_COMMIT
+ * (иначе N имён = N стираний страницы подряд). */
+#define TRIGGER_NAMES_OFFSET   (DEVICE_EXT_CONFIG_OFFSET + 16U) /* = 48 */
+#define TRIGGER_NAMES_MAGIC    0x544E4D30U /* "TNM0" */
+#define TRIGGER_NAMES_VERSION  1U
+#define TRIGGER_NAME_MAX       24U
+#define TRIGGER_NAME_LEN       16U
+
+typedef struct __attribute__((packed)) {
+  uint32_t magic;
+  uint8_t  version;
+  uint8_t  reserved[4]; /* выравнивание: запись пишется halfword'ами */
+  char     names[TRIGGER_NAME_MAX][TRIGGER_NAME_LEN]; /* UTF-8, 0-термин. */
+  uint8_t  crc8;
+} trigger_names_t; /* 4+1+4+384+1 = 394 bytes, чётный размер */
+
 /* Loads the config from Flash into the RAM mirror (call once at boot, before
  * MX_USB_DEVICE_Init() so the USB descriptors already see the right
  * name/serial on first enumeration). Falls back to defaults if the page is
@@ -94,6 +119,21 @@ uint32_t DeviceConfig_GetCanBaud(uint8_t channel);
  * config page (main + extended records), keeping name/serial/VID/PID
  * untouched. Returns 1 on success. */
 uint8_t DeviceConfig_SetCanBaud(uint8_t channel, uint32_t baud_kbps);
+
+/* Имя триггера по слоту базовой записи (0..TRIGGER_NAME_MAX-1):
+ * возвращает указатель на len байт в RAM-зеркале (не терминировано
+ * нулём при len==TRIGGER_NAME_LEN) или NULL/len=0 для пустого слота. */
+const uint8_t *DeviceConfig_GetTriggerName(uint8_t index, uint8_t *len_out);
+
+/* Складывает имя в RAM-зеркало таблицы (Flash не трогает — фиксация
+ * только через DeviceConfig_CommitTriggerNames). Пустое len стирает
+ * имя слота. Возвращает 0 при неверном индексе/длине. */
+uint8_t DeviceConfig_StageTriggerName(uint8_t index, const uint8_t *name,
+                                      uint8_t len);
+
+/* Одна перезапись config-страницы (main + ext + имена) — вызывается
+ * один раз после пачки StageTriggerName. Возвращает 1 при успехе. */
+uint8_t DeviceConfig_CommitTriggerNames(void);
 
 #ifdef __cplusplus
 }

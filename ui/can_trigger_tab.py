@@ -28,6 +28,9 @@ from PySide6.QtWidgets import (
 
 from core.can_protocol import (
     CMD_TRIGGER_COMMIT,
+    CMD_TRIGGER_NAME_COMMIT,
+    CMD_TRIGGER_NAME_READ,
+    CMD_TRIGGER_NAME_WRITE,
     CMD_TRIGGER_READ,
     CMD_TRIGGER_STAGE,
     TRIGGER_CLEAR_ALL_KEY,
@@ -39,7 +42,11 @@ from core.trigger_protocol import (
     TRIGGER_FORMAT_VERSION,
     TRIGGER_FORMAT_VERSION_V2,
     TRIGGER_MAX_SLOTS,
+    TRIGGER_NAME_MAX_COUNT,
+    TRIGGER_NAME_MAX_LEN,
     count_configured_triggers,
+    decode_trigger_name,
+    encode_trigger_name,
     expand_schedule,
     pack_trigger,
     unpack_trigger,
@@ -286,6 +293,7 @@ class CanTriggerTab(QWidget):
             tr("Срабатывать и на кадры, отправленные самим МК (TX-эхо)")
         )
         options_layout.addWidget(listen_echo)
+        self._wire_toggle_checkbox_style(listen_echo)
         fire_check = QCheckBox(tr("Кол-во сработок до смены DATA"))
         fire_check.setFont(font)
         fire_check.setToolTip(
@@ -293,6 +301,7 @@ class CanTriggerTab(QWidget):
                "содержимого; новая Data запускает счёт заново")
         )
         options_layout.addWidget(fire_check)
+        self._wire_toggle_checkbox_style(fire_check)
         fire_spin = QSpinBox()
         fire_spin.setRange(1, 9999)
         fire_spin.setValue(1)
@@ -580,6 +589,7 @@ class CanTriggerTab(QWidget):
         cache_check.setFont(font)
         cache_check.stateChanged.connect(lambda state, idx=index: self._on_cache_active_changed(idx, state))
         group_layout.addWidget(cache_check)
+        self._wire_toggle_checkbox_style(cache_check)
 
         fields_widget = QWidget()
         fields_layout = QVBoxLayout(fields_widget)
@@ -703,6 +713,7 @@ class CanTriggerTab(QWidget):
             tr("Кэшировать и кадры, отправленные самим МК (TX-эхо)")
         )
         line3.addWidget(listen_echo)
+        self._wire_toggle_checkbox_style(listen_echo)
         fire_check = QCheckBox(tr("Кол-во сработок до смены DATA"))
         fire_check.setFont(font)
         fire_check.setToolTip(
@@ -710,6 +721,7 @@ class CanTriggerTab(QWidget):
                "смены содержимого; новая Data запускает счёт заново")
         )
         line3.addWidget(fire_check)
+        self._wire_toggle_checkbox_style(fire_check)
         fire_spin = QSpinBox()
         fire_spin.setRange(1, 9999)
         fire_spin.setValue(1)
@@ -833,6 +845,29 @@ class CanTriggerTab(QWidget):
             else:
                 edit.setEnabled(True)
 
+    @staticmethod
+    def _set_toggle_checkbox_style(checkbox: QCheckBox, checked: bool) -> None:
+        """Подсвечивает чекбокс-переключатель голубым при включении —
+        без этого «Слушать отправляемое»/«Кол-во сработок»/«Кэш» было не
+        отличить вкл/выкл на общем фоне (полевая находка мастера)."""
+        if checked:
+            checkbox.setStyleSheet(
+                "QCheckBox { background-color: #2196F3; color: #FFFFFF; "
+                "padding: 3px 6px; border-radius: 4px; }"
+            )
+        else:
+            # «Серым как сейчас» — без собственного фона; padding
+            # оставляем, чтобы геометрия не прыгала при переключении.
+            checkbox.setStyleSheet(
+                "QCheckBox { padding: 3px 6px; }"
+            )
+
+    def _wire_toggle_checkbox_style(self, checkbox: QCheckBox) -> None:
+        checkbox.toggled.connect(
+            lambda checked, cb=checkbox: self._set_toggle_checkbox_style(cb, checked)
+        )
+        self._set_toggle_checkbox_style(checkbox, checkbox.isChecked())
+
     def _on_row_rtr_toggled(
         self, checked: bool, edits: list[QLineEdit], widget: QWidget, dlc: QSpinBox
     ) -> None:
@@ -905,6 +940,18 @@ class CanTriggerTab(QWidget):
         status.setFont(font)
         status.setStyleSheet("color: #9E9E9E;")
 
+        name_edit = QLineEdit()
+        name_edit.setFont(font)
+        name_edit.setPlaceholderText(tr("Имя триггера"))
+        name_edit.setMaxLength(TRIGGER_NAME_MAX_LEN)
+        name_edit.setFixedWidth(160)
+        name_edit.setToolTip(
+            tr("Имя хранится в МК — появится на пустом устройстве "
+               "после применения конфигурации (первые {0} триггеров)")
+            .format(TRIGGER_NAME_MAX_COUNT)
+        )
+        name_edit.textChanged.connect(lambda _t: self._mark_dirty())
+
         recv = self._create_receive_row(font, tr("Приём"))
         response = self._create_response_block(font)
         cache = self._create_cache_block(font, index)
@@ -927,6 +974,7 @@ class CanTriggerTab(QWidget):
         return {
             "group": group,
             "status": status,
+            "name": name_edit,
             "recv": recv,
             "response": response,
             "cache": cache,
@@ -951,10 +999,12 @@ class CanTriggerTab(QWidget):
         self._set_cache_enabled(block, False)
         block["cache"]["cache_check"].setEnabled(True)
 
-        # Шапка блока: статус слева.
+        # Шапка блока: статус слева, имя триггера справа от него.
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.addWidget(block["status"])
+        header_row.addSpacing(10)
+        header_row.addWidget(block["name"])
         header_row.addStretch()
         group_layout.addLayout(header_row)
         group_layout.addWidget(content)
@@ -1544,6 +1594,11 @@ class CanTriggerTab(QWidget):
         recv = block["recv"]
         values = group[0]
         block["group"].setChecked(bool(values["enabled"]))
+        # Имя присутствует только на прошивках протокола ≥5 (таблица
+        # trigger_names в config-странице). На старых — не трогаем поле,
+        # чтобы не затирать имя из загруженного конфига ПК.
+        if "name" in values:
+            block["name"].setText(str(values["name"]))
         recv["channel"].setCurrentIndex(min(values["rx_channel"], 2))
         recv["bit"].setCurrentIndex(int(values["rx_extended"]))
         recv["id"].setText(int_to_hex(values["rx_id"], 8 if values["rx_extended"] else 3))
@@ -1876,6 +1931,7 @@ class CanTriggerTab(QWidget):
         в полях старые данные из кэша конфигурации)."""
         block = self._blocks[index]
         block["group"].setChecked(False)
+        block["name"].setText("")
         block["cache"]["cache_check"].setChecked(False)
         self._on_cache_active_changed(index, Qt.CheckState.Unchecked.value)
         block["recv"]["listen_echo"].setChecked(True)
@@ -1932,6 +1988,35 @@ class CanTriggerTab(QWidget):
                 records.append(values)
         return records
 
+    def _read_device_trigger_names(self, slot_count: int) -> dict[int, str]:
+        """Читает имена триггеров из config-страницы МК по слотам пула.
+
+        Имя привязано к слоту базовой записи группы (group_seq==0), но
+        читаем диапазон целиком — дешевле, чем вычислять базы заранее,
+        а пустые слоты просто вернут len=0. Прошивки протокола <5
+        команды 0xD0 не знают — вернём пустой словарь, имена тогда живут
+        только в config.json ПК."""
+        if self._serial_manager.device_protocol_version() < 5:
+            return {}
+        names: dict[int, str] = {}
+        count = min(slot_count, TRIGGER_NAME_MAX_COUNT)
+        try:
+            with self._serial_manager.control_session():
+                for slot in range(count):
+                    resp = self._serial_manager.request_control(
+                        CMD_TRIGGER_NAME_READ, bytes((slot,))
+                    )
+                    if len(resp) >= 1:
+                        name_len = min(int(resp[0]), len(resp) - 1)
+                        names[slot] = decode_trigger_name(resp[1: 1 + name_len])
+        except (RuntimeError, OSError) as exc:
+            # RuntimeError — отказ по статусу; OSError/TimeoutError —
+            # прошивка проглотила неизвестную команду молча (маркер 0xD0
+            # у старых версий уходит в ресинхронизацию, ответа нет).
+            logger.warning("Чтение имён триггеров недоступно: %s", exc)
+            return {}
+        return names
+
     def sync_from_device(self, force: bool = False) -> bool:
         """Вычитывает триггеры из устройства (вызывается при подключении).
 
@@ -1968,10 +2053,16 @@ class CanTriggerTab(QWidget):
         self._applying_device_state = True
         try:
             groups = self._group_device_records(records)
+            # Имена читаются по плоскому слоту базовой записи группы —
+            # развёрнутая группа занимает len(group) слотов подряд.
+            names = self._read_device_trigger_names(len(records))
             self._ensure_blocks(len(groups))
             while len(self._blocks) > len(groups):
                 self._remove_block_at(len(self._blocks) - 1)
+            slot = 0
             for index, group in enumerate(groups):
+                group[0]["name"] = names.get(slot, "")
+                slot += len(group)
                 self._apply_device_trigger(index, group)
                 # Всё, что вычитано из устройства, устройство и
                 # исполняет (многофреймовые группы — тоже: они хранятся
@@ -2355,7 +2446,54 @@ class CanTriggerTab(QWidget):
                     raise RuntimeError(
                         tr("Триггер {0}: проверка записи во Flash не пройдена").format(index + 1)
                     )
+        # Имена — отдельная запись в config-странице МК, привязанная к
+        # слоту в НОВОМ пуле: коммит имён идёт строго после успешного
+        # CMD_TRIGGER_COMMIT и верификации.
+        self._write_device_trigger_names(target, len(device))
         return changed
+
+    def _write_device_trigger_names(
+        self, target: list[tuple[int, bytes]], old_slot_count: int
+    ) -> None:
+        """Пишет имена триггеров в config-страницу МК (протокол ≥5).
+
+        Индекс имени = плоский слот базовой записи группы в новом пуле.
+        Стейджится только отличающееся — каждый COMMIT это полное
+        стирание страницы Flash. Ошибка имени не роняет запись триггеров
+        (они уже закоммичены выше): имя — отображение, не логика."""
+        if self._serial_manager.device_protocol_version() < 5:
+            return
+        try:
+            old_names = self._read_device_trigger_names(old_slot_count)
+            desired: dict[int, str] = {}
+            seen_blocks: set[int] = set()
+            for slot, (block_index, _payload) in enumerate(target):
+                if slot >= TRIGGER_NAME_MAX_COUNT or block_index in seen_blocks:
+                    continue
+                seen_blocks.add(block_index)
+                desired[slot] = self._blocks[block_index]["name"].text().strip()
+
+            staged = 0
+            last_slot = min(max(old_slot_count, len(target)), TRIGGER_NAME_MAX_COUNT)
+            for slot in range(last_slot):
+                # Нормализуем как МК: обрезка по 16 байтам UTF-8 — иначе
+                # длинное имя сравнивалось бы с усечённым и переписывалось
+                # при каждом «Сохранить».
+                new_name = decode_trigger_name(
+                    encode_trigger_name(desired.get(slot, ""))
+                )
+                if new_name == old_names.get(slot, ""):
+                    continue
+                raw = encode_trigger_name(new_name)
+                self._serial_manager.request_control(
+                    CMD_TRIGGER_NAME_WRITE, bytes((slot, len(raw))) + raw
+                )
+                staged += 1
+            if staged:
+                self._serial_manager.request_control(CMD_TRIGGER_NAME_COMMIT)
+                logger.info("Имена триггеров записаны в МК: %d слотов", staged)
+        except (RuntimeError, OSError) as exc:
+            logger.error("Запись имён триггеров не удалась: %s", exc)
 
     def clear_device_managed(self) -> None:
         """Сбрасывает флаги исполнения на МК (при отключении порта)."""
@@ -2622,6 +2760,7 @@ class CanTriggerTab(QWidget):
             })
         config = {
             "active": block["group"].isChecked(),
+            "name": block["name"].text().strip(),
             "cache": block["cache"]["cache_check"].isChecked(),
             "recv_channel": block["recv"]["channel"].currentIndex(),
             "recv_bit": block["recv"]["bit"].currentIndex(),
@@ -2910,6 +3049,7 @@ class CanTriggerTab(QWidget):
         self._applying_device_state = True
         try:
             block["group"].setChecked(bool(trigger.get("active", True)))
+            block["name"].setText(str(trigger.get("name", "")))
             cache_active = bool(trigger.get("cache", False))
             block["cache"]["cache_check"].setChecked(cache_active)
             self._on_cache_active_changed(

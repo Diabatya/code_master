@@ -497,6 +497,8 @@ class Translator:
                 "Добавить фрейм": "Add frame",
                 "Добавить триггер": "Add trigger",
                 "Удалить триггер": "Delete trigger",
+                "Имя триггера": "Trigger name",
+                "Имя хранится в МК — появится на пустом устройстве после применения конфигурации (первые {0} триггеров)": "The name is stored in the MCU — it appears on a blank device after applying the configuration (first {0} triggers)",
                 "Срабатывать только на RTR-запрос (Remote Transmission Request)": "Trigger only on RTR request (Remote Transmission Request)",
                 "Страница триггеров заполнена ({0}/{1})": "Trigger page is full ({0}/{1})",
                 "Триггер {0}: проверка записи во Flash не пройдена": "Trigger {0}: Flash write verification failed",

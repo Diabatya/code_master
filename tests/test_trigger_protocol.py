@@ -189,3 +189,32 @@ def test_count_configured_triggers() -> None:
         {"active": False, "recv_id": "", "responses": [{"id": ""}]},
     ]
     assert count_configured_triggers(triggers) == 3
+
+
+def test_encode_trigger_name() -> None:
+    """Имя кодируется UTF-8 и обрезается по границе символа, ≤16 байт."""
+    from core.trigger_protocol import (
+        TRIGGER_NAME_MAX_LEN,
+        decode_trigger_name,
+        encode_trigger_name,
+    )
+
+    assert encode_trigger_name("Pump") == b"Pump"
+    assert encode_trigger_name("") == b""
+    # 16 ASCII-символов = ровно лимит
+    assert len(encode_trigger_name("A" * 16)) == TRIGGER_NAME_MAX_LEN
+    # Длинное имя обрезается до лимита
+    assert len(encode_trigger_name("A" * 30)) == TRIGGER_NAME_MAX_LEN
+    # Кириллица: 2 байта/символ — неполный хвостовой кодпоинт отбрасывается
+    raw = encode_trigger_name("Ж" * 9)  # 18 байт → обрезка до 8 символов
+    assert len(raw) == TRIGGER_NAME_MAX_LEN
+    assert decode_trigger_name(raw) == "Ж" * 8
+
+
+def test_decode_trigger_name() -> None:
+    """Декодер обрезает по первому нулю и чистит пробелы/битый UTF-8."""
+    from core.trigger_protocol import decode_trigger_name
+
+    assert decode_trigger_name(b"Fan\x00\x00\x00") == "Fan"
+    assert decode_trigger_name(b"\xff\xfegarbage") == "garbage"
+    assert decode_trigger_name(b"") == ""

@@ -1,6 +1,5 @@
 """Вкладка «Мониторинг CAN» с двумя каналами."""
 
-import contextlib
 import csv
 import time
 from collections import deque
@@ -19,14 +18,12 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
     QGraphicsOpacityEffect,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -689,10 +686,11 @@ class CanChannelMonitor(QWidget):
             [tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("Счётчик"), tr("ASCII"), tr("Пояснение")]
         )
         # Таблица чуть компактнее остального UI: шрифт 8 pt и уменьшенная
-        # высота строк — в плотном потоке влезает больше кадров на экран.
+        # высота строк (13 px — в 1.5 раза ниже обычных 20) — в плотном
+        # потоке влезает больше кадров на экран.
         self._table.setFont(QFont("Segoe UI", 8))
         self._table.verticalHeader().setVisible(False)
-        self._table.verticalHeader().setDefaultSectionSize(20)
+        self._table.verticalHeader().setDefaultSectionSize(13)
         self._table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -792,19 +790,9 @@ class CanChannelMonitor(QWidget):
         self._stats_label = QLabel(tr("Принято: 0 | Скорость: 0 пак/с"))
         self._stats_label.setFont(font)
 
-        # Панель декодированных DBC-сигналов выбранного ID — полный
-        # разбор (describe_frame), а не усечённые 3 сигнала в колонке.
-        self._decoded_label = QLabel(tr("Сигналы: выберите ID при загруженном DBC"))
-        self._decoded_label.setFont(QFont("Consolas", 9))
-        self._decoded_label.setStyleSheet(
-            "color: #9CCC65; border: 1px solid #444; border-radius: 4px; padding: 4px;"
-        )
-        self._decoded_label.setWordWrap(True)
-        self._decoded_label.setFixedHeight(52)
-        self._decoded_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self._table.itemSelectionChanged.connect(self._update_decoded_panel)
+        # Полный DBC-разбор кадра показывается во всплывающей подсказке
+        # ячейки (describe_frame в _build_row_items) — отдельной панели
+        # под таблицей нет: её место отдано строкам приёма.
 
         # Мини-индикатор загрузки шины рядом со строкой статуса:
         # зелёный < 50%, оранжевый < 80%, красный выше — как «Память».
@@ -831,7 +819,6 @@ class CanChannelMonitor(QWidget):
         layout.addLayout(control_layout)
 
         layout.addWidget(self._table, 1)
-        layout.addWidget(self._decoded_label)
 
         send_layout = QVBoxLayout()
         send_layout.setSpacing(4)
@@ -1173,22 +1160,6 @@ class CanChannelMonitor(QWidget):
         period_ms = int((now - stats["last_time"]) * 1000)
         return f"{period_ms} ms"
 
-    def _update_decoded_panel(self) -> None:
-        """Панель сигналов: полный DBC-разбор последнего кадра
-        выбранного ID — живое обновление и по выделению, и по приходу
-        новых данных этого ID."""
-        row = self._table.currentRow()
-        id_item = self._table.item(row, 0) if row >= 0 else None
-        can_id = hex_to_int(id_item.text()) if id_item is not None else None
-        if can_id is None or not self._dbc_manager.is_loaded():
-            self._decoded_label.setText(
-                tr("Сигналы: выберите ID при загруженном DBC")
-            )
-            return
-        stats = self._id_stats.get(can_id) or {}
-        text = self._dbc_manager.describe_frame(can_id, stats.get("last_data") or b"")
-        self._decoded_label.setText(text or tr("Сигналы: для этого ID нет сообщения в DBC"))
-
     def _build_row_items(
         self, frame_id: int, dlc: int, data: bytes, rtr: bool, timestamp: str, period: str, count: int
     ) -> list[str]:
@@ -1308,15 +1279,6 @@ class CanChannelMonitor(QWidget):
         for dialog in self._history_dialogs:
             if dialog.can_id == frame_id:
                 dialog.add_sample(now, data, rtr, dlc)
-
-        # Живое обновление панели сигналов, если кадр выбранного ID.
-        sel_id_item = self._table.item(self._table.currentRow(), 0)
-        if (
-            sel_id_item is not None
-            and hex_to_int(sel_id_item.text()) == frame_id
-            and self._dbc_manager.is_loaded()
-        ):
-            self._update_decoded_panel()
 
         if was_at_bottom:
             self._table.scrollToBottom()
@@ -1718,135 +1680,6 @@ class CanMonitorTab(QWidget):
         self._can2_speed_combo.currentIndexChanged.connect(self._on_can2_speed_changed)
         self._can2_speed_combo.lineEdit().editingFinished.connect(self._on_can2_speed_changed)
 
-        self._cyclic_rows: list[dict[str, Any]] = []
-        self._cyclic_group = self._create_cyclic_panel(compact_font)
-
-    def _create_cyclic_panel(self, font: QFont) -> QGroupBox:
-        """Панель «Периодические отправки»: таблица циклических кадров,
-        каждая строка — свой таймер. В отличие от одиночной циклической
-        кнопки в канале, здесь можно держать несколько потоков сразу."""
-        group = QGroupBox(tr("Периодические отправки"))
-        group.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        group.setCheckable(True)
-        group.setChecked(False)  # свёрнута по умолчанию — не мешает монитору
-
-        self._cyclic_rows_layout = QVBoxLayout()
-        self._cyclic_rows_layout.setSpacing(4)
-
-        add_btn = QPushButton(tr("+ Добавить отправку"))
-        add_btn.setFont(font)
-        add_btn.clicked.connect(self._add_cyclic_row)
-
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(4, 4, 4, 4)
-        content_layout.addLayout(self._cyclic_rows_layout)
-        content_layout.addWidget(add_btn)
-
-        outer = QVBoxLayout(group)
-        outer.setContentsMargins(4, 4, 4, 4)
-        outer.addWidget(content)
-        group.toggled.connect(content.setVisible)
-        content.setVisible(False)
-        return group
-
-    def _add_cyclic_row(self) -> None:
-        font = QFont("Segoe UI", 9)
-        row_widget = QWidget()
-        row_layout = QHBoxLayout(row_widget)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(4)
-
-        active = QCheckBox()
-        active.setToolTip(tr("Запустить/остановить периодическую отправку"))
-        channel = QComboBox()
-        channel.addItems(["CAN1", "CAN2"])
-        channel.setFont(font)
-        channel.setFixedWidth(70)
-        id_edit = QLineEdit()
-        id_edit.setPlaceholderText("ID hex")
-        id_edit.setFixedWidth(70)
-        id_edit.setFont(font)
-        data_edit = QLineEdit()
-        data_edit.setPlaceholderText("Data hex: 11 22 …")
-        data_edit.setFont(font)
-        period = QSpinBox()
-        period.setRange(10, 600000)
-        period.setValue(1000)
-        period.setSuffix(tr(" мс"))
-        period.setFont(font)
-        period.setFixedWidth(90)
-        del_btn = QPushButton("✕")
-        del_btn.setFixedSize(24, 24)
-        del_btn.setFont(font)
-
-        row_layout.addWidget(active)
-        row_layout.addWidget(channel)
-        row_layout.addWidget(id_edit)
-        row_layout.addWidget(data_edit, 1)
-        row_layout.addWidget(period)
-        row_layout.addWidget(del_btn)
-
-        timer = QTimer(self)
-        row = {
-            "widget": row_widget,
-            "active": active,
-            "channel": channel,
-            "id": id_edit,
-            "data": data_edit,
-            "period": period,
-            "timer": timer,
-        }
-        timer.timeout.connect(lambda r=row: self._send_cyclic_row(r))
-        active.toggled.connect(lambda checked, r=row: self._on_cyclic_toggled(r, checked))
-        period.valueChanged.connect(
-            lambda value, r=row: r["timer"].setInterval(max(10, value))
-        )
-        del_btn.clicked.connect(lambda _c=False, r=row: self._remove_cyclic_row(r))
-        self._cyclic_rows.append(row)
-        self._cyclic_rows_layout.addWidget(row_widget)
-
-    def _remove_cyclic_row(self, row: dict[str, Any]) -> None:
-        row["timer"].stop()
-        self._cyclic_rows.remove(row)
-        row["widget"].setParent(None)
-        row["widget"].deleteLater()
-
-    def _on_cyclic_toggled(self, row: dict[str, Any], checked: bool) -> None:
-        if not checked:
-            row["timer"].stop()
-            return
-        can_id = hex_to_int(row["id"].text())
-        if can_id is None:
-            row["active"].setChecked(False)
-            show_toast(self, tr("Периодическая отправка: некорректный ID"), success=False)
-            return
-        if not self._serial_manager.is_open():
-            row["active"].setChecked(False)
-            show_toast(self, tr("Порт не подключен"), success=False)
-            return
-        row["timer"].setInterval(max(10, row["period"].value()))
-        row["timer"].start()
-        self._send_cyclic_row(row)
-
-    def _send_cyclic_row(self, row: dict[str, Any]) -> None:
-        if not self._serial_manager.is_open():
-            row["active"].setChecked(False)
-            row["timer"].stop()
-            return
-        can_id = hex_to_int(row["id"].text())
-        if can_id is None:
-            return
-        data = b""
-        text = row["data"].text().strip()
-        if text:
-            try:
-                data = bytes(int(part, 16) for part in text.split())
-            except ValueError:
-                return
-        with contextlib.suppress(Exception):
-            self._serial_manager.send_data(pack_can_frame(row["channel"].currentIndex() + 1, can_id, data[:8]))
-
     def _layout_widgets(self) -> None:
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -1870,7 +1703,6 @@ class CanMonitorTab(QWidget):
         buttons_layout.addStretch()
         layout.addLayout(buttons_layout)
         layout.addWidget(self._splitter)
-        layout.addWidget(self._cyclic_group)
         layout.addWidget(self._memory_indicator)
 
     def _show_filter_dialog(self) -> None:

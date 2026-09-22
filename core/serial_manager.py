@@ -17,6 +17,8 @@ from core.can_protocol import (
     CMD_CAN_STATS,
     CMD_TRIGGER_COMMIT,
     CMD_TRIGGER_ENABLE,
+    CMD_TRIGGER_NAME_COMMIT,
+    CMD_TRIGGER_NAME_WRITE,
     CMD_TRIGGER_STAGE,
     CMD_TRIGGER_STATS,
     CMD_TRIGGER_WRITE,
@@ -62,6 +64,7 @@ _REBOOTING_COMMANDS = frozenset((CMD_CFG_WRITE, CMD_CFG_FACTORY_RESET))
 _MUTATING_COMMANDS = frozenset((
     CMD_CFG_WRITE, CMD_CFG_FACTORY_RESET, CMD_TRIGGER_WRITE,
     CMD_TRIGGER_ENABLE, CMD_TRIGGER_STAGE, CMD_TRIGGER_COMMIT,
+    CMD_TRIGGER_NAME_WRITE, CMD_TRIGGER_NAME_COMMIT,
     CMD_CAN_MODE, CMD_CAN_SPEED,
 ))
 
@@ -746,7 +749,11 @@ class SerialManager(QObject):
                 continue
             written += chunk
         deadline = time.time() + timeout
-        response_marker = (command | 0x10) & 0xFF
+        # Прошивка отвечает cmd + 0x10 (protocol.c: cmd + CMD_RESP_OFFSET).
+        # Для команд 0xC0-0xCF «+» и «|» давали один байт; для новых
+        # 0xD0-0xD2 (имена триггеров) «|» возвращал бы сам маркер
+        # команды и ответ никогда не совпадал — только «+» корректен.
+        response_marker = (command + 0x10) & 0xFF
         buffer = bytearray()
         while time.time() < deadline:
             # Явный read(), а не опрос in_waiting: usbser.sys на Windows

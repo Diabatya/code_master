@@ -58,7 +58,9 @@ def _rx_frame(channel: int, can_id: int, data: bytes) -> bytes:
 
 
 def _cmd_response(command: int, status: int, payload: bytes = b"") -> bytes:
-    return bytes([(command | 0x10) & 0xFF, status, len(payload)]) + payload
+    # Прошивка отвечает маркером cmd + 0x10 (protocol.c CMD_RESP_OFFSET);
+    # для команд 0xC0-0xCF «+» и «|» совпадают, для 0xD0+ — только «+».
+    return bytes([(command + 0x10) & 0xFF, status, len(payload)]) + payload
 
 
 def _manager_with_port(port: _ScriptedPort) -> SerialManager:

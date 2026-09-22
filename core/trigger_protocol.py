@@ -33,6 +33,28 @@ TRIGGER_SLOT_SIZE = 90
 # Лимит по RAM прошивки (70 записей), а не по пулу — см. Inc/trigger.h.
 TRIGGER_MAX_SLOTS = 70
 
+# Имена триггеров хранятся отдельной записью в config-странице МК
+# (см. device_config.h: trigger_names_t), а не внутри trigger_t —
+# RAM прошивки почти весь занят CAN-кольцами, имя в исполнении не
+# участвует. Индекс имени = слот базовой записи группы (group_seq==0)
+# в пуле триггеров — тот же индекс, что у CMD_TRIGGER_READ.
+TRIGGER_NAME_MAX_LEN = 16
+TRIGGER_NAME_MAX_COUNT = 24
+
+
+def encode_trigger_name(text: str) -> bytes:
+    """Имя триггера → UTF-8 байты для провода (≤ TRIGGER_NAME_MAX_LEN).
+
+    Обрезка идёт по границе символа: хвостовой неполный UTF-8
+    кодпоинт отбрасывается, иначе МК вернул бы битую строку."""
+    raw = text.encode("utf-8", "ignore")[:TRIGGER_NAME_MAX_LEN]
+    return raw.decode("utf-8", "ignore").encode("utf-8")
+
+
+def decode_trigger_name(raw: bytes) -> str:
+    """Имя триггера из байтов МК (обрезается по первому нулю)."""
+    return bytes(raw).split(b"\x00", 1)[0].decode("utf-8", "ignore").strip()
+
 
 def trigger_usage_percent(used_slots: int) -> int:
     """Процент занятой памяти пула триггеров для индикатора «Память».

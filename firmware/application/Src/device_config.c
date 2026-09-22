@@ -8,6 +8,7 @@
 
 static device_config_t s_config;
 static device_ext_config_t s_ext_config;
+static trigger_names_t s_trigger_names;
 static uint8_t s_config_valid;
 
 static uint8_t crc8(const uint8_t *data, uint32_t len)
@@ -53,6 +54,14 @@ static void load_ext_defaults(device_ext_config_t *cfg)
   cfg->crc8 = crc8((const uint8_t *)cfg, offsetof(device_ext_config_t, crc8));
 }
 
+static void load_names_defaults(trigger_names_t *names)
+{
+  memset(names, 0, sizeof(*names));
+  names->magic = TRIGGER_NAMES_MAGIC;
+  names->version = TRIGGER_NAMES_VERSION;
+  names->crc8 = crc8((const uint8_t *)names, offsetof(trigger_names_t, crc8));
+}
+
 void DeviceConfig_Init(void)
 {
   const device_config_t *flash_cfg = (const device_config_t *)DEVICE_CONFIG_PAGE_ADDR;
@@ -90,6 +99,19 @@ void DeviceConfig_Init(void)
   } else {
     load_ext_defaults(&s_ext_config);
   }
+
+  /* Таблица имён триггеров — как и ext-запись, появилась после выхода
+   * устройств в поле: отсутствующая/битая запись означает «имён нет»,
+   * но не трогает остальную конфигурацию. */
+  const trigger_names_t *names =
+      (const trigger_names_t *)(DEVICE_CONFIG_PAGE_ADDR + TRIGGER_NAMES_OFFSET);
+  if (names->magic == TRIGGER_NAMES_MAGIC
+      && names->version == TRIGGER_NAMES_VERSION
+      && crc8((const uint8_t *)names, offsetof(trigger_names_t, crc8)) == names->crc8) {
+    memcpy(&s_trigger_names, names, sizeof(s_trigger_names));
+  } else {
+    load_names_defaults(&s_trigger_names);
+  }
 }
 
 const device_config_t *DeviceConfig_Get(void)
@@ -102,12 +124,13 @@ uint8_t DeviceConfig_IsValid(void)
   return s_config_valid;
 }
 
-/* Programs both records in one pass: any page rewrite (identity write,
- * CAN speed change, factory reset) rewrites main+extended together, so the
- * extended settings survive a CMD_CFG_WRITE instead of reverting to
- * defaults on the next boot. */
+/* Programs all records in one pass: any page rewrite (identity write,
+ * CAN speed change, factory reset, trigger names commit) rewrites
+ * main+extended+names together, so they survive each other's updates
+ * instead of reverting to defaults on the next boot. */
 static uint8_t flash_write_config(const device_config_t *cfg,
-                                  const device_ext_config_t *ext)
+                                  const device_ext_config_t *ext,
+                                  const trigger_names_t *names)
 {
   HAL_FLASH_Unlock();
 
@@ -147,6 +170,16 @@ static uint8_t flash_write_config(const device_config_t *cfg,
     addr += 2U;
   }
 
+  src = (const uint16_t *)names;
+  addr = DEVICE_CONFIG_PAGE_ADDR + TRIGGER_NAMES_OFFSET;
+  for (uint32_t i = 0; i < (sizeof(trigger_names_t) / 2U); i++) {
+    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, src[i]) != HAL_OK) {
+      HAL_FLASH_Lock();
+      return 0U;
+    }
+    addr += 2U;
+  }
+
   HAL_FLASH_Lock();
   /* Сверяем реальное содержимое страницы: частично прошитая запись
    * (brown-out во время программирования) иначе всплывала бы только
@@ -154,7 +187,9 @@ static uint8_t flash_write_config(const device_config_t *cfg,
   return (memcmp((const void *)DEVICE_CONFIG_PAGE_ADDR, cfg,
                  sizeof(device_config_t)) == 0
           && memcmp((const void *)(DEVICE_CONFIG_PAGE_ADDR + DEVICE_EXT_CONFIG_OFFSET),
-                    ext, sizeof(device_ext_config_t)) == 0)
+                    ext, sizeof(device_ext_config_t)) == 0
+          && memcmp((const void *)(DEVICE_CONFIG_PAGE_ADDR + TRIGGER_NAMES_OFFSET),
+                    names, sizeof(trigger_names_t)) == 0)
              ? 1U
              : 0U;
 }
@@ -188,7 +223,7 @@ uint8_t DeviceConfig_Write(const uint8_t *device_name, uint8_t device_name_len,
     return 1U;
   }
 
-  if (!flash_write_config(&new_cfg, &s_ext_config)) {
+  if (!flash_write_config(&new_cfg, &s_ext_config, &s_trigger_names)) {
     return 0U;
   }
 
@@ -203,13 +238,18 @@ uint8_t DeviceConfig_FactoryReset(void)
   load_defaults(&defaults);
   device_ext_config_t ext_defaults;
   load_ext_defaults(&ext_defaults);
+  /* «Заводские настройки» стирают и имена триггеров — устройство
+   * возвращается в состояние «с нуля», как при Trigger_ClearAll. */
+  trigger_names_t names_defaults;
+  load_names_defaults(&names_defaults);
 
-  if (!flash_write_config(&defaults, &ext_defaults)) {
+  if (!flash_write_config(&defaults, &ext_defaults, &names_defaults)) {
     return 0U;
   }
 
   memcpy(&s_config, &defaults, sizeof(s_config));
   memcpy(&s_ext_config, &ext_defaults, sizeof(s_ext_config));
+  memcpy(&s_trigger_names, &names_defaults, sizeof(s_trigger_names));
   s_config_valid = 1U;
   return 1U;
 }
@@ -254,7 +294,7 @@ uint8_t DeviceConfig_SetCanBaud(uint8_t channel, uint32_t baud_kbps)
     return 1U;
   }
 
-  if (!flash_write_config(&s_config, &new_ext)) {
+  if (!flash_write_config(&s_config, &new_ext, &s_trigger_names)) {
     return 0U;
   }
 
@@ -263,4 +303,47 @@ uint8_t DeviceConfig_SetCanBaud(uint8_t channel, uint32_t baud_kbps)
    * если конфиг был повреждён) — отмечаем её как действительную. */
   s_config_valid = 1U;
   return 1U;
+}
+
+const uint8_t *DeviceConfig_GetTriggerName(uint8_t index, uint8_t *len_out)
+{
+  if (index >= TRIGGER_NAME_MAX) {
+    return NULL;
+  }
+  const char *name = s_trigger_names.names[index];
+  /* Имя занимает до TRIGGER_NAME_LEN байт без терминатора — фактическая
+   * длина до первого нулевого байта (или весь слот). */
+  uint8_t len = 0U;
+  while (len < TRIGGER_NAME_LEN && name[len] != 0) {
+    len++;
+  }
+  if (len_out != NULL) {
+    *len_out = len;
+  }
+  return (len > 0U) ? (const uint8_t *)name : NULL;
+}
+
+uint8_t DeviceConfig_StageTriggerName(uint8_t index, const uint8_t *name,
+                                      uint8_t len)
+{
+  if (index >= TRIGGER_NAME_MAX || len > TRIGGER_NAME_LEN) {
+    return 0U;
+  }
+  memset(s_trigger_names.names[index], 0, TRIGGER_NAME_LEN);
+  if (len > 0U && name != NULL) {
+    memcpy(s_trigger_names.names[index], name, len);
+  }
+  return 1U;
+}
+
+uint8_t DeviceConfig_CommitTriggerNames(void)
+{
+  /* RAM-зеркало могло собираться с чистого листа (blank-страница) —
+   * заголовок и CRC выставляем здесь, чтобы записанная запись прошла
+   * валидацию при следующем старте. */
+  s_trigger_names.magic = TRIGGER_NAMES_MAGIC;
+  s_trigger_names.version = TRIGGER_NAMES_VERSION;
+  s_trigger_names.crc8 =
+      crc8((const uint8_t *)&s_trigger_names, offsetof(trigger_names_t, crc8));
+  return flash_write_config(&s_config, &s_ext_config, &s_trigger_names);
 }

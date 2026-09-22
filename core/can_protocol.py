@@ -37,6 +37,9 @@ CMD_USB_STATS = 0xCC
 CMD_CAN_MODE = 0xCD  # Управление режимом CAN (Normal/Silent) и терминатором
 CMD_CAN_SPEED = 0xCE  # Установка бод-рейта CAN-канала (применяется и персистится в МК)
 CMD_EVENT_LOG = 0xCF  # Постраничное чтение Flash-журнала событий МК (см. firmware/event_log.h)
+CMD_TRIGGER_NAME_READ = 0xD0    # [index] → [len][имя] — из config-страницы МК
+CMD_TRIGGER_NAME_WRITE = 0xD1   # [index][len][имя] — в RAM, фиксация по CMD_TRIGGER_NAME_COMMIT
+CMD_TRIGGER_NAME_COMMIT = 0xD2  # Записать таблицу имён триггеров во Flash (перезапись config-страницы)
 
 # Типы событий CMD_EVENT_LOG (event_log_type_t в прошивке).
 EVLOG_BOOT = 1

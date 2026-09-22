@@ -45,6 +45,9 @@
 #define CMD_CAN_MODE             0xCDU /* управление режимом и терминатором CAN */
 #define CMD_CAN_SPEED            0xCEU /* установка бод-рейта CAN-канала (runtime + persist) */
 #define CMD_EVENT_LOG            0xCFU /* постраничное чтение Flash-журнала событий, см. event_log.h */
+#define CMD_TRIGGER_NAME_READ    0xD0U /* [index] → [len][имя]: имя из config-страницы */
+#define CMD_TRIGGER_NAME_WRITE   0xD1U /* [index][len][имя]: RAM-зеркало, Flash по COMMIT */
+#define CMD_TRIGGER_NAME_COMMIT  0xD2U /* запись таблицы имён во Flash (страница конфига) */
 
 /* Защита деструктивных команд от фантомного срабатывания при рассинхроне
  * CDC-потока: парсер после битого кадра пересматривает следующие байты
@@ -585,9 +588,10 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * версии ПК читают только первые 16 байт. */
       uint8_t out[68] = {
         s_device_version,
-        4U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
+        5U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
              * деструктивных команд; 4 = записи триггеров v3 (90 Б —
-             * fire_limit + флаги эха), старым прошивкам хост шлёт 82 Б */
+             * fire_limit + флаги эха), старым прошивкам хост шлёт 82 Б;
+             * 5 = имена триггеров (CMD_TRIGGER_NAME_*) в config-странице */
         0U,
         1U,
         cfg->reserved[0],
@@ -630,6 +634,49 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
         memcpy(&out[64], &stack_free, 4U);
       }
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
+      break;
+    }
+
+    case CMD_TRIGGER_NAME_READ: {
+      /* payload: [index] — слот базовой записи группы в пуле триггеров.
+       * Ответ: [len][имя UTF-8]. Имя живёт в config-странице (запись
+       * trigger_names_t), а не в trigger_t — см. device_config.h. */
+      if (payload_len < 1U) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      uint8_t name_len = 0U;
+      const uint8_t *name =
+          DeviceConfig_GetTriggerName(payload[0], &name_len);
+      uint8_t out_name[1U + TRIGGER_NAME_LEN];
+      out_name[0] = name_len;
+      if (name != NULL && name_len > 0U) {
+        memcpy(&out_name[1], name, name_len);
+      }
+      send_new_cmd_response(cmd, 0x00U, out_name, (uint8_t)(1U + name_len));
+      break;
+    }
+
+    case CMD_TRIGGER_NAME_WRITE: {
+      /* payload: [index][len][имя] — только RAM-зеркало, Flash не трогает
+       * (пачка имён иначе стирала бы страницу на каждое имя). */
+      if (payload_len < 2U || payload[1] > TRIGGER_NAME_LEN
+          || payload_len < (uint8_t)(2U + payload[1])) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      uint8_t ok =
+          DeviceConfig_StageTriggerName(payload[0], &payload[2], payload[1]);
+      send_new_cmd_response(cmd, ok ? 0x00U : 0x01U, NULL, 0U);
+      break;
+    }
+
+    case CMD_TRIGGER_NAME_COMMIT: {
+      /* Одна перезапись config-страницы после пачки WRITE. Хост шлёт
+       * ПОСЛЕ успешного CMD_TRIGGER_COMMIT — индекс имени привязан к
+       * слоту в НОВОМ пуле триггеров. */
+      uint8_t ok = DeviceConfig_CommitTriggerNames();
+      send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
       break;
     }
 
@@ -809,8 +856,8 @@ static uint16_t try_parse_one(void)
     return 1U;
   }
 
-  /* --- New commands (0xC0-0xCF), see PROTOCOL.md Part 2 --- */
-  if (marker >= 0xC0U && marker <= 0xCFU) {
+  /* --- New commands (0xC0-0xD2), see PROTOCOL.md Part 2 --- */
+  if (marker >= 0xC0U && marker <= 0xD2U) {
     if (avail < 2U) {
       return wait_more_or_resync();
     }
