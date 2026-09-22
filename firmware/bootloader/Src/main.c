@@ -6,6 +6,7 @@
 #include "usbd_cdc_if.h"
 #include "usbd_desc.h"
 #include "bootloader.h"
+#include "event_log_bl.h"
 
 USBD_HandleTypeDef hUsbDeviceFS;
 static IWDG_HandleTypeDef hiwdg;
@@ -33,9 +34,15 @@ int main(void)
   MX_GPIO_Init();
   MX_IWDG_Init();
 
-  if (!Bootloader_ShouldStay()) {
+  uint8_t stay_reason = Bootloader_ShouldStay();
+  if (!stay_reason) {
     Bootloader_JumpToApplication(APP_START_ADDRESS);
   }
+
+  /* Отметка в журнале приложения до поднятия USB: сеанс загрузчика иначе
+   * остаётся слепым промежутком — «прошили, подключились, а лог пустой».
+   * Append-only: стереть страницу журнала бутлоадер не может. */
+  BlEventLog_NoteBoot(stay_reason);
 
   USBD_Init(&hUsbDeviceFS, &FS_Desc, 0);
   USBD_RegisterClass(&hUsbDeviceFS, USBD_CDC_CLASS);

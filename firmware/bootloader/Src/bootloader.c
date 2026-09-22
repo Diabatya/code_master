@@ -195,10 +195,10 @@ void Bootloader_RequestStay(void)
   *(__IO uint32_t *)BOOTLOADER_FLAG_ADDRESS = BOOTLOADER_FLAG_VALUE;
 }
 
-bool Bootloader_ShouldStay(void)
+uint8_t Bootloader_ShouldStay(void)
 {
   bool software_reset = (RCC->CSR & RCC_CSR_SFTRSTF) != 0U;
-  bool stay = false;
+  uint8_t stay = 0U; /* 0 — запускать приложение, 1/2 — код причины для журнала */
 
   /* The handoff flag lives in the backup domain: it survives a system
    * reset but not a real power cycle, and — unlike the legacy RAM word,
@@ -209,7 +209,7 @@ bool Bootloader_ShouldStay(void)
   PWR->CR |= PWR_CR_DBP;
 
   if (software_reset && (BKP->DR1 == BOOTLOADER_BKP_VALUE)) {
-    stay = true;
+    stay = 1U; /* запрошен хостом (переход на прошивку по команде ПК) */
   }
 
   /* Причина этого сброса для диагностики приложения: все флаги RCC->CSR
@@ -227,7 +227,7 @@ bool Bootloader_ShouldStay(void)
   RCC->CSR |= RCC_CSR_RMVF;
 
   if (!stay && !bl_app_is_valid(APP_START)) {
-    stay = true;
+    stay = 2U; /* приложение невалидно/отсутствует — остаёмся на прошивку */
   }
   return stay;
 }

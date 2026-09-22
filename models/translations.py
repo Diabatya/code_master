@@ -931,6 +931,11 @@ class Translator:
                 "Переполнение RX-буфера USB": "USB RX buffer overflow",
                 " байт (насыщение)": " bytes (saturated)",
                 " байт": " bytes",
+                "Вход в загрузчик": "Bootloader entry",
+                "по команде ПК (прошивка)": "by PC command (flashing)",
+                "запрошен хостом (флаг BKP)": "requested by host (BKP flag)",
+                "приложение невалидно или отсутствует": "application invalid or missing",
+                "код {0}": "code {0}",
                 "Неизвестное событие": "Unknown event",
             },
         }

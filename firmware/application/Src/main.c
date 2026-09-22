@@ -131,15 +131,19 @@ int main(void)
   MX_GPIO_Init();
   MX_IWDG_Init();
 
+  /* Журнал — максимально рано: запись EVLOG_BOOT должна лечь во Flash даже
+   * если что-то из дальнейшей инициализации (DeviceConfig/Trigger/CAN/USB)
+   * упадёт или зависнет — иначе «жёлтый» старт без журнала остаётся
+   * недоказуемым в поле. После MX_IWDG_Init, потому что EventLog_Init()
+   * может стирать/писать Flash (первый старт после обновления прошивки,
+   * оборот кольца) — сторож уже должен быть настроен на долгое стирание. */
+  EventLog_Init();
+
   /* Config/triggers must be loaded before USB starts, so the very first
    * enumeration already reports the Flash-configured name/serial
    * (usbd_desc.c reads DeviceConfig_Get()). */
   DeviceConfig_Init();
   Trigger_Init();
-  /* После MX_IWDG_Init (см. выше) — EventLog_Init() может стирать/писать
-   * Flash (первый старт на этой странице после обновления прошивки), а
-   * IWDG уже должен быть настроен на случай долгого стирания. */
-  EventLog_Init();
 
   /* CAN + triggers must run standalone even with USB deactivated (ТЗ
    * 12.4), so bring the CAN bridge up unconditionally, before deciding

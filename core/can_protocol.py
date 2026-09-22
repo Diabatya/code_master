@@ -52,6 +52,8 @@ EVLOG_USB_RESET = 7
 EVLOG_USB_DISCONNECT = 8
 EVLOG_USB_TX_STALL = 9
 EVLOG_USB_RX_OVERFLOW = 10
+EVLOG_BOOTLOADER = 11  # вход в загрузчик: code 0 — по команде ПК (пишет приложение),
+                       # 1 — флаг хоста, 2 — приложение невалидно (пишет бутлоадер)
 
 # Версия протокола, которую ожидает хост. Прошивка отвечает её в
 # CMD_SYSTEM_INFO (payload[1]); меньше — функции нового протокола

@@ -36,7 +36,7 @@ _Static_assert((EVENT_LOG_RECORD_SIZE % 2U) == 0U,
  * Flash за часы. 500 мс даёт достаточно частую историю по времени, не
  * убивая Flash при реальном шторме ошибок. */
 #define EVENT_LOG_THROTTLE_MS 500U
-/* type доходит до 9 (EVLOG_USB_TX_STALL); channel 0/1/0xFF -> индекс 2. */
+/* type доходит до 11 (EVLOG_BOOTLOADER); channel 0/1/0xFF -> индекс 2. */
 #define EVLOG_TYPE_SLOTS 16U
 static uint32_t s_last_log_tick[EVLOG_TYPE_SLOTS][3];
 

@@ -107,6 +107,11 @@ static void reboot_to_bootloader(void)
    * check this address, so keep writing it for compatibility. */
   uint32_t *flag = (uint32_t *)BOOTLOADER_FLAG_ADDRESS;
   *flag = BOOTLOADER_FLAG_VALUE;
+
+  /* Отметка в журнале до сброса: сеанс прошивки иначе остаётся «немым»
+   * промежутком — после обновления в логе видно, почему был разрыв.
+   * Мы в контексте главного цикла (Protocol_Poll), Flash-запись легальна. */
+  EventLog_Add((uint8_t)EVLOG_BOOTLOADER, 0xFFU, 0U);
   NVIC_SystemReset();
 }
 

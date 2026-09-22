@@ -46,6 +46,15 @@ typedef enum {
   EVLOG_USB_TX_STALL       = 9U, /* CDC IN-эндпоинт голодал >100 мс — хост не читает */
   EVLOG_USB_RX_OVERFLOW    = 10U, /* программный RX FIFO (usbd_cdc_if.c) переполнен —
                                     * главный цикл не успевал вычитывать входящий поток */
+  EVLOG_BOOTLOADER         = 11U, /* вход в загрузчик. channel=0xFF. code:
+                                    * 0 — переход по команде ПК (пишет приложение
+                                    *     прямо перед сбросом в reboot_to_bootloader);
+                                    * 1 — бутлоадер остался по флагу хоста (BKP->DR1);
+                                    * 2 — бутлоадер остался: приложение невалидно/
+                                    *     отсутствует (метаданные/CRC не сошлись).
+                                    * Записи 1/2 пишет сам бутлоадер (append-only,
+                                    * страницы журнала он не стирает — см.
+                                    * firmware/bootloader/Src/event_log_bl.c). */
 } event_log_type_t;
 
 typedef struct {

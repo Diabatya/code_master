@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from core.can_protocol import (
     EVLOG_BOOT,
+    EVLOG_BOOTLOADER,
     EVLOG_CAN_BUSOFF,
     EVLOG_CAN_BUSOFF_RECOVER,
     EVLOG_CAN_ERROR,
@@ -66,6 +67,8 @@ _RESET_FLAG_NAMES = (
     (0x04, "PIN"),
 )
 _FAULT_NAMES = {0: None, 1: "HardFault", 2: "MemManage", 3: "BusFault", 4: "UsageFault"}
+# События без привязки к каналу CAN — колонка «Канал» показывает "-".
+_CHANNELLESS_TYPES = (EVLOG_BOOT, EVLOG_BOOTLOADER)
 
 
 def _format_channel(channel: int) -> str:
@@ -88,6 +91,7 @@ class EventLogTab(QWidget):
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._entries: list[dict] = []
+        self._auto_read_done = False
         self._create_widgets()
         self._build_layout()
 
@@ -150,9 +154,28 @@ class EventLogTab(QWidget):
 
     # ------------------------------------------------------------------
 
+    def showEvent(self, event) -> None:
+        # Авто-чтение при первом открытии вкладки с живым портом: иначе
+        # оператор видит пустую таблицу и делает вывод «логов нет», хотя
+        # МК их записал ещё при подаче питания. Порт мог быть подключён
+        # до открытия вкладки — connection_changed ловить не нужно.
+        super().showEvent(event)
+        if not self._auto_read_done and self._serial_manager.is_open():
+            self._read_log(auto=True)
+
+    # ------------------------------------------------------------------
+
     def _on_read_clicked(self) -> None:
+        self._read_log(auto=False)
+
+    def _read_log(self, auto: bool) -> None:
+        # auto=True — авто-чтение при открытии вкладки: ошибки только в
+        # статус-строку, без модального диалога (старые прошивки не знают
+        # CMD_EVENT_LOG и отвечают «неизвестная команда» — это не авария).
+        self._auto_read_done = True
         if not self._serial_manager.is_open():
-            QMessageBox.warning(self, tr("Ошибка"), tr("Порт не подключен"))
+            if not auto:
+                QMessageBox.warning(self, tr("Ошибка"), tr("Порт не подключен"))
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
@@ -160,11 +183,14 @@ class EventLogTab(QWidget):
         except Exception as exc:  # noqa: BLE001
             logger.warning("Не удалось прочитать журнал МК: %s", exc)
             QApplication.restoreOverrideCursor()
-            QMessageBox.warning(
-                self,
-                tr("Ошибка"),
-                tr("Не удалось прочитать журнал МК: {0}").format(exc),
-            )
+            if auto:
+                self._status_label.setText(tr("Не удалось прочитать журнал МК: {0}").format(exc))
+            else:
+                QMessageBox.warning(
+                    self,
+                    tr("Ошибка"),
+                    tr("Не удалось прочитать журнал МК: {0}").format(exc),
+                )
             return
         QApplication.restoreOverrideCursor()
         self._entries = entries
@@ -203,7 +229,7 @@ class EventLogTab(QWidget):
         code = entry["code"]
         time_str = self._format_uptime(ts_ms)
         name, detail = self._decode_event(etype, channel, code)
-        chan_str = _format_channel(channel) if etype not in (EVLOG_BOOT,) else "-"
+        chan_str = _format_channel(channel) if etype not in _CHANNELLESS_TYPES else "-"
         return sep.join((str(seq), time_str, name, chan_str, detail))
 
     @staticmethod
@@ -239,6 +265,13 @@ class EventLogTab(QWidget):
         if etype == EVLOG_USB_RX_OVERFLOW:
             detail = f"+{code}" + (tr(" байт (насыщение)") if code == 0xFF else tr(" байт"))
             return tr("Переполнение RX-буфера USB"), detail
+        if etype == EVLOG_BOOTLOADER:
+            detail = {
+                0: tr("по команде ПК (прошивка)"),
+                1: tr("запрошен хостом (флаг BKP)"),
+                2: tr("приложение невалидно или отсутствует"),
+            }.get(code, tr("код {0}").format(code))
+            return tr("Вход в загрузчик"), detail
         return tr("Неизвестное событие"), f"type={etype} code=0x{code:02X}"
 
     def _render_table(self) -> None:
@@ -249,7 +282,7 @@ class EventLogTab(QWidget):
             channel = entry["channel"]
             code = entry["code"]
             name, detail = self._decode_event(etype, channel, code)
-            chan_str = _format_channel(channel) if etype not in (EVLOG_BOOT,) else "-"
+            chan_str = _format_channel(channel) if etype not in _CHANNELLESS_TYPES else "-"
             values = (str(seq), self._format_uptime(entry["timestamp_ms"]), name, chan_str, detail)
             for col, value in enumerate(values):
                 self._table.setItem(row, col, QTableWidgetItem(value))
