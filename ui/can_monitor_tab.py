@@ -153,11 +153,12 @@ def _is_dark_theme() -> bool:
 
 def _tx_echo_colors() -> tuple[QColor, QColor]:
     """Фон и текст строки кадра, отправленного самим МК (tx_echo):
-    тёмная тема — оранжевый фон с чёрным текстом, светлая — чёрный
-    фон с белым текстом."""
+    оранжевый ШРИФТ на общем фоне — заливка путалась с подсветкой
+    смены данных (отчёт мастера); теперь оранжевый цвет текста
+    однозначно значит «кадр отправил МК»."""
     if _is_dark_theme():
-        return QColor("#FF8C00"), QColor("#000000")
-    return QColor("#000000"), QColor("#FFFFFF")
+        return _row_base_bg(), QColor("#FF8C00")
+    return _row_base_bg(), QColor("#E65100")
 
 
 def _row_base_bg() -> QColor:
@@ -213,7 +214,9 @@ class _DataByteDelegate(QStyledItemDelegate):
             base = fg
         else:
             base = opt.palette.color(QPalette.ColorRole.Text)
-        hl = QColor("#FFD54F") if _is_dark_theme() else QColor("#B26A00")
+        # Изменившийся байт — КРАСНЫЙ шрифт: оранжевый зарезервирован за
+        # tx_echo (кадры, отправленные самим МК) — отчёт мастера.
+        hl = QColor("#FF5252") if _is_dark_theme() else QColor("#D32F2F")
         painter.save()
         painter.setFont(opt.font)
         for i in range((len(text) + 2) // 3):
@@ -1309,13 +1312,14 @@ class CanChannelMonitor(QWidget):
                 if tooltip:
                     item.setToolTip(tooltip)
             self._paint_row_direction(row, tx_echo)
-            # Подсветка изменившихся данных: жёлтый шрифт конкретного
-            # байта на 500 мс. «Интервал подсветки» — фильтр по темпу
-            # одного ID: 0 — подсвечивать все изменения; N — только если
-            # кадры этого ID идут чаще, чем раз в N мс (отчёт мастера).
+            # Подсветка изменившихся данных: красный шрифт конкретного
+            # байта на 500 мс. «Интервал подсветки» — фильтр по давности
+            # смены: 0 — подсвечивать все изменения; N — только если
+            # прошлый кадр этого ID был БОЛЬШЕ чем N мс назад (чем больше
+            # N, тем реже подсветка — ловим редко меняющиеся байты).
             if prev_data is not None and prev_data != data:
                 gap_ms = (now - prev_time) * 1000.0 if prev_time else float("inf")
-                if self._highlight_interval_ms == 0 or gap_ms < self._highlight_interval_ms:
+                if self._highlight_interval_ms == 0 or gap_ms > self._highlight_interval_ms:
                     changed = {
                         i
                         for i in range(max(len(prev_data), len(data)))
@@ -1403,12 +1407,13 @@ class CanChannelMonitor(QWidget):
         return False
 
     def _find_insert_row(self, frame_id: int) -> int:
+        """Строки идут сверху вниз по возрастанию ID (отчёт мастера)."""
         for row in range(self._table.rowCount()):
             id_item = self._table.item(row, 0)
             if id_item is None:
                 continue
             existing = hex_to_int(id_item.text())
-            if existing is not None and existing < frame_id:
+            if existing is not None and existing > frame_id:
                 return row
         return self._table.rowCount()
 
@@ -1653,8 +1658,9 @@ class CanMonitorTab(QWidget):
         self._highlight_interval_spin.setSuffix(tr(" мс"))
         self._highlight_interval_spin.setFont(compact_font)
         self._highlight_interval_spin.setToolTip(
-            tr("Подсветка смены DATA: 0 — все пакеты; N — только пакеты,\n"
-               "идущие чаще, чем раз в N мс по одному ID. Длительность 500 мс.")
+            tr("Подсветка смены DATA: 0 — все изменения; N — только байты,\n"
+               "изменившиеся позже чем через N мс после прошлого кадра этого ID.\n"
+               "Чем больше N, тем реже подсветка. Длительность 500 мс.")
         )
         self._highlight_interval_spin.valueChanged.connect(self._on_highlight_interval_changed)
 

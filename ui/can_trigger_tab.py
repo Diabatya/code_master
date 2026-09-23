@@ -2541,7 +2541,12 @@ class CanTriggerTab(QWidget):
         cache_fields = block["cache"]["fields_widget"]
 
         response_group.setEnabled(not enabled)
-        cache_fields.setEnabled(enabled)
+        # Поля кэша не глушим целиком (setEnabled(False) на контейнере
+        # делал мёртвыми и чекбоксы строк — «Слушать отправляемое»/
+        # «Кол-во сработок», отчёт мастера): их надо настраивать ДО
+        # включения автозаписи. Выключенное состояние показывает
+        # приглушение прозрачностью ниже.
+        cache_fields.setEnabled(True)
 
         self._set_widget_opacity(response_group, 0.5 if enabled else 1.0)
         self._set_widget_opacity(cache_fields, 1.0 if enabled else 0.5)
