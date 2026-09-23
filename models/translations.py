@@ -548,6 +548,12 @@ class Translator:
                 "Автоматическая запись DATA в Кэш": "Auto-save DATA to Cache",
                 "Слушать отправляемое": "Listen to transmitted",
                 "Кол-во сработок до смены DATA": "Fire count until DATA change",
+                "Сработка после старта устройства": "Fire once on device start",
+                "Отправить ответ один раз сразу после включения МК, без "
+                "ожидания кадра на шине — поля приёма не используются":
+                    "Send the response once right after the MCU powers up, "
+                    "without waiting for a bus frame — the receive fields "
+                    "are not used",
                 "Срабатывать и на кадры, отправленные самим МК (TX-эхо)":
                     "Trigger on frames sent by the MCU itself (TX echo)",
                 "Кэшировать и кадры, отправленные самим МК (TX-эхо)":

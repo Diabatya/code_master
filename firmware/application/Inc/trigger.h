@@ -60,6 +60,13 @@ extern "C" {
  * инвертирован относительно галочки UI «Слушать отправляемое», чтобы
  * старые записи (flags=0) сохраняли прежнюю реакцию на эхо. */
 #define TRIGGER_F_MUTE_ECHO   0x01U
+/* rx_flags бит 1 — «сработка после старта устройства»: условие приёма
+ * заменяется событием запуска МК — триггер вооружается однократно в
+ * Trigger_FireOnBoot() при загрузке, на кадры шины не реагирует.
+ * Поля rx_* в записи при этом не используются (UI их блокирует).
+ * Требует protocol>=6: старая прошивка бита не знает — хост такие
+ * записи на неё не пишет (исполняет приложение). */
+#define TRIGGER_F_FIRE_ON_BOOT 0x02U
 /* Предел по RAM, а не по пулу: триггеры, staging-буфер и кэши живут в
  * ОЗУ — 70 записей ≈ 3 страницы пула из 4 (четвёртая остаётся запасом
  * на рост записи/пула). При росте RAM-бюджета можно поднять до 99. */
@@ -142,6 +149,13 @@ uint8_t Trigger_FlashValidCount(void);
  * arms any matching response (respecting its configured delay_ms). Must
  * be called from the main loop only, never from IRQ context. */
 void Trigger_OnFrame(const can_frame_t *frame);
+
+/* Однократно вооружает все включённые триггеры с rx_flags&
+ * TRIGGER_F_FIRE_ON_BOOT — «сработка после старта устройства».
+ * Вызывать один раз при загрузке, когда CAN уже поднят (в main() после
+ * CanBridge_StartInterrupts): отправка уходит через Trigger_Poll() с
+ * учётом delay_ms/tx_count/tx_interval_ms, как обычный ответ. */
+void Trigger_FireOnBoot(void);
 
 /* Read one trigger slot (index 0..Trigger_Count()-1) into *out. Returns 1
  * if index valid. */

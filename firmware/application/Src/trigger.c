@@ -419,7 +419,7 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
       || trig->tx_rtr > 1U || trig->rx_rtr > 2U || trig->cache_enabled > 1U
       || trig->src_channel > 2U || trig->src_extended > 1U
       || trig->src_dlc > 8U
-      || (trig->rx_flags & ~TRIGGER_F_MUTE_ECHO) != 0U
+      || (trig->rx_flags & ~(TRIGGER_F_MUTE_ECHO | TRIGGER_F_FIRE_ON_BOOT)) != 0U
       || (trig->src_flags & ~TRIGGER_F_MUTE_ECHO) != 0U) {
     return 0U;
   }
@@ -825,8 +825,11 @@ void Trigger_OnFrame(const can_frame_t *frame)
       }
     }
     /* rx_flags&MUTE_ECHO — триггер не реагирует на кадры, отправленные
-     * самим МК (TX-эхо); 0 — слушает и внешние, и свои (как в v2). */
-    if ((frame->echo != 0U && (t->rx_flags & TRIGGER_F_MUTE_ECHO) != 0U)
+     * самим МК (TX-эхо); 0 — слушает и внешние, и свои (как в v2).
+     * FIRE_ON_BOOT — вооружается один раз в Trigger_FireOnBoot(), кадры
+     * шины его не возбуждают (поля приёма в UI при галке заблокированы). */
+    if ((t->rx_flags & TRIGGER_F_FIRE_ON_BOOT) != 0U
+        || (frame->echo != 0U && (t->rx_flags & TRIGGER_F_MUTE_ECHO) != 0U)
         || !rx_header_matches(t, frame)) {
       continue;
     }
@@ -857,6 +860,31 @@ void Trigger_OnFrame(const can_frame_t *frame)
           && ++s_rx_state[i].count >= t->rx_fire_limit) {
         s_rx_state[i].suppress = 1U;
       }
+    }
+  }
+}
+
+void Trigger_FireOnBoot(void)
+{
+  /* «Сработка после старта устройства»: включённые записи с
+   * rx_flags&FIRE_ON_BOOT вооружаются один раз здесь — условие приёма у
+   * них заменено событием запуска (Trigger_OnFrame их пропускает).
+   * Путь отправки общий: мгновенная — напрямую, с задержкой/повторами —
+   * через s_pending в Trigger_Poll; занятые ящики добираются ретраями. */
+  for (uint8_t i = 0; i < s_count; i++) {
+    const trigger_t *t = &s_triggers[i];
+    if (!t->enabled || (t->rx_flags & TRIGGER_F_FIRE_ON_BOOT) == 0U) {
+      continue;
+    }
+    uint8_t sends = t->tx_count ? t->tx_count : 1U;
+    if (t->delay_ms == 0U && sends == 1U) {
+      if (send_response(t, i, 0U)) {
+        s_fired_count++;
+      } else {
+        arm_response(i, t, 0U);
+      }
+    } else {
+      arm_response(i, t, 0U);
     }
   }
 }

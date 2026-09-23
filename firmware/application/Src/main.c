@@ -174,7 +174,7 @@ int main(void)
       memcpy(&app_crc, &metadata[12], 4U);
     }
     EventLog_AddEx((uint8_t)EVLOG_VERSION, APP_DEVICE_VERSION,
-                   5U /* версия протокола, как в CMD_SYSTEM_INFO */, app_crc);
+                   6U /* версия протокола, как в CMD_SYSTEM_INFO */, app_crc);
   }
   /* Крах прошлого сеанса — с застеканным PC вместо timestamp: полевой
    * bootloop «не стартует на активной CAN-шине» без JTAG иначе не
@@ -245,6 +245,12 @@ int main(void)
    * backstop-опросом CanBridge_PollHealth() на первой итерации. */
   CanBridge_StartInterrupts();
   App_NoteStage(7U);
+
+  /* Триггеры «сработка после старта устройства» (rx_flags бит
+   * TRIGGER_F_FIRE_ON_BOOT): вооружаются один раз здесь — CAN уже поднят,
+   * отправки уходят через Trigger_Poll() с delay_ms/повторами, как
+   * обычный ответ. На кадры шины такие триггеры не реагируют. */
+  Trigger_FireOnBoot();
 
   uint8_t last_usb_reset_count = CDC_GetUsbResetCount();
   uint8_t last_usb_disconnect_count = CDC_GetUsbDisconnectCount();

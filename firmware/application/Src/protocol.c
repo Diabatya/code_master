@@ -591,10 +591,12 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * версии ПК читают только первые 16 байт. */
       uint8_t out[76] = {
         s_device_version,
-        5U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
+        6U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
              * деструктивных команд; 4 = записи триггеров v3 (90 Б —
              * fire_limit + флаги эха), старым прошивкам хост шлёт 82 Б;
-             * 5 = имена триггеров (CMD_TRIGGER_NAME_*) в config-странице */
+             * 5 = имена триггеров (CMD_TRIGGER_NAME_*) в config-странице;
+             * 6 = rx_flags бит FIRE_ON_BOOT — триггер стреляет один раз
+             * при запуске МК, без ожидания кадра приёма */
         0U,
         1U,
         cfg->reserved[0],

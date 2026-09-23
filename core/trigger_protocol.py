@@ -16,9 +16,14 @@ TRIGGER_SIZE_V2 = 82
 # (собственные отправки МК). 0 = слушать шину и эхо (поведение v2).
 # *_fire_limit: «кол-во сработок до смены DATA» — N срабатываний на
 # неизменной Data, затем защёлка до смены содержимого; 0 = выкл.
+# rx_flags бит 1 = FIRE_ON_BOOT: «сработка после старта устройства» —
+# МК исполняет триггер один раз при запуске, условие приёма не
+# используется. Поддержан прошивкой с protocol>=6; на старых версиях
+# такой триггер исполняет приложение (см. _project_block_records).
 _TRIGGER_FORMAT_V2 = "<IBBBIIB8s8sBBIB8sH2sBBBBIB8s8sHBBBB"
 _TRIGGER_FORMAT = "<IBBBIIB8s8sBBIB8sH2sBBBBIB8s8sHBBBHBHBBB B".replace(" ", "")
 TRIGGER_F_MUTE_ECHO = 0x01
+TRIGGER_F_FIRE_ON_BOOT = 0x02
 
 # Хранилище триггеров v3 (см. firmware/PROTOCOL.md и Inc/trigger.h):
 # записи упакованы в суффикс пула страниц над config-страницей
@@ -203,6 +208,8 @@ def pack_trigger(values: dict[str, Any], fmt_version: int = TRIGGER_FORMAT_VERSI
         raw = bytearray(struct.pack(_TRIGGER_FORMAT_V2, *common, 0))
     else:
         rx_flags = 0 if values.get("rx_listen_echo", True) else TRIGGER_F_MUTE_ECHO
+        if values.get("rx_fire_on_boot"):
+            rx_flags |= TRIGGER_F_FIRE_ON_BOOT
         src_flags = 0 if values.get("src_listen_echo", True) else TRIGGER_F_MUTE_ECHO
         raw = bytearray(
             struct.pack(
@@ -230,6 +237,7 @@ def unpack_trigger(payload: bytes) -> dict[str, Any]:
         tail = {
             "rx_fire_limit": values[28],
             "rx_listen_echo": not (values[29] & TRIGGER_F_MUTE_ECHO),
+            "rx_fire_on_boot": bool(values[29] & TRIGGER_F_FIRE_ON_BOOT),
             "src_fire_limit": values[30],
             "src_listen_echo": not (values[31] & TRIGGER_F_MUTE_ECHO),
         }
@@ -242,6 +250,7 @@ def unpack_trigger(payload: bytes) -> dict[str, Any]:
         tail = {
             "rx_fire_limit": 0,
             "rx_listen_echo": True,
+            "rx_fire_on_boot": False,
             "src_fire_limit": 0,
             "src_listen_echo": True,
         }

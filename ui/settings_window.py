@@ -1003,6 +1003,12 @@ class SettingsWindow(QMainWindow):
             # Вычитки не будет — оверлей, показанный на connecting,
             # нужно снять, иначе он зависнет поверх полей.
             self._hide_loading_overlay()
+            # Подключение свежее — PC-исполняемые триггеры «сработка
+            # после старта устройства» отрабатывают один раз и без
+            # вычитки (pc_suspended/device_managed их по-прежнему
+            # удержат; при закрытии окна и в эмуляции не стреляем).
+            if not self._closing_down and not self._config.get("emulation", False):
+                self._trigger_tab.on_device_session_started()
             return
         # Реентерабельность запрещена: _read_device_triggers крутит
         # QApplication.processEvents(), через который отложенный
@@ -1048,6 +1054,11 @@ class SettingsWindow(QMainWindow):
         elif applied:
             self._device_diverged = False
             self._mark_clean()
+        # PC-исполняемые триггеры «сработка после старта устройства»
+        # стреляют один раз на подключение — ПОСЛЕ вычитки, чтобы флаги
+        # device_managed уже отражали реальное распределение (иначе ПК
+        # продублировал бы ответ, который шлёт сам МК).
+        self._trigger_tab.on_device_session_started()
 
     def showEvent(self, event) -> None:  # noqa: N802
         """При показе окна обновляет только лейблы имени/серийника.

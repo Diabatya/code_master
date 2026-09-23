@@ -229,7 +229,14 @@ class TriggerSimulator:
                         src_state["count"] += 1
                         if src_state["count"] >= src_limit:
                             src_state["suppress"] = True
-            if (echo and not self._listen_echo(t, "rx")) or not self._rx_header_matches(t, frame):
+            # rx_fire_on_boot — условие приёма заменено событием запуска:
+            # вооружается один раз в fire_on_boot(), кадры шины такой
+            # триггер не возбуждают (порт Trigger_OnFrame).
+            if (
+                t.get("rx_fire_on_boot")
+                or (echo and not self._listen_echo(t, "rx"))
+                or not self._rx_header_matches(t, frame)
+            ):
                 continue
             rx_state = self._rx_state[i]
             rx_limit = int(t.get("rx_fire_limit", 0))
@@ -257,6 +264,33 @@ class TriggerSimulator:
                 rx_state["count"] += 1
                 if rx_state["count"] >= rx_limit:
                     rx_state["suppress"] = True
+        return sent
+
+    def fire_on_boot(self, now_ms: float) -> list[dict[str, Any]]:
+        """Порт Trigger_FireOnBoot(): однократное вооружение включённых
+        записей с rx_fire_on_boot — вызывается один раз при «запуске МК»
+        (в simulate() — в начале прогона). Мгновенный ответ уходит сразу,
+        с задержкой/повторами — через poll() по расписанию."""
+        sent: list[dict[str, Any]] = []
+        for i, t in enumerate(self._triggers):
+            if not t.get("enabled") or not t.get("rx_fire_on_boot"):
+                continue
+            sends = int(t.get("tx_count", 0)) or 1
+            if int(t.get("delay_ms", 0)) == 0 and sends == 1:
+                responses = self._send_response(t, i, 0, now_ms)
+                if responses:
+                    self.fired_count += 1
+                sent.extend(responses)
+            else:
+                self._arm(i, t, 0, now_ms)
+                self.events.append(
+                    {
+                        "time_ms": now_ms,
+                        "trigger": i,
+                        "kind": "armed",
+                        "delay": int(t.get("delay_ms", 0)),
+                    }
+                )
         return sent
 
     def poll(self, now_ms: float) -> list[dict[str, Any]]:
@@ -295,6 +329,10 @@ def simulate(
     queue = list(timeline)
     tx_frames: list[dict[str, Any]] = []
     idx = 0
+    # «Сработка после старта устройства» — порт Trigger_FireOnBoot() в
+    # main(): вооружается один раз в начале прогона, до первого кадра.
+    for tx in sim.fire_on_boot(0.0):
+        _record_tx(sim, tx, queue, tx_frames, end_ms)
     while idx < len(queue):
         item = queue[idx]
         idx += 1

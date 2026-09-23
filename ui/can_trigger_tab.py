@@ -179,6 +179,11 @@ class CanTriggerTab(QWidget):
         # count/suppress — счётчик и защёлка лимита.
         self._pc_rx_state: dict[int, dict[str, Any]] = {}
         self._pc_src_state: dict[tuple[int, int], dict[str, Any]] = {}
+        # Индексы PC-исполняемых «сработок после старта», уже
+        # отработавших в этой сессии порта — повторяется выстрел на
+        # каждое новое подключение (рестарт МК = реэнумерация USB =
+        # новый коннект), но не на каждый кадр/редактирование.
+        self._pc_boot_fired: set[int] = set()
         self._memory_indicator = MemoryIndicator(self)
 
         self._create_widgets()
@@ -313,6 +318,14 @@ class CanTriggerTab(QWidget):
         fire_spin.setEnabled(False)
         fire_check.toggled.connect(fire_spin.setEnabled)
         options_layout.addWidget(fire_spin)
+        fire_on_boot = QCheckBox(tr("Сработка после старта устройства"))
+        fire_on_boot.setFont(font)
+        fire_on_boot.setToolTip(
+            tr("Отправить ответ один раз сразу после включения МК, без "
+               "ожидания кадра на шине — поля приёма не используются")
+        )
+        options_layout.addWidget(fire_on_boot)
+        self._wire_toggle_checkbox_style(fire_on_boot)
         options_layout.addStretch()
 
         def _on_dlc_or_rtr(*_args: object) -> None:
@@ -320,6 +333,16 @@ class CanTriggerTab(QWidget):
             # блокируются (матч идёт по каналу/битности/ID/DLC).
             self._set_data_enabled(data, 0 if rtr.isChecked() else dlc.value())
 
+        def _on_fire_on_boot(checked: bool) -> None:
+            # «Сработка после старта» заменяет условие приёма событием
+            # запуска МК — все поля блока приёма недоступны (прошивка
+            # их при этом флаге просто не читает).
+            for w in (channel, bit, can_id, dlc, data_widget, rtr,
+                      copy_paste, listen_echo, fire_check):
+                w.setEnabled(not checked)
+            fire_spin.setEnabled(not checked and fire_check.isChecked())
+
+        fire_on_boot.toggled.connect(_on_fire_on_boot)
         dlc.valueChanged.connect(_on_dlc_or_rtr)
         rtr.toggled.connect(_on_dlc_or_rtr)
         self._set_data_enabled(data, dlc.value())
@@ -338,6 +361,7 @@ class CanTriggerTab(QWidget):
             "listen_echo": listen_echo,
             "fire_check": fire_check,
             "fire_spin": fire_spin,
+            "fire_on_boot": fire_on_boot,
         }
         can_id.set_fill_callback(lambda parsed, r=row: self._fill_row_from_packet(r, parsed))
         return row
@@ -1546,6 +1570,9 @@ class CanTriggerTab(QWidget):
             "rx_fire_limit": (
                 recv["fire_spin"].value() if recv["fire_check"].isChecked() else 0
             ),
+            # protocol>=6: отработать один раз при запуске МК, поля
+            # приёма не используются (в UI заблокированы этой галкой).
+            "rx_fire_on_boot": recv["fire_on_boot"].isChecked(),
             "src_listen_echo": src_listen_echo,
             "src_fire_limit": src_fire_limit,
         }
@@ -1605,6 +1632,9 @@ class CanTriggerTab(QWidget):
         # чтобы не затирать имя из загруженного конфига ПК.
         if "name" in values:
             block["name"].setText(str(values["name"]))
+        # Флаг ставим до полей приёма — его toggled блокирует их ввод
+        # (setText/setValue на заблокированных виджетах работают).
+        recv["fire_on_boot"].setChecked(bool(values.get("rx_fire_on_boot", False)))
         recv["channel"].setCurrentIndex(min(values["rx_channel"], 2))
         recv["bit"].setCurrentIndex(int(values["rx_extended"]))
         recv["id"].setText(int_to_hex(values["rx_id"], 8 if values["rx_extended"] else 3))
@@ -1896,6 +1926,15 @@ class CanTriggerTab(QWidget):
             # Старая прошивка (protocol<4) записи v3 не исполнит — такой
             # триггер остаётся на PC-исполнении (томбстоун enabled=0).
             return None
+        if (
+            self._serial_manager.device_protocol_version() < 6
+            and any(r.get("rx_fire_on_boot") for r in records)
+        ):
+            # FIRE_ON_BOOT появился в протоколе 6: старая прошивка бита
+            # не знает — запись была бы мёртвым триггером (полей приёма
+            # у такой записи нет). Исполняет приложение — выстрел один
+            # раз при старте сессии (см. on_device_session_started).
+            return None
         return records
 
     def _cache_row_record(
@@ -1940,6 +1979,8 @@ class CanTriggerTab(QWidget):
         block["name"].setText("")
         block["cache"]["cache_check"].setChecked(False)
         self._on_cache_active_changed(index, Qt.CheckState.Unchecked.value)
+        # Сброс до полей приёма — снятие галки возвращает им доступность.
+        block["recv"]["fire_on_boot"].setChecked(False)
         block["recv"]["listen_echo"].setChecked(True)
         block["recv"]["fire_check"].setChecked(False)
         block["recv"]["fire_spin"].setValue(1)
@@ -2504,6 +2545,36 @@ class CanTriggerTab(QWidget):
     def clear_device_managed(self) -> None:
         """Сбрасывает флаги исполнения на МК (при отключении порта)."""
         self._device_managed = [False] * len(self._blocks)
+        # Новая сессия порта — новый «запуск устройства»: PC-исполняемые
+        # boot-триггеры снова готовы к однократному выстрелу.
+        self._pc_boot_fired.clear()
+
+    def on_device_session_started(self) -> None:
+        """Однократное срабатывание PC-исполняемых триггеров «после старта».
+
+        Порт Trigger_FireOnBoot() прошивки для блоков, исполняемых
+        приложением (старая прошивка бита FIRE_ON_BOOT не знает —
+        _project_block_records оставляет такие на ПК). Стреляет один раз
+        за сессию порта: рестарт МК с реэнумерацией USB — это новое
+        подключение, и выстрел повторяется, как и у прошивки."""
+        if not self._serial_manager.is_open():
+            return
+        for trigger in self._build_internal_triggers():
+            if not trigger.get("recv_fire_on_boot"):
+                continue
+            index = trigger["index"]
+            if (
+                trigger.get("device_managed")
+                or trigger.get("pc_suspended")
+                or index in self._pc_boot_fired
+            ):
+                continue
+            self._pc_boot_fired.add(index)
+            logger.info("Триггер %d: сработка после старта устройства", index + 1)
+            if trigger["cache"]:
+                self._send_cached_frames(trigger)
+            else:
+                self._send_responses(trigger)
 
     def _on_trigger_toggled_by_block(self, block: dict[str, Any], enabled: bool) -> None:
         try:
@@ -2557,6 +2628,7 @@ class CanTriggerTab(QWidget):
             block["group"].setTitle(tr("Триггер {0}").format(i + 1))
             block["recv"]["listen_echo"].setText(tr("Слушать отправляемое"))
             block["recv"]["fire_check"].setText(tr("Кол-во сработок до смены DATA"))
+            block["recv"]["fire_on_boot"].setText(tr("Сработка после старта устройства"))
             block["cache"]["cache_check"].setText(tr("Автоматическая запись DATA в Кэш"))
             block["response"]["group"].setTitle(tr("Ответ"))
             block["response"]["header_label"].setText(tr("Фреймы ответа"))
@@ -2622,12 +2694,14 @@ class CanTriggerTab(QWidget):
         for i, block in enumerate(self._blocks):
             if not block["group"].isChecked():
                 continue
+            fire_on_boot = block["recv"]["fire_on_boot"].isChecked()
             recv_id = self._parse_id(block["recv"]["id"].text())
-            if recv_id is None:
+            if recv_id is None and not fire_on_boot:
                 continue
             triggers.append({
                 "index": i,
-                "recv_id": recv_id,
+                "recv_id": recv_id or 0,
+                "recv_fire_on_boot": fire_on_boot,
                 "recv_rtr": int(block["recv"]["rtr"].isChecked()),
                 "recv_data": self._parse_data(block["recv"]["data"]),
                 "recv_channel": block["recv"]["channel"].currentIndex(),
@@ -2781,6 +2855,7 @@ class CanTriggerTab(QWidget):
             "recv_listen_echo": int(block["recv"]["listen_echo"].isChecked()),
             "recv_fire_limit_enabled": int(block["recv"]["fire_check"].isChecked()),
             "recv_fire_limit": block["recv"]["fire_spin"].value(),
+            "recv_fire_on_boot": int(block["recv"]["fire_on_boot"].isChecked()),
             # Пустой байт приёма — wildcard, пишется явным «X».
             "recv_data": " ".join(
                 e.text() or "X"
@@ -3077,6 +3152,8 @@ class CanTriggerTab(QWidget):
             recv["fire_spin"].setValue(
                 max(1, min(9999, int(trigger.get("recv_fire_limit", 1) or 1)))
             )
+            # Галка блокирует поля приёма — ставим после их заполнения.
+            recv["fire_on_boot"].setChecked(bool(trigger.get("recv_fire_on_boot", 0)))
             self._set_data_enabled(
                 block["recv"]["data"], 0 if recv_rtr else block["recv"]["dlc"].value()
             )
@@ -3243,6 +3320,12 @@ class CanTriggerTab(QWidget):
                 # Блок пришёл из «Загрузить конфигурацию» и ещё не
                 # записан в устройство кнопкой «Сохранить» — на шине
                 # молчим, файл лишь заполняет поля.
+                continue
+            if trigger.get("recv_fire_on_boot"):
+                # «Сработка после старта» — условие приёма не
+                # используется: МК вооружает такой триггер один раз в
+                # Trigger_FireOnBoot, PC-исполнение — в
+                # on_device_session_started. Кадры шины его не возбуждают.
                 continue
             if tx_echo and not trigger.get("recv_listen_echo", True):
                 continue
