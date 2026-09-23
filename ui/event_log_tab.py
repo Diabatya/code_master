@@ -30,6 +30,9 @@ from PySide6.QtWidgets import (
 from core.can_protocol import (
     EVLOG_BOOT,
     EVLOG_BOOTLOADER,
+    EVLOG_FAULT,
+    EVLOG_INIT_STAGE,
+    EVLOG_VERSION,
     EVLOG_CAN_BUSOFF,
     EVLOG_CAN_BUSOFF_RECOVER,
     EVLOG_CAN_ERROR,
@@ -68,7 +71,11 @@ _RESET_FLAG_NAMES = (
 )
 _FAULT_NAMES = {0: None, 1: "HardFault", 2: "MemManage", 3: "BusFault", 4: "UsageFault"}
 # События без привязки к каналу CAN — колонка «Канал» показывает "-".
-_CHANNELLESS_TYPES = (EVLOG_BOOT, EVLOG_BOOTLOADER)
+_CHANNELLESS_TYPES = (EVLOG_BOOT, EVLOG_BOOTLOADER, EVLOG_FAULT, EVLOG_VERSION,
+                      EVLOG_INIT_STAGE)
+# У этих типов поле timestamp несёт данные (PC / CRC32 образа), а не время —
+# колонка «Время» для них не имеет смысла.
+_AUX_TIMESTAMP_TYPES = (EVLOG_FAULT, EVLOG_VERSION)
 
 
 def _format_channel(channel: int) -> str:
@@ -227,8 +234,8 @@ class EventLogTab(QWidget):
         etype = entry["type"]
         channel = entry["channel"]
         code = entry["code"]
-        time_str = self._format_uptime(ts_ms)
-        name, detail = self._decode_event(etype, channel, code)
+        time_str = "-" if etype in _AUX_TIMESTAMP_TYPES else self._format_uptime(ts_ms)
+        name, detail = self._decode_event(etype, channel, code, ts_ms)
         chan_str = _format_channel(channel) if etype not in _CHANNELLESS_TYPES else "-"
         return sep.join((str(seq), time_str, name, chan_str, detail))
 
@@ -239,7 +246,7 @@ class EventLogTab(QWidget):
         m, s = divmod(rem, 60)
         return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
-    def _decode_event(self, etype: int, channel: int, code: int) -> tuple:
+    def _decode_event(self, etype: int, channel: int, code: int, ts_ms: int = 0) -> tuple:
         if etype == EVLOG_BOOT:
             fault = _FAULT_NAMES.get(channel)
             detail = tr("Причина: {0}").format(_decode_reset_flags(code))
@@ -272,6 +279,28 @@ class EventLogTab(QWidget):
                 2: tr("приложение невалидно или отсутствует"),
             }.get(code, tr("код {0}").format(code))
             return tr("Вход в загрузчик"), detail
+        if etype == EVLOG_FAULT:
+            fault = _FAULT_NAMES.get(channel, tr("код {0}").format(channel))
+            # Поле timestamp несёт застеканный PC, code — младший байт CFSR.
+            return tr("Крах МК"), f"{fault} | PC=0x{ts_ms:08X} | CFSR=0x{code:02X}"
+        if etype == EVLOG_VERSION:
+            # Поле timestamp несёт CRC32 образа приложения — отпечаток сборки.
+            return tr("Прошивка МК"), (
+                f"app v{channel} | {tr('протокол')} {code} | CRC32=0x{ts_ms:08X}"
+            )
+        if etype == EVLOG_INIT_STAGE:
+            stage_names = {
+                0: tr("до журнала (ранняя инициализация)"),
+                1: tr("после журнала"),
+                2: tr("после загрузки конфигурации"),
+                3: tr("после загрузки триггеров"),
+                4: tr("после инициализации CAN"),
+                5: tr("после инициализации протокола"),
+                6: tr("после запуска USB"),
+                7: tr("после включения CAN-прерываний"),
+                8: tr("главный цикл"),
+            }
+            return tr("Этап краха"), stage_names.get(channel, tr("этап {0}").format(channel))
         return tr("Неизвестное событие"), f"type={etype} code=0x{code:02X}"
 
     def _render_table(self) -> None:
@@ -281,8 +310,10 @@ class EventLogTab(QWidget):
             etype = entry["type"]
             channel = entry["channel"]
             code = entry["code"]
-            name, detail = self._decode_event(etype, channel, code)
+            name, detail = self._decode_event(etype, channel, code, entry["timestamp_ms"])
             chan_str = _format_channel(channel) if etype not in _CHANNELLESS_TYPES else "-"
-            values = (str(seq), self._format_uptime(entry["timestamp_ms"]), name, chan_str, detail)
+            ts_ms = entry["timestamp_ms"]
+            time_str = "-" if etype in _AUX_TIMESTAMP_TYPES else self._format_uptime(ts_ms)
+            values = (str(seq), time_str, name, chan_str, detail)
             for col, value in enumerate(values):
                 self._table.setItem(row, col, QTableWidgetItem(value))

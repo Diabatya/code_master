@@ -29,6 +29,13 @@ extern "C" {
  * unrelated software reset (e.g. the CMD_CFG_WRITE re-enumeration). */
 #define BOOTLOADER_BKP_VALUE    0xBEEFU
 
+/* Блок целостности приложения, пишется tools/add_app_metadata.py в
+ * последнюю страницу Flash: [0..3]=magic "APP1", [4..7]=версия формата,
+ * [8..11]=размер образа, [12..15]=CRC32 образа. Используется в
+ * CMD_SYSTEM_INFO (protocol.c) и в записи EVLOG_VERSION журнала. */
+#define APP_METADATA_ADDR  0x0803D000U
+#define APP_METADATA_MAGIC 0x41505031U
+
 /* ---- Board pinout for the custom CAN1/CAN2 TJA1050 board ----------------- */
 
 /* CAN1: remapped to PB8/PB9 (see AFIO remap in can_bridge.c) */

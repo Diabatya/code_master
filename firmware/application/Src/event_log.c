@@ -36,7 +36,7 @@ _Static_assert((EVENT_LOG_RECORD_SIZE % 2U) == 0U,
  * Flash за часы. 500 мс даёт достаточно частую историю по времени, не
  * убивая Flash при реальном шторме ошибок. */
 #define EVENT_LOG_THROTTLE_MS 500U
-/* type доходит до 11 (EVLOG_BOOTLOADER); channel 0/1/0xFF -> индекс 2. */
+/* type доходит до 14 (EVLOG_INIT_STAGE); channel 0/1/0xFF -> индекс 2. */
 #define EVLOG_TYPE_SLOTS 16U
 static uint32_t s_last_log_tick[EVLOG_TYPE_SLOTS][3];
 
@@ -134,22 +134,14 @@ static uint8_t erase_page_for_slot(uint16_t slot)
   return ok;
 }
 
-void EventLog_Add(uint8_t type, uint8_t channel, uint8_t code)
+static void write_record(uint8_t type, uint8_t channel, uint8_t code,
+                         uint32_t timestamp_ms)
 {
-  uint8_t ch_idx = (channel > 1U) ? 2U : channel;
-  uint8_t type_idx = (type < EVLOG_TYPE_SLOTS) ? type : 0U;
-  uint32_t now = HAL_GetTick();
-  uint32_t last = s_last_log_tick[type_idx][ch_idx];
-  if (last != 0U && (uint32_t)(now - last) < EVENT_LOG_THROTTLE_MS) {
-    return; /* троттлинг — не стираем Flash повторами на убитой шине */
-  }
-  s_last_log_tick[type_idx][ch_idx] = (now == 0U) ? 1U : now; /* 0 = "ещё не было" */
-
   wire_record_t rec;
   memset(&rec, 0, sizeof(rec));
   rec.magic = EVENT_LOG_MAGIC;
   rec.seq = s_next_seq;
-  rec.timestamp_ms = now;
+  rec.timestamp_ms = timestamp_ms;
   rec.type = type;
   rec.channel = channel;
   rec.code = code;
@@ -185,6 +177,25 @@ void EventLog_Add(uint8_t type, uint8_t channel, uint8_t code)
 
   s_next_seq++;
   s_next_slot = (uint16_t)((slot + 1U) % EVENT_LOG_TOTAL_SLOTS);
+}
+
+void EventLog_Add(uint8_t type, uint8_t channel, uint8_t code)
+{
+  uint8_t ch_idx = (channel > 1U) ? 2U : channel;
+  uint8_t type_idx = (type < EVLOG_TYPE_SLOTS) ? type : 0U;
+  uint32_t now = HAL_GetTick();
+  uint32_t last = s_last_log_tick[type_idx][ch_idx];
+  if (last != 0U && (uint32_t)(now - last) < EVENT_LOG_THROTTLE_MS) {
+    return; /* троттлинг — не стираем Flash повторами на убитой шине */
+  }
+  s_last_log_tick[type_idx][ch_idx] = (now == 0U) ? 1U : now; /* 0 = "ещё не было" */
+  write_record(type, channel, code, now);
+}
+
+void EventLog_AddEx(uint8_t type, uint8_t channel, uint8_t code,
+                    uint32_t aux_timestamp)
+{
+  write_record(type, channel, code, aux_timestamp);
 }
 
 uint8_t EventLog_Read(uint32_t after_seq, event_log_entry_t *out, uint8_t max_count)

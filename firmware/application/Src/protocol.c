@@ -61,8 +61,6 @@
 static const uint8_t FACTORY_RESET_KEY[4] = { 'F', 'C', 'L', 'R' };
 #define TRIGGER_CLEAR_KEY       0xA5U /* CMD_TRIGGER_COMMIT: [0x00][A5] = стереть все */
 
-#define APP_METADATA_ADDR       0x0803D000U
-#define APP_METADATA_MAGIC      0x41505031U
 #define STM32_UID96_ADDR        0x1FFFF7E8U /* Unique Device ID (96 бит), F1 */
 #ifndef GIT_COMMIT_STR
 #define GIT_COMMIT_STR          "unknown"

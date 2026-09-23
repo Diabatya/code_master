@@ -14,6 +14,7 @@
  * are free for GPIO/SWD use per main.h's pin assignments.
  */
 
+#include <string.h>
 #include "main.h"
 #include "usbd_core.h"
 #include "usbd_cdc.h"
@@ -67,6 +68,18 @@ static uint8_t s_reset_flags;
 static uint8_t s_fault_code;
 static uint32_t s_fault_pc;
 static uint32_t s_fault_cfsr;
+/* Этап инициализации, до которого дошла загрузка, закончившаяся крахом
+ * (BKP->DR8 переживает IWDG-ресет): при старте после краха пишется в
+ * журнал записью EVLOG_INIT_STAGE — сужает «упало где-то в инициализации»
+ * до конкретного шага без JTAG. */
+static uint8_t s_boot_stage;
+
+/* Отметка этапа инициализации в BKP->DR8. Дёшево (одна запись в backup
+ * домен), вызывается между шагами main() до входа в главный цикл. */
+static void App_NoteStage(uint8_t stage)
+{
+  BKP->DR8 = stage;
+}
 
 static void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
@@ -124,12 +137,14 @@ int main(void)
   /* Читаем до любого возможного сброса backup-домена дальше по коду. */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_RCC_BKP_CLK_ENABLE();
+  PWR->CR |= PWR_CR_DBP; /* нужен для записи DR3..DR8 (фолты, этапы init) */
   s_reset_flags = (uint8_t)(BKP->DR2 & 0xFFU);
   s_fault_code = (uint8_t)(BKP->DR3 & 0xFFU);
   s_fault_pc = ((uint32_t)BKP->DR5 << 16) | BKP->DR4;
   s_fault_cfsr = ((uint32_t)BKP->DR7 << 16) | BKP->DR6;
+  s_boot_stage = (uint8_t)(BKP->DR8 & 0xFFU);
+  BKP->DR8 = 0U;
   if (s_fault_code != 0U) {
-    PWR->CR |= PWR_CR_DBP;
     BKP->DR3 = 0U; /* одноразовый маркер — потреблён */
     BKP->DR4 = 0U;
     BKP->DR5 = 0U;
@@ -149,11 +164,35 @@ int main(void)
    * оборот кольца) — сторож уже должен быть настроен на долгое стирание. */
   EventLog_Init();
 
+  /* Отпечаток сборки в журнал: полевой event_log.txt сам говорит, какая
+   * прошивка на камне (по CRC32 образа) — иначе «фикс не помог» неотличим
+   * от «на камне до сих пор старая прошивка». */
+  {
+    const uint8_t *metadata = (const uint8_t *)APP_METADATA_ADDR;
+    uint32_t app_crc = 0U;
+    if (*(const uint32_t *)&metadata[0] == APP_METADATA_MAGIC) {
+      memcpy(&app_crc, &metadata[12], 4U);
+    }
+    EventLog_AddEx((uint8_t)EVLOG_VERSION, APP_DEVICE_VERSION,
+                   5U /* версия протокола, как в CMD_SYSTEM_INFO */, app_crc);
+  }
+  /* Крах прошлого сеанса — с застеканным PC вместо timestamp: полевой
+   * bootloop «не стартует на активной CAN-шине» без JTAG иначе не
+   * локализуется — DR3 говорит только ЧТО упало, а не ГДЕ. */
+  if (s_fault_code != 0U) {
+    EventLog_AddEx((uint8_t)EVLOG_FAULT, s_fault_code,
+                   (uint8_t)(s_fault_cfsr & 0xFFU), s_fault_pc);
+    EventLog_Add((uint8_t)EVLOG_INIT_STAGE, s_boot_stage, 0U);
+  }
+  App_NoteStage(1U);
+
   /* Config/triggers must be loaded before USB starts, so the very first
    * enumeration already reports the Flash-configured name/serial
    * (usbd_desc.c reads DeviceConfig_Get()). */
   DeviceConfig_Init();
+  App_NoteStage(2U);
   Trigger_Init();
+  App_NoteStage(3U);
 
   /* CAN + triggers must run standalone even with USB deactivated (ТЗ
    * 12.4), so bring the CAN bridge up unconditionally, before deciding
@@ -166,8 +205,10 @@ int main(void)
     /* Keep USB/application diagnostics available even when the board's CAN
      * transceiver, pinout or termination prevents CAN initialization. */
   }
+  App_NoteStage(4U);
 
   Protocol_Init(APP_DEVICE_TYPE, APP_DEVICE_VERSION);
+  App_NoteStage(5U);
 
   uint8_t usb_active = 0U;
   if (!APPLICATION_USE_VBUS_SENSE || VBUS_Present()) {
@@ -177,6 +218,7 @@ int main(void)
     USBD_Start(&hUsbDeviceFS);
     usb_active = 1U;
   }
+  App_NoteStage(6U);
 
   /* CAN-прерывания включаем последним шагом — уже на входе в главный
    * цикл. На активной шине RX-IRQ иначе стреляли в середину
@@ -186,11 +228,13 @@ int main(void)
    * выключен, кадры копятся в аппаратном FIFO0 (3 слота) и вычитываются
    * backstop-опросом CanBridge_PollHealth() на первой итерации. */
   CanBridge_StartInterrupts();
+  App_NoteStage(7U);
 
   uint8_t last_usb_reset_count = CDC_GetUsbResetCount();
   uint8_t last_usb_disconnect_count = CDC_GetUsbDisconnectCount();
   uint32_t last_rx_overflow_bytes = CDC_GetRxOverflowCount();
 
+  App_NoteStage(8U); /* главный цикл — дальнейший крах уже не init-этап */
   while (1) {
     HAL_IWDG_Refresh(&hiwdg);
 
