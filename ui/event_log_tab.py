@@ -31,6 +31,9 @@ from core.can_protocol import (
     EVLOG_BOOT,
     EVLOG_BOOTLOADER,
     EVLOG_FAULT,
+    EVLOG_FAULT_ADDR,
+    EVLOG_FAULT_LR,
+    EVLOG_FAULT_REGS,
     EVLOG_INIT_STAGE,
     EVLOG_VERSION,
     EVLOG_CAN_BUSOFF,
@@ -72,10 +75,12 @@ _RESET_FLAG_NAMES = (
 _FAULT_NAMES = {0: None, 1: "HardFault", 2: "MemManage", 3: "BusFault", 4: "UsageFault"}
 # События без привязки к каналу CAN — колонка «Канал» показывает "-".
 _CHANNELLESS_TYPES = (EVLOG_BOOT, EVLOG_BOOTLOADER, EVLOG_FAULT, EVLOG_VERSION,
-                      EVLOG_INIT_STAGE)
-# У этих типов поле timestamp несёт данные (PC / CRC32 образа), а не время —
-# колонка «Время» для них не имеет смысла.
-_AUX_TIMESTAMP_TYPES = (EVLOG_FAULT, EVLOG_VERSION)
+                      EVLOG_INIT_STAGE, EVLOG_FAULT_REGS, EVLOG_FAULT_ADDR,
+                      EVLOG_FAULT_LR)
+# У этих типов поле timestamp несёт данные (PC / CRC32 / CFSR / BFAR / LR),
+# а не время — колонка «Время» для них не имеет смысла.
+_AUX_TIMESTAMP_TYPES = (EVLOG_FAULT, EVLOG_VERSION, EVLOG_FAULT_REGS,
+                        EVLOG_FAULT_ADDR, EVLOG_FAULT_LR)
 
 
 def _format_channel(channel: int) -> str:
@@ -281,8 +286,40 @@ class EventLogTab(QWidget):
             return tr("Вход в загрузчик"), detail
         if etype == EVLOG_FAULT:
             fault = _FAULT_NAMES.get(channel, tr("код {0}").format(channel))
-            # Поле timestamp несёт застеканный PC, code — младший байт CFSR.
-            return tr("Крах МК"), f"{fault} | PC=0x{ts_ms:08X} | CFSR=0x{code:02X}"
+            # Поле timestamp несёт застеканный PC, code — байт BFSR
+            # (CFSR[15:8]: PRECISERR/IMPRECISERR/STKERR/UNSTKERR/BFARVALID).
+            bfsr_bits = []
+            if code & 0x80:
+                bfsr_bits.append("BFARVALID")
+            if code & 0x08:
+                bfsr_bits.append("STKERR")
+            if code & 0x10:
+                bfsr_bits.append("UNSTKERR")
+            if code & 0x02:
+                bfsr_bits.append("IMPRECISERR")
+            if code & 0x01:
+                bfsr_bits.append("PRECISERR")
+            bfsr = ",".join(bfsr_bits) if bfsr_bits else f"0x{code:02X}"
+            return tr("Крах МК"), f"{fault} | PC=0x{ts_ms:08X} | BFSR={bfsr}"
+        if etype == EVLOG_FAULT_REGS:
+            fault = _FAULT_NAMES.get(channel, tr("код {0}").format(channel))
+            # timestamp — полный CFSR, code — HFSR[31:24] (FORCED/DEBUGEVT).
+            hfsr_hi = []
+            if code & 0x40:
+                hfsr_hi.append("FORCED")
+            if code & 0x80:
+                hfsr_hi.append("DEBUGEVT")
+            hfsr = ",".join(hfsr_hi) if hfsr_hi else f"0x{code:02X}"
+            return tr("Регистры краха"), f"{fault} | CFSR=0x{ts_ms:08X} | HFSR={hfsr}"
+        if etype == EVLOG_FAULT_ADDR:
+            # timestamp — BFAR (адрес доступа), channel — EXC_RETURN.
+            return tr("Адрес краха"), f"BFAR=0x{ts_ms:08X} | EXC=0x{channel:02X}"
+        if etype == EVLOG_FAULT_LR:
+            # timestamp — застеканный LR, channel+code — ICSR (VECTACTIVE).
+            vect = (code << 8) | channel
+            return tr("Контекст краха"), (
+                f"LR=0x{ts_ms:08X} | IRQ={vect & 0x1FF} (ICSR=0x{vect:03X})"
+            )
         if etype == EVLOG_VERSION:
             # Поле timestamp несёт CRC32 образа приложения — отпечаток сборки.
             return tr("Прошивка МК"), (

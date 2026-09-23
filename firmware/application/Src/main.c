@@ -178,10 +178,26 @@ int main(void)
   }
   /* Крах прошлого сеанса — с застеканным PC вместо timestamp: полевой
    * bootloop «не стартует на активной CAN-шине» без JTAG иначе не
-   * локализуется — DR3 говорит только ЧТО упало, а не ГДЕ. */
+   * локализуется — DR3 говорит только ЧТО упало, а не ГДЕ.
+   * code несёт байт BFSR (CFSR[15:8]): PRECISERR/IMPRECISERR/STKERR/
+   * UNSTKERR/BFARVALID — решающие биты для bus/stacking-фолтов (младший
+   * байт MMFSR в поле оказался нулевым и неинформативным). */
   if (s_fault_code != 0U) {
     EventLog_AddEx((uint8_t)EVLOG_FAULT, s_fault_code,
-                   (uint8_t)(s_fault_cfsr & 0xFFU), s_fault_pc);
+                   (uint8_t)((s_fault_cfsr >> 8) & 0xFFU), s_fault_pc);
+    /* Полный CFSR/HFSR/BFAR/LR/EXC_RETURN/ICSR — из .noinit-дампа (BKP
+     * всё занято); только если магик+сумма сошлись. */
+    const crash_dump_t *cd = App_CrashDump();
+    if (cd != NULL) {
+      EventLog_AddEx((uint8_t)EVLOG_FAULT_REGS, s_fault_code,
+                     (uint8_t)((cd->hfsr >> 24) & 0xFFU), cd->cfsr);
+      EventLog_AddEx((uint8_t)EVLOG_FAULT_ADDR,
+                     (uint8_t)(cd->exc_ret & 0xFFU), 0U, cd->bfar);
+      EventLog_AddEx((uint8_t)EVLOG_FAULT_LR,
+                     (uint8_t)(cd->icsr & 0xFFU),
+                     (uint8_t)((cd->icsr >> 8) & 0xFFU), cd->lr);
+      App_ClearCrashDump();
+    }
     EventLog_Add((uint8_t)EVLOG_INIT_STAGE, s_boot_stage, 0U);
   }
   App_NoteStage(1U);
@@ -398,6 +414,42 @@ void App_NoteFault(uint8_t code)
   __HAL_RCC_BKP_CLK_ENABLE();
   PWR->CR |= PWR_CR_DBP;
   BKP->DR3 = code;
+}
+
+/* .noinit — секция линкера между .data и .bss: startup её не зануляет,
+ * стековая канарейка красит только _ebss..SP — содержимое переживает
+ * IWDG/системный ресет и читается на следующем старте. */
+__attribute__((section(".noinit"))) static crash_dump_t s_crash_dump;
+
+void App_StoreCrashDump(const uint32_t *stacked, uint32_t exc_ret)
+{
+  /* Контекст фолта: только RAM/регистры. Дамп валидируется магиком +
+   * XOR-суммой — содержимое RAM после подачи питания не определено. */
+  s_crash_dump.magic   = CRASH_DUMP_MAGIC;
+  s_crash_dump.pc      = stacked[6]; /* застеканный PC */
+  s_crash_dump.lr      = stacked[5]; /* застеканный LR (точка вызова) */
+  s_crash_dump.exc_ret = exc_ret;
+  s_crash_dump.icsr    = SCB->ICSR;
+  s_crash_dump.cfsr    = SCB->CFSR;
+  s_crash_dump.hfsr    = SCB->HFSR;
+  s_crash_dump.bfar    = SCB->BFAR;
+  s_crash_dump.sum = s_crash_dump.magic ^ s_crash_dump.pc ^
+      s_crash_dump.lr ^ s_crash_dump.exc_ret ^ s_crash_dump.icsr ^
+      s_crash_dump.cfsr ^ s_crash_dump.hfsr ^ s_crash_dump.bfar;
+}
+
+const crash_dump_t *App_CrashDump(void)
+{
+  const crash_dump_t *d = &s_crash_dump;
+  uint32_t sum = d->magic ^ d->pc ^ d->lr ^ d->exc_ret ^ d->icsr ^
+      d->cfsr ^ d->hfsr ^ d->bfar;
+  return (d->magic == CRASH_DUMP_MAGIC && d->sum == sum) ? d : NULL;
+}
+
+void App_ClearCrashDump(void)
+{
+  s_crash_dump.magic = 0U;
+  s_crash_dump.sum = 0U;
 }
 
 void App_KickWatchdog(void)

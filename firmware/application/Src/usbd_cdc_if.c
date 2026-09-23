@@ -71,7 +71,6 @@ uint8_t CDC_PeekRxByte(uint16_t offset, uint8_t *out)
 
 uint16_t CDC_Transmit_FS_Resume(uint8_t *Buf, uint16_t offset, uint16_t Len)
 {
-  USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
   uint16_t sent = offset;
 
   while (sent < Len) {
@@ -79,40 +78,76 @@ uint16_t CDC_Transmit_FS_Resume(uint8_t *Buf, uint16_t offset, uint16_t Len)
     if (chunk > APP_TX_DATA_SIZE) {
       chunk = APP_TX_DATA_SIZE;
     }
-    if (hcdc != NULL) {
-      /* Bounded wait for the previous IN transfer to complete. Unbounded
-       * busy-waiting here would hang the whole main loop (including CAN RX
-       * draining via Protocol_Poll()) if the host ever stops reading the
-       * CDC port, contradicting the "CAN reception must never be blocked"
-       * requirement (ТЗ 12.3). On timeout, give up on this transmit rather
-       * than deadlock; the PC-side protocol already tolerates dropped/lost
-       * responses (commands can be retried, CAN frames are best-effort). */
-      uint32_t wait_start = HAL_GetTick();
-      while (hcdc->TxState == 1U) {
-        /* Ожидание освобождения IN-конечной точки ограничено и само по
-         * себе завершится — кормим IWDG, чтобы занятость USB не
-         * принималась за зависание главного цикла (устройство уходило
-         * в reset и роняло порт посреди серии команд). */
-        App_KickWatchdog();
-        if ((HAL_GetTick() - wait_start) >= 100U) {
-          /* Отдельный счётчик «хост не забирал IN» — в поле отвечает на
-           * вопрос «МК медленный или ПК не читает»: растёт именно когда
-           * TxState занят >100 мс, т.е. на шине не было IN-токенов.
-           * Возвращаем sent (а не 0/ошибку) — вызывающая сторона (см.
-           * send_new_cmd_response) продолжает досылку С ЭТОЙ позиции, а
-           * не пересылает уже ушедшие чанки заново: раньше повтор с
-           * начала того же буфера дублировал байты на линии и ломал
-           * позиционный разбор многочанкового ответа на ПК (SYSTEM_INFO,
-           * TRIGGER_READ, EVENT_LOG — всё, что длиннее 64 байт). */
-          tx_busy_waits++;
-          tx_dropped++;
-          return sent;
-        }
+    /* pClassData == NULL, пока хост не выдал SET_CONFIGURATION (класс
+     * ещё не инициализирован), и снова NULL после USB-ресета —
+     * USBD_CDC_DeInit() обнуляет его прямо из OTG-прерывания.
+     * USBD_CDC_SetTxBuffer() пишет hcdc->TxBuffer/TxLength БЕЗ проверки:
+     * запись по NULL+0x208 давала imprecise bus fault — застеканный PC
+     * показывал инструкцию ПОСЛЕ возврата SetTxBuffer (write buffer),
+     * CFSR[7:0]=0. Полевой лог 1.1.39: bootloop HardFault в главном
+     * цикле ровно на первом CAN-кадре при активной шине — кадры сразу
+     * стримятся на хост, а энумерация ещё не завершена. Без CAN нет
+     * TX-трафика — окно гонки просто не задевалось. */
+    USBD_CDC_HandleTypeDef *hcdc =
+        (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+    if (hcdc == NULL) {
+      tx_dropped++;
+      return sent;
+    }
+    /* Bounded wait for the previous IN transfer to complete. Unbounded
+     * busy-waiting here would hang the whole main loop (including CAN RX
+     * draining via Protocol_Poll()) if the host ever stops reading the
+     * CDC port, contradicting the "CAN reception must never be blocked"
+     * requirement (ТЗ 12.3). On timeout, give up on this transmit rather
+     * than deadlock; the PC-side protocol already tolerates dropped/lost
+     * responses (commands can be retried, CAN frames are best-effort). */
+    uint32_t wait_start = HAL_GetTick();
+    while (hcdc->TxState == 1U) {
+      /* Ожидание освобождения IN-конечной точки ограничено и само по
+       * себе завершится — кормим IWDG, чтобы занятость USB не
+       * принималась за зависание главного цикла (устройство уходило
+       * в reset и роняло порт посреди серии команд). */
+      App_KickWatchdog();
+      if ((HAL_GetTick() - wait_start) >= 100U) {
+        /* Отдельный счётчик «хост не забирал IN» — в поле отвечает на
+         * вопрос «МК медленный или ПК не читает»: растёт именно когда
+         * TxState занят >100 мс, т.е. на шине не было IN-токенов.
+         * Возвращаем sent (а не 0/ошибку) — вызывающая сторона (см.
+         * send_new_cmd_response) продолжает досылку С ЭТОЙ позиции, а
+         * не пересылает уже ушедшие чанки заново: раньше повтор с
+         * начала того же буфера дублировал байты на линии и ломал
+         * позиционный разбор многочанкового ответа на ПК (SYSTEM_INFO,
+         * TRIGGER_READ, EVENT_LOG — всё, что длиннее 64 байт). */
+        tx_busy_waits++;
+        tx_dropped++;
+        return sent;
+      }
+      /* USB-ресет мог обнулить pClassData прямо во время ожидания —
+       * перечитываем, чтобы не дальше ждать по устаревшему указателю. */
+      hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+      if (hcdc == NULL) {
+        tx_dropped++;
+        return sent;
       }
     }
     memcpy(UserTxBufferFS, Buf + sent, chunk);
-    USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, chunk);
-    if (USBD_CDC_TransmitPacket(&hUsbDeviceFS) != USBD_OK) {
+    /* OTG-прерывание (USB reset -> USBD_CDC_DeInit -> pClassData=NULL)
+     * может ударить между проверкой и программированием IN-передачи —
+     * держим секцию атомарной: перечитывание pClassData + SetTxBuffer +
+     * TransmitPacket (последний программирует регистры эндпоинта и
+     * пишет FIFO — тоже неделимо относительно HAL_PCD_IRQHandler).
+     * Критическая секция — микросекунды (регистры + до 16 слов в FIFO),
+     * аппаратный CAN FIFO0 (3 слота) и backstop-опрос это переживают. */
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+    uint8_t tx_rc = USBD_BUSY;
+    if (hcdc != NULL && hcdc->TxState == 0U) {
+      USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, chunk);
+      tx_rc = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+    }
+    __set_PRIMASK(primask);
+    if (tx_rc != USBD_OK) {
       tx_dropped++;
       return sent;
     }
@@ -172,6 +207,12 @@ uint8_t CDC_FlushTx(uint32_t timeout_ms)
   while (hcdc->TxState != 0U) {
     App_KickWatchdog();
     if ((HAL_GetTick() - start) >= timeout_ms) {
+      return 1U;
+    }
+    /* USB-ресет из OTG-IRQ может обнулить pClassData на ходу —
+     * перечитываем, чтобы не поллить поле освобождённого дескриптора. */
+    hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+    if (hcdc == NULL) {
       return 1U;
     }
   }

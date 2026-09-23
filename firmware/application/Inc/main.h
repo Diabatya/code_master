@@ -111,6 +111,31 @@ uint8_t App_GetFaultCode(void);
 uint32_t App_GetFaultPc(void);
 uint32_t App_GetFaultCfsr(void);
 void App_NoteFault(uint8_t code);
+/* Полный дамп краха в .noinit-RAM: BKP-регистров всего десять, и они
+ * уже заняты (флаг загрузчика DR1, PC DR4/5, CFSR DR6/7, этап DR8) —
+ * HFSR/BFAR/LR/EXC_RETURN туда не помещаются, а RAM переживает системный
+ * и IWDG-ресет. Пишется из fault-хендлера (только записи в RAM/регистры),
+ * читается и очищается при старте — содержимое уходит в журнал записями
+ * EVLOG_FAULT_*. */
+typedef struct {
+  uint32_t magic;    /* CRASH_DUMP_MAGIC — валидность дампа */
+  uint32_t pc;       /* застеканный PC прерванного контекста */
+  uint32_t lr;       /* застеканный LR — точка вызова прерванного кода */
+  uint32_t exc_ret;  /* EXC_RETURN на входе в фолт (thread/handler, MSP/PSP) */
+  uint32_t icsr;     /* SCB->ICSR — VECTACTIVE = какой IRQ был активен */
+  uint32_t cfsr;     /* SCB->CFSR полный (MMFSR/BFSR/UFSR) */
+  uint32_t hfsr;     /* SCB->HFSR (FORCED/VECTTBL/DEBUGEVT) */
+  uint32_t bfar;     /* SCB->BFAR — адрес доступа (валиден при BFSR.BFARVALID) */
+  uint32_t sum;      /* XOR всех полей выше — защита от мусора в RAM после
+                      * подачи питания (магик может случайно совпасть) */
+} crash_dump_t;
+#define CRASH_DUMP_MAGIC 0x43525348U /* "CRSH" */
+/* Вызывается из fault-хендлера: stacked — база застеканного фрейма
+ * (r0..xpsr), exc_ret — значение LR на входе в исключение. */
+void App_StoreCrashDump(const uint32_t *stacked, uint32_t exc_ret);
+/* Дамп последнего краха или NULL, если магик/сумма не сошлись. */
+const crash_dump_t *App_CrashDump(void);
+void App_ClearCrashDump(void);
 /* Худший зафиксированный запас между концом .bss и пиком использования
  * стека с момента старта (см. paint_stack_canary() в main.c) — байты.
  * Диагностика тесноты RAM (два CAN-кольца съедают ~35 КБ из 64 КБ);

@@ -61,17 +61,38 @@ uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
     if (chunk > APP_TX_DATA_SIZE) {
       chunk = APP_TX_DATA_SIZE;
     }
-    if (hcdc != NULL) {
-      uint32_t wait_start = HAL_GetTick();
-      while (hcdc->TxState == 1U) {
-        if ((HAL_GetTick() - wait_start) >= 100U) {
-          return 1U;
-        }
+    /* pClassData == NULL до SET_CONFIGURATION и после USB-ресета
+     * (DeInit из OTG-IRQ): USBD_CDC_SetTxBuffer пишет в hcdc->TxBuffer
+     * без проверки — запись по NULL+0x208 даёт imprecise bus fault.
+     * Та же дыра в приложении дала полевой bootloop (см. application/
+     * Src/usbd_cdc_if.c), здесь шанс меньше (нет CAN-потока), но
+     * симметричный фикс дешевле ещё одной диагностики. */
+    hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+    if (hcdc == NULL) {
+      return 1U;
+    }
+    uint32_t wait_start = HAL_GetTick();
+    while (hcdc->TxState == 1U) {
+      if ((HAL_GetTick() - wait_start) >= 100U) {
+        return 1U;
+      }
+      hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+      if (hcdc == NULL) {
+        return 1U;
       }
     }
     memcpy(UserTxBufferFS, Buf + sent, chunk);
-    USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, chunk);
-    if (USBD_CDC_TransmitPacket(&hUsbDeviceFS) != USBD_OK) {
+    /* Проверка + SetTxBuffer + TransmitPacket — атомарно относительно
+     * OTG-прерывания: иначе ресет обнуляет pClassData посреди секции. */
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    uint8_t tx_rc = USBD_BUSY;
+    if (hUsbDeviceFS.pClassData != NULL) {
+      USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, chunk);
+      tx_rc = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+    }
+    __set_PRIMASK(primask);
+    if (tx_rc != USBD_OK) {
       return 1U;
     }
     sent += chunk;

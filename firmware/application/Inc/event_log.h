@@ -58,10 +58,12 @@ typedef enum {
   EVLOG_FAULT              = 12U, /* крах прошлого сеанса (пишется при старте,
                                     * если в BKP остался код фолта):
                                     * channel=код фолта (1=HardFault...),
-                                    * code=младший байт CFSR,
-                                    * timestamp_ms=застеканный PC (НЕ время!) —
-                                    * точный адрес инструкции краха для полевой
-                                    * диагностики без JTAG. */
+                                    * code=байт BFSR (CFSR[15:8]) —
+                                    * PRECISERR/IMPRECISERR/STKERR/UNSTKERR/
+                                    * BFARVALID (imprecise-фолт в поле имел
+                                    * застеканный PC=прерванная инструкция,
+                                    * поэтому класс важнее точного PC),
+                                    * timestamp_ms=застеканный PC (НЕ время!). */
   EVLOG_VERSION            = 13U, /* идентификатор сборки: channel=версия
                                     * приложения (APP_DEVICE_VERSION),
                                     * code=версия протокола,
@@ -76,6 +78,18 @@ typedef enum {
                                     * 5=протокол, 6=USB, 7=NVIC CAN, 8=главный
                                     * цикл). Пишется только при старте после
                                     * краха — вместе с записью EVLOG_FAULT. */
+  EVLOG_FAULT_REGS         = 15U, /* регистры краха из .noinit-дампа:
+                                    * channel=код фолта, code=HFSR[31:24]
+                                    * (FORCED/DEBUGEVT), timestamp_ms=
+                                    * полный CFSR (НЕ время!). */
+  EVLOG_FAULT_ADDR         = 16U, /* адрес доступа краха: channel=EXC_RETURN
+                                    * (0xF9=thread/MSP, 0xED=handler/PSP),
+                                    * timestamp_ms=SCB->BFAR (валиден при
+                                    * BFSR.BFARVALID). */
+  EVLOG_FAULT_LR           = 17U, /* контекст краха: timestamp_ms=застеканный
+                                    * LR прерванного кода, channel+code=
+                                    * SCB->ICSR мл./ст. байт — VECTACTIVE
+                                    * показывает, какой IRQ был активен. */
 } event_log_type_t;
 
 typedef struct {

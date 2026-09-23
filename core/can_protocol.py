@@ -54,13 +54,18 @@ EVLOG_USB_TX_STALL = 9
 EVLOG_USB_RX_OVERFLOW = 10
 EVLOG_BOOTLOADER = 11  # вход в загрузчик: code 0 — по команде ПК (пишет приложение),
                        # 1 — флаг хоста, 2 — приложение невалидно (пишет бутлоадер)
-EVLOG_FAULT = 12       # крах прошлого сеанса: channel=код фолта, code=мл.байт CFSR,
-                       # поле timestamp несёт застеканный PC (не время!)
+EVLOG_FAULT = 12       # крах прошлого сеанса: channel=код фолта, code=байт BFSR
+                       # (CFSR[15:8]), поле timestamp несёт застеканный PC (не время!)
 EVLOG_VERSION = 13     # отпечаток сборки: channel=версия приложения, code=версия
                        # протокола, поле timestamp несёт CRC32 образа (не время!)
 EVLOG_INIT_STAGE = 14  # до какого этапа инициализации дошла загрузка с крахом:
                        # channel=этап (1=журнал, 2=config, 3=триггеры, 4=CAN,
                        # 5=протокол, 6=USB, 7=NVIC CAN, 8=главный цикл)
+EVLOG_FAULT_REGS = 15  # регистры краха: channel=код фолта, code=HFSR[31:24],
+                       # поле timestamp несёт полный CFSR (не время!)
+EVLOG_FAULT_ADDR = 16  # timestamp=SCB->BFAR (адрес доступа), channel=EXC_RETURN
+EVLOG_FAULT_LR = 17    # timestamp=застеканный LR, channel+code=SCB->ICSR
+                       # (VECTACTIVE = какой IRQ был активен при крахе)
 
 # Версия протокола, которую ожидает хост. Прошивка отвечает её в
 # CMD_SYSTEM_INFO (payload[1]); меньше — функции нового протокола

@@ -52,7 +52,7 @@ void NMI_Handler(void) { }
 /* Не static и used: на символ прыгает inline-asm трамплина — компилятор
  * обязан сохранить функцию и пометить её Thumb-точкой входа. */
 __attribute__((noinline, used))
-void fault_capture(uint32_t *stacked, uint8_t code)
+void fault_capture(uint32_t *stacked, uint8_t code, uint32_t exc_ret)
 {
   App_NoteFault(code); /* DR3 + включение PWR/BKP clock и DBP */
   uint32_t pc = stacked[6]; /* застеканный PC: r0,r1,r2,r3,r12,lr,pc,xpsr */
@@ -61,11 +61,18 @@ void fault_capture(uint32_t *stacked, uint8_t code)
   BKP->DR5 = (uint16_t)(pc >> 16);
   BKP->DR6 = (uint16_t)(cfsr & 0xFFFFU);
   BKP->DR7 = (uint16_t)(cfsr >> 16);
+  /* Полный дамп (LR/EXC_RETURN/ICSR/HFSR/BFAR) — в .noinit-RAM:
+   * переживает IWDG-ресет, BKP-регистры уже все заняты. Полевой лог
+   * 1.1.39 показал imprecise-фолт: застеканный PC — просто прерванная
+   * инструкция, а не фолтящая — без CFSR/HFSR целиком и адреса BFAR
+   * класс краха не различить. */
+  App_StoreCrashDump(stacked, exc_ret);
   while (1) { }
 }
 
 /* Naked-трамплин: выбирает MSP/PSP по EXC_RETURN (lr бит 2) и передаёт
- * адрес застеканного фрейма в fault_capture. r1 — код фолта. */
+ * адрес застеканного фрейма в fault_capture. r1 — код фолта,
+ * r2 — само EXC_RETURN (говорит thread/handler и MSP/PSP краха). */
 #define FAULT_HANDLER(name, code)                                   \
   __attribute__((naked)) void name(void)                            \
   {                                                                 \
@@ -75,6 +82,7 @@ void fault_capture(uint32_t *stacked, uint8_t code)
         "mrseq r0, msp           \n\t"                              \
         "mrsne r0, psp           \n\t"                              \
         "movs  r1, #" #code "    \n\t"                              \
+        "mov   r2, lr            \n\t"                              \
         "b     fault_capture     \n\t");                            \
   }
 

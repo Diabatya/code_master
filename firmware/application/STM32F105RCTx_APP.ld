@@ -123,6 +123,18 @@ SECTIONS
     _edata = .;
   } >RAM AT> FLASH
 
+  /* Строго между .data и .bss: нельзя ставить ПОСЛЕ _ebss — область
+   * _ebss..SP красится стековой канарейкой (paint_stack_canary) и дамп
+   * краха затёрся бы до чтения. Startup зануляет только _sbss.._ebss,
+   * поэтому .noinit переживает системный/IWDG-ресет. */
+  . = ALIGN(4);
+  .noinit (NOLOAD) :
+  {
+    *(.noinit)
+    *(.noinit*)
+    . = ALIGN(4);
+  } >RAM
+
   . = ALIGN(4);
   .bss :
   {
