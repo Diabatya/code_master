@@ -483,6 +483,7 @@ class SettingsWindow(QMainWindow):
         layout.addLayout(bottom_layout)
 
         self._connect_signals()
+        self._connect_misc()
 
         # Отслеживание несохранённых изменений: после вычитки настроек с
         # устройства «Сохранить» выключена и полупрозрачна, любое изменение
@@ -1219,6 +1220,11 @@ class SettingsWindow(QMainWindow):
                 tab.retranslate_ui()
 
     def _connect_signals(self) -> None:
+        # Горячий путь — батчами: одно queued-событие на порцию байт из
+        # порта вместо события на каждый кадр (с двух насыщенных CAN это
+        # тысячи событий/с и «дикие тормоза» UI). Одиночные new_can_frame
+        # остаются для кадров, всплывших внутри командных сессий.
+        self._serial_manager.new_can_frames.connect(self._dispatch_can_frames)
         self._serial_manager.new_can_frame.connect(self._trigger_tab.process_frame)
         self._serial_manager.new_can_frame.connect(self._gateway_tab.process_frame)
         self._serial_manager.new_can_frame.connect(self._monitor_tab.process_frame)
@@ -1233,6 +1239,21 @@ class SettingsWindow(QMainWindow):
             self._on_reconnect_scheduled
         )
         self._update_conn_status(self._serial_manager.is_open())
+
+    def _dispatch_can_frames(self, frames: list) -> None:
+        """Пачка кадров за одно чтение порта: монитор сливает повторы
+        одного ID в одно обновление строки, остальные вкладки получают
+        каждый кадр по-прежнему поштучно (триггеры/шлюзы должны видеть
+        каждый кадр — агрегация тут недопустима)."""
+        for frame in frames:
+            self._trigger_tab.process_frame(frame)
+            self._gateway_tab.process_frame(frame)
+            self._flexible_tab.process_frame(frame)
+            self._analyzer_tab.process_frame(frame)
+            self._topology_tab.add_frame(frame)
+        self._monitor_tab.process_frames(frames)
+
+    def _connect_misc(self) -> None:
         self._monitor_tab.create_trigger_requested.connect(self._on_create_trigger)
         self._trigger_tab.settings_changed.connect(self._mark_dirty)
         self._trigger_tab.progress_updated.connect(self._on_tab_progress)

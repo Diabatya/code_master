@@ -16,11 +16,13 @@ extern "C" {
 #include <stdint.h>
 #include "stm32f1xx_hal.h"
 
-/* ТЗ 12.2: RAM ring buffers per CAN channel, >= 512 packets deep. Rounded
- * up to a power of two (1024) so head/tail wraparound is a cheap mask
- * instead of a modulo, doubling the documented minimum for extra headroom
- * against the Flash-write stall discussed in firmware/PROTOCOL.md Part 3. */
-#define CAN_RING_DEPTH   1024U
+/* ТЗ 12.2: RAM ring buffers per CAN channel, >= 512 packets deep. 896
+ * (не 1024): высвобожденные ~2 КБ×2 ушли под TX_FIFO USB CDC — с
+ * TX-кольцом 100-мс сталлы send_can_frame() исчезли, и запаса 896 кадров
+ * (≈130 мс при полном флуде обоих каналов) хватает против Flash-write
+ * сталла из PROTOCOL.md Part 3. 896 — НЕ степень двойки: врап в
+ * can_bridge.c сделан сравнением `idx >= DEPTH -> 0`, а не маской. */
+#define CAN_RING_DEPTH   896U
 
 /* Packed: кадры живут в двух кольцах по 1024 шт. + эхо-кольце — выравнивание
  * раздувало бы каждый слот до 20 байт (RAM F105 = 64 КБ, хвост под

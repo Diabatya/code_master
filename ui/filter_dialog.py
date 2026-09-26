@@ -82,6 +82,17 @@ class FilterDialog(QDialog):
         alayout = QVBoxLayout(accepted_tab)
         alayout.setContentsMargins(8, 8, 8, 8)
         alayout.addWidget(QLabel(tr("Принятые ID. Отметьте те, которые нужно игнорировать:")))
+        marks_row = QHBoxLayout()
+        mark_all = QPushButton(tr("Отметить все"))
+        mark_none = QPushButton(tr("Снять все"))
+        mark_all.setFont(self._font)
+        mark_none.setFont(self._font)
+        mark_all.clicked.connect(lambda: self._set_all_ignored(True))
+        mark_none.clicked.connect(lambda: self._set_all_ignored(False))
+        marks_row.addWidget(mark_all)
+        marks_row.addWidget(mark_none)
+        marks_row.addStretch()
+        alayout.addLayout(marks_row)
         alayout.addWidget(self._accepted_list)
 
         self._tabs = QTabWidget()
@@ -106,6 +117,10 @@ class FilterDialog(QDialog):
             self._add_rule()
 
         self._refresh_accepted_ids()
+        # Список «Принятые» заполнялся только по таймеру и только когда
+        # вкладка видима — первый переход на неё показывал пустое окно
+        # на целую секунду, галки «игнорировать» казались некликабельными.
+        self._tabs.currentChanged.connect(lambda _i: self._refresh_accepted_ids())
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._refresh_accepted_ids)
         self._refresh_timer.start(1000)
@@ -232,6 +247,14 @@ class FilterDialog(QDialog):
         rule = self._rules_widgets.pop()
         rule["widget"].deleteLater()
 
+    def _set_all_ignored(self, ignored: bool) -> None:
+        """«Отметить все»/«Снять все» в списке принятых ID."""
+        state = Qt.CheckState.Checked if ignored else Qt.CheckState.Unchecked
+        for i in range(self._accepted_list.count()):
+            item = self._accepted_list.item(i)
+            if item is not None:
+                item.setCheckState(state)
+
     def _refresh_accepted_ids(self) -> None:
         if not self._accepted_list.isVisible():
             return
@@ -272,6 +295,11 @@ class FilterDialog(QDialog):
             id_to = hex_to_int(rule["id_to"].text())
             data_from = bytes(parse_data_bytes([e.text() for e in rule["data_from"]]))
             data_to = bytes(parse_data_bytes([e.text() for e in rule["data_to"]]))
+            # Пустая строка правила не правило: «hide» без полей матчит
+            # ВСЕ кадры и глушил бы весь поток — пропускаем.
+            if (id_from is None and id_to is None
+                    and not data_from and not data_to):
+                continue
             rules.append({
                 "mode": mode,
                 "id_from": id_from,

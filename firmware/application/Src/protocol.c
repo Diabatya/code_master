@@ -181,7 +181,14 @@ static void send_can_frame(const can_frame_t *frame)
   buf[n] = xor_checksum(&buf[0], n);
   n++;
 
-  CDC_Transmit_FS(buf, (uint16_t)n);
+  /* TX-кольцо, а не прямой CDC_Transmit_FS: тот ждал свободного
+   * IN-эндпоинта до 100 мс ЗА КАЖДЫЙ кадр — при двух насыщенных CAN
+   * главный цикл вставал на секунды, CAN FIFO переполнялся, кадры
+   * терялись («дико тормозит при 2 CAN»). Теперь кадр складывается в
+   * кольцо мгновенно, а CDC_PumpTx() выгребает его пакетами по 64 Б —
+   * несколько кадров едут в одном USB IN-пакете. При переполнении кольца
+   * хвост считается в tx_dropped (CAN-кадры best-effort). */
+  CDC_QueueTx(buf, (uint16_t)n);
 }
 
 static void send_new_cmd_response(uint8_t cmd, uint8_t status, const uint8_t *payload, uint8_t len)

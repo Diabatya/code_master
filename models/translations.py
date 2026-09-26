@@ -442,6 +442,9 @@ class Translator:
                 "Данные отв.:": "Resp. data:",
                 "Задержка:": "Delay:",
                 "Тест": "Test",
+                "Отправить ответ триггера один раз": "Send the trigger response once",
+                "Порт устройства не открыт": "Device port is not open",
+                "У триггера нет ответа для отправки": "Trigger has no response to send",
                 "Неверный ID в триггере {0}": "Invalid ID in trigger {0}",
                 "Все 10 триггеров заняты": "All 10 triggers are occupied",
                 "Сработал триггер {0}": "Trigger {0} fired",
@@ -583,6 +586,36 @@ class Translator:
                 "Отправить разово": "Send once",
                 "Разово отправить выбранную строку на шину":
                     "Send the selected row to the bus once",
+                "Отправить …": "Send …",
+                "Отправка выделенных строк: разово с паузой или циклически":
+                    "Send selected rows: once with a pause or cyclically",
+                "Отправка ID {0}": "Send ID {0}",
+                "Выделено пакетов: {0}": "Selected packets: {0}",
+                "Пауза между пакетами, мс": "Pause between packets, ms",
+                "Циклически до «Стоп»": "Cyclic until «Stop»",
+                "Кол-во кругов:": "Number of rounds:",
+                "Отправлено: {0} — остановлено": "Sent: {0} — stopped",
+                "Отправлено: {0} — готово": "Sent: {0} — done",
+                "Калькулятор": "Calculator",
+                "символы": "characters",
+                "BIN/DEC/HEX/CHAR — ввод в любое поле пересчитывает остальные":
+                    "BIN/DEC/HEX/CHAR — typing in any field recalculates the others",
+                "Весь DATA ▾": "Whole DATA ▾",
+                "Байты {0} ▾": "Bytes {0} ▾",
+                "Байты DATA для графика и процентов — отметьте нужные":
+                    "DATA bytes for the graph and percent — check the ones you need",
+                "Сумма выбранных байт DATA в десятичной системе":
+                    "Sum of the selected DATA bytes in decimal",
+                "Скрыть выделенное": "Hide selected",
+                "Скрыть строки выделенных ID, пока кнопка нажата":
+                    "Hide rows of the selected IDs while the button is held",
+                "Кол-во строк": "Row count",
+                "Число строк мониторинга на экране — фон ID циклится\n"
+                "по этому количеству оттенков":
+                    "Number of monitor rows on screen — the ID background "
+                    "cycles through this many shades",
+                "Отметить все": "Check all",
+                "Снять все": "Uncheck all",
                 "Выберите строку истории": "Select a history row",
                 "Отправка не удалась": "Send failed",
                 "Копировать пакет (для триггера)": "Copy packet (for trigger)",

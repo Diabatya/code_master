@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -298,10 +297,10 @@ class CanTriggerTab(QWidget):
         # «−» удаляет это условие (у первой строки не показывается —
         # минимум одно условие на триггер). «+» живёт в строке опций.
         remove_button = QPushButton("−")
-        remove_button.setFixedSize(22, 22)
-        remove_button.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        remove_button.setFixedSize(24, 24)
+        remove_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Black))
         remove_button.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
             "QPushButton:hover { background-color: #8A3A3A; }"
         )
         remove_button.setToolTip(tr("Удалить условие приёма"))
@@ -393,10 +392,10 @@ class CanTriggerTab(QWidget):
         # «+» — ещё одно условие приёма (ИЛИ): свои канал/битность/ID/
         # DLC/Data/RTR. Ограничение — 3 бита индекса в rx_flags записи.
         add_cond = QPushButton("+")
-        add_cond.setFixedSize(22, 22)
-        add_cond.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        add_cond.setFixedSize(24, 24)
+        add_cond.setFont(QFont("Segoe UI", 16, QFont.Weight.Black))
         add_cond.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
             "QPushButton:hover { background-color: #4A4A6A; }"
         )
         add_cond.setToolTip(tr("Добавить условие приёма (ИЛИ — до 8)"))
@@ -529,9 +528,9 @@ class CanTriggerTab(QWidget):
         header.addStretch()
         add_button = QPushButton("+")
         add_button.setFixedSize(32, 32)
-        add_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        add_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
         add_button.setStyleSheet(
-            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
             "QPushButton:hover { background-color: #5A5A7A; }"
         )
         add_button.setToolTip(tr("Добавить фрейм"))
@@ -587,11 +586,11 @@ class CanTriggerTab(QWidget):
         count = self._make_count_spin(font, 999)
         count.setFixedWidth(60)
 
-        remove_button = QPushButton("\u2013")
+        remove_button = QPushButton("\u2212")
         remove_button.setFixedSize(32, 32)
-        remove_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        remove_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
         remove_button.setStyleSheet(
-            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
             "QPushButton:hover { background-color: #5A5A7A; }"
         )
         remove_button.setToolTip(tr("Удалить фрейм"))
@@ -783,9 +782,9 @@ class CanTriggerTab(QWidget):
         header.addStretch()
         add_button = QPushButton("+")
         add_button.setFixedSize(32, 32)
-        add_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        add_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
         add_button.setStyleSheet(
-            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
             "QPushButton:hover { background-color: #5A5A7A; }"
         )
         add_button.setToolTip(tr("Добавить строку кэша"))
@@ -873,11 +872,11 @@ class CanTriggerTab(QWidget):
         line2.addWidget(count)
         line2.addStretch()
 
-        remove_button = QPushButton("\u2013")
+        remove_button = QPushButton("\u2212")
         remove_button.setFixedSize(32, 32)
-        remove_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        remove_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
         remove_button.setStyleSheet(
-            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
             "QPushButton:hover { background-color: #5A5A7A; }"
         )
         remove_button.setToolTip(tr("Удалить строку"))
@@ -1169,6 +1168,16 @@ class CanTriggerTab(QWidget):
         copy_button.setToolTip(tr("Копировать триггер целиком"))
         copy_button.setCursor(Qt.CursorShape.PointingHandCursor)
 
+        # «Тест» — ручной одиночный выстрел триггера (отправляет ответ
+        # как при срабатывании). Голубая; на 0.7 с вспыхивает зелёным,
+        # когда триггер реально отработал — видно живую диагностику.
+        test_button = QPushButton(tr("Тест"))
+        test_button.setFixedSize(44, 24)
+        test_button.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        test_button.setToolTip(tr("Отправить ответ триггера один раз"))
+        test_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._apply_test_button_style(test_button, fired=False)
+
         return {
             "group": group,
             "status": status,
@@ -1178,7 +1187,35 @@ class CanTriggerTab(QWidget):
             "cache": cache,
             "delete_button": delete_button,
             "copy_button": copy_button,
+            "test_button": test_button,
         }
+
+    @staticmethod
+    def _apply_test_button_style(button: QPushButton, fired: bool) -> None:
+        if fired:
+            button.setStyleSheet(
+                "QPushButton { background-color: #2E7D32; color: #FFFFFF; "
+                "border: none; border-radius: 4px; }"
+            )
+        else:
+            button.setStyleSheet(
+                "QPushButton { background-color: #1565C0; color: #FFFFFF; "
+                "border: none; border-radius: 4px; }"
+                "QPushButton:hover { background-color: #1E88E5; }"
+                "QPushButton:pressed { background-color: #0D47A1; }"
+            )
+
+    def _flash_test_button(self, index: int) -> None:
+        """Зелёная вспышка «Тест» на 0.7 с — триггер отработал."""
+        if not (0 <= index < len(self._blocks)):
+            return
+        button = self._blocks[index].get("test_button")
+        if button is None:
+            return
+        self._apply_test_button_style(button, fired=True)
+        QTimer.singleShot(
+            700, lambda b=button: self._apply_test_button_style(b, fired=False)
+        )
 
     def _layout_trigger_block(self, block: dict[str, Any], index: int) -> None:
         """Собирает layout блока и добавляет его в контейнер."""
@@ -1219,6 +1256,9 @@ class CanTriggerTab(QWidget):
         delete_button.clicked.connect(lambda _c=False, b=block: self._remove_trigger_block(b))
         copy_button = block["copy_button"]
         copy_button.clicked.connect(lambda _c=False, b=block: self._copy_trigger_block(b))
+        block["test_button"].clicked.connect(
+            lambda _c=False, b=block: self._test_trigger(b)
+        )
 
         wrapper = QWidget()
         grid = QGridLayout(wrapper)
@@ -1235,6 +1275,7 @@ class CanTriggerTab(QWidget):
         holder_layout.setContentsMargins(0, 4, 22, 0)
         holder_layout.setSpacing(4)
         holder_layout.addStretch()
+        holder_layout.addWidget(block["test_button"])
         holder_layout.addWidget(copy_button)
         holder_layout.addWidget(delete_button)
         grid.addWidget(
@@ -1364,6 +1405,36 @@ class CanTriggerTab(QWidget):
         show_toast(self, tr("Триггер «{0}» вставлен").format(name or str(index + 1)))
         logger.info("Триггер вставлен из буфера в блок %d", index + 1)
 
+    def _test_trigger(self, block: dict[str, Any]) -> None:
+        """Кнопка «Тест»: одиночный выстрел триггера — отправка его
+        ответа/кэша на шину, как при срабатывании. Работает и для
+        device-managed блоков: диагностика ответа независимо от того,
+        кто исполняет условие."""
+        try:
+            index = self._blocks.index(block)
+        except ValueError:
+            return
+        if not self._serial_manager.is_open():
+            show_toast(self, tr("Порт устройства не открыт"), success=False)
+            return
+        # Строим ответ напрямую из блока — не через
+        # _build_internal_triggers: выключенный (group unchecked)
+        # триггер тестировать тоже можно.
+        trigger = {
+            "index": index,
+            "cache": block["cache"]["cache_check"].isChecked(),
+            "responses": self._collect_responses(block["response"]["rows"]),
+            "cache_rows": self._collect_cache(block["cache"]),
+        }
+        if not trigger["responses"] and not trigger["cache_rows"]:
+            show_toast(self, tr("У триггера нет ответа для отправки"), success=False)
+            return
+        if trigger["cache"]:
+            self._send_cached_frames(trigger)
+        else:
+            self._send_responses(trigger)
+        self._flash_test_button(index)
+
     def _add_trigger_block(self) -> int | None:
         """Добавляет блок триггера. Лимит — ёмкость пула Flash
         (TRIGGER_COUNT записей по 82 Б + заголовок в 8 КБ над config)."""
@@ -1394,142 +1465,6 @@ class CanTriggerTab(QWidget):
     def _on_add_trigger_clicked(self) -> None:
         if self._add_trigger_block() is not None:
             self._mark_dirty(len(self._blocks) - 1)
-
-    def _sim_records(self) -> list[dict[str, Any]]:
-        """Записи в формате firmware для симулятора — то же, что ушло бы
-        в МК по «Сохранить» (непустые блоки, enabled как в UI)."""
-        records = []
-        for index in range(len(self._blocks)):
-            block = self._blocks[index]
-            recv = block["recv"]
-            if recv["fire_on_boot"].isChecked():
-                conds = [(0, recv["conds"][0])]
-            else:
-                conds = [
-                    (i, c) for i, c in enumerate(recv["conds"])
-                    if self._parse_id(c["id"].text()) is not None
-                ] or [(0, recv["conds"][0])]
-            for cond_idx, cond in conds:
-                values = self._device_trigger_values(index, cond=cond)
-                values["rx_cond_idx"] = cond_idx
-                if not self._is_empty_trigger(values):
-                    records.append(values)
-        return records
-
-    def _open_simulation(self) -> None:
-        from ui.trigger_sim_dialog import TriggerSimDialog
-
-        dialog = TriggerSimDialog(self._sim_records, self)
-        dialog.exec()
-
-    @staticmethod
-    def _templates() -> dict[str, dict[str, Any]]:
-        """Готовые сценарии триггеров — заполненный блок в один клик,
-        дальше оператор правит ID/данные под себя."""
-        return {
-            tr("Эхо-ответ"): {
-                "active": True,
-                "recv_channel": 0,
-                "recv_bit": 0,
-                "recv_id": "100",
-                "recv_dlc": 8,
-                "recv_rtr": 0,
-                "recv_data": "",
-                "responses": [
-                    {
-                        "channel": 0, "bit": 0, "id": "101", "dlc": 8,
-                        "data": "00 00 00 00 00 00 00 00", "rtr": 0,
-                        "delay_before_send": 0, "delay_between": 0,
-                        "count": 1, "next_delay": 0,
-                    }
-                ],
-            },
-            tr("Маршрутизация CAN1 → CAN2"): {
-                "active": True,
-                "recv_channel": 0,
-                "recv_bit": 0,
-                "recv_id": "123",
-                "recv_dlc": 8,
-                "recv_rtr": 0,
-                "recv_data": "",
-                "responses": [
-                    {
-                        "channel": 1, "bit": 0, "id": "123", "dlc": 8,
-                        "data": "", "rtr": 0,
-                        "delay_before_send": 0, "delay_between": 0,
-                        "count": 1, "next_delay": 0,
-                    }
-                ],
-            },
-            tr("Ответ на RTR-запрос"): {
-                "active": True,
-                "recv_channel": 0,
-                "recv_bit": 0,
-                "recv_id": "200",
-                "recv_dlc": 0,
-                "recv_rtr": 1,
-                "recv_data": "",
-                "responses": [
-                    {
-                        "channel": 0, "bit": 0, "id": "200", "dlc": 8,
-                        "data": "00 00 00 00 00 00 00 00", "rtr": 0,
-                        "delay_before_send": 0, "delay_between": 0,
-                        "count": 1, "next_delay": 0,
-                    }
-                ],
-            },
-            tr("Ответ пачкой ×3 с паузой"): {
-                "active": True,
-                "recv_channel": 0,
-                "recv_bit": 0,
-                "recv_id": "210",
-                "recv_dlc": 8,
-                "recv_rtr": 0,
-                "recv_data": "",
-                "responses": [
-                    {
-                        "channel": 0, "bit": 0, "id": "211", "dlc": 8,
-                        "data": "", "rtr": 0,
-                        "delay_before_send": 50, "delay_between": 20,
-                        "count": 3, "next_delay": 0,
-                    }
-                ],
-            },
-            tr("Кэш-репитер CAN1 → CAN2"): {
-                "active": True,
-                "cache": True,
-                "recv_channel": 0,
-                "recv_bit": 0,
-                "recv_id": "300",
-                "recv_dlc": 0,
-                "recv_rtr": 0,
-                "recv_data": "",
-                "responses": [],
-                "cache_channel": 0,
-                "cache_bit": 0,
-                "cache_id": "300",
-                "cache_dlc": 8,
-                "cache_tx_channel": 1,
-                "cache_from_data": "",
-                "cache_to_data": "",
-                "cache_delay_before_send": 0,
-                "cache_delay_between": 0,
-                "cache_count": 1,
-            },
-        }
-
-    def _add_template_trigger(self, preset: dict[str, Any]) -> None:
-        """Добавляет блок триггера из шаблона (тем же путём, что загрузка
-        конфига: текущие блоки + пресет → set_config)."""
-        from copy import deepcopy
-
-        if len(self._blocks) >= TRIGGER_COUNT:
-            QMessageBox.warning(
-                self, tr("Шаблон"), tr("Страница триггеров заполнена")
-            )
-            return
-        self.set_config(self._collect_config() + [deepcopy(preset)])
-        self._mark_dirty(len(self._blocks) - 1)
 
     def _build_layout(self) -> None:
         container = QWidget()
@@ -1564,38 +1499,10 @@ class CanTriggerTab(QWidget):
         )
         self._paste_trigger_button.clicked.connect(self._on_paste_trigger_clicked)
 
-        self._sim_button = QPushButton(tr("Симуляция…"))
-        self._sim_button.setFont(QFont("Segoe UI", 9))
-        self._sim_button.setStyleSheet(
-            "QPushButton { background-color: #2A4A3A; color: #FFFFFF; border: none; "
-            "border-radius: 4px; padding: 6px 14px; }"
-            "QPushButton:hover { background-color: #3A6A4A; }"
-        )
-        self._sim_button.setToolTip(
-            tr("Прогнать кадры из лога через триггеры без железа")
-        )
-        self._sim_button.clicked.connect(self._open_simulation)
-
-        self._template_button = QPushButton(tr("Шаблон ▾"))
-        self._template_button.setFont(QFont("Segoe UI", 9))
-        self._template_button.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
-            "border-radius: 4px; padding: 6px 14px; }"
-            "QPushButton:hover { background-color: #4A4A6A; }"
-        )
-        template_menu = QMenu(self._template_button)
-        for title, preset in self._templates().items():
-            template_menu.addAction(
-                title, lambda _c=False, p=preset: self._add_template_trigger(p)
-            )
-        self._template_button.setMenu(template_menu)
-
         buttons_row = QHBoxLayout()
         buttons_row.setSpacing(8)
         buttons_row.addWidget(self._add_trigger_button)
         buttons_row.addWidget(self._paste_trigger_button)
-        buttons_row.addWidget(self._template_button)
-        buttons_row.addWidget(self._sim_button)
         buttons_row.addStretch()
         container_layout.addLayout(buttons_row)
         container_layout.addStretch()
@@ -2315,16 +2222,25 @@ class CanTriggerTab(QWidget):
 
     @staticmethod
     def _is_empty_trigger(values: dict[str, Any]) -> bool:
-        """True, если запись устройства «заводская» — не была настроена."""
+        """True, если запись устройства «заводская» — не была настроена.
+
+        Пустой определяется по СОДЕРЖИМОМУ, а не по enabled: блок с
+        включённой галкой, но очищенными полями проецируется в запись
+        rx_id=0/tx_id=0 с нулевыми масками — она матчила бы кадр ID 0 и
+        слала ответ из нулей (полевой баг: «стёрт» полями триггер
+        продолжал жить во Flash и занимать память). Такую запись не
+        пишем и не считаем — настоящий триггер всегда имеет ID приёма,
+        ответа или кэша."""
         return (
-            not values["enabled"]
-            and values["rx_id"] == 0
+            values["rx_id"] == 0
             and values["tx_id"] == 0
             and values.get("src_id", 0) == 0
             and not values.get("cache_enabled", 0)
             and not values.get("rx_rtr", 0)
+            and not values.get("rx_fire_on_boot", 0)
             and not any(values["rx_data"])
             and not any(values["tx_data"])
+            and not any(values.get("rx_data_mask") or b"")
         )
 
     def _clear_block(self, index: int) -> None:
@@ -2949,6 +2865,7 @@ class CanTriggerTab(QWidget):
                     self._send_cached_frames(trigger)
                 else:
                     self._send_responses(trigger)
+                self._flash_test_button(index)
             else:
                 # Поле «Задержка, мс» — пауза от старта сессии до
                 # вооружения ответа (порт boot_delay_ms прошивки).
@@ -2971,6 +2888,7 @@ class CanTriggerTab(QWidget):
             self._send_cached_frames(trigger)
         else:
             self._send_responses(trigger)
+        self._flash_test_button(index)
 
     def _on_trigger_toggled_by_block(self, block: dict[str, Any], enabled: bool) -> None:
         try:
@@ -3803,6 +3721,15 @@ class CanTriggerTab(QWidget):
                 trigger, frame_id, frame_channel, data,
                 bool(frame.get("extended")), tx_echo,
             )
+            # Триггер исполняется самим МК: его ответ приходит эхом —
+            # совпадение с фреймом ответа триггера = сработка, кнопка
+            # «Тест» вспыхивает зелёным (живая диагностика).
+            if (
+                tx_echo
+                and trigger.get("device_managed")
+                and self._echo_is_response(trigger, frame_id, frame_channel, data, bool(frame.get("extended")))
+            ):
+                self._flash_test_button(trigger["index"])
         for trigger in triggers:
             if trigger.get("device_managed"):
                 # Триггер записан во Flash и исполняется самим МК —
@@ -3849,6 +3776,7 @@ class CanTriggerTab(QWidget):
                     self._send_cached_frames(trigger)
                 else:
                     self._send_responses(trigger)
+                self._flash_test_button(trigger["index"])
                 if rx_state is not None:
                     rx_state["count"] += 1
                     if rx_state["count"] >= rx_limit:
@@ -3883,6 +3811,33 @@ class CanTriggerTab(QWidget):
             if idx >= len(data) or data[idx] != expected:
                 return False
         return True
+
+    def _echo_is_response(
+        self,
+        trigger: dict[str, Any],
+        frame_id: int,
+        frame_channel: int,
+        data: bytes,
+        extended: bool,
+    ) -> bool:
+        """Эхо-кадр совпадает с фреймом ответа триггера (ID+канал+
+        битность+Data): МК исполнил триггер и его передача вернулась
+        к нам как tx_echo. Для кэш-триггеров tx_id динамический — эхо не
+        распознаётся, вспышка только у PC-исполнения."""
+        if trigger.get("cache"):
+            return False
+        for resp in trigger.get("responses") or []:
+            if int(resp.get("id", -1)) != frame_id:
+                continue
+            ch = int(resp.get("channel", 0))
+            if ch != 2 and ch + 1 != frame_channel:
+                continue
+            if int(resp.get("dlc", 0)) != len(data):
+                continue
+            if self._data_from_response(resp) != data:
+                continue
+            return True
+        return False
 
     def _send_responses(self, trigger: dict[str, Any]) -> None:
         """Последовательно отправляет фреймы ответа с задержками и паузами."""

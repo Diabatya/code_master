@@ -59,6 +59,7 @@ class _FakeSerialManager(QObject):
     device_identified = Signal()
     error_occurred = Signal(str)
     new_can_frame = Signal(int, bytes, int)
+    new_can_frames = Signal(list)
     reconnect_scheduled = Signal(str)
 
     def is_open(self) -> bool:

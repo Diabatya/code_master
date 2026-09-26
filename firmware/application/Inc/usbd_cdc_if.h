@@ -12,6 +12,13 @@ extern "C" {
 #define APP_RX_DATA_SIZE  64
 #define APP_TX_DATA_SIZE  64
 #define RX_FIFO_SIZE      2048
+/* TX-кольцо CAN-кадров → USB: кадры складываются в очередь мгновенно
+ * (без ожидания свободного IN-эндпоинта до 100 мс за кадр — это и был
+ * источник «тормозов при двух CAN»: серия send_can_frame() ставила
+ * главный цикл на секунды). CDC_PumpTx() в главном цикле выгребает
+ * очередь пакетами по APP_TX_DATA_SIZE — несколько CAN-кадров едут
+ * в одном USB-пакете. */
+#define TX_FIFO_SIZE      2048
 
 extern USBD_CDC_ItfTypeDef USBD_CDC_fops;
 
@@ -26,10 +33,18 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
  * ни на байт, вплоть до Len при полном успехе) — вызывающий код продолжает
  * с этой позиции. */
 uint16_t CDC_Transmit_FS_Resume(uint8_t *Buf, uint16_t offset, uint16_t Len);
-/* Ждёт, пока последняя отправка реально уйдёт хосту (TxState==0),
- * максимум timeout_ms. Нужна перед NVIC_SystemReset по командам
- * конфигурации: слепая задержка теряла ответ при занятом CDC-канале,
- * и хост считал команду невыполненной, хотя она исполнилась. */
+/* CAN-кадр (или любой лучший-effort поток) → TX-кольцо. Никогда не
+ * ждёт: при переполнении хвост отбрасывается и считается в tx_dropped.
+ * В конце сам дёргает CDC_PumpTx(), чтобы пустой линк стартовал сразу. */
+void CDC_QueueTx(const uint8_t *Buf, uint16_t Len);
+/* Выгребает TX-кольцо в USB одним пакетом до APP_TX_DATA_SIZE за вызов.
+ * Дешёвый при пустом кольце/занятом эндпоинте — зовётся каждой
+ * итерацией главного цикла и из CDC_QueueTx(). */
+void CDC_PumpTx(void);
+/* Ждёт, пока последняя отправка реально уйдёт хосту (TxState==0 и
+ * TX-кольцо пусто), максимум timeout_ms. Нужна перед NVIC_SystemReset по
+ * командам конфигурации: слепая задержка теряла ответ при занятом
+ * CDC-канале, и хост считал команду невыполненной, хотя она исполнилась. */
 uint8_t CDC_FlushTx(uint32_t timeout_ms);
 uint16_t CDC_GetRxAvailable(void);
 uint8_t CDC_ReadRxByte(void);

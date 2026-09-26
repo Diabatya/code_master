@@ -198,6 +198,12 @@ class SerialReader(QThread):
     """Поток непрерывного чтения данных из COM-порта."""
 
     new_frame = Signal(dict)
+    # Батч кадров за одно чтение порта: при двух насыщенных CAN-шинах
+    # сигнал-на-кадр генерировал тысячи queued-событий в UI-поток за
+    # секунду и приложение «дико тормозило». UI-потребители берут
+    # new_frames (одно событие на порцию), per-frame сигнал оставлен
+    # для совместимости с холодными путями/тестами.
+    new_frames = Signal(list)
     new_raw_data = Signal(bytes, float)
     error = Signal(str)
     # Поток остановлен после серии ошибок чтения — соединение мертво и
@@ -273,7 +279,11 @@ class SerialReader(QThread):
                             frame["id"],
                             len(bytes(frame["data"])),
                         )
-                        self.new_frame.emit(frame)
+                    if frames:
+                        # Только батч: per-frame emit здесь генерировал бы
+                        # queued-событие в UI-поток на каждый кадр — при
+                        # двух насыщенных CAN это и есть источник фризов.
+                        self.new_frames.emit(frames)
                 else:
                     # Пустое чтение реального порта уже подождало до
                     # 100 мс; у FakeSerial read() неблокирующий — пауза
@@ -322,6 +332,8 @@ class SerialManager(QObject):
     """
 
     new_can_frame = Signal(dict)
+    # Пачка CAN-кадров за одно чтение порта — см. SerialReader.new_frames.
+    new_can_frames = Signal(list)
     raw_data = Signal(bytes, float)
     raw_tx = Signal(bytes, float)
     error_occurred = Signal(str)
@@ -1318,6 +1330,7 @@ class SerialManager(QObject):
                 self._reader.seed_buffer(self._reader_carry)
                 self._reader_carry = b""
             self._reader.new_frame.connect(self.new_can_frame)
+            self._reader.new_frames.connect(self.new_can_frames)
             self._reader.new_raw_data.connect(self.raw_data)
             self._reader.error.connect(self.error_occurred)
             self._reader.fatal_error.connect(self.critical_error)

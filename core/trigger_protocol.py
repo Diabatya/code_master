@@ -114,24 +114,35 @@ def count_configured_triggers(triggers: list) -> int:
                 r for r in trigger.get("responses") or []
                 if isinstance(r, dict) and str(r.get("id", "")).strip()
             ]
-        if (
-            trigger.get("active")
+        conds = trigger.get("recv_conditions")
+        n_conds = 1
+        filled_conds = 0
+        if isinstance(conds, list):
+            filled_conds = len(
+                [
+                    c for c in conds
+                    if isinstance(c, dict) and str(c.get("id", "")).strip()
+                ]
+            )
+            n_conds = max(1, filled_conds)
+        # Блок занимает слоты, только если в записи есть содержимое:
+        # ID приёма (любого условия), «сработка после старта», кэш или
+        # фреймы ответа. Включённая галка без полей в МК ничего не
+        # пишет — пустая запись rx_id=0/tx_id=0 отбраковывается
+        # (_is_empty_trigger), а счётчик раньше её учитывал: «стёртые»
+        # полями триггеры не возвращали память.
+        has_content = (
+            bool(trigger.get("recv_fire_on_boot"))
             or str(trigger.get("recv_id", "")).strip()
             or str(trigger.get("cache_id", "")).strip()
+            or filled_conds
             or filled
-        ):
+        )
+        if has_content:
             schedule = expand_schedule(filled)
             # Мульти-условия приёма (ИЛИ): расписание дублируется на
             # каждое условие с заполненным ID — каждое занимает свои
             # записи в пуле.
-            conds = trigger.get("recv_conditions")
-            n_conds = 1
-            if isinstance(conds, list):
-                n_conds = max(
-                    1,
-                    len([c for c in conds
-                         if isinstance(c, dict) and str(c.get("id", "")).strip()]),
-                )
             count += (len(schedule) if schedule is not None else 1) * n_conds
     return count
 

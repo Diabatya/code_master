@@ -182,13 +182,16 @@ def test_trigger_rx_rtr_round_trip() -> None:
 def test_count_configured_triggers() -> None:
     assert count_configured_triggers([]) == 0
     assert count_configured_triggers([{}, {"active": False, "recv_id": ""}]) == 0
+    # Включённый блок без заполненных полей — фантом rx_id=0/tx_id=0:
+    # в МК он не пишется (_is_empty_trigger), память не занимает.
+    assert count_configured_triggers([{"active": True}]) == 0
     triggers = [
         {"active": True},
         {"active": False, "recv_id": "123"},
         {"active": False, "recv_id": "", "responses": [{"id": "55"}]},
         {"active": False, "recv_id": "", "responses": [{"id": ""}]},
     ]
-    assert count_configured_triggers(triggers) == 3
+    assert count_configured_triggers(triggers) == 2
 
 
 def test_encode_trigger_name() -> None:

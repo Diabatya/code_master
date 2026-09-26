@@ -73,13 +73,13 @@ static uint8_t s_can_ready;
 static void ring_push(uint8_t channel, const can_frame_t *frame)
 {
   can_ring_t *ring = &s_ring[channel];
-  uint16_t next = (uint16_t)((ring->head + 1U) & (CAN_RING_DEPTH - 1U));
+  uint16_t next = (uint16_t)((ring->head + 1U >= CAN_RING_DEPTH) ? 0U : (ring->head + 1U));
   if (next == ring->tail) {
     /* Ring full: drop the oldest frame (advance tail) per ТЗ 12.2
      * "drop-oldest + error flag on overflow" instead of dropping the new
      * frame, so the PC sees the most recent bus activity rather than a
      * stale window. */
-    ring->tail = (uint16_t)((ring->tail + 1U) & (CAN_RING_DEPTH - 1U));
+    ring->tail = (uint16_t)((ring->tail + 1U >= CAN_RING_DEPTH) ? 0U : (ring->tail + 1U));
     ring->overflow = 1U;
     ring->lost_count++;
   }
@@ -106,7 +106,7 @@ uint8_t CanBridge_PopRx(uint8_t channel, can_frame_t *out)
     return 0U;
   }
   *out = ring->buf[ring->tail];
-  ring->tail = (uint16_t)((ring->tail + 1U) & (CAN_RING_DEPTH - 1U));
+  ring->tail = (uint16_t)((ring->tail + 1U >= CAN_RING_DEPTH) ? 0U : (ring->tail + 1U));
   return 1U;
 }
 

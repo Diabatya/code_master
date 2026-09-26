@@ -77,6 +77,30 @@ QTableWidget::item:selected {
     background-color: $bg_selected;
     color: $text;
 }
+QListWidget, QTreeWidget {
+    background-color: $bg_widget;
+    color: $text;
+    border: 1px solid $border;
+    border-radius: 6px;
+}
+/* Индикаторы галочек элементов списков (вкладка «Принятые» фильтра и
+ * пр.): без явного стиля Fusion рисовал их тёмным на тёмном — галка
+ * выглядела невидимой/«не кликабельной». */
+QAbstractItemView::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    border: 1px solid $border;
+    background-color: $bg_widget;
+}
+QAbstractItemView::indicator:checked {
+    background-color: $accent;
+    border-color: $accent;
+    image: url("$check_icon");
+}
+QAbstractItemView::indicator:hover {
+    border-color: $accent;
+}
 QHeaderView::section {
     background-color: $bg_button;
     color: $text;

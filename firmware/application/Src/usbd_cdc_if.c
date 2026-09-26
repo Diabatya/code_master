@@ -20,6 +20,14 @@ static uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 static uint8_t rx_fifo[RX_FIFO_SIZE];
 static volatile uint16_t rx_head = 0;
 static volatile uint16_t rx_tail = 0;
+/* TX-кольцо для CAN-потока: push мгновенный, USB забирает чанками по
+ * 64 Б через CDC_PumpTx() из главного цикла. Пишется только из главного
+ * цикла (send_can_frame в Protocol_Poll) — head/tail не нуждаются в
+ * примитивной синхронизации против USB-IRQ, которое TX-кольцо не трогает
+ * (TxState/TransmitPacket защищены критической секцией в pump). */
+static uint8_t tx_fifo[TX_FIFO_SIZE];
+static volatile uint16_t tx_head = 0;
+static volatile uint16_t tx_tail = 0;
 static volatile uint32_t tx_dropped = 0U;
 static volatile uint32_t tx_busy_waits = 0U;
 static volatile uint32_t rx_overflow_bytes = 0U;
@@ -161,6 +169,59 @@ uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
   return (CDC_Transmit_FS_Resume(Buf, 0U, Len) == Len) ? 0U : 1U;
 }
 
+void CDC_QueueTx(const uint8_t *Buf, uint16_t Len)
+{
+  /* Best-effort: место нет — хвост отбрасываем и считаем, кадр не
+   * ждёт свободного эндпоинта. Команды сюда не ходят — их ответы идут
+   * напрямую через CDC_Transmit_FS_Resume() с гарантированной досылкой;
+   * в одном байтовом потоке это легально (host-парсер marker-based, он
+   * уже сегодня видит ответы команд между CAN-кадрами). */
+  for (uint16_t i = 0; i < Len; i++) {
+    uint16_t next = (uint16_t)((tx_head + 1U) & (TX_FIFO_SIZE - 1U));
+    if (next == tx_tail) {
+      tx_dropped += (uint32_t)(Len - i);
+      break;
+    }
+    tx_fifo[tx_head] = Buf[i];
+    tx_head = next;
+  }
+  CDC_PumpTx();
+}
+
+void CDC_PumpTx(void)
+{
+  if (tx_head == tx_tail) {
+    return;
+  }
+  USBD_CDC_HandleTypeDef *hcdc =
+      (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+  if (hcdc == NULL || hcdc->TxState != 0U) {
+    return; /* эндпоинт занят — кольцо подождёт следующий проход */
+  }
+  uint16_t chunk = (uint16_t)((tx_head - tx_tail) & (TX_FIFO_SIZE - 1U));
+  if (chunk > APP_TX_DATA_SIZE) {
+    chunk = APP_TX_DATA_SIZE;
+  }
+  for (uint16_t i = 0; i < chunk; i++) {
+    UserTxBufferFS[i] = tx_fifo[(tx_tail + i) & (TX_FIFO_SIZE - 1U)];
+  }
+  /* Та же атомарная секция, что в CDC_Transmit_FS_Resume: между проверкой
+   * и программированием IN-передачи не должен вклиниться OTG-IRQ. */
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+  uint8_t tx_rc = USBD_BUSY;
+  if (hcdc != NULL && hcdc->TxState == 0U) {
+    USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, chunk);
+    tx_rc = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
+  }
+  __set_PRIMASK(primask);
+  if (tx_rc != USBD_OK) {
+    return; /* байты остаются в кольце — следующий pump повторит */
+  }
+  tx_tail = (uint16_t)((tx_tail + chunk) & (TX_FIFO_SIZE - 1U));
+}
+
 uint32_t CDC_GetTxDropped(void)
 {
   return tx_dropped;
@@ -204,8 +265,11 @@ uint8_t CDC_FlushTx(uint32_t timeout_ms)
     return 1U;
   }
   uint32_t start = HAL_GetTick();
-  while (hcdc->TxState != 0U) {
+  /* Ждём и эндпоинт, и TX-кольцо: reset после CFG_WRITE не должен
+   * отрезать ещё не ушедшие хосту CAN-кадры/ответ. */
+  while (hcdc->TxState != 0U || tx_head != tx_tail) {
     App_KickWatchdog();
+    CDC_PumpTx();
     if ((HAL_GetTick() - start) >= timeout_ms) {
       return 1U;
     }

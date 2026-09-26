@@ -312,6 +312,10 @@ int main(void)
     Trigger_Poll();
     if (usb_active) {
       Protocol_Poll();
+      /* Дозабор TX-кольца CAN-кадров: CDC_QueueTx() сам пинает pump, но
+       * при занятом эндпоинте остаток дожидается здесь — иначе хвост
+       * сидел бы в кольце до следующего push. */
+      CDC_PumpTx();
     } else {
       /* Standalone mode: still drain CAN ring buffers into the trigger
        * engine (so triggers keep firing) even though there is no USB link
