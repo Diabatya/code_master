@@ -3,7 +3,7 @@
 from typing import Any
 from collections.abc import Callable
 
-from PySide6.QtCore import QRegularExpression, Qt, QTimer
+from PySide6.QtCore import QEvent, QRegularExpression, Qt, QTimer
 from PySide6.QtGui import QFont, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -77,6 +77,11 @@ class FilterDialog(QDialog):
 
         self._accepted_list = QListWidget()
         self._accepted_list.setFont(self._font)
+        # Галка размером ~16px — под клик «по строке» мастер не
+        # попадал: переключаем состояние по клику в любое место строки
+        # (eventFilter — позиция из события, QCursor.pos() в offscreen
+        # и под Windows DPI врёт).
+        self._accepted_list.viewport().installEventFilter(self)
 
         accepted_tab = QWidget()
         alayout = QVBoxLayout(accepted_tab)
@@ -246,6 +251,29 @@ class FilterDialog(QDialog):
             return
         rule = self._rules_widgets.pop()
         rule["widget"].deleteLater()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        """Клик по строке списка (не по индикатору) переключает галку.
+
+        Фильтр срабатывает ДО нативной обработки Qt: в зоне индикатора
+        (~24px слева) ничего не делаем — переключит сам Qt; по остальной
+        строке переключаем вручную.
+        """
+        if (
+            watched is self._accepted_list.viewport()
+            and event.type() == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            item = self._accepted_list.itemAt(event.position().toPoint())
+            if item is not None:
+                rect = self._accepted_list.visualItemRect(item)
+                if event.position().x() - rect.x() > 24:
+                    item.setCheckState(
+                        Qt.CheckState.Unchecked
+                        if item.checkState() == Qt.CheckState.Checked
+                        else Qt.CheckState.Checked
+                    )
+        return False
 
     def _set_all_ignored(self, ignored: bool) -> None:
         """«Отметить все»/«Снять все» в списке принятых ID."""

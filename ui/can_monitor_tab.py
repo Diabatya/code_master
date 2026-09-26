@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from PySide6.QtCore import QPointF, QRect, QRegularExpression, Qt, QTimer, Signal
+from shiboken6 import isValid
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -1081,10 +1082,19 @@ class CanChannelMonitor(QWidget):
         self._prev_busoff = 0
         self._prev_lost = 0
         self._warn_level = 0  # 0=ok, 1=lost, 2=bus-off
+        # Кэш опроса устройства: метки статистики рендерятся каждый
+        # тик, а сам опрос — раз в 2 с (рестарты reader под флудом).
+        self._stats_tick = 0
+        self._dev_stats: dict[str, int] | None = None
+        self._usb_stats: dict[str, int] | None = None
+        self._stats_fresh = False
 
         self._create_widgets()
         self._layout_widgets()
         self._setup_timers()
+        # Высота таблицы = «кол-во строк»: пересчёт после первого
+        # показа, когда у заголовка уже есть реальная высота.
+        QTimer.singleShot(0, self._apply_table_height)
 
     def _create_widgets(self) -> None:
         font = QFont("Segoe UI", 9)
@@ -1331,6 +1341,9 @@ class CanChannelMonitor(QWidget):
         stats_layout.addWidget(self._stats_label, 1)
         stats_layout.addWidget(self._load_bar)
         layout.addLayout(stats_layout)
+        # Таблица с фиксированной высотой («кол-во строк») — остаток
+        # панели прижимаем вниз, чтобы блоки не разъезжались.
+        layout.addStretch()
 
     def _setup_timers(self) -> None:
         self._timer = QTimer(self)
@@ -1523,10 +1536,23 @@ class CanChannelMonitor(QWidget):
             if item is not None:
                 item.setBackground(_id_row_color(row, self._row_color_count))
 
+    def _apply_table_height(self) -> None:
+        """«Кол-во строк» задаёт не только цвета, но и фактическую
+        высоту таблицы: на экране умещается ровно N строк приёма
+        (отчёт мастера — настройка меняла только палитру)."""
+        header = self._table.horizontalHeader()
+        header_h = header.height() or header.sizeHint().height() or 24
+        row_h = self._table.verticalHeader().defaultSectionSize()
+        height = header_h + row_h * self._row_color_count + 2 * self._table.frameWidth()
+        if self._table.horizontalScrollBar().isVisible():
+            height += self._table.horizontalScrollBar().height()
+        self._table.setFixedHeight(height)
+
     def _on_row_color_count_changed(self, value: int) -> None:
         self._row_color_count = max(1, value)
         self._config.set("monitor_row_colors", self._row_color_count)
         self._recolor_id_column(0)
+        self._apply_table_height()
 
     def _update_sent_label(self) -> None:
         self._sent_label.setText(tr("Отправлено: {0}").format(self._sent_count))
@@ -1585,46 +1611,60 @@ class CanChannelMonitor(QWidget):
         text = tr("Принято: {0} | Скорость: {1} пак/с | Нагрузка: {2:.0f}%").format(
             self._received_count, speed, load_pct
         )
-        try:
-            if (
-                self._serial_manager.is_open()
-                and not self._config.get("emulation", False)
-                # Идёт пачка команд настроек (запись/вычитка триггеров):
-                # статистика, вклинившись между командами, на живой шине
-                # висит до таймаута и держит _lock секундами — пропускаем
-                # этот тик, в следующий всё дочитается.
-                and not self._serial_manager.in_control_session
-            ):
+        self._stats_tick += 1
+        # Опрос устройства — раз в 2 с: каждая control-сессия
+        # останавливает и пересоздаёт reader-поток, на насыщенной шине
+        # это рвало приём и на Windows гоняло ClearCommError → окно
+        # «Ошибка COM-порта» посреди работы. Локальные «пак/с» выше
+        # обновляются каждый тик, метки метрик — из кэша.
+        if (
+            self._stats_tick % 2 == 0
+            and self._serial_manager.is_open()
+            and not self._config.get("emulation", False)
+            # Идёт пачка команд настроек (запись/вычитка триггеров):
+            # статистика, вклинившись между командами, на живой шине
+            # висит до таймаута и держит _lock секундами — пропускаем
+            # этот тик, в следующий всё дочитается.
+            and not self._serial_manager.in_control_session
+        ):
+            try:
                 # Обе команды — одной сессией: иначе каждая гоняет
                 # QThread reader stop/start, что на двух каналах
                 # давало ~4 пересоздания потока в секунду непрерывно.
                 with self._serial_manager.control_session():
-                    device = self._serial_manager.read_can_stats(self._channel)
-                    usb = self._serial_manager.read_usb_stats()
-                ready = tr("OK") if device.get("ready") else tr("INIT FAIL")
-                text += tr(
-                    " | Ready: {0} | RX: {1} TX: {2} Потеряно: {3} Errors: {4} Bus-off: {5} Recovery: {6}"
-                ).format(
-                    ready,
-                    device["rx_count"],
-                    device["tx_count"],
-                    device["lost_count"],
-                    device["error_count"],
-                    device["busoff_count"],
-                    device["recovery_count"],
-                )
-                text += tr(" USB dropped: {0}").format(usb["tx_dropped"])
-                # TXfail: кадры, которые МК не смог поставить на шину
-                # (все TX-ящики заняты — арбитраж/нет ACK/bus-off) —
-                # именно так выглядит молчаливый пропуск ответа триггера.
-                tx_fail = device.get("tx_fail_count", 0)
-                if tx_fail:
-                    text += tr(" | TXfail: {0}").format(tx_fail)
-                # FIFOpoll: кадры, спасённые backstop-опросом — RX0-IRQ их
-                # пропустило. Рост счётчика = проблема с доставкой IRQ.
-                fifo_poll = device.get("fifo_poll_count", 0)
-                if fifo_poll:
-                    text += tr(" | FIFOpoll: {0}").format(fifo_poll)
+                    self._dev_stats = self._serial_manager.read_can_stats(self._channel)
+                    self._usb_stats = self._serial_manager.read_usb_stats()
+                self._stats_fresh = True
+            except Exception:  # noqa: BLE001
+                pass
+        device = self._dev_stats
+        usb = self._usb_stats
+        if device is not None and usb is not None:
+            ready = tr("OK") if device.get("ready") else tr("INIT FAIL")
+            text += tr(
+                " | Ready: {0} | RX: {1} TX: {2} Потеряно: {3} Errors: {4} Bus-off: {5} Recovery: {6}"
+            ).format(
+                ready,
+                device["rx_count"],
+                device["tx_count"],
+                device["lost_count"],
+                device["error_count"],
+                device["busoff_count"],
+                device["recovery_count"],
+            )
+            text += tr(" USB dropped: {0}").format(usb["tx_dropped"])
+            # TXfail: кадры, которые МК не смог поставить на шину
+            # (все TX-ящики заняты — арбитраж/нет ACK/bus-off) —
+            # именно так выглядит молчаливый пропуск ответа триггера.
+            tx_fail = device.get("tx_fail_count", 0)
+            if tx_fail:
+                text += tr(" | TXfail: {0}").format(tx_fail)
+            # FIFOpoll: кадры, спасённые backstop-опросом — RX0-IRQ их
+            # пропустило. Рост счётчика = проблема с доставкой IRQ.
+            fifo_poll = device.get("fifo_poll_count", 0)
+            if fifo_poll:
+                text += tr(" | FIFOpoll: {0}").format(fifo_poll)
+            if self._stats_fresh:
                 # Полевая телеметрия: по дельтам счётчиков между опросами
                 # в логе видно, где теряется время — МК медленный
                 # (last_cmd_ms велик, poll_count замирает) или ПК не
@@ -1642,8 +1682,7 @@ class CanChannelMonitor(QWidget):
                     usb.get("poll_count", -1),
                 )
                 self._update_error_warnings(device)
-        except Exception:  # noqa: BLE001
-            pass
+                self._stats_fresh = False
         if self._warn_level == 2:
             text += tr("  ⚠ BUS-OFF — проверьте шину/терминацию")
         elif self._warn_level == 1:
@@ -1743,7 +1782,13 @@ class CanChannelMonitor(QWidget):
         self._id_history.setdefault(frame_id, deque(maxlen=2000)).append(
             (now, data, rtr, dlc)
         )
-        for dialog in self._history_dialogs:
+        for dialog in list(self._history_dialogs):
+            # Ссылка могла пережить C++-объект (диалог закрыт, finished
+            # не добежал) — add_sample на мёртвом виджете ронял слот
+            # RuntimeError «already deleted».
+            if not isValid(dialog):
+                self._history_dialogs.remove(dialog)
+                continue
             if dialog.can_id == frame_id:
                 dialog.add_sample(now, data, rtr, dlc)
         return True
@@ -2398,6 +2443,10 @@ class CanMonitorTab(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._refresh_memory_indicator()
+        # Реальная высота заголовка известна только после показа —
+        # доводим высоту таблиц до «кол-во строк» строк приёма.
+        self._monitor1._apply_table_height()
+        self._monitor2._apply_table_height()
 
     def toggle_monitoring(self) -> None:
         """F5: старт/стоп мониторинга обоих каналов одним действием."""

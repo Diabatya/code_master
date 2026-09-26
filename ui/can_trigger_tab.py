@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QEvent, QPoint, QRegularExpression, Qt, QTimer, Signal
+from shiboken6 import isValid
 from PySide6.QtGui import QFont, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QApplication,
@@ -1172,7 +1173,7 @@ class CanTriggerTab(QWidget):
         # как при срабатывании). Голубая; на 0.7 с вспыхивает зелёным,
         # когда триггер реально отработал — видно живую диагностику.
         test_button = QPushButton(tr("Тест"))
-        test_button.setFixedSize(44, 24)
+        test_button.setFixedSize(72, 24)
         test_button.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         test_button.setToolTip(tr("Отправить ответ триггера один раз"))
         test_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1213,8 +1214,12 @@ class CanTriggerTab(QWidget):
         if button is None:
             return
         self._apply_test_button_style(button, fired=True)
+        # isValid: блок могут удалить за эти 700 мс — setStyleSheet на
+        # мёртвом C++-виджете ронял слот: «QPushButton already deleted».
         QTimer.singleShot(
-            700, lambda b=button: self._apply_test_button_style(b, fired=False)
+            700,
+            lambda b=button: self._apply_test_button_style(b, fired=False)
+            if isValid(b) else None,
         )
 
     def _layout_trigger_block(self, block: dict[str, Any], index: int) -> None:

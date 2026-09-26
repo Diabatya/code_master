@@ -227,6 +227,13 @@ class SerialReader(QThread):
         self._last_heartbeat = 0.0
         self._last_data_time = time.time()
         self._error_count = 0
+        # Агрегаты для троттлинга debug-лога: на насыщенной шине
+        # (~600+ кадр/с) построчное «Принят CAN-кадр» форматировало
+        # ~600 записей/с и раз в ~25 с ротировало мегабайтный файл —
+        # сам лог подтормаживал чтение. Пишем сводку раз в 2 с.
+        self._dbg_rx_frames = 0
+        self._dbg_rx_bytes = 0
+        self._dbg_log_time = time.time()
 
     def _is_open(self) -> bool:
         """Возвращает True, если порт открыт, независимо от типа объекта."""
@@ -258,7 +265,7 @@ class SerialReader(QThread):
                 # есть постоянный опрос шины.
                 chunk = self._port.read(256)
                 if chunk:
-                    logger.debug("SerialReader: прочитано %d байт", len(chunk))
+                    self._dbg_rx_bytes += len(chunk)
                     self._last_data_time = now
                     self.new_raw_data.emit(chunk, time.time())
                     self._buffer.extend(chunk)
@@ -272,13 +279,16 @@ class SerialReader(QThread):
                         )
                         remainder = remainder[-MAX_BUFFER_SIZE:]
                     self._buffer = bytearray(remainder)
-                    for frame in frames:
+                    self._dbg_rx_frames += len(frames)
+                    if now - self._dbg_log_time >= 2.0 and (frames or self._dbg_rx_bytes):
                         logger.debug(
-                            "Принят CAN-кадр: ch=%s id=0x%08X dlc=%d",
-                            frame["channel"],
-                            frame["id"],
-                            len(bytes(frame["data"])),
+                            "SerialReader: %d кадров, %d байт за %.1f с",
+                            self._dbg_rx_frames, self._dbg_rx_bytes,
+                            now - self._dbg_log_time,
                         )
+                        self._dbg_rx_frames = 0
+                        self._dbg_rx_bytes = 0
+                        self._dbg_log_time = now
                     if frames:
                         # Только батч: per-frame emit здесь генерировал бы
                         # queued-событие в UI-поток на каждый кадр — при
