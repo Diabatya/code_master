@@ -370,9 +370,6 @@ class SettingsWindow(QMainWindow):
         self._serial_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._system_info_label = QLabel(tr("Firmware: не определена"))
         self._system_info_label.setFont(QFont("Segoe UI", 9))
-        self._copy_id_button = QPushButton(tr("Копировать ID"))
-        self._copy_id_button.setFixedHeight(24)
-        self._copy_id_button.clicked.connect(self._copy_device_id)
 
         device_layout = QHBoxLayout()
         device_layout.setSpacing(8)
@@ -381,7 +378,6 @@ class SettingsWindow(QMainWindow):
         device_layout.addWidget(self._conn_status_label)
         device_layout.addWidget(self._serial_label)
         device_layout.addWidget(self._serial_value)
-        device_layout.addWidget(self._copy_id_button)
         device_layout.addWidget(self._system_info_label)
         device_layout.addStretch()
         self._device_layout = device_layout
@@ -1164,18 +1160,6 @@ class SettingsWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             self._system_info_label.setStyleSheet("")
             self._system_info_label.setText(tr("Firmware: информация недоступна"))
-
-    def _copy_device_id(self) -> None:
-        """Копирует MCU UID (или серийный номер, если UID недоступен) в буфер."""
-        uid = ""
-        try:
-            if self._serial_manager.is_open() and not self._config.get("emulation", False):
-                uid = str(self._serial_manager.read_system_info().get("mcu_uid") or "")
-        except Exception:  # noqa: BLE001
-            pass
-        text = uid or self._serial_value.text()
-        if text:
-            QApplication.clipboard().setText(text)
 
     def retranslate_ui(self) -> None:
         """Обновляет статические строки окна настроек и всех вкладок."""

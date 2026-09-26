@@ -1092,9 +1092,10 @@ class CanChannelMonitor(QWidget):
         self._create_widgets()
         self._layout_widgets()
         self._setup_timers()
-        # Высота таблицы = «кол-во строк»: пересчёт после первого
-        # показа, когда у заголовка уже есть реальная высота.
-        QTimer.singleShot(0, self._apply_table_height)
+        # Плотность строк («кол-во строк» → высота строки/шрифт):
+        # пересчёт после первого показа, когда вьюпорт уже имеет
+        # реальную высоту.
+        QTimer.singleShot(0, self._apply_row_density)
 
     def _create_widgets(self) -> None:
         font = QFont("Segoe UI", 9)
@@ -1151,6 +1152,10 @@ class CanChannelMonitor(QWidget):
         self._table.setFont(QFont("Segoe UI", 8))
         self._table.verticalHeader().setVisible(False)
         self._table.verticalHeader().setDefaultSectionSize(13)
+        # Нижний предел секции по умолчанию привязан к метрикам шрифта —
+        # без явного минимума «кол-во строк» не могло ужать строки ниже
+        # ~17px, и дельта уходила только в шрифт.
+        self._table.verticalHeader().setMinimumSectionSize(4)
         self._table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1536,23 +1541,47 @@ class CanChannelMonitor(QWidget):
             if item is not None:
                 item.setBackground(_id_row_color(row, self._row_color_count))
 
-    def _apply_table_height(self) -> None:
-        """«Кол-во строк» задаёт не только цвета, но и фактическую
-        высоту таблицы: на экране умещается ровно N строк приёма
-        (отчёт мастера — настройка меняла только палитру)."""
-        header = self._table.horizontalHeader()
-        header_h = header.height() or header.sizeHint().height() or 24
-        row_h = self._table.verticalHeader().defaultSectionSize()
-        height = header_h + row_h * self._row_color_count + 2 * self._table.frameWidth()
-        if self._table.horizontalScrollBar().isVisible():
-            height += self._table.horizontalScrollBar().height()
-        self._table.setFixedHeight(height)
+    def _apply_row_density(self) -> None:
+        """«Кол-во строк» — сколько строк приёма должно умещаться на
+        экране. Размер окна/таблицы НЕ трогаем (требование мастера):
+        если N строк не влезают в доступную высоту — ужимаем высоту
+        строки, а вслед за ней и шрифт; когда места хватает — обычная
+        высота и обычный шрифт."""
+        if not hasattr(self, "_base_row_height"):
+            # База фиксируется при первом показе — раньше высоты ещё
+            # не посчитаны лейаутом.
+            self._base_row_height = 17
+            self._base_font_pt = self._table.font().pointSize() or 8
+        avail = self._table.viewport().height()
+        if avail <= 0:
+            return
+        row_h = avail // self._row_color_count
+        row_h = max(6, min(self._base_row_height, row_h))
+        if row_h != self._table.verticalHeader().defaultSectionSize():
+            self._table.verticalHeader().setDefaultSectionSize(row_h)
+        # Шрифт уменьшаем только когда строка стала ниже базовой —
+        # иначе текст клипается. Пропорция ~0.5: 17px→8pt, 12px→6pt.
+        if row_h < self._base_row_height:
+            pt = max(5, int(self._base_font_pt * row_h / self._base_row_height))
+        else:
+            pt = self._base_font_pt
+        if pt != self._table.font().pointSize():
+            font = QFont(self._table.font())
+            font.setPointSize(pt)
+            self._table.setFont(font)
+            self._table.horizontalHeader().setFont(font)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """При изменении окна пересчитываем плотность строк — размер
+        экрана не трогаем, под него подстраиваются строки и шрифт."""
+        super().resizeEvent(event)
+        self._apply_row_density()
 
     def _on_row_color_count_changed(self, value: int) -> None:
         self._row_color_count = max(1, value)
         self._config.set("monitor_row_colors", self._row_color_count)
         self._recolor_id_column(0)
-        self._apply_table_height()
+        self._apply_row_density()
 
     def _update_sent_label(self) -> None:
         self._sent_label.setText(tr("Отправлено: {0}").format(self._sent_count))
@@ -2443,10 +2472,10 @@ class CanMonitorTab(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._refresh_memory_indicator()
-        # Реальная высота заголовка известна только после показа —
-        # доводим высоту таблиц до «кол-во строк» строк приёма.
-        self._monitor1._apply_table_height()
-        self._monitor2._apply_table_height()
+        # Реальная высота вьюпорта известна только после показа —
+        # доводим плотность строк до «кол-во строк» строк приёма.
+        self._monitor1._apply_row_density()
+        self._monitor2._apply_row_density()
 
     def toggle_monitoring(self) -> None:
         """F5: старт/стоп мониторинга обоих каналов одним действием."""

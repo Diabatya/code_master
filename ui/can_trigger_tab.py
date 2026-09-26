@@ -301,7 +301,10 @@ class CanTriggerTab(QWidget):
         remove_button.setFixedSize(24, 24)
         remove_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Black))
         remove_button.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
+            # padding-bottom 3px: глиф «−» при 16pt сидит ниже
+            # геометрического центра кнопки — поднимаем визуально.
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
+            "border-radius: 4px; padding: 0px 0px 3px 0px; }"
             "QPushButton:hover { background-color: #8A3A3A; }"
         )
         remove_button.setToolTip(tr("Удалить условие приёма"))
@@ -396,7 +399,8 @@ class CanTriggerTab(QWidget):
         add_cond.setFixedSize(24, 24)
         add_cond.setFont(QFont("Segoe UI", 16, QFont.Weight.Black))
         add_cond.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
+            "border-radius: 4px; padding: 0px 0px 2px 0px; }"
             "QPushButton:hover { background-color: #4A4A6A; }"
         )
         add_cond.setToolTip(tr("Добавить условие приёма (ИЛИ — до 8)"))
@@ -531,7 +535,10 @@ class CanTriggerTab(QWidget):
         add_button.setFixedSize(32, 32)
         add_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
         add_button.setStyleSheet(
-            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
+            # padding-bottom 4px: глифы «+»/«−» при 20pt сидят ниже
+            # геометрического центра кнопки — поднимаем визуально.
+            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
+            "border-radius: 4px; padding: 0px 0px 4px 0px; }"
             "QPushButton:hover { background-color: #5A5A7A; }"
         )
         add_button.setToolTip(tr("Добавить фрейм"))
@@ -591,7 +598,8 @@ class CanTriggerTab(QWidget):
         remove_button.setFixedSize(32, 32)
         remove_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
         remove_button.setStyleSheet(
-            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
+            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
+            "border-radius: 4px; padding: 0px 0px 4px 0px; }"
             "QPushButton:hover { background-color: #5A5A7A; }"
         )
         remove_button.setToolTip(tr("Удалить фрейм"))
@@ -785,7 +793,8 @@ class CanTriggerTab(QWidget):
         add_button.setFixedSize(32, 32)
         add_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
         add_button.setStyleSheet(
-            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
+            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
+            "border-radius: 4px; padding: 0px 0px 4px 0px; }"
             "QPushButton:hover { background-color: #5A5A7A; }"
         )
         add_button.setToolTip(tr("Добавить строку кэша"))
@@ -877,7 +886,8 @@ class CanTriggerTab(QWidget):
         remove_button.setFixedSize(32, 32)
         remove_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
         remove_button.setStyleSheet(
-            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
+            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
+            "border-radius: 4px; padding: 0px 0px 4px 0px; }"
             "QPushButton:hover { background-color: #5A5A7A; }"
         )
         remove_button.setToolTip(tr("Удалить строку"))
@@ -1174,7 +1184,7 @@ class CanTriggerTab(QWidget):
         # когда триггер реально отработал — видно живую диагностику.
         test_button = QPushButton(tr("Тест"))
         test_button.setFixedSize(72, 24)
-        test_button.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        test_button.setFont(QFont("Segoe UI", 10, QFont.Weight.Black))
         test_button.setToolTip(tr("Отправить ответ триггера один раз"))
         test_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._apply_test_button_style(test_button, fired=False)
@@ -1193,15 +1203,21 @@ class CanTriggerTab(QWidget):
 
     @staticmethod
     def _apply_test_button_style(button: QPushButton, fired: bool) -> None:
+        # Радиусы заданы по углам явно: общий border-radius на части
+        # платформ не скругляет нижние углы (отчёт мастера).
+        radius = (
+            "border-top-left-radius: 4px; border-top-right-radius: 4px; "
+            "border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; "
+        )
         if fired:
             button.setStyleSheet(
                 "QPushButton { background-color: #2E7D32; color: #FFFFFF; "
-                "border: none; border-radius: 4px; }"
+                "border: none; " + radius + "}"
             )
         else:
             button.setStyleSheet(
                 "QPushButton { background-color: #1565C0; color: #FFFFFF; "
-                "border: none; border-radius: 4px; }"
+                "border: none; " + radius + "}"
                 "QPushButton:hover { background-color: #1E88E5; }"
                 "QPushButton:pressed { background-color: #0D47A1; }"
             )

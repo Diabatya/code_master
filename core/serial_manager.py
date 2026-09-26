@@ -404,6 +404,12 @@ class SerialManager(QObject):
         # от неё зависит допустимый формат деструктивных команд
         # (ключи v3). 0 = неизвестно/эмуляция — слать легаси-формат.
         self._device_protocol_version = 0
+        # Устройство реально ответило на идентификацию (CMD_DEVICE_ID или
+        # SYSTEM_INFO) в текущем сеансе порта. Windows может долго отдавать
+        # открываемый, но мёртвый COM-хендл после отвала USB — «успешное»
+        # переподключение к нему оставляло приложение зомби: порт есть,
+        # устройство молчит («после долгой потери связи не определяется»).
+        self._device_identified = False
 
     def is_open(self) -> bool:
         """Возвращает True, если порт открыт."""
@@ -489,6 +495,7 @@ class SerialManager(QObject):
                 # оператор должен видеть «Загрузка настроек», а не
                 # устаревшие поля из локального кэша.
                 self.connecting.emit()
+                self._device_identified = False
                 self._detect_device_id()
                 # В полевой лог — какая сборка прошивки реально стоит на
                 # МК (commit + дата сборки): «прошили последней» без неё
@@ -496,6 +503,7 @@ class SerialManager(QObject):
                 if not emulation:
                     try:
                         info = self.read_system_info()
+                        self._device_identified = True
                         self._device_protocol_version = int(info.get("protocol_version") or 0)
                         logger.info(
                             "Прошивка МК: app v%d, протокол %d, сборка «%s», commit %s",
@@ -527,6 +535,24 @@ class SerialManager(QObject):
                                 )
                     except Exception:  # noqa: BLE001
                         logger.debug("Устройство не отдало SYSTEM_INFO")
+                    if self._port is None:
+                        # Порт умер прямо в идентификации (expect_reboot
+                        # из request_control при таймауте записи): реконнект
+                        # уже запланирован им — «Подключено» эмитить нельзя.
+                        return False
+                    if not self._device_identified:
+                        # Windows ещё отдаёт открываемый COM-хендл, а МК
+                        # молчит (ушёл с шины/ещё не поднялся после
+                        # рестарта). Раньше это отмечалось «успешным»
+                        # подключением — приложение зомби: порт есть,
+                        # устройство не определяется. Закрываемся и (при
+                        # auto_reconnect) продолжаем циклический опрос.
+                        logger.warning(
+                            "Устройство на %s не отвечает — порт закрыт, опрос продолжается",
+                            port_name,
+                        )
+                        self.expect_reboot()
+                        return False
                 self._config.set_bulk({
                     "port": port_name, "baudrate": baudrate, "emulation": emulation,
                     "auto_reconnect": auto_reconnect, "error_probability": error_probability,
@@ -1147,6 +1173,7 @@ class SerialManager(QObject):
                         if _scan_for_response(buffer, CMD_DEVICE_ID_RESP) and len(buffer) >= 3:
                             device_type = buffer[1]
                             device_version = buffer[2]
+                            self._device_identified = True
                             break
                     else:
                         time.sleep(0.01)
