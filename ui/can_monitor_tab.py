@@ -428,9 +428,13 @@ class IdHistoryDialog(QDialog):
         channel: int,
         samples: list[tuple[float, bytes, bool, int]],
         parent: QWidget | None = None,
+        send_callback: Any | None = None,
     ) -> None:
         super().__init__(parent)
         self.can_id = can_id
+        # Разовая отправка строки на шину для тестирования — колбэк
+        # монитора (can_id, data, dlc, rtr). None — без устройства.
+        self._send_callback = send_callback
         self.setWindowTitle(tr("История ID 0x{0:X} — CAN{1}").format(can_id, channel))
         # Окно анализа — сразу на весь доступный экран: таблица и
         # график читаются без прокрутки, кнопки остаются видимыми.
@@ -451,6 +455,8 @@ class IdHistoryDialog(QDialog):
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._show_table_menu)
 
         self._percent_label = QLabel("0%")
         self._percent_label.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
@@ -484,6 +490,19 @@ class IdHistoryDialog(QDialog):
         self._export_button.setFont(font)
         self._export_button.clicked.connect(self._export_csv)
 
+        # Выбранная строка истории → буфер обмена в формате пакета
+        # (ID=.. DLC=.. DATA=..) — вставляется прямо в поля триггера —
+        # и разовая отправка этой строки на шину для проверки реакции.
+        self._copy_row_button = QPushButton(tr("Копировать строку"))
+        self._copy_row_button.setFont(font)
+        self._copy_row_button.setToolTip(tr("ID/DLC/Data выбранной строки — для вставки в триггер"))
+        self._copy_row_button.clicked.connect(self._copy_selected_packet)
+        self._send_row_button = QPushButton(tr("Отправить разово"))
+        self._send_row_button.setFont(font)
+        self._send_row_button.setToolTip(tr("Разово отправить выбранную строку на шину"))
+        self._send_row_button.clicked.connect(self._send_selected_row)
+        self._send_row_button.setEnabled(self._send_callback is not None)
+
         bottom = QHBoxLayout()
         bottom.addWidget(self._percent_label)
         bottom.addSpacing(16)
@@ -491,6 +510,8 @@ class IdHistoryDialog(QDialog):
         bottom.addWidget(self._zoom_label)
         bottom.addWidget(self._zoom_slider, 1)
         bottom.addWidget(self._invert_button)
+        bottom.addWidget(self._copy_row_button)
+        bottom.addWidget(self._send_row_button)
         bottom.addWidget(self._export_button)
 
         layout.addWidget(self._table, 1)
@@ -545,6 +566,47 @@ class IdHistoryDialog(QDialog):
     def add_sample(self, t: float, data: bytes, rtr: bool, dlc: int) -> None:
         """Вызывается монитором при новом фрейме с этим ID."""
         self._append_row(t, data, rtr, dlc)
+
+    def _show_table_menu(self, position) -> None:
+        row = self._table.rowAt(position.y())
+        if row < 0 or row >= len(self._samples_raw):
+            return
+        self._table.setCurrentCell(row, self._table.currentColumn())
+        menu = QMenu(self)
+        menu.addAction(tr("Копировать строку (для триггера)"), lambda: self._copy_row_packet(row))
+        if self._send_callback is not None:
+            menu.addAction(tr("Отправить разово"), lambda: self._send_row(row))
+        menu.exec(self._table.viewport().mapToGlobal(position))
+
+    def _packet_text(self, row: int) -> str:
+        """Строка ID=.. DLC=.. DATA=.. для вставки в поля триггера."""
+        _t, data, rtr, dlc = self._samples_raw[row]
+        dlc = max(0, min(dlc, len(data)))
+        data_str = "" if rtr else " ".join(f"{b:02X}" for b in data[:dlc])
+        return f"ID=0x{self.can_id:X} DLC={dlc} DATA={data_str}"
+
+    def _copy_row_packet(self, row: int) -> None:
+        QApplication.clipboard().setText(self._packet_text(row))
+
+    def _copy_selected_packet(self) -> None:
+        row = self._table.currentRow()
+        if 0 <= row < len(self._samples_raw):
+            self._copy_row_packet(row)
+        else:
+            show_toast(self, tr("Выберите строку истории"), success=False)
+
+    def _send_row(self, row: int) -> None:
+        if self._send_callback is None:
+            return
+        _t, data, rtr, dlc = self._samples_raw[row]
+        self._send_callback(self.can_id, bytes(data), dlc, rtr)
+
+    def _send_selected_row(self) -> None:
+        row = self._table.currentRow()
+        if 0 <= row < len(self._samples_raw):
+            self._send_row(row)
+        else:
+            show_toast(self, tr("Выберите строку истории"), success=False)
 
     def _on_source_changed(self, _index: int) -> None:
         """Смена источника графика: весь DATA ↔ конкретный байт."""
@@ -1088,6 +1150,16 @@ class CanChannelMonitor(QWidget):
         if self._send_cyclic_frame() and self._cyclic_button.isChecked():
             self._start_cyclic_timer()
 
+    def _send_frame_once(self, can_id: int, data: bytes, dlc: int, rtr: bool) -> None:
+        """Разовая отправка кадра из диалога истории ID."""
+        dlc = max(0, min(dlc, len(data), 8))
+        frame = pack_can_frame(self._channel_byte, can_id, data[:dlc], rtr=rtr, dlc=dlc)
+        if self._serial_manager.send_data(frame):
+            self._sent_count += 1
+            self._update_sent_label()
+        else:
+            show_toast(self, tr("Отправка не удалась"), success=False)
+
     def _data_from_send_edits(self, dlc: int) -> bytes:
         values = [edit.text() for edit in self._send_data_edits[:dlc]]
         parsed = parse_data_bytes(values)
@@ -1501,6 +1573,9 @@ class CanChannelMonitor(QWidget):
         menu.addAction(tr("Копировать ID"), lambda: self._copy_selected_id(row))
         menu.addAction(tr("Копировать данные"), lambda: self._copy_selected_data(row))
         menu.addAction(tr("Копировать всю строку"), lambda: self._copy_selected_row(row))
+        menu.addAction(
+            tr("Копировать пакет (для триггера)"), lambda: self._copy_row_as_packet(row)
+        )
         menu.addAction(tr("Создать триггер"), lambda: self._create_trigger_from_row(row))
         menu.addAction(tr("Показать варианты данных"), lambda: self._show_data_variants(row))
         menu.addAction(tr("Битовая карта"), lambda: self._show_bitmap(row))
@@ -1524,13 +1599,44 @@ class CanChannelMonitor(QWidget):
         ]
         QApplication.clipboard().setText("  ".join(values))
 
+    def _copy_row_as_packet(self, row: int) -> None:
+        """Копирует строку в формате ID=.. DLC=.. DATA=.. для вставки в триггер."""
+        id_item = self._table.item(row, 0)
+        if id_item is None:
+            return
+        can_id = hex_to_int(id_item.text())
+        if can_id is None:
+            return
+        dlc_item = self._table.item(row, 1)
+        try:
+            dlc = int(dlc_item.text()) if dlc_item is not None else 8
+        except ValueError:
+            dlc = 8
+        data_item = self._table.item(row, 2)
+        data_text = data_item.text() if data_item is not None else ""
+        if data_text.strip().lower() == "rtr":
+            data_text = ""
+        QApplication.clipboard().setText(f"ID=0x{can_id:X} DLC={dlc} DATA={data_text.strip()}")
+
     def _create_trigger_from_row(self, row: int) -> None:
         id_item = self._table.item(row, 0)
         data_item = self._table.item(row, 2)
         if id_item is None:
             return
+        can_id = hex_to_int(id_item.text())
+        if can_id is None:
+            return
         data_values = data_item.text().split() if data_item is not None else []
-        self.create_trigger_requested.emit({"id": id_item.text(), "data": data_values})
+        packet: dict[str, Any] = {
+            "id": can_id,
+            "data": bytes(parse_data_bytes(data_values)),
+        }
+        dlc_item = self._table.item(row, 1)
+        try:
+            packet["dlc"] = int(dlc_item.text()) if dlc_item is not None else len(packet["data"])
+        except ValueError:
+            packet["dlc"] = len(packet["data"])
+        self.create_trigger_requested.emit(packet)
 
     def _show_data_variants(self, row: int) -> None:
         id_item = self._table.item(row, 0)
@@ -1555,7 +1661,8 @@ class CanChannelMonitor(QWidget):
         if can_id is None:
             return
         samples = list(self._id_history.get(can_id, ()))
-        dialog = IdHistoryDialog(can_id, self._channel, samples, self)
+        send_cb = self._send_frame_once if self._serial_manager.is_open() else None
+        dialog = IdHistoryDialog(can_id, self._channel, samples, self, send_callback=send_cb)
         self._history_dialogs.append(dialog)
         dialog.finished.connect(
             lambda *_a, d=dialog: self._history_dialogs.remove(d)

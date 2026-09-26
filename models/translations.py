@@ -549,11 +549,43 @@ class Translator:
                 "Слушать отправляемое": "Listen to transmitted",
                 "Кол-во сработок до смены DATA": "Fire count until DATA change",
                 "Сработка после старта устройства": "Fire once on device start",
+                "Задержка, мс": "Delay, ms",
+                "Пауза от включения МК до сработки триггера, 0–9999 мс "
+                "(плюс задержка самого ответа)":
+                    "Delay from MCU power-up until the trigger fires, "
+                    "0–9999 ms (in addition to the response delay)",
+                "Добавить условие приёма (ИЛИ — до 8)":
+                    "Add a receive condition (OR — up to 8)",
+                "Удалить условие приёма": "Remove receive condition",
+                "Максимум 8 условий приёма": "Maximum of 8 receive conditions",
+                "условие {0}": "condition {0}",
+                "условие {0} дублирует ID приёма":
+                    "condition {0} duplicates the receive ID",
                 "Отправить ответ один раз сразу после включения МК, без "
                 "ожидания кадра на шине — поля приёма не используются":
                     "Send the response once right after the MCU powers up, "
                     "without waiting for a bus frame — the receive fields "
                     "are not used",
+                "Вставить триггер": "Paste trigger",
+                "Вставить триггер из буфера обмена (кнопка копии в блоке триггера)":
+                    "Paste a trigger from the clipboard "
+                    "(copy button in the trigger block)",
+                "Копировать триггер целиком": "Copy the entire trigger",
+                "В буфере нет скопированного триггера":
+                    "No copied trigger in the clipboard",
+                "Буфер обмена повреждён": "Clipboard data is corrupted",
+                "Триггер «{0}» скопирован": "Trigger \"{0}\" copied",
+                "Триггер «{0}» вставлен": "Trigger \"{0}\" pasted",
+                "Копировать строку": "Copy row",
+                "Копировать строку (для триггера)": "Copy row (for trigger)",
+                "ID/DLC/Data выбранной строки — для вставки в триггер":
+                    "ID/DLC/Data of the selected row — to paste into a trigger",
+                "Отправить разово": "Send once",
+                "Разово отправить выбранную строку на шину":
+                    "Send the selected row to the bus once",
+                "Выберите строку истории": "Select a history row",
+                "Отправка не удалась": "Send failed",
+                "Копировать пакет (для триггера)": "Copy packet (for trigger)",
                 "Срабатывать и на кадры, отправленные самим МК (TX-эхо)":
                     "Trigger on frames sent by the MCU itself (TX echo)",
                 "Кэшировать и кадры, отправленные самим МК (TX-эхо)":

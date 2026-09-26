@@ -1,5 +1,6 @@
 """Страница «Триггеры» — блоки условий и ответов, слоты во Flash МК."""
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,7 @@ from ui.hex_edit import create_data_field_widget
 from ui.id_edit import IdPasteEdit
 from ui.memory_indicator import MemoryIndicator
 from ui.packet_clipboard import create_clipboard_buttons
+from ui.toast import show_toast
 
 _CHECK_ICON = str((Path(__file__).parent.parent / "assets" / "icons" / "check.svg").resolve())
 
@@ -250,10 +252,17 @@ class CanTriggerTab(QWidget):
         spin.setFixedWidth(90)
         return spin
 
-    def _create_receive_row(self, font: QFont, label: str) -> dict[str, Any]:
+    def _create_cond_row(self, font: QFont, label: str | None) -> dict[str, Any]:
+        """Одна строка условия приёма (канал/битность/ID/DLC/Data/RTR).
+
+        Условия внутри блока — ИЛИ: триггер срабатывает на первое
+        совпавшее. На провод каждое условие разворачивается в свою
+        группу записей (индекс условия — rx_flags биты 2..4, протокол 7).
+        """
         layout = QHBoxLayout()
         layout.setSpacing(4)
-        layout.addWidget(QLabel(label))
+        if label:
+            layout.addWidget(QLabel(label))
         channel = self._make_channel_combo(font)
         layout.addWidget(channel)
         bit = self._make_bit_combo(font)
@@ -286,7 +295,47 @@ class CanTriggerTab(QWidget):
         copy_paste = create_clipboard_buttons(self, can_id, dlc, data, bit)
         layout.addWidget(copy_paste)
 
+        # «−» удаляет это условие (у первой строки не показывается —
+        # минимум одно условие на триггер). «+» живёт в строке опций.
+        remove_button = QPushButton("−")
+        remove_button.setFixedSize(22, 22)
+        remove_button.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        remove_button.setStyleSheet(
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #8A3A3A; }"
+        )
+        remove_button.setToolTip(tr("Удалить условие приёма"))
+        remove_button.setVisible(False)
+        layout.addWidget(remove_button)
+
         layout.addStretch()
+
+        row = {
+            "layout": layout,
+            "channel": channel,
+            "bit": bit,
+            "id": can_id,
+            "dlc": dlc,
+            "data": data,
+            "data_widget": data_widget,
+            "rtr": rtr,
+            "copy_paste": copy_paste,
+            "remove_button": remove_button,
+        }
+        can_id.set_fill_callback(lambda parsed, r=row: self._fill_row_from_packet(r, parsed))
+        dlc.valueChanged.connect(lambda _v, r=row: self._on_cond_dlc_or_rtr(r))
+        rtr.toggled.connect(lambda _c, r=row: self._on_cond_dlc_or_rtr(r))
+        self._set_data_enabled(data, dlc.value())
+        return row
+
+    def _create_receive_row(self, font: QFont, label: str) -> dict[str, Any]:
+        # Условия приёма — список строк (ИЛИ между собой). Первая строка
+        # с подписью «Приём», остальные добавляются «+» в строке опций.
+        conds_layout = QVBoxLayout()
+        conds_layout.setSpacing(4)
+        conds_layout.setContentsMargins(0, 0, 0, 0)
+        cond0 = self._create_cond_row(font, label)
+        conds_layout.addLayout(cond0["layout"])
 
         # Вторая строка приёма — опции: реагировать ли на кадры,
         # отправленные самим МК (TX-эхо), и счётчик «сработок до смены
@@ -326,45 +375,145 @@ class CanTriggerTab(QWidget):
         )
         options_layout.addWidget(fire_on_boot)
         self._wire_toggle_checkbox_style(fire_on_boot)
+        boot_delay_label = QLabel(tr("Задержка, мс"))
+        boot_delay_label.setFont(font)
+        boot_delay_label.setEnabled(False)
+        boot_delay = QSpinBox()
+        boot_delay.setRange(0, 9999)
+        boot_delay.setValue(0)
+        boot_delay.setFont(font)
+        boot_delay.setFixedWidth(70)
+        boot_delay.setEnabled(False)
+        boot_delay.setToolTip(
+            tr("Пауза от включения МК до сработки триггера, 0–9999 мс "
+               "(плюс задержка самого ответа)")
+        )
+        options_layout.addWidget(boot_delay_label)
+        options_layout.addWidget(boot_delay)
+        # «+» — ещё одно условие приёма (ИЛИ): свои канал/битность/ID/
+        # DLC/Data/RTR. Ограничение — 3 бита индекса в rx_flags записи.
+        add_cond = QPushButton("+")
+        add_cond.setFixedSize(22, 22)
+        add_cond.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        add_cond.setStyleSheet(
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #4A4A6A; }"
+        )
+        add_cond.setToolTip(tr("Добавить условие приёма (ИЛИ — до 8)"))
+        options_layout.addWidget(add_cond)
         options_layout.addStretch()
 
-        def _on_dlc_or_rtr(*_args: object) -> None:
-            # В RTR-режиме приёма кадр не несёт данных — поля Data
-            # блокируются (матч идёт по каналу/битности/ID/DLC).
-            self._set_data_enabled(data, 0 if rtr.isChecked() else dlc.value())
+        row = {
+            "conds_layout": conds_layout,
+            "conds": [cond0],
+            "options_layout": options_layout,
+            "listen_echo": listen_echo,
+            "fire_check": fire_check,
+            "fire_spin": fire_spin,
+            "fire_on_boot": fire_on_boot,
+            "boot_delay": boot_delay,
+            "boot_delay_label": boot_delay_label,
+            "add_cond_button": add_cond,
+        }
 
         def _on_fire_on_boot(checked: bool) -> None:
             # «Сработка после старта» заменяет условие приёма событием
             # запуска МК — все поля блока приёма недоступны (прошивка
             # их при этом флаге просто не читает).
-            for w in (channel, bit, can_id, dlc, data_widget, rtr,
-                      copy_paste, listen_echo, fire_check):
+            for cond in row["conds"]:
+                for w in (cond["channel"], cond["bit"], cond["id"], cond["dlc"],
+                          cond["data_widget"], cond["rtr"], cond["copy_paste"],
+                          cond["remove_button"]):
+                    w.setEnabled(not checked)
+            for w in (listen_echo, fire_check, add_cond):
                 w.setEnabled(not checked)
             fire_spin.setEnabled(not checked and fire_check.isChecked())
+            boot_delay.setEnabled(checked)
+            boot_delay_label.setEnabled(checked)
 
         fire_on_boot.toggled.connect(_on_fire_on_boot)
-        dlc.valueChanged.connect(_on_dlc_or_rtr)
-        rtr.toggled.connect(_on_dlc_or_rtr)
-        self._set_data_enabled(data, dlc.value())
-
-        row = {
-            "layout": layout,
-            "options_layout": options_layout,
-            "channel": channel,
-            "bit": bit,
-            "id": can_id,
-            "dlc": dlc,
-            "data": data,
-            "data_widget": data_widget,
-            "rtr": rtr,
-            "copy_paste": copy_paste,
-            "listen_echo": listen_echo,
-            "fire_check": fire_check,
-            "fire_spin": fire_spin,
-            "fire_on_boot": fire_on_boot,
-        }
-        can_id.set_fill_callback(lambda parsed, r=row: self._fill_row_from_packet(r, parsed))
+        add_cond.clicked.connect(lambda _c=False, r=row: self._add_cond_row(r))
+        for cond in row["conds"]:
+            cond["remove_button"].clicked.connect(
+                lambda _c=False, r=row, cr=cond: self._remove_cond_row(r, cr)
+            )
         return row
+
+    def _on_cond_dlc_or_rtr(self, cond: dict[str, Any]) -> None:
+        # В RTR-режиме приёма кадр не несёт данных — поля Data
+        # блокируются (матч идёт по каналу/битности/ID/DLC).
+        self._set_data_enabled(
+            cond["data"], 0 if cond["rtr"].isChecked() else cond["dlc"].value()
+        )
+
+    def _add_cond_row(self, recv: dict[str, Any]) -> None:
+        """Добавляет строку условия приёма (ИЛИ). Лимит — 8: индекс
+        условия едет в записи триггера в rx_flags битах 2..4."""
+        if len(recv["conds"]) >= 8:
+            show_toast(self, tr("Максимум 8 условий приёма"), success=False)
+            return
+        cond = self._create_cond_row(self._font, None)
+        recv["conds"].append(cond)
+        recv["conds_layout"].addLayout(cond["layout"])
+        cond["remove_button"].clicked.connect(
+            lambda _c=False, r=recv, cr=cond: self._remove_cond_row(r, cr)
+        )
+        self._watch_cond_row(recv, cond)
+        # При включённой «сработке после старта» поля приёма недоступны —
+        # новое условие наследует это состояние.
+        if recv["fire_on_boot"].isChecked():
+            for w in (cond["channel"], cond["bit"], cond["id"], cond["dlc"],
+                      cond["data_widget"], cond["rtr"], cond["copy_paste"],
+                      cond["remove_button"]):
+                w.setEnabled(False)
+        self._update_cond_remove_buttons(recv)
+        self._mark_dirty()
+
+    def _remove_cond_row(self, recv: dict[str, Any], cond: dict[str, Any]) -> None:
+        """Удаляет строку условия приёма (минимум одна остаётся)."""
+        if len(recv["conds"]) <= 1 or cond not in recv["conds"]:
+            return
+        recv["conds"].remove(cond)
+        layout = cond["layout"]
+        recv["conds_layout"].removeItem(layout)
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._update_cond_remove_buttons(recv)
+        self._mark_dirty()
+
+    @staticmethod
+    def _update_cond_remove_buttons(recv: dict[str, Any]) -> None:
+        extra = len(recv["conds"]) > 1
+        for i, cond in enumerate(recv["conds"]):
+            cond["remove_button"].setVisible(extra and i > 0)
+
+    def _watch_cond_row(self, recv: dict[str, Any], cond: dict[str, Any]) -> None:
+        """Подписки «грязного» маркера для динамически добавленной строки
+        условия — повторяют _watch_widget_tree для её полей ввода."""
+
+        def mark(*_args: object) -> None:
+            owner = next((b for b in self._blocks if b.get("recv") is recv), None)
+            if owner is None:
+                self._mark_dirty()
+            else:
+                try:
+                    self._mark_dirty(self._blocks.index(owner))
+                except ValueError:
+                    self._mark_dirty()
+
+        cond["channel"].activated.connect(mark)
+        cond["bit"].activated.connect(mark)
+        cond["id"].textEdited.connect(mark)
+        for edit in cond["data"]:
+            edit.textEdited.connect(mark)
+        cond["dlc"].valueChanged.connect(
+            lambda *_a, w=cond["dlc"], m=mark: m() if w.hasFocus() else None
+        )
+        cond["rtr"].clicked.connect(mark)
 
     def _create_response_block(self, font: QFont) -> dict[str, Any]:
         """Создаёт блок динамического списка фреймов ответа."""
@@ -614,7 +763,12 @@ class CanTriggerTab(QWidget):
 
         cache_check = QCheckBox(tr("Автоматическая запись DATA в Кэш"))
         cache_check.setFont(font)
-        cache_check.stateChanged.connect(lambda state, idx=index: self._on_cache_active_changed(idx, state))
+        # Привязка к чекбоксу, а не к индексу блока: удаление/перестройка
+        # блоков сдвигает позиции — захваченный номер бил по чужому
+        # блоку или падал с IndexError, и галка переставала отключаться.
+        cache_check.stateChanged.connect(
+            lambda state, cb=cache_check: self._on_cache_active_changed(cb, state)
+        )
         group_layout.addWidget(cache_check)
         self._wire_toggle_checkbox_style(cache_check)
 
@@ -1001,6 +1155,20 @@ class CanTriggerTab(QWidget):
         delete_button.setToolTip(tr("Удалить триггер"))
         delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
 
+        # Копия триггера целиком — в буфер обмена (JSON с маркером),
+        # вставка — кнопкой «Вставить триггер» рядом с «Добавить».
+        copy_button = QPushButton()
+        copy_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+        )
+        copy_button.setFixedSize(24, 24)
+        copy_button.setStyleSheet(
+            "QPushButton { background-color: transparent; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #2A4A5A; }"
+        )
+        copy_button.setToolTip(tr("Копировать триггер целиком"))
+        copy_button.setCursor(Qt.CursorShape.PointingHandCursor)
+
         return {
             "group": group,
             "status": status,
@@ -1009,6 +1177,7 @@ class CanTriggerTab(QWidget):
             "response": response,
             "cache": cache,
             "delete_button": delete_button,
+            "copy_button": copy_button,
         }
 
     def _layout_trigger_block(self, block: dict[str, Any], index: int) -> None:
@@ -1022,7 +1191,7 @@ class CanTriggerTab(QWidget):
         content_layout.setSpacing(5)
         content_layout.setContentsMargins(6, 6, 6, 6)
 
-        content_layout.addLayout(block["recv"]["layout"])
+        content_layout.addLayout(block["recv"]["conds_layout"])
         content_layout.addLayout(block["recv"]["options_layout"])
         content_layout.addWidget(block["response"]["group"])
         content_layout.addWidget(block["cache"]["group"])
@@ -1048,6 +1217,8 @@ class CanTriggerTab(QWidget):
         # угол блока, активна всегда.
         delete_button = block["delete_button"]
         delete_button.clicked.connect(lambda _c=False, b=block: self._remove_trigger_block(b))
+        copy_button = block["copy_button"]
+        copy_button.clicked.connect(lambda _c=False, b=block: self._copy_trigger_block(b))
 
         wrapper = QWidget()
         grid = QGridLayout(wrapper)
@@ -1062,8 +1233,9 @@ class CanTriggerTab(QWidget):
         holder = QWidget()
         holder_layout = QHBoxLayout(holder)
         holder_layout.setContentsMargins(0, 4, 22, 0)
-        holder_layout.setSpacing(0)
+        holder_layout.setSpacing(4)
         holder_layout.addStretch()
+        holder_layout.addWidget(copy_button)
         holder_layout.addWidget(delete_button)
         grid.addWidget(
             holder, 0, 0,
@@ -1091,7 +1263,7 @@ class CanTriggerTab(QWidget):
     def _align_delete_button(self, block: dict[str, Any]) -> None:
         """Ставит крестик по высоте напротив поля Data в «Приём», а по
         горизонтали — ровно над «+» добавления фрейма ответа."""
-        data_widget = block["recv"]["data_widget"]
+        data_widget = block["recv"]["conds"][0]["data_widget"]
         add_button = block["response"]["add_button"]
         wrapper = block.get("wrapper")
         layout = block.get("delete_holder_layout")
@@ -1145,6 +1317,53 @@ class CanTriggerTab(QWidget):
         self._mark_dirty()
         self._save_config()
 
+    _TRIGGER_CLIPBOARD_PREFIX = "CODEMASTER_TRIGGER_V1:"
+
+    def _copy_trigger_block(self, block: dict[str, Any]) -> None:
+        """Сериализует триггер целиком в буфер обмена (JSON с маркером)."""
+        cfg = self._collect_block_config(block)
+        payload = json.dumps(cfg, ensure_ascii=False)
+        QApplication.clipboard().setText(self._TRIGGER_CLIPBOARD_PREFIX + payload)
+        name = block["name"].text().strip() or block["group"].title()
+        show_toast(self, tr("Триггер «{0}» скопирован").format(name))
+        logger.info("Триггер скопирован в буфер: %s", name)
+
+    def _on_paste_trigger_clicked(self) -> None:
+        """Создаёт новый блок триггера из JSON буфера обмена."""
+        clipboard = QApplication.clipboard()
+        text = clipboard.text().strip() if clipboard is not None else ""
+        if not text.startswith(self._TRIGGER_CLIPBOARD_PREFIX):
+            show_toast(
+                self,
+                tr("В буфере нет скопированного триггера"),
+                success=False,
+            )
+            return
+        try:
+            cfg = json.loads(text[len(self._TRIGGER_CLIPBOARD_PREFIX):])
+        except (ValueError, TypeError):
+            show_toast(self, tr("Буфер обмена повреждён"), success=False)
+            return
+        if not isinstance(cfg, dict):
+            show_toast(self, tr("Буфер обмена повреждён"), success=False)
+            return
+        index = self._add_trigger_block()
+        if index is None:
+            show_toast(
+                self,
+                tr("Страница триггеров заполнена ({0}/{1})").format(
+                    len(self._blocks), TRIGGER_COUNT
+                ),
+                success=False,
+            )
+            return
+        self._apply_config_trigger(index, cfg)
+        self._mark_dirty(index)
+        self._save_config()
+        name = self._blocks[index]["name"].text().strip()
+        show_toast(self, tr("Триггер «{0}» вставлен").format(name or str(index + 1)))
+        logger.info("Триггер вставлен из буфера в блок %d", index + 1)
+
     def _add_trigger_block(self) -> int | None:
         """Добавляет блок триггера. Лимит — ёмкость пула Flash
         (TRIGGER_COUNT записей по 82 Б + заголовок в 8 КБ над config)."""
@@ -1181,9 +1400,20 @@ class CanTriggerTab(QWidget):
         в МК по «Сохранить» (непустые блоки, enabled как в UI)."""
         records = []
         for index in range(len(self._blocks)):
-            values = self._device_trigger_values(index)
-            if not self._is_empty_trigger(values):
-                records.append(values)
+            block = self._blocks[index]
+            recv = block["recv"]
+            if recv["fire_on_boot"].isChecked():
+                conds = [(0, recv["conds"][0])]
+            else:
+                conds = [
+                    (i, c) for i, c in enumerate(recv["conds"])
+                    if self._parse_id(c["id"].text()) is not None
+                ] or [(0, recv["conds"][0])]
+            for cond_idx, cond in conds:
+                values = self._device_trigger_values(index, cond=cond)
+                values["rx_cond_idx"] = cond_idx
+                if not self._is_empty_trigger(values):
+                    records.append(values)
         return records
 
     def _open_simulation(self) -> None:
@@ -1321,6 +1551,19 @@ class CanTriggerTab(QWidget):
         )
         self._add_trigger_button.clicked.connect(self._on_add_trigger_clicked)
 
+        self._paste_trigger_button = QPushButton(tr("Вставить триггер"))
+        self._paste_trigger_button.setFont(QFont("Segoe UI", 9))
+        self._paste_trigger_button.setStyleSheet(
+            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
+            "border-radius: 4px; padding: 6px 14px; }"
+            "QPushButton:hover { background-color: #4A4A6A; }"
+            "QPushButton:disabled { color: #777777; }"
+        )
+        self._paste_trigger_button.setToolTip(
+            tr("Вставить триггер из буфера обмена (кнопка копии в блоке триггера)")
+        )
+        self._paste_trigger_button.clicked.connect(self._on_paste_trigger_clicked)
+
         self._sim_button = QPushButton(tr("Симуляция…"))
         self._sim_button.setFont(QFont("Segoe UI", 9))
         self._sim_button.setStyleSheet(
@@ -1350,6 +1593,7 @@ class CanTriggerTab(QWidget):
         buttons_row = QHBoxLayout()
         buttons_row.setSpacing(8)
         buttons_row.addWidget(self._add_trigger_button)
+        buttons_row.addWidget(self._paste_trigger_button)
         buttons_row.addWidget(self._template_button)
         buttons_row.addWidget(self._sim_button)
         buttons_row.addStretch()
@@ -1384,7 +1628,8 @@ class CanTriggerTab(QWidget):
 
         block["group"].toggled.connect(mark)
         skip = [
-            block["recv"]["copy_paste"],
+            *(cond["copy_paste"] for cond in block["recv"]["conds"]),
+            block["recv"]["add_cond_button"],
             *(row["from_copy_paste"] for row in block["cache"]["rows"]),
             *(row["to_copy_paste"] for row in block["cache"]["rows"]),
             *(row["copy_paste"] for row in block["response"]["rows"]),
@@ -1460,19 +1705,32 @@ class CanTriggerTab(QWidget):
         self._pc_src_state.clear()
         if index is not None and 0 <= index < len(self._device_managed):
             self._device_managed[index] = False
+        # Индикатор «Память» пересчитываем сразу: раньше он менялся только
+        # на «Сохранить»/вычитке — стёртые вручную поля оставляли старый %.
+        self._refresh_memory_indicator()
         self.settings_changed.emit()
 
+    def _refresh_memory_indicator(self) -> None:
+        """Пересчёт «Памяти» по текущим полям блоков (не по файлу)."""
+        self._memory_indicator.show_trigger_usage(
+            count_configured_triggers(self._collect_config())
+        )
+
     def _device_trigger_values(
-        self, index: int, cache_row: dict[str, Any] | None = None
+        self,
+        index: int,
+        cache_row: dict[str, Any] | None = None,
+        cond: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         block = self._blocks[index]
         recv = block["recv"]
+        cond = cond or recv["conds"][0]
         # rx_channel/tx_channel хранятся 0-based как индекс комбобокса:
         # 0=CAN1, 1=CAN2, 2=«CAN1 и CAN2» — firmware понимает все три.
-        recv_id = self._parse_id(recv["id"].text()) or 0
-        rx_extended = recv["bit"].currentIndex()
+        recv_id = self._parse_id(cond["id"].text()) or 0
+        rx_extended = cond["bit"].currentIndex()
         rx_mask = 0x1FFFFFFF if rx_extended else 0x7FF
-        rx_values = self._parse_data(recv["data"])
+        rx_values = self._parse_data(cond["data"])
         rx_data = bytes((value or 0) & 0xFF for value in rx_values)
         rx_data_mask = bytes(0xFF if value is not None else 0 for value in rx_values)
 
@@ -1540,15 +1798,18 @@ class CanTriggerTab(QWidget):
 
         return {
             "enabled": int(block["group"].isChecked()),
-            "rx_channel": recv["channel"].currentIndex(),
+            "rx_channel": cond["channel"].currentIndex(),
             "rx_extended": rx_extended,
             "rx_id": recv_id,
             "rx_id_mask": rx_mask,
-            "rx_dlc": recv["dlc"].value(),
+            "rx_dlc": cond["dlc"].value(),
             "rx_data": rx_data,
             "rx_data_mask": rx_data_mask,
             # rx_rtr: 1 = срабатывать только на RTR-запрос, 0 = любой кадр.
-            "rx_rtr": int(recv["rtr"].isChecked()),
+            "rx_rtr": int(cond["rtr"].isChecked()),
+            # Индекс условия приёма (мульти-условия ИЛИ) — выставляет
+            # _project_block_records; здесь всегда первое условие.
+            "rx_cond_idx": 0,
             "tx_channel": tx_channel,
             "tx_extended": tx_extended,
             "tx_id": tx_id,
@@ -1573,6 +1834,10 @@ class CanTriggerTab(QWidget):
             # protocol>=6: отработать один раз при запуске МК, поля
             # приёма не используются (в UI заблокированы этой галкой).
             "rx_fire_on_boot": recv["fire_on_boot"].isChecked(),
+            # protocol>=7: пауза от старта МК до сработки (0–9999 мс).
+            "rx_boot_delay": (
+                recv["boot_delay"].value() if recv["fire_on_boot"].isChecked() else 0
+            ),
             "src_listen_echo": src_listen_echo,
             "src_fire_limit": src_fire_limit,
         }
@@ -1620,12 +1885,37 @@ class CanTriggerTab(QWidget):
             self._applying_device_state = False
         self._set_trigger_status(index, "enabled" if values["enabled"] else "disabled")
 
+    def _apply_record_to_cond(
+        self, cond: dict[str, Any], values: dict[str, Any]
+    ) -> None:
+        """Заполняет строку условия приёма из полей записи trigger_t."""
+        cond["channel"].setCurrentIndex(min(values["rx_channel"], 2))
+        cond["bit"].setCurrentIndex(int(values["rx_extended"]))
+        cond["id"].setText(int_to_hex(values["rx_id"], 8 if values["rx_extended"] else 3))
+        cond["dlc"].setValue(max(1, min(8, values["rx_dlc"] or 8)))
+        rx_data_mask = bytes(values.get("rx_data_mask", b"\xff" * 8))
+        for i, (edit, value) in enumerate(zip(cond["data"], values["rx_data"], strict=True)):
+            # Байт с нулевой маской — wildcard: показываем «X», а не «00».
+            edit.setText("X" if i < len(rx_data_mask) and rx_data_mask[i] == 0 else f"{value:02X}")
+        cond["rtr"].setChecked(values.get("rx_rtr", 0) == 1)
+        self._set_data_enabled(
+            cond["data"], 0 if cond["rtr"].isChecked() else cond["dlc"].value()
+        )
+
     def _apply_device_group(
         self, index: int, group: list[dict[str, Any]]
     ) -> None:
         block = self._blocks[index]
         recv = block["recv"]
-        values = group[0]
+        # Записи группируем по индексу условия приёма (rx_flags биты
+        # 2..4, протокол 7). Расписание ответа общее — собираем его из
+        # записей условия 0; у записей без cond-бит (старая прошивка)
+        # одна группа.
+        cond_groups: dict[int, list[dict[str, Any]]] = {}
+        for record in group:
+            cond_groups.setdefault(int(record.get("rx_cond_idx", 0)), []).append(record)
+        base_records = cond_groups.get(0) or next(iter(cond_groups.values()))
+        values = base_records[0]
         block["group"].setChecked(bool(values["enabled"]))
         # Имя присутствует только на прошивках протокола ≥5 (таблица
         # trigger_names в config-странице). На старых — не трогаем поле,
@@ -1635,22 +1925,21 @@ class CanTriggerTab(QWidget):
         # Флаг ставим до полей приёма — его toggled блокирует их ввод
         # (setText/setValue на заблокированных виджетах работают).
         recv["fire_on_boot"].setChecked(bool(values.get("rx_fire_on_boot", False)))
-        recv["channel"].setCurrentIndex(min(values["rx_channel"], 2))
-        recv["bit"].setCurrentIndex(int(values["rx_extended"]))
-        recv["id"].setText(int_to_hex(values["rx_id"], 8 if values["rx_extended"] else 3))
-        recv["dlc"].setValue(max(1, min(8, values["rx_dlc"] or 8)))
-        rx_data_mask = bytes(values.get("rx_data_mask", b"\xff" * 8))
-        for i, (edit, value) in enumerate(zip(recv["data"], values["rx_data"], strict=True)):
-            # Байт с нулевой маской — wildcard: показываем «X», а не «00».
-            edit.setText("X" if i < len(rx_data_mask) and rx_data_mask[i] == 0 else f"{value:02X}")
-        recv["rtr"].setChecked(values.get("rx_rtr", 0) == 1)
+        recv["boot_delay"].setValue(max(0, min(9999, int(values.get("rx_boot_delay", 0)))))
+        # Строки условий — по числу групп; rx-поля — из первой записи
+        # каждой группы (внутри группы rx_* одинаковые).
+        for cond_idx in sorted(cond_groups):
+            while len(recv["conds"]) <= cond_idx:
+                self._add_cond_row(recv)
+            self._apply_record_to_cond(
+                recv["conds"][cond_idx], cond_groups[cond_idx][0]
+            )
+        while len(recv["conds"]) > len(cond_groups):
+            self._remove_cond_row(recv, recv["conds"][-1])
         recv["listen_echo"].setChecked(bool(values.get("rx_listen_echo", True)))
         rx_fire_limit = int(values.get("rx_fire_limit", 0))
         recv["fire_check"].setChecked(rx_fire_limit > 0)
         recv["fire_spin"].setValue(max(1, min(9999, rx_fire_limit or 1)))
-        self._set_data_enabled(
-            recv["data"], 0 if recv["rtr"].isChecked() else recv["dlc"].value()
-        )
 
         cache = block["cache"]
         cache_enabled = bool(values.get("cache_enabled", 0))
@@ -1661,7 +1950,7 @@ class CanTriggerTab(QWidget):
             # Инвертированный диапазон (from>to) показываем как «X».
             row_records: list[dict[str, Any]] = []
             row_counts: list[int] = []
-            for record in group:
+            for record in base_records:
                 if record.get("group_seq", 0) & GROUP_SEQ_FRAGMENT and row_counts:
                     row_counts[-1] += max(1, record.get("tx_count") or 1)
                 else:
@@ -1718,7 +2007,7 @@ class CanTriggerTab(QWidget):
             # delay_before_send следующей строки, тайминг сохраняется.
             row_records: list[dict[str, Any]] = []
             row_counts: list[int] = []
-            for record in group:
+            for record in base_records:
                 if record.get("group_seq", 0) & GROUP_SEQ_FRAGMENT and row_counts:
                     row_counts[-1] += max(1, record.get("tx_count") or 1)
                 else:
@@ -1758,7 +2047,7 @@ class CanTriggerTab(QWidget):
             self._set_response_rows(block["response"], responses)
         cache["cache_check"].setChecked(cache_enabled)
         self._on_cache_active_changed(
-            index,
+            cache["cache_check"],
             Qt.CheckState.Checked.value if cache_enabled else Qt.CheckState.Unchecked.value,
         )
 
@@ -1818,9 +2107,29 @@ class CanTriggerTab(QWidget):
         многофреймовым триггером в конфиге — это томбстоун старого
         формата (устройство хранит заглушку, отвечает приложение).
         """
-        return self._config_trigger_device_representable(
-            self._collect_block_config(block)
-        )
+        config = self._collect_block_config(block)
+        if not self._config_trigger_device_representable(config):
+            return False
+        # Опции, требующие версии протокола устройства: на старой
+        # прошивке запись с ними — томбстоун PC-исполнения, а не выбор
+        # оператора (heal должен воскресить блок, а не подтвердить
+        # заглушку). Пороги — как у _project_block_records: FIRE_ON_BOOT —
+        # протокол 6, задержка/мульти-условия — протокол 7.
+        proto = self._serial_manager.device_protocol_version()
+        if config.get("recv_fire_on_boot") and proto < 6:
+            return False
+        if proto < 7:
+            if int(config.get("recv_boot_delay") or 0):
+                return False
+            conds = config.get("recv_conditions")
+            if isinstance(conds, list):
+                filled_conds = [
+                    c for c in conds
+                    if isinstance(c, dict) and hex_to_int(str(c.get("id", ""))) is not None
+                ]
+                if len(filled_conds) > 1:
+                    return False
+        return True
 
     def _record_fmt_version(self) -> int:
         """Формат записи на провод: прошивка с protocol≥4 принимает
@@ -1839,6 +2148,9 @@ class CanTriggerTab(QWidget):
             or not record.get("rx_listen_echo", True)
             or record.get("src_fire_limit")
             or not record.get("src_listen_echo", True)
+            or record.get("rx_fire_on_boot")
+            or record.get("rx_boot_delay")
+            or record.get("rx_cond_idx")
         )
 
     def _pack_record(self, values: dict[str, Any]) -> bytes:
@@ -1854,71 +2166,101 @@ class CanTriggerTab(QWidget):
         отправки, повторы делает прошивка. Записи группы связаны байтом
         group_seq, по которому вычитка собирает блок обратно.
 
+        Несколько условий приёма (ИЛИ) разворачиваются по тому же
+        принципу: расписание ответа дублируется для каждого условия,
+        условие помечается индексом в rx_flags битах 2..4 (протокол 7),
+        по которому вычитка собирает условия обратно в один блок.
+
         Возвращает список значений записей ([] — блок пустой) или None,
         если триггер не разворачивается (задержка >65 c, >127 строк) —
         такой исполняет приложение, в МК пишется томбстоун enabled=0.
         """
-        values = self._device_trigger_values(index)
-        if self._is_empty_trigger(values):
-            return []
         block = self._blocks[index]
-        records: list[dict[str, Any]] = []
-        if block["cache"]["cache_check"].isChecked():
-            # Каждая строка кэша — отдельная запись с собственным
-            # src-фильтром и своим слотом кэша в прошивке. Строки
-            # связаны group_seq — как у многофреймового ответа.
-            cache_rows = [
-                self._collect_cache_row(row)
-                for row in block["cache"]["rows"]
-                if self._parse_id(row["id"].text()) is not None
-            ]
-            if cache_rows:
-                schedule = expand_schedule(cache_rows)
-                if schedule is None:
-                    return None
-                records = [
-                    self._cache_row_record(index, cache_rows[row_index], delay, count, interval, seq)
-                    for row_index, delay, count, interval, seq in schedule
-                ]
-            else:
-                records = [values]
+        recv = block["recv"]
+        # «Сработка после старта»: условия не используются — один
+        # виртуальный (idx 0). Иначе — каждая строка с заполненным ID;
+        # все пустые → единственное условие с rx_id=0 (поведение v1..v6).
+        if recv["fire_on_boot"].isChecked():
+            conds = [(0, recv["conds"][0])]
         else:
-            rows = [
-                row for row in block["response"]["rows"]
-                if self._parse_id(row["id"].text()) is not None
+            conds = [
+                (i, c) for i, c in enumerate(recv["conds"])
+                if self._parse_id(c["id"].text()) is not None
             ]
-            if not rows:
-                records = [values]
+            if not conds:
+                conds = [(0, recv["conds"][0])]
+        base = self._device_trigger_values(index, cond=conds[0][1])
+        if self._is_empty_trigger(base) and len(conds) == 1:
+            return []
+        records: list[dict[str, Any]] = []
+        # Индекс условия в записи — плотная нумерация 0..n-1 (не номер
+        # строки UI): вычитка собирает блок по правилу «cond_idx>0 —
+        # то же условие-триггер», и пустые строки не ломают порядок.
+        for cond_idx, (_row, cond) in enumerate(conds):
+            values = (
+                base if cond_idx == 0
+                else self._device_trigger_values(index, cond=cond)
+            )
+            values["rx_cond_idx"] = cond_idx
+            if block["cache"]["cache_check"].isChecked():
+                # Каждая строка кэша — отдельная запись с собственным
+                # src-фильтром и своим слотом кэша в прошивке. Строки
+                # связаны group_seq — как у многофреймового ответа.
+                cache_rows = [
+                    self._collect_cache_row(row)
+                    for row in block["cache"]["rows"]
+                    if self._parse_id(row["id"].text()) is not None
+                ]
+                if cache_rows:
+                    schedule = expand_schedule(cache_rows)
+                    if schedule is None:
+                        return None
+                    records.extend(
+                        self._cache_row_record(
+                            index, cache_rows[row_index], delay, count, interval,
+                            seq, cond=cond, cond_idx=cond_idx,
+                        )
+                        for row_index, delay, count, interval, seq in schedule
+                    )
+                else:
+                    records.append(values)
             else:
-                schedule = expand_schedule([
-                    {
-                        "delay_before_send": row["delay_before_send"].value(),
-                        "delay_between": row["delay_between"].value(),
-                        "count": row["count"].value(),
-                        "next_delay": row["next_delay"].value(),
-                    }
-                    for row in rows
-                ])
-                if schedule is None:
-                    return None
-                for row_index, delay, count, interval, seq in schedule:
-                    row = rows[row_index]
-                    record = dict(values)
-                    record.update({
-                        "tx_channel": row["channel"].currentIndex(),
-                        "tx_extended": row["bit"].currentIndex(),
-                        "tx_id": self._parse_id(row["id"].text()) or 0,
-                        "tx_dlc": row["dlc"].value(),
-                        "tx_data": bytes(
-                            (v or 0) & 0xFF for v in self._parse_data(row["data"])
-                        ),
-                        "tx_rtr": int(row["rtr"].isChecked()),
-                        "delay_ms": delay,
-                        "tx_count": count,
-                        "tx_interval_ms": interval,
-                        "group_seq": seq,
-                    })
-                    records.append(record)
+                rows = [
+                    row for row in block["response"]["rows"]
+                    if self._parse_id(row["id"].text()) is not None
+                ]
+                if not rows:
+                    records.append(values)
+                else:
+                    schedule = expand_schedule([
+                        {
+                            "delay_before_send": row["delay_before_send"].value(),
+                            "delay_between": row["delay_between"].value(),
+                            "count": row["count"].value(),
+                            "next_delay": row["next_delay"].value(),
+                        }
+                        for row in rows
+                    ])
+                    if schedule is None:
+                        return None
+                    for row_index, delay, count, interval, seq in schedule:
+                        row = rows[row_index]
+                        record = dict(values)
+                        record.update({
+                            "tx_channel": row["channel"].currentIndex(),
+                            "tx_extended": row["bit"].currentIndex(),
+                            "tx_id": self._parse_id(row["id"].text()) or 0,
+                            "tx_dlc": row["dlc"].value(),
+                            "tx_data": bytes(
+                                (v or 0) & 0xFF for v in self._parse_data(row["data"])
+                            ),
+                            "tx_rtr": int(row["rtr"].isChecked()),
+                            "delay_ms": delay,
+                            "tx_count": count,
+                            "tx_interval_ms": interval,
+                            "group_seq": seq,
+                        })
+                        records.append(record)
         if (
             self._record_fmt_version() == TRIGGER_FORMAT_VERSION_V2
             and any(self._record_uses_v3(r) for r in records)
@@ -1935,6 +2277,17 @@ class CanTriggerTab(QWidget):
             # у такой записи нет). Исполняет приложение — выстрел один
             # раз при старте сессии (см. on_device_session_started).
             return None
+        if (
+            self._serial_manager.device_protocol_version() < 7
+            and any(
+                r.get("rx_boot_delay") or r.get("rx_cond_idx") for r in records
+            )
+        ):
+            # boot_delay_ms и индекс условия появились в протоколе 7:
+            # на старой прошивке boot_delay — пад-байты (задержка молча
+            # пропала бы), а неизвестные биты rx_flags старой прошивкой
+            # отбраковываются — запись была бы мёртвой.
+            return None
         return records
 
     def _cache_row_record(
@@ -1945,15 +2298,18 @@ class CanTriggerTab(QWidget):
         count: int,
         interval: int,
         seq: int,
+        cond: dict[str, Any] | None = None,
+        cond_idx: int = 0,
     ) -> dict[str, Any]:
         """Запись trigger_t одной строки кэша: её src-фильтр и канал
         отправки + абсолютный тайминг из расписания expand_schedule."""
-        record = self._device_trigger_values(index, cache_row)
+        record = self._device_trigger_values(index, cache_row, cond=cond)
         record.update({
             "delay_ms": delay,
             "tx_count": count,
             "tx_interval_ms": interval,
             "group_seq": seq,
+            "rx_cond_idx": cond_idx,
         })
         return record
 
@@ -1978,13 +2334,20 @@ class CanTriggerTab(QWidget):
         block["group"].setChecked(False)
         block["name"].setText("")
         block["cache"]["cache_check"].setChecked(False)
-        self._on_cache_active_changed(index, Qt.CheckState.Unchecked.value)
+        self._on_cache_active_changed(
+            block["cache"]["cache_check"], Qt.CheckState.Unchecked.value
+        )
         # Сброс до полей приёма — снятие галки возвращает им доступность.
         block["recv"]["fire_on_boot"].setChecked(False)
+        block["recv"]["boot_delay"].setValue(0)
         block["recv"]["listen_echo"].setChecked(True)
         block["recv"]["fire_check"].setChecked(False)
         block["recv"]["fire_spin"].setValue(1)
-        self._set_row(block["recv"], {}, "recv")
+        # Лишние условия приёма удаляем — остаётся одна пустая строка.
+        recv = block["recv"]
+        while len(recv["conds"]) > 1:
+            self._remove_cond_row(recv, recv["conds"][-1])
+        self._set_row(recv["conds"][0], {}, "recv")
         self._set_response_rows(block["response"], [])
         self._set_cache(block["cache"], {})
         self._set_trigger_status(index, "disabled")
@@ -2142,10 +2505,19 @@ class CanTriggerTab(QWidget):
         0), 1..127 — новая строка ответа, 0x80|f — фрагмент счётчика
         текущей строки. Запись с seq>0 без базовой перед ней считается
         отдельным триггером (защита от чужих/повреждённых данных).
+
+        Мульти-условия (ИЛИ, протокол 7): расписание каждого условия —
+        своя цепочка seq с базовой записью в начале. Отличаем их по
+        rx_cond_idx в rx_flags: запись с индексом >0 — очередное условие
+        текущего триггера и цепляется к открытой группе даже при seq=0.
         """
         groups: list[list[dict[str, Any]]] = []
         for record in records:
-            if record.get("group_seq", 0) == 0 or not groups:
+            starts_new = (
+                record.get("group_seq", 0) == 0
+                and int(record.get("rx_cond_idx", 0)) == 0
+            )
+            if starts_new or not groups:
                 groups.append([record])
             else:
                 groups[-1].append(record)
@@ -2571,10 +2943,34 @@ class CanTriggerTab(QWidget):
                 continue
             self._pc_boot_fired.add(index)
             logger.info("Триггер %d: сработка после старта устройства", index + 1)
-            if trigger["cache"]:
-                self._send_cached_frames(trigger)
+            boot_delay = max(0, int(trigger.get("recv_boot_delay", 0)))
+            if boot_delay == 0:
+                if trigger["cache"]:
+                    self._send_cached_frames(trigger)
+                else:
+                    self._send_responses(trigger)
             else:
-                self._send_responses(trigger)
+                # Поле «Задержка, мс» — пауза от старта сессии до
+                # вооружения ответа (порт boot_delay_ms прошивки).
+                QTimer.singleShot(
+                    boot_delay,
+                    lambda t=trigger, i=index: self._fire_boot_trigger(t, i),
+                )
+
+    def _fire_boot_trigger(self, trigger: dict[str, Any], index: int) -> None:
+        """Отложенный выстрел boot-триггера (поле «Задержка, мс»).
+
+        Сессию проверяем: если порт за время паузы отключили, кадр на
+        шину не уходит (МК повёл бы себя так же — рестарт всё сбрасывает).
+        """
+        if not self._serial_manager.is_open():
+            return
+        if index >= len(self._blocks) or not self._blocks[index]["group"].isChecked():
+            return
+        if trigger["cache"]:
+            self._send_cached_frames(trigger)
+        else:
+            self._send_responses(trigger)
 
     def _on_trigger_toggled_by_block(self, block: dict[str, Any], enabled: bool) -> None:
         try:
@@ -2591,10 +2987,12 @@ class CanTriggerTab(QWidget):
         self._device_managed[index] = False
         self._set_trigger_status(index, "enabled" if enabled else "disabled")
 
-    def _on_cache_active_changed(self, index: int, state: int) -> None:
+    def _on_cache_active_changed(self, cache_check: QCheckBox, state: int) -> None:
         enabled = state == Qt.CheckState.Checked.value
-        block = self._blocks[index]
-        self._set_cache_enabled(block, enabled)
+        for block in self._blocks:
+            if block["cache"]["cache_check"] is cache_check:
+                self._set_cache_enabled(block, enabled)
+                return
 
     def _set_widget_opacity(self, widget: QWidget, opacity: float) -> None:
         """Устанавливает прозрачность виджета."""
@@ -2629,6 +3027,16 @@ class CanTriggerTab(QWidget):
             block["recv"]["listen_echo"].setText(tr("Слушать отправляемое"))
             block["recv"]["fire_check"].setText(tr("Кол-во сработок до смены DATA"))
             block["recv"]["fire_on_boot"].setText(tr("Сработка после старта устройства"))
+            block["recv"]["boot_delay_label"].setText(tr("Задержка, мс"))
+            block["recv"]["add_cond_button"].setToolTip(
+                tr("Добавить условие приёма (ИЛИ — до 8)")
+            )
+            for cond in block["recv"]["conds"]:
+                cond["remove_button"].setToolTip(tr("Удалить условие приёма"))
+                cond["rtr"].setText(tr("RTR"))
+                cond["rtr"].setToolTip(
+                    tr("Срабатывать только на RTR-запрос (Remote Transmission Request)")
+                )
             block["cache"]["cache_check"].setText(tr("Автоматическая запись DATA в Кэш"))
             block["response"]["group"].setTitle(tr("Ответ"))
             block["response"]["header_label"].setText(tr("Фреймы ответа"))
@@ -2695,16 +3103,32 @@ class CanTriggerTab(QWidget):
             if not block["group"].isChecked():
                 continue
             fire_on_boot = block["recv"]["fire_on_boot"].isChecked()
-            recv_id = self._parse_id(block["recv"]["id"].text())
-            if recv_id is None and not fire_on_boot:
+            # Условия приёма — список строк (ИЛИ). Пустые строки
+            # пропускаются; при включённой «сработке после старта»
+            # условия не используются вообще.
+            conds = [
+                {
+                    "recv_id": cid,
+                    "recv_rtr": int(cond["rtr"].isChecked()),
+                    "recv_data": self._parse_data(cond["data"]),
+                    "recv_channel": cond["channel"].currentIndex(),
+                }
+                for cond in block["recv"]["conds"]
+                if (cid := self._parse_id(cond["id"].text())) is not None
+            ]
+            if not conds and not fire_on_boot:
                 continue
             triggers.append({
                 "index": i,
-                "recv_id": recv_id or 0,
+                "recv_id": conds[0]["recv_id"] if conds else 0,
+                "recv_conditions": conds,
                 "recv_fire_on_boot": fire_on_boot,
-                "recv_rtr": int(block["recv"]["rtr"].isChecked()),
-                "recv_data": self._parse_data(block["recv"]["data"]),
-                "recv_channel": block["recv"]["channel"].currentIndex(),
+                "recv_boot_delay": (
+                    block["recv"]["boot_delay"].value() if fire_on_boot else 0
+                ),
+                "recv_rtr": int(block["recv"]["conds"][0]["rtr"].isChecked()),
+                "recv_data": self._parse_data(block["recv"]["conds"][0]["data"]),
+                "recv_channel": block["recv"]["conds"][0]["channel"].currentIndex(),
                 "recv_listen_echo": block["recv"]["listen_echo"].isChecked(),
                 "recv_fire_limit": (
                     block["recv"]["fire_spin"].value()
@@ -2843,23 +3267,42 @@ class CanTriggerTab(QWidget):
                 "fire_limit_enabled": int(row["fire_check"].isChecked()),
                 "fire_limit": row["fire_spin"].value(),
             })
+        recv = block["recv"]
+        cond0 = recv["conds"][0]
+        # Все строки условий приёма (ИЛИ). Легаси-ключи recv_* ниже
+        # дублируют первое условие — старые версии приложения читают их.
+        conds = [
+            {
+                "channel": cond["channel"].currentIndex(),
+                "bit": cond["bit"].currentIndex(),
+                "id": cond["id"].text(),
+                "dlc": cond["dlc"].value(),
+                "rtr": int(cond["rtr"].isChecked()),
+                "data": " ".join(
+                    e.text() or "X" for e in cond["data"][: cond["dlc"].value()]
+                ),
+            }
+            for cond in recv["conds"]
+        ]
         config = {
             "active": block["group"].isChecked(),
             "name": block["name"].text().strip(),
             "cache": block["cache"]["cache_check"].isChecked(),
-            "recv_channel": block["recv"]["channel"].currentIndex(),
-            "recv_bit": block["recv"]["bit"].currentIndex(),
-            "recv_id": block["recv"]["id"].text(),
-            "recv_dlc": block["recv"]["dlc"].value(),
-            "recv_rtr": int(block["recv"]["rtr"].isChecked()),
-            "recv_listen_echo": int(block["recv"]["listen_echo"].isChecked()),
-            "recv_fire_limit_enabled": int(block["recv"]["fire_check"].isChecked()),
-            "recv_fire_limit": block["recv"]["fire_spin"].value(),
-            "recv_fire_on_boot": int(block["recv"]["fire_on_boot"].isChecked()),
+            "recv_conditions": conds,
+            "recv_channel": cond0["channel"].currentIndex(),
+            "recv_bit": cond0["bit"].currentIndex(),
+            "recv_id": cond0["id"].text(),
+            "recv_dlc": cond0["dlc"].value(),
+            "recv_rtr": int(cond0["rtr"].isChecked()),
+            "recv_listen_echo": int(recv["listen_echo"].isChecked()),
+            "recv_fire_limit_enabled": int(recv["fire_check"].isChecked()),
+            "recv_fire_limit": recv["fire_spin"].value(),
+            "recv_fire_on_boot": int(recv["fire_on_boot"].isChecked()),
+            "recv_boot_delay": recv["boot_delay"].value(),
             # Пустой байт приёма — wildcard, пишется явным «X».
             "recv_data": " ".join(
                 e.text() or "X"
-                for e in block["recv"]["data"][: block["recv"]["dlc"].value()]
+                for e in cond0["data"][: cond0["dlc"].value()]
             ),
             "responses": responses,
             "cache_rows": cache_rows,
@@ -3016,6 +3459,30 @@ class CanTriggerTab(QWidget):
             )
             errors += e
             warnings += w
+            # Дополнительные условия приёма (ИЛИ): проверка ID и
+            # предупреждение о дублях внутри одного триггера.
+            seen_conds: set[tuple[int, str]] = set()
+            if rx_text:
+                seen_conds.add((rx_channel, rx_text.lower()))
+            for j, cond in enumerate(trigger.get("recv_conditions") or [], 1):
+                if not isinstance(cond, dict) or j == 1:
+                    continue  # первое условие — легаси-поля выше
+                c_text = str(cond.get("id", "")).strip()
+                if not c_text:
+                    continue
+                c_channel = int(cond.get("channel", 0))
+                errors += self._check_id_range(
+                    c_text, int(cond.get("bit", 0)),
+                    f"{label} {tr('условие {0}').format(j)}",
+                )
+                key = (c_channel, c_text.lower())
+                if key in seen_conds:
+                    warnings.append(
+                        f"{label}: " + tr("условие {0} дублирует ID приёма").format(j)
+                    )
+                seen_conds.add(key)
+                rx_map.setdefault(key, i)
+                rx_seen.setdefault(key, []).append(i)
             for j, response in enumerate(trigger.get("responses", []), 1):
                 rlabel = f"{label} {tr('ответ {0}').format(j)}"
                 tx_text = str(response.get("id", "")).strip()
@@ -3139,14 +3606,39 @@ class CanTriggerTab(QWidget):
             cache_active = bool(trigger.get("cache", False))
             block["cache"]["cache_check"].setChecked(cache_active)
             self._on_cache_active_changed(
-                index,
+                block["cache"]["cache_check"],
                 Qt.CheckState.Checked.value if cache_active else Qt.CheckState.Unchecked.value,
             )
 
-            self._set_row(block["recv"], trigger, "recv")
             recv = block["recv"]
-            recv_rtr = int(trigger.get("recv_rtr", 0))
-            recv["rtr"].setChecked(bool(recv_rtr))
+            # Условия приёма: новый формат — список recv_conditions
+            # (ИЛИ); легаси — одиночные recv_* поля первого условия.
+            conds_cfg = trigger.get("recv_conditions")
+            if not isinstance(conds_cfg, list) or not conds_cfg:
+                conds_cfg = [trigger]
+            while len(recv["conds"]) < len(conds_cfg):
+                self._add_cond_row(recv)
+            while len(recv["conds"]) > len(conds_cfg):
+                self._remove_cond_row(recv, recv["conds"][-1])
+            for cond_cfg, cond in zip(conds_cfg, recv["conds"], strict=False):
+                if cond_cfg is trigger:
+                    # Легаси-формат — плоские recv_* ключи записи.
+                    self._set_row(cond, trigger, "recv")
+                    rtr_val = bool(trigger.get("recv_rtr", 0))
+                else:
+                    cond["channel"].setCurrentIndex(int(cond_cfg.get("channel", 0)))
+                    cond["bit"].setCurrentIndex(int(cond_cfg.get("bit", 0)))
+                    cond["id"].setText(str(cond_cfg.get("id", "")))
+                    cond["dlc"].setValue(max(1, min(8, int(cond_cfg.get("dlc", 8) or 8))))
+                    self._set_data_fields(
+                        cond["data"], str(cond_cfg.get("data", "")), allow_x=True
+                    )
+                    rtr_val = bool(cond_cfg.get("rtr", 0))
+                cond["rtr"].setChecked(rtr_val)
+                self._set_data_enabled(
+                    cond["data"],
+                    0 if rtr_val else cond["dlc"].value(),
+                )
             recv["listen_echo"].setChecked(bool(trigger.get("recv_listen_echo", 1)))
             recv["fire_check"].setChecked(bool(trigger.get("recv_fire_limit_enabled", 0)))
             recv["fire_spin"].setValue(
@@ -3154,8 +3646,8 @@ class CanTriggerTab(QWidget):
             )
             # Галка блокирует поля приёма — ставим после их заполнения.
             recv["fire_on_boot"].setChecked(bool(trigger.get("recv_fire_on_boot", 0)))
-            self._set_data_enabled(
-                block["recv"]["data"], 0 if recv_rtr else block["recv"]["dlc"].value()
+            recv["boot_delay"].setValue(
+                max(0, min(9999, int(trigger.get("recv_boot_delay", 0) or 0)))
             )
             self._set_response_rows(block["response"], trigger.get("responses", []))
             self._set_cache(block["cache"], trigger)
@@ -3329,32 +3821,38 @@ class CanTriggerTab(QWidget):
                 continue
             if tx_echo and not trigger.get("recv_listen_echo", True):
                 continue
-            # Заголовок (ID/канал/RTR) и Data разделены — «смена DATA»
-            # для счётчика сработок отслеживается на уровне заголовка,
-            # как rx_header_matches/fire_track в прошивке.
-            if not self._match_rx_header(
-                trigger, frame_id, frame_channel, bool(frame.get("rtr"))
-            ):
-                continue
-            rx_state = None
+            # Условия приёма — ИЛИ: на устройстве каждое условие —
+            # отдельная запись со своим счётчиком сработок, кадр,
+            # подходящий под несколько условий, вооружает все их.
+            # PC-исполнение повторяет это: состояние лимита хранится
+            # на пару (триггер, условие).
+            conds = trigger.get("recv_conditions") or [trigger]
             rx_limit = int(trigger.get("recv_fire_limit", 0))
-            if rx_limit:
-                rx_state = self._pc_rx_state.setdefault(
-                    trigger["index"], self._new_fire_state()
-                )
-                self._fire_track_data(rx_state, data)
-            if (rx_state is not None and rx_state["suppress"]) or not self._match_rx_data(
-                trigger, data, bool(frame.get("rtr"))
-            ):
-                continue
-            if trigger["cache"]:
-                self._send_cached_frames(trigger)
-            else:
-                self._send_responses(trigger)
-            if rx_state is not None:
-                rx_state["count"] += 1
-                if rx_state["count"] >= rx_limit:
-                    rx_state["suppress"] = True
+            frame_rtr = bool(frame.get("rtr"))
+            for ci, cond in enumerate(conds):
+                # Заголовок (ID/канал/RTR) и Data разделены — «смена DATA»
+                # для счётчика сработок отслеживается на уровне
+                # заголовка, как rx_header_matches/fire_track в прошивке.
+                if not self._match_rx_header(cond, frame_id, frame_channel, frame_rtr):
+                    continue
+                rx_state = None
+                if rx_limit:
+                    rx_state = self._pc_rx_state.setdefault(
+                        (trigger["index"], ci), self._new_fire_state()
+                    )
+                    self._fire_track_data(rx_state, data)
+                if (rx_state is not None and rx_state["suppress"]) or not self._match_rx_data(
+                    cond, data, frame_rtr
+                ):
+                    continue
+                if trigger["cache"]:
+                    self._send_cached_frames(trigger)
+                else:
+                    self._send_responses(trigger)
+                if rx_state is not None:
+                    rx_state["count"] += 1
+                    if rx_state["count"] >= rx_limit:
+                        rx_state["suppress"] = True
 
     def _match_rx_header(
         self,
@@ -3525,17 +4023,18 @@ class CanTriggerTab(QWidget):
         return True
 
     def create_trigger_from_packet(self, packet: dict[str, object]) -> None:
-        """Создаёт первый триггер из пакета мониторинга."""
-        if not self._blocks and self._add_trigger_block() is None:
+        """Создаёт новый триггер из пакета мониторинга (ID/DLC/Data в приём)."""
+        block = self._add_trigger_block()
+        if block is None:
             return
-        block = self._blocks[0]
         block["group"].setChecked(True)
+        cond = block["recv"]["conds"][0]
         can_id = int(packet["id"])
-        block["recv"]["id"].setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
-        block["recv"]["bit"].setCurrentIndex(1 if can_id > 0x7FF else 0)
+        cond["id"].setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
+        cond["bit"].setCurrentIndex(1 if can_id > 0x7FF else 0)
         if "dlc" in packet:
-            block["recv"]["dlc"].setValue(packet["dlc"])
+            cond["dlc"].setValue(packet["dlc"])
         bytes_data = bytes(packet["data"])
-        for d, edit in enumerate(block["recv"]["data"]):
+        for d, edit in enumerate(cond["data"]):
             edit.setText(f"{bytes_data[d]:02X}" if d < len(bytes_data) else "")
         logger.info("Триггер создан из пакета ID=0x%X", can_id)

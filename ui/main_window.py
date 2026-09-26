@@ -340,7 +340,7 @@ class MainWindow(QMainWindow):
             for block in trigger_tab._blocks:
                 if not block["group"].isChecked():
                     block["group"].setChecked(True)
-                    block["recv"]["id"].setFocus()
+                    block["recv"]["conds"][0]["id"].setFocus()
                     break
 
     def _ensure_port_selected(self) -> bool:

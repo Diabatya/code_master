@@ -174,7 +174,7 @@ int main(void)
       memcpy(&app_crc, &metadata[12], 4U);
     }
     EventLog_AddEx((uint8_t)EVLOG_VERSION, APP_DEVICE_VERSION,
-                   6U /* версия протокола, как в CMD_SYSTEM_INFO */, app_crc);
+                   7U /* версия протокола, как в CMD_SYSTEM_INFO */, app_crc);
   }
   /* Крах прошлого сеанса — с застеканным PC вместо timestamp: полевой
    * bootloop «не стартует на активной CAN-шине» без JTAG иначе не

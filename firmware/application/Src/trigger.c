@@ -419,7 +419,8 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
       || trig->tx_rtr > 1U || trig->rx_rtr > 2U || trig->cache_enabled > 1U
       || trig->src_channel > 2U || trig->src_extended > 1U
       || trig->src_dlc > 8U
-      || (trig->rx_flags & ~(TRIGGER_F_MUTE_ECHO | TRIGGER_F_FIRE_ON_BOOT)) != 0U
+      || (trig->rx_flags & ~(TRIGGER_F_MUTE_ECHO | TRIGGER_F_FIRE_ON_BOOT
+                             | TRIGGER_F_COND_MASK)) != 0U
       || (trig->src_flags & ~TRIGGER_F_MUTE_ECHO) != 0U) {
     return 0U;
   }
@@ -877,7 +878,9 @@ void Trigger_FireOnBoot(void)
       continue;
     }
     uint8_t sends = t->tx_count ? t->tx_count : 1U;
-    if (t->delay_ms == 0U && sends == 1U) {
+    /* boot_delay_ms — пауза от старта МК до сработки (протокол 7):
+     * складывается с delay_ms записи — вооружаем с суммарным тиком. */
+    if (t->boot_delay_ms == 0U && t->delay_ms == 0U && sends == 1U) {
       if (send_response(t, i, 0U)) {
         s_fired_count++;
       } else {
@@ -885,6 +888,7 @@ void Trigger_FireOnBoot(void)
       }
     } else {
       arm_response(i, t, 0U);
+      s_pending[i].fire_at_tick += t->boot_delay_ms;
     }
   }
 }

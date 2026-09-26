@@ -20,10 +20,19 @@ TRIGGER_SIZE_V2 = 82
 # МК исполняет триггер один раз при запуске, условие приёма не
 # используется. Поддержан прошивкой с protocol>=6; на старых версиях
 # такой триггер исполняет приложение (см. _project_block_records).
+# rx_flags биты 2..4 = RX_COND: индекс условия приёма при мульти-условиях
+# (несколько строк «Приём» в UI — ИЛИ). Самой прошивке бит не нужен —
+# записи независимы; он нужен вычитке, чтобы собрать условия обратно
+# в один блок. Протокол 7 (маска разрешённых битов в trigger_fields_valid).
 _TRIGGER_FORMAT_V2 = "<IBBBIIB8s8sBBIB8sH2sBBBBIB8s8sHBBBB"
-_TRIGGER_FORMAT = "<IBBBIIB8s8sBBIB8sH2sBBBBIB8s8sHBBBHBHBBB B".replace(" ", "")
+# Хвост v3 после src_flags: boot_delay_ms(H) — «сработка после старта»:
+# пауза 0..9999 мс от запуска МК до вооружения ответа (протокол 7,
+# бывшие pad-байты — старая прошивка их игнорирует, CRC валиден), crc8(B).
+_TRIGGER_FORMAT = "<IBBBIIB8s8sBBIB8sH2sBBBBIB8s8sHBBBHBHBHB".replace(" ", "")
 TRIGGER_F_MUTE_ECHO = 0x01
 TRIGGER_F_FIRE_ON_BOOT = 0x02
+TRIGGER_F_COND_SHIFT = 2
+TRIGGER_F_COND_MASK = 0x1C
 
 # Хранилище триггеров v3 (см. firmware/PROTOCOL.md и Inc/trigger.h):
 # записи упакованы в суффикс пула страниц над config-страницей
@@ -112,7 +121,18 @@ def count_configured_triggers(triggers: list) -> int:
             or filled
         ):
             schedule = expand_schedule(filled)
-            count += len(schedule) if schedule is not None else 1
+            # Мульти-условия приёма (ИЛИ): расписание дублируется на
+            # каждое условие с заполненным ID — каждое занимает свои
+            # записи в пуле.
+            conds = trigger.get("recv_conditions")
+            n_conds = 1
+            if isinstance(conds, list):
+                n_conds = max(
+                    1,
+                    len([c for c in conds
+                         if isinstance(c, dict) and str(c.get("id", "")).strip()]),
+                )
+            count += (len(schedule) if schedule is not None else 1) * n_conds
     return count
 
 
@@ -210,6 +230,9 @@ def pack_trigger(values: dict[str, Any], fmt_version: int = TRIGGER_FORMAT_VERSI
         rx_flags = 0 if values.get("rx_listen_echo", True) else TRIGGER_F_MUTE_ECHO
         if values.get("rx_fire_on_boot"):
             rx_flags |= TRIGGER_F_FIRE_ON_BOOT
+        rx_flags |= (
+            int(values.get("rx_cond_idx", 0)) << TRIGGER_F_COND_SHIFT
+        ) & TRIGGER_F_COND_MASK
         src_flags = 0 if values.get("src_listen_echo", True) else TRIGGER_F_MUTE_ECHO
         raw = bytearray(
             struct.pack(
@@ -219,7 +242,8 @@ def pack_trigger(values: dict[str, Any], fmt_version: int = TRIGGER_FORMAT_VERSI
                 rx_flags,
                 int(values.get("src_fire_limit", 0)) & 0xFFFF,
                 src_flags,
-                0, 0, 0,
+                int(values.get("rx_boot_delay", 0)) & 0xFFFF,
+                0,
             )
         )
     raw[-1] = crc8(raw[:-1])
@@ -238,8 +262,10 @@ def unpack_trigger(payload: bytes) -> dict[str, Any]:
             "rx_fire_limit": values[28],
             "rx_listen_echo": not (values[29] & TRIGGER_F_MUTE_ECHO),
             "rx_fire_on_boot": bool(values[29] & TRIGGER_F_FIRE_ON_BOOT),
+            "rx_cond_idx": (values[29] & TRIGGER_F_COND_MASK) >> TRIGGER_F_COND_SHIFT,
             "src_fire_limit": values[30],
             "src_listen_echo": not (values[31] & TRIGGER_F_MUTE_ECHO),
+            "rx_boot_delay": values[32],
         }
     elif len(payload) == TRIGGER_SIZE_V2:
         values = struct.unpack(_TRIGGER_FORMAT_V2, payload)
@@ -251,8 +277,10 @@ def unpack_trigger(payload: bytes) -> dict[str, Any]:
             "rx_fire_limit": 0,
             "rx_listen_echo": True,
             "rx_fire_on_boot": False,
+            "rx_cond_idx": 0,
             "src_fire_limit": 0,
             "src_listen_echo": True,
+            "rx_boot_delay": 0,
         }
     else:
         raise ValueError(f"Некорректный размер trigger_t: {len(payload)}")

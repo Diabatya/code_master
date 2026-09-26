@@ -98,7 +98,30 @@ QScrollBar::handle:vertical:hover {
     background: $accent;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 14px;
+    background: $bg_button;
+    border: none;
+    border-radius: 6px;
+}
+QScrollBar::add-line:vertical:hover, QScrollBar::sub-line:vertical:hover {
+    background: $bg_button_hover;
+}
+QScrollBar::up-arrow:vertical {
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-bottom: 5px solid $text;
+    width: 0px;
     height: 0px;
+}
+QScrollBar::down-arrow:vertical {
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid $text;
+    width: 0px;
+    height: 0px;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: none;
 }
 QScrollBar:horizontal {
     background: $bg_widget;
@@ -114,7 +137,30 @@ QScrollBar::handle:horizontal:hover {
     background: $accent;
 }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 14px;
+    background: $bg_button;
+    border: none;
+    border-radius: 6px;
+}
+QScrollBar::add-line:horizontal:hover, QScrollBar::sub-line:horizontal:hover {
+    background: $bg_button_hover;
+}
+QScrollBar::left-arrow:horizontal {
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    border-right: 5px solid $text;
     width: 0px;
+    height: 0px;
+}
+QScrollBar::right-arrow:horizontal {
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    border-left: 5px solid $text;
+    width: 0px;
+    height: 0px;
+}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: none;
 }
 QTabWidget::pane {
     border: 1px solid $border;

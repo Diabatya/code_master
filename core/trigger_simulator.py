@@ -276,13 +276,18 @@ class TriggerSimulator:
             if not t.get("enabled") or not t.get("rx_fire_on_boot"):
                 continue
             sends = int(t.get("tx_count", 0)) or 1
-            if int(t.get("delay_ms", 0)) == 0 and sends == 1:
+            # boot_delay_ms — пауза от старта до вооружения (протокол 7,
+            # суммируется с delay_ms, как в прошивке).
+            boot_delay = int(t.get("rx_boot_delay", 0))
+            if boot_delay == 0 and int(t.get("delay_ms", 0)) == 0 and sends == 1:
                 responses = self._send_response(t, i, 0, now_ms)
                 if responses:
                     self.fired_count += 1
                 sent.extend(responses)
             else:
                 self._arm(i, t, 0, now_ms)
+                if boot_delay:
+                    self._pending[i]["fire_at"] += boot_delay
                 self.events.append(
                     {
                         "time_ms": now_ms,
@@ -292,6 +297,12 @@ class TriggerSimulator:
                     }
                 )
         return sent
+
+    def next_pending_time(self) -> float | None:
+        """Ближайший момент отложенной отправки (минимальный fire_at
+        вооружённых pending), None если очередь пуста."""
+        due = [p["fire_at"] for p in self._pending if p]
+        return min(due) if due else None
 
     def poll(self, now_ms: float) -> list[dict[str, Any]]:
         """Обслуживание отложенных ответов (порт Trigger_Poll)."""
@@ -337,7 +348,15 @@ def simulate(
         item = queue[idx]
         idx += 1
         t_ms = float(item["time_ms"])
-        # Обслужить отложенные ответы до этого момента.
+        # Обслужить отложенные ответы до этого момента — каждый в момент
+        # своего расписания, иначе метка времени ответа прыгала бы на
+        # время следующего кадра (boot_delay/delay_ms в показе).
+        while True:
+            due = sim.next_pending_time()
+            if due is None or due > t_ms:
+                break
+            for tx in sim.poll(due):
+                _record_tx(sim, tx, queue, tx_frames, end_ms)
         for tx in sim.poll(t_ms):
             _record_tx(sim, tx, queue, tx_frames, end_ms)
         channel0 = int(item.get("channel", 1)) - 1  # лог 1-based → firmware 0-based
@@ -353,9 +372,13 @@ def simulate(
         sim.events.append({"time_ms": t_ms, "kind": "rx", "frame": frame})
         for tx in sim.on_frame(frame, t_ms):
             _record_tx(sim, tx, queue, tx_frames, end_ms)
-    # Хвост: дослужить pending до конца окна.
-    for tx in sim.poll(end_ms):
-        _record_tx(sim, tx, queue, tx_frames, end_ms)
+    # Хвост: дослужить pending до конца окна в их моменты.
+    while True:
+        due = sim.next_pending_time()
+        if due is None or due > end_ms:
+            break
+        for tx in sim.poll(due):
+            _record_tx(sim, tx, queue, tx_frames, end_ms)
     sim.events.sort(key=lambda e: float(e["time_ms"]))
     return {"events": sim.events, "fired_count": sim.fired_count, "tx_frames": tx_frames}
 

@@ -43,7 +43,7 @@ print(
 )
 
 # auto focus data test
-edits = block["recv"]["data"]
+edits = block["recv"]["conds"][0]["data"]
 edits[0].setFocus()
 QTest.keyClicks(edits[0], "12")
 app.processEvents()
@@ -54,13 +54,14 @@ app.processEvents()
 print(f"focus after backspace: {edits[0].hasFocus()}", flush=True)
 
 # paste packet into trigger fields
+cond0 = block["recv"]["conds"][0]
 app.clipboard().setText("ID=7FF DLC=2 DATA=DE AD")
-block["recv"]["id"].setFocus()
-QTest.keyClick(block["recv"]["id"], Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+cond0["id"].setFocus()
+QTest.keyClick(cond0["id"], Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
 app.processEvents()
-print(f"trigger id after paste: {block['recv']['id'].text()}", flush=True)
-print(f"trigger dlc after paste: {block['recv']['dlc'].value()}", flush=True)
-print(f"trigger data after paste: {[e.text() for e in block['recv']['data'][:2]]}", flush=True)
+print(f"trigger id after paste: {cond0['id'].text()}", flush=True)
+print(f"trigger dlc after paste: {cond0['dlc'].value()}", flush=True)
+print(f"trigger data after paste: {[e.text() for e in cond0['data'][:2]]}", flush=True)
 
 # paste packet into monitor send fields
 app.clipboard().setText("ID=123 DLC=3 DATA=AA BB CC")

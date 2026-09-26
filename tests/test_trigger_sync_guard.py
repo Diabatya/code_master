@@ -94,7 +94,7 @@ def test_diverged_device_state_keeps_ui(tab) -> None:
 
     assert tab.sync_from_device() is False
     assert len(tab._blocks) == 1
-    assert tab._blocks[0]["recv"]["id"].text() == "111"
+    assert tab._blocks[0]["recv"]["conds"][0]["id"].text() == "111"
 
 
 def test_force_read_replaces_ui(tab) -> None:
@@ -107,7 +107,7 @@ def test_force_read_replaces_ui(tab) -> None:
 
     assert tab.sync_from_device(force=True) is True
     assert len(tab._blocks) == 1
-    assert tab._blocks[0]["recv"]["id"].text() == "333"
+    assert tab._blocks[0]["recv"]["conds"][0]["id"].text() == "333"
 
 
 def test_empty_ui_filled_from_device(tab) -> None:
@@ -439,7 +439,7 @@ def test_recv_wildcard_packs_zero_mask(tab) -> None:
     tab.set_config([])
     tab._read_device_triggers = lambda: device_records
     assert tab.sync_from_device() is True
-    data_edits = tab._blocks[0]["recv"]["data"]
+    data_edits = tab._blocks[0]["recv"]["conds"][0]["data"]
     assert data_edits[0].text() == "AA"
     assert data_edits[1].text() == "X"
     assert data_edits[2].text() == "33"
