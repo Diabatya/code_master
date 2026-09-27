@@ -9,9 +9,11 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMenu,
     QPushButton,
     QSplitter,
@@ -31,11 +33,121 @@ from models.utils import format_data_bytes, hex_to_int, int_to_hex, parse_packet
 
 logger = get_logger(__name__)
 
-MAX_TABLE_ROWS = 50_000
+# Кольцевой лимит строк трейса: 8 QTableWidgetItem на строку —
+# 50k строк это ~400k объектов и заметная доля ОЗУ на длинном приёме.
+# 20k строк по-прежнему покрывают ~20 с шины на 1000 кадр/с; старый
+# лог при этом остаётся доступным через экспорт .trace/CSV.
+MAX_TABLE_ROWS = 20_000
 
 
 def _ascii_from_data(data: bytes) -> str:
     return "".join(chr(b) if 32 <= b < 127 else "." for b in data)
+
+
+def translate_to_bytes(text: str) -> bytes:
+    """Ввод оператора → последовательность байт для поиска в DATA.
+
+    Правила (в порядке приоритета):
+      • «0x…», hex с пробелами («46 4E») или hex с буквами A–F («5464E»)
+        — разбор как hex, нечётную длину добиваем нулём слева
+        («5464E» → 05 46 4E);
+      • только цифры («345678») — десятичное число в минимальные
+        big-endian байты (345678 → 05 46 4E);
+      • остальное (латиница/символы, VIN и т.п.) — UTF-8 байты текста.
+    """
+    s = text.strip()
+    if not s:
+        return b""
+    if s.lower().startswith("0x"):
+        s = s[2:]
+        if not s:
+            return b""
+    if " " in s or "," in s:
+        # hex-токены через пробел/запятую
+        try:
+            return bytes(int(tok, 16) & 0xFF for tok in re.split(r"[ ,]+", s) if tok)
+        except ValueError:
+            return s.encode("utf-8")
+    if re.fullmatch(r"[0-9A-Fa-f]+", s):
+        if re.search(r"[A-Fa-f]", s):
+            # hex-строка с буквами — однозначно байты
+            h = s if len(s) % 2 == 0 else "0" + s
+            return bytes.fromhex(h)
+        # чистые цифры — десятичное число → big-endian
+        value = int(s, 10)
+        if value == 0:
+            return b"\x00"
+        length = max(1, (value.bit_length() + 7) // 8)
+        return value.to_bytes(length, "big")
+    # текст/VIN — байты символов
+    return s.encode("utf-8")
+
+
+class _TranslatedSearchDialog(QDialog):
+    """«Поиск с переводом»: ввод → автоперевод в байты → подсветка
+    совпадений в трейсе. Немодальный — оператор листает лог параллельно."""
+
+    def __init__(self, analyzer: "CanAnalyzer") -> None:
+        super().__init__(analyzer)
+        self._analyzer = analyzer
+        self.setWindowTitle(tr("Поиск с переводом"))
+        self.setMinimumWidth(420)
+        font = QFont("Segoe UI", 9)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        layout.addWidget(QLabel(tr(
+            "Число (345678 → 05 46 4E), hex (5464E, 46 4E, 0x05464E)\n"
+            "или текст — VIN ищется как ASCII-байты:"
+        )))
+        self._edit = QLineEdit()
+        self._edit.setFont(font)
+        self._edit.textChanged.connect(self._update_preview)
+        self._edit.returnPressed.connect(self._find)
+        layout.addWidget(self._edit)
+
+        self._preview = QLabel("→ —")
+        self._preview.setFont(QFont("Consolas", 10))
+        layout.addWidget(self._preview)
+
+        self._status = QLabel("")
+        self._status.setFont(font)
+        layout.addWidget(self._status)
+
+        row = QHBoxLayout()
+        find_btn = QPushButton(tr("Найти"))
+        next_btn = QPushButton(tr("Следующее"))
+        close_btn = QPushButton(tr("Закрыть"))
+        for b in (find_btn, next_btn, close_btn):
+            b.setFont(font)
+        find_btn.clicked.connect(self._find)
+        next_btn.clicked.connect(self._next)
+        close_btn.clicked.connect(self.close)
+        row.addWidget(find_btn)
+        row.addWidget(next_btn)
+        row.addStretch()
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+
+    def _update_preview(self, text: str) -> None:
+        seq = translate_to_bytes(text)
+        self._preview.setText(
+            "→ " + " ".join(f"{b:02X}" for b in seq) if seq else "→ —"
+        )
+
+    def _find(self) -> None:
+        found = self._analyzer.search_translated(self._edit.text())
+        if found == 0:
+            self._status.setText(tr("Не найдено"))
+        elif self._edit.text().strip():
+            self._status.setText(tr("Совпадений: {0}").format(found))
+
+    def _next(self) -> None:
+        self._analyzer.scroll_to_next_hit()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._analyzer.clear_search_marks()
+        super().closeEvent(event)
 
 
 class CanAnalyzer(QWidget):
@@ -58,6 +170,21 @@ class CanAnalyzer(QWidget):
         self._send_buttons: dict[QTableWidget, tuple] = {}
         self._send_timed: dict[QTableWidget, bool] = {}
         self._send_prev_ms: dict[QTableWidget, float | None] = {}
+        # Приём батчится: per-frame insertRow + scrollToBottom на
+        # насыщенной шине (сотни кадров/с) вместе с removeRow(0) по
+        # кольцевому буферу давали главную долю нагрузки UI-потока.
+        # Кадры копятся в очереди и вставляются одной пачкой ~10 раз/с.
+        self._pending_rows: dict[QTableWidget, list[list[str]]] = {}
+        self._pending_dirs: dict[QTableWidget, list[bool]] = {}
+        self._trace_timer = QTimer(self)
+        self._trace_timer.setInterval(100)
+        self._trace_timer.timeout.connect(self._flush_trace_rows)
+        # Подсветка найденных «Поиском с переводом» строк: item→фон,
+        # чтобы вернуть исходный цвет при следующем поиске.
+        self._search_marks: list[tuple[QTableWidgetItem, Any]] = []
+        self._search_hits: list[tuple[QTableWidget, int]] = []
+        self._search_hit_pos = 0
+        self._search_dialog: QWidget | None = None
         self._create_widgets()
         self._build_layout()
 
@@ -66,6 +193,7 @@ class CanAnalyzer(QWidget):
         self._stop_button.setText(tr("Завершить анализ"))
         self._export_csv_button.setText(tr("Экспорт CSV"))
         self._export_custom_button.setText(tr("Экспорт .trace"))
+        self._search_button.setText(tr("Поиск с переводом"))
         self._title.setText(tr("Трэйс CAN-шины"))
         for table in (self._table1, self._table2):
             table.setHorizontalHeaderLabels(
@@ -108,6 +236,16 @@ class CanAnalyzer(QWidget):
             tr("Загрузить .trace/CSV в таблицы — дальше «Отправить»/«По кадрам» воспроизводят его в шину")
         )
         self._load_button.clicked.connect(self._load_log)
+
+        self._search_button = QPushButton(tr("Поиск с переводом"))
+        self._search_button.setFont(font)
+        self._search_button.setMinimumHeight(32)
+        self._search_button.setToolTip(
+            tr("Введите число (345678 → 05 46 4E), hex (5464E / 46 4E) "
+               "или текст (VIN — ищется как ASCII-байты) — совпадения "
+               "подсвечиваются в трейсе")
+        )
+        self._search_button.clicked.connect(self._open_translated_search)
 
         self._table1 = self._build_table(font)
         self._table2 = self._build_table(font)
@@ -197,6 +335,7 @@ class CanAnalyzer(QWidget):
         top_layout.addWidget(self._export_csv_button)
         top_layout.addWidget(self._export_custom_button)
         top_layout.addWidget(self._load_button)
+        top_layout.addWidget(self._search_button)
         top_layout.addStretch()
         layout.addLayout(top_layout)
 
@@ -217,20 +356,151 @@ class CanAnalyzer(QWidget):
 
     def _stop_analysis(self) -> None:
         self._analyzing = False
+        # Остаток очереди — в таблицы, чтобы «Поиск с переводом» видел
+        # все пойманные кадры, а не только выведенные.
+        self._flush_trace_rows()
         self._start_button.setEnabled(True)
         self._stop_button.setEnabled(False)
         self._table1.scrollToBottom()
         self._table2.scrollToBottom()
         logger.info("Трэйс остановлен")
 
+    # ---- «Поиск с переводом» -------------------------------------------
+
+    def _open_translated_search(self) -> None:
+        if self._search_dialog is not None:
+            try:
+                self._search_dialog.raise_()
+                self._search_dialog.activateWindow()
+                return
+            except RuntimeError:
+                self._search_dialog = None
+        self._search_dialog = _TranslatedSearchDialog(self)
+        self._search_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._search_dialog.show()
+
+    def clear_search_marks(self) -> None:
+        """Возвращает исходные фоны подсвеченным ячейкам."""
+        for item, brush in self._search_marks:
+            try:
+                item.setBackground(brush)
+            except RuntimeError:
+                continue
+        self._search_marks.clear()
+        self._search_hits.clear()
+        self._search_hit_pos = 0
+
+    def search_translated(self, text: str) -> int:
+        """Ищет переведённые байты в DATA обеих таблиц и подсвечивает
+        строки с совпадениями. Возвращает число найденных строк."""
+        self._flush_trace_rows()  # слить очередь — ищем по всем кадрам
+        self.clear_search_marks()
+        seq = translate_to_bytes(text)
+        if not seq:
+            return 0
+        mark = QColor("#4A6B9E")
+        for table in (self._table1, self._table2):
+            for row in range(table.rowCount()):
+                data_item = table.item(row, 3)
+                if data_item is None:
+                    continue
+                try:
+                    row_bytes = bytes(
+                        int(part, 16) for part in data_item.text().split()
+                    )
+                except ValueError:
+                    continue
+                if seq not in row_bytes:
+                    continue
+                self._search_hits.append((table, row))
+                for col in range(table.columnCount()):
+                    item = table.item(row, col)
+                    if item is None:
+                        continue
+                    self._search_marks.append((item, item.background()))
+                    item.setBackground(mark)
+        if self._search_hits:
+            table, row = self._search_hits[0]
+            item = table.item(row, 3)
+            if item is not None:
+                table.scrollToItem(item)
+        self._search_hit_pos = 0
+        return len(self._search_hits)
+
+    def scroll_to_next_hit(self) -> None:
+        if not self._search_hits:
+            return
+        self._search_hit_pos = (self._search_hit_pos + 1) % len(self._search_hits)
+        table, row = self._search_hits[self._search_hit_pos]
+        item = table.item(row, 3)
+        if item is not None:
+            table.scrollToItem(item)
+
     def process_frame(self, frame: dict[str, Any]) -> None:
         if not self._analyzing:
             return
         channel = int(frame.get("channel", 0))
         table = self._table1 if channel == 1 else self._table2
-        self._add_trace_row(table, frame)
+        can_id = int(frame.get("id", 0))
+        data = bytes(frame.get("data", b""))
+        now = time.time()
+        elapsed_text = f"{now - self._start_time:.3f}"
+        last_time = self._id_last_time.get(can_id)
+        period_text = f"{int((now - last_time) * 1000)} ms" if last_time else ""
+        self._id_last_time[can_id] = now
+
+        id_text = int_to_hex(can_id, 8 if can_id > 0x7FF else 3)
+        data_text = " ".join(format_data_bytes(data))
+        ascii_text = _ascii_from_data(data.ljust(8, b"\x00"))
+        explanation = ""
+        if self._dbc_manager.is_loaded():
+            explanation = self._dbc_manager.describe_frame(can_id, data)
+
+        is_tx = bool(frame.get("tx_echo", False))
+        dir_text = "TX" if is_tx else "RX"
+        self._pending_rows.setdefault(table, []).append(
+            [elapsed_text, id_text, str(len(data)), data_text,
+             period_text, ascii_text, explanation, dir_text]
+        )
+        self._pending_dirs.setdefault(table, []).append(is_tx)
+        if not self._trace_timer.isActive():
+            self._trace_timer.start()
+
+    def _flush_trace_rows(self) -> None:
+        """Сливает накопленные кадры в таблицы одной пачкой: вставки без
+        промежуточных перерисовок, одна прокрутка на всю порцию."""
+        any_flush = False
+        for table in (self._table1, self._table2):
+            rows = self._pending_rows.pop(table, None)
+            dirs = self._pending_dirs.pop(table, None)
+            if not rows:
+                continue
+            any_flush = True
+            bg, fg = _tx_echo_colors()
+            table.setUpdatesEnabled(False)
+            try:
+                for values, is_tx in zip(rows, dirs, strict=True):
+                    if table.rowCount() >= MAX_TABLE_ROWS:
+                        table.removeRow(0)
+                    row = table.rowCount()
+                    table.insertRow(row)
+                    for col, text in enumerate(values):
+                        item = QTableWidgetItem(text)
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        if is_tx:
+                            item.setBackground(bg)
+                            item.setForeground(fg)
+                        table.setItem(row, col, item)
+            finally:
+                table.setUpdatesEnabled(True)
+            scrollbar = table.verticalScrollBar()
+            if scrollbar.value() >= scrollbar.maximum() - 4 - len(rows) * 30:
+                table.scrollToBottom()
+        if not any_flush:
+            self._trace_timer.stop()
 
     def _add_trace_row(self, table: QTableWidget, frame: dict[str, Any]) -> None:
+        """Прямая вставка строки (холодный путь — загрузка логов)."""
         can_id = int(frame.get("id", 0))
         data = bytes(frame.get("data", b""))
         now = time.time()

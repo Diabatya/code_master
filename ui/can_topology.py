@@ -73,6 +73,21 @@ class CanTopologyWidget(QWidget):
         self._timer.timeout.connect(self._animate_packets)
         self._timer.start(40)
 
+    # На насыщенной шине сотни кадров/с: скрытая вкладка всё равно
+    # получала каждый кадр и создавала по QGraphicsItem — сотни
+    # объектов/с в сцене, рост ОЗУ и тормоза UI. Кадры и анимация
+    # обрабатываются только на видимой вкладке; число летящих точек
+    # ограничено — лишние спавны просто пропускаются.
+    MAX_PACKETS = 80
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        # Чистим очередь летящих точек, чтобы вернуться на вкладку без
+        # хвоста мёртвых пакетов и не держать анимацию в фоне.
+        for packet in self._packets:
+            self._scene.removeItem(packet.item)
+        self._packets.clear()
+        super().hideEvent(event)
+
     def _create_static_scene(self) -> None:
         pen = QPen(QColor("#6C8CFF"))
         pen.setWidth(3)
@@ -131,6 +146,10 @@ class CanTopologyWidget(QWidget):
 
     def add_frame(self, frame: dict[str, object]) -> None:
         """Добавляет узел по ID и запускает анимацию пакета."""
+        # Вкладка скрыта — никакой работы: создание сотен items/с в
+        # невидимой сцене было главным источником тормозов приёма.
+        if not self.isVisible():
+            return
         channel = int(frame.get("channel", 1))
         can_id = int(frame.get("id", 0))
         if can_id == 0:
@@ -165,7 +184,7 @@ class CanTopologyWidget(QWidget):
     def _spawn_packet(self, channel: int, can_id: int) -> None:
         key = (channel, can_id)
         node = self._nodes.get(key)
-        if node is None:
+        if node is None or len(self._packets) >= self.MAX_PACKETS:
             return
         node_rect = node.rect()
         start_x = node_rect.x() + node_rect.width() / 2

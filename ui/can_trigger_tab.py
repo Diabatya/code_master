@@ -6,7 +6,7 @@ from typing import Any
 
 from PySide6.QtCore import QEvent, QPoint, QRegularExpression, Qt, QTimer, Signal
 from shiboken6 import isValid
-from PySide6.QtGui import QFont, QRegularExpressionValidator
+from PySide6.QtGui import QColor, QFont, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -58,6 +57,7 @@ from core.trigger_protocol import (
 from models.config import Config
 from models.logger import get_logger
 from models.translations import _ as tr
+from ui.can_monitor_tab import _is_dark_theme
 from models.utils import hex_to_int, int_to_hex
 from ui.hex_edit import create_data_field_widget
 from ui.id_edit import IdPasteEdit
@@ -1120,6 +1120,20 @@ class CanTriggerTab(QWidget):
         # загрузкой конфига или синхронизацией с устройством. Заводское
         # состояние — один пустой блок.
 
+    @staticmethod
+    def _apply_block_tint(group: QGroupBox, index: int) -> None:
+        """Приглушённый оттенок фона блока — оператор при прокрутке
+        различает триггеры визуально (та же идея, что цвет ID-строк
+        в мониторинге: hue по индексу, низкая насыщенность заливки)."""
+        hue = (index * 47) % 360
+        sat, light, alpha = (70, 42, 34) if _is_dark_theme() else (80, 55, 46)
+        color = QColor.fromHsl(hue, sat, light, alpha)
+        group.setStyleSheet(
+            "QGroupBox { background-color: "
+            f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()});"
+            " border-radius: 8px; }"
+        )
+
     def _create_trigger_block(self, index: int) -> dict[str, Any]:
         """Создаёт виджеты одного блока триггера (позиция = index)."""
         font = self._font
@@ -1127,6 +1141,7 @@ class CanTriggerTab(QWidget):
         group.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         group.setCheckable(True)
         group.setChecked(False)
+        self._apply_block_tint(group, index)
 
         status = QLabel(tr("Статус: не читался"))
         status.setFont(font)
@@ -1380,9 +1395,11 @@ class CanTriggerTab(QWidget):
         except ValueError:
             return
         self._remove_block_at(index)
-        # Перенумеровываем заголовки оставшихся блоков.
+        # Перенумеровываем заголовки оставшихся блоков и перетонируем
+        # фон — оттенок привязан к позиции, а не к содержимому блока.
         for i, b in enumerate(self._blocks):
             b["group"].setTitle(tr("Триггер {0}").format(i + 1))
+            self._apply_block_tint(b["group"], i)
         self._update_add_trigger_button()
         self._mark_dirty()
         self._save_config()
@@ -1495,142 +1512,6 @@ class CanTriggerTab(QWidget):
         if self._add_trigger_block() is not None:
             self._mark_dirty(len(self._blocks) - 1)
 
-    def _sim_records(self) -> list[dict[str, Any]]:
-        """Записи в формате firmware для симулятора — то же, что ушло бы
-        в МК по «Сохранить» (непустые блоки, enabled как в UI)."""
-        records = []
-        for index in range(len(self._blocks)):
-            block = self._blocks[index]
-            recv = block["recv"]
-            if recv["fire_on_boot"].isChecked():
-                conds = [(0, recv["conds"][0])]
-            else:
-                conds = [
-                    (i, c) for i, c in enumerate(recv["conds"])
-                    if self._parse_id(c["id"].text()) is not None
-                ] or [(0, recv["conds"][0])]
-            for cond_idx, cond in conds:
-                values = self._device_trigger_values(index, cond=cond)
-                values["rx_cond_idx"] = cond_idx
-                if not self._is_empty_trigger(values):
-                    records.append(values)
-        return records
-
-    def _open_simulation(self) -> None:
-        from ui.trigger_sim_dialog import TriggerSimDialog
-
-        dialog = TriggerSimDialog(self._sim_records, self)
-        dialog.exec()
-
-    @staticmethod
-    def _templates() -> dict[str, dict[str, Any]]:
-        """Готовые сценарии триггеров — заполненный блок в один клик,
-        дальше оператор правит ID/данные под себя."""
-        return {
-            tr("Эхо-ответ"): {
-                "active": True,
-                "recv_channel": 0,
-                "recv_bit": 0,
-                "recv_id": "100",
-                "recv_dlc": 8,
-                "recv_rtr": 0,
-                "recv_data": "",
-                "responses": [
-                    {
-                        "channel": 0, "bit": 0, "id": "101", "dlc": 8,
-                        "data": "00 00 00 00 00 00 00 00", "rtr": 0,
-                        "delay_before_send": 0, "delay_between": 0,
-                        "count": 1, "next_delay": 0,
-                    }
-                ],
-            },
-            tr("Маршрутизация CAN1 → CAN2"): {
-                "active": True,
-                "recv_channel": 0,
-                "recv_bit": 0,
-                "recv_id": "123",
-                "recv_dlc": 8,
-                "recv_rtr": 0,
-                "recv_data": "",
-                "responses": [
-                    {
-                        "channel": 1, "bit": 0, "id": "123", "dlc": 8,
-                        "data": "", "rtr": 0,
-                        "delay_before_send": 0, "delay_between": 0,
-                        "count": 1, "next_delay": 0,
-                    }
-                ],
-            },
-            tr("Ответ на RTR-запрос"): {
-                "active": True,
-                "recv_channel": 0,
-                "recv_bit": 0,
-                "recv_id": "200",
-                "recv_dlc": 0,
-                "recv_rtr": 1,
-                "recv_data": "",
-                "responses": [
-                    {
-                        "channel": 0, "bit": 0, "id": "200", "dlc": 8,
-                        "data": "00 00 00 00 00 00 00 00", "rtr": 0,
-                        "delay_before_send": 0, "delay_between": 0,
-                        "count": 1, "next_delay": 0,
-                    }
-                ],
-            },
-            tr("Ответ пачкой ×3 с паузой"): {
-                "active": True,
-                "recv_channel": 0,
-                "recv_bit": 0,
-                "recv_id": "210",
-                "recv_dlc": 8,
-                "recv_rtr": 0,
-                "recv_data": "",
-                "responses": [
-                    {
-                        "channel": 0, "bit": 0, "id": "211", "dlc": 8,
-                        "data": "", "rtr": 0,
-                        "delay_before_send": 50, "delay_between": 20,
-                        "count": 3, "next_delay": 0,
-                    }
-                ],
-            },
-            tr("Кэш-репитер CAN1 → CAN2"): {
-                "active": True,
-                "cache": True,
-                "recv_channel": 0,
-                "recv_bit": 0,
-                "recv_id": "300",
-                "recv_dlc": 0,
-                "recv_rtr": 0,
-                "recv_data": "",
-                "responses": [],
-                "cache_channel": 0,
-                "cache_bit": 0,
-                "cache_id": "300",
-                "cache_dlc": 8,
-                "cache_tx_channel": 1,
-                "cache_from_data": "",
-                "cache_to_data": "",
-                "cache_delay_before_send": 0,
-                "cache_delay_between": 0,
-                "cache_count": 1,
-            },
-        }
-
-    def _add_template_trigger(self, preset: dict[str, Any]) -> None:
-        """Добавляет блок триггера из шаблона (тем же путём, что загрузка
-        конфига: текущие блоки + пресет → set_config)."""
-        from copy import deepcopy
-
-        if len(self._blocks) >= TRIGGER_COUNT:
-            QMessageBox.warning(
-                self, tr("Шаблон"), tr("Страница триггеров заполнена")
-            )
-            return
-        self.set_config(self._collect_config() + [deepcopy(preset)])
-        self._mark_dirty(len(self._blocks) - 1)
-
     def _build_layout(self) -> None:
         container = QWidget()
         container_layout = QVBoxLayout(container)
@@ -1664,38 +1545,10 @@ class CanTriggerTab(QWidget):
         )
         self._paste_trigger_button.clicked.connect(self._on_paste_trigger_clicked)
 
-        self._sim_button = self._round_button(tr("Симуляция…"))
-        self._sim_button.setFont(QFont("Segoe UI", 9))
-        self._sim_button.setStyleSheet(
-            "QToolButton { background-color: #2A4A3A; color: #FFFFFF; border: none; "
-            "border-radius: 4px; padding: 6px 14px; }"
-            "QToolButton:hover { background-color: #3A6A4A; }"
-        )
-        self._sim_button.setToolTip(
-            tr("Прогнать кадры из лога через триггеры без железа")
-        )
-        self._sim_button.clicked.connect(self._open_simulation)
-
-        self._template_button = self._round_button(tr("Шаблон ▾"))
-        self._template_button.setFont(QFont("Segoe UI", 9))
-        self._template_button.setStyleSheet(
-            "QToolButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
-            "border-radius: 4px; padding: 6px 14px; }"
-            "QToolButton:hover { background-color: #4A4A6A; }"
-        )
-        template_menu = QMenu(self._template_button)
-        for title, preset in self._templates().items():
-            template_menu.addAction(
-                title, lambda _c=False, p=preset: self._add_template_trigger(p)
-            )
-        self._template_button.setMenu(template_menu)
-
         buttons_row = QHBoxLayout()
         buttons_row.setSpacing(8)
         buttons_row.addWidget(self._add_trigger_button)
         buttons_row.addWidget(self._paste_trigger_button)
-        buttons_row.addWidget(self._template_button)
-        buttons_row.addWidget(self._sim_button)
         buttons_row.addStretch()
         container_layout.addLayout(buttons_row)
         container_layout.addStretch()
@@ -3505,34 +3358,18 @@ class CanTriggerTab(QWidget):
         self, triggers: list[dict[str, Any]]
     ) -> tuple[list[str], list[str]]:
         """Проверка триггеров перед записью. Не меняет полей: ошибки
-        блокируют запись, предупреждения требуют подтверждения — необычные,
-        но допустимые конфигурации остаются возможными."""
+        блокируют запись; предупреждения — только о НЕЗАПОЛНЕННЫХ
+        обязательных полях (нет ID приёма/ответа, кэш без ID, DLC≠Data):
+        пересечения условий между разными триггерами и прочие «необычные,
+        но допустимые» конфигурации оператору не показываем (отчёт
+        мастера — диалог спамил при каждом «Сохранить»)."""
         errors: list[str] = []
         warnings: list[str] = []
-        rx_seen: dict[tuple[int, str], list[int]] = {}
-        rx_map: dict[tuple[int, str], int] = {}
-        tx_map: dict[tuple[int, str], int] = {}
         for i, trigger in enumerate(triggers, 1):
             if self._config_trigger_is_empty(trigger):
                 continue
             label = tr("Триггер {0}").format(i)
-            if not trigger.get("active", True):
-                # Полевой баг: заполненный, но выключенный триггер уходил
-                # в МК с enabled=0 — хранился, вычитывался, но никогда не
-                # срабатывал («устройство перестало работать»).
-                warnings.append(
-                    f"{label}: "
-                    + tr("заполнен, но выключен — будет записан неактивным и исполняться не будет")
-                )
-            elif not self._config_trigger_expandable(trigger):
-                # Триггер не разворачивается в записи МК (задержка >65 с)
-                # — на шине отвечает приложение и только пока оно открыто.
-                warnings.append(
-                    f"{label}: "
-                    + tr("исполняется приложением (не помещается в МК) — при закрытии программы перестанет работать")
-                )
             rx_text = str(trigger.get("recv_id", "")).strip()
-            rx_channel = int(trigger.get("recv_channel", 0))
             if trigger.get("cache"):
                 # Строки кэша (новый формат) или легаси-одиночный кэш.
                 cache_rows = trigger.get("cache_rows")
@@ -3559,9 +3396,6 @@ class CanTriggerTab(QWidget):
                 errors += self._check_id_range(
                     rx_text, int(trigger.get("recv_bit", 0)), label
                 )
-                key = (rx_channel, rx_text.lower())
-                rx_seen.setdefault(key, []).append(i)
-                rx_map[key] = i
             else:
                 warnings.append(
                     f"{label}: " + tr("нет ID приёма — условие не задано")
@@ -3573,50 +3407,26 @@ class CanTriggerTab(QWidget):
             )
             errors += e
             warnings += w
-            # Дополнительные условия приёма (ИЛИ): проверка ID и
-            # предупреждение о дублях внутри одного триггера.
-            seen_conds: set[tuple[int, str]] = set()
-            if rx_text:
-                seen_conds.add((rx_channel, rx_text.lower()))
+            # Дополнительные условия приёма (ИЛИ) — только валидация ID.
             for j, cond in enumerate(trigger.get("recv_conditions") or [], 1):
                 if not isinstance(cond, dict) or j == 1:
                     continue  # первое условие — легаси-поля выше
                 c_text = str(cond.get("id", "")).strip()
                 if not c_text:
                     continue
-                c_channel = int(cond.get("channel", 0))
                 errors += self._check_id_range(
                     c_text, int(cond.get("bit", 0)),
                     f"{label} {tr('условие {0}').format(j)}",
                 )
-                key = (c_channel, c_text.lower())
-                if key in seen_conds:
-                    warnings.append(
-                        f"{label}: " + tr("условие {0} дублирует ID приёма").format(j)
-                    )
-                seen_conds.add(key)
-                rx_map.setdefault(key, i)
-                rx_seen.setdefault(key, []).append(i)
             for j, response in enumerate(trigger.get("responses", []), 1):
                 rlabel = f"{label} {tr('ответ {0}').format(j)}"
                 tx_text = str(response.get("id", "")).strip()
-                tx_channel = int(response.get("channel", 0))
                 if not tx_text:
                     warnings.append(f"{rlabel}: " + tr("нет ID ответа"))
                 else:
                     errors += self._check_id_range(
                         tx_text, int(response.get("bit", 0)), rlabel
                     )
-                    tx_map.setdefault((tx_channel, tx_text.lower()), i)
-                    if (
-                        rx_text
-                        and tx_channel == rx_channel
-                        and tx_text.lower() == rx_text.lower()
-                    ):
-                        warnings.append(
-                            f"{rlabel}: "
-                            + tr("ответ повторяет ID приёма — самопетля на одном канале")
-                        )
                 e, w = self._check_data(
                     str(response.get("data", "")),
                     int(response.get("dlc", 0)),
@@ -3624,38 +3434,6 @@ class CanTriggerTab(QWidget):
                 )
                 errors += e
                 warnings += w
-                if response.get("rtr") and str(response.get("data", "")).strip():
-                    warnings.append(
-                        f"{rlabel}: " + tr("RTR-ответ с данными — шина их проигнорирует")
-                    )
-        for (channel, can_id), indices in rx_seen.items():
-            if len(indices) > 1:
-                warnings.append(
-                    tr("Дублирующийся ID приёма 0x{0} на CAN{1} — триггеры {2}").format(
-                        can_id.upper(), channel + 1, ", ".join(map(str, indices))
-                    )
-                )
-        pingpong_seen: set[frozenset] = set()
-        for key, rx_i in rx_map.items():
-            if key in tx_map and tx_map[key] != rx_i:
-                # A принимает то, что шлёт B — опасно только при
-                # встречной связи: проверяем, отвечает ли rx_i в приём
-                # tx_map[key].
-                other = tx_map[key]
-                other_rx = next(
-                    (k for k, v in rx_map.items() if v == other), None
-                )
-                if other_rx and other_rx in tx_map and tx_map[other_rx] == rx_i:
-                    pair = frozenset((rx_i, other))
-                    if pair in pingpong_seen:
-                        continue
-                    pingpong_seen.add(pair)
-                    warnings.append(
-                        tr(
-                            "Пинг-понг: триггер {0} отвечает в приём триггера {1} "
-                            "и наоборот — сработает ограничение эха"
-                        ).format(rx_i, other)
-                    )
         return errors, warnings
 
     def set_config(

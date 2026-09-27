@@ -288,6 +288,12 @@ class Config:
                 return loaded
         return None
 
+    def config_dir(self) -> Path:
+        """Каталог конфигурации приложения (для кластерных данных вроде
+        VAG/MQB — заметки оператора хранятся там же, но отдельными
+        файлами и не сбрасываются при обновлении версии)."""
+        return self._file_path.parent
+
     def get(self, key: str, default: Any = None) -> Any:
         """Возвращает значение настройки по ключу."""
         return self._data.get(key, default)

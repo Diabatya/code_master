@@ -6,10 +6,9 @@ from collections import deque
 from pathlib import Path
 from typing import Any, TextIO
 
-from PySide6.QtCore import QPointF, QRect, QRegularExpression, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRect, QRegularExpression, Qt, QTimer, Signal
 from shiboken6 import isValid
 from PySide6.QtGui import (
-    QAction,
     QBrush,
     QColor,
     QFont,
@@ -23,6 +22,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -57,6 +58,7 @@ from core.dbc_manager import DBCManager
 from core.dbc_parser import decode_frame
 from core.serial_manager import SerialManager
 from models.config import Config
+from models.id_notes import IdNotes
 from models.logger import get_logger
 from models.translations import _ as tr
 from models.utils import bytes_to_hex_string, format_data_bytes, hex_to_int, int_to_hex, parse_data_bytes
@@ -187,7 +189,16 @@ _DATA_HL_ROLE = Qt.ItemDataRole.UserRole + 101
 
 class SendPacketsDialog(QDialog):
     """Отправка выделенных строк истории ID: разово с паузой между
-    пакетами или циклически — до «Стоп» либо заданное число кругов."""
+    пакетами или циклически — до «Стоп» либо заданное число кругов.
+
+    Диалог немодальный (show(), не exec()): кнопка «Отправить …» в
+    диалоге истории должна гореть красным всё время активной рассылки —
+    для этого есть сигнал sending_changed. Свёрнутый и развёрнутый
+    диалог сохраняет кликабельный «Стоп»: состояние кнопок переприменяется
+    на каждом тике и при смене состояния окна (Windows могла терять
+    enabled-флаг у детей модального диалога после сворачивания)."""
+
+    sending_changed = Signal(bool)
 
     def __init__(
         self,
@@ -206,6 +217,7 @@ class SendPacketsDialog(QDialog):
         self._pos = 0
         self._round = 0
         self._sent = 0
+        self._sending = False
 
         font = QFont("Segoe UI", 9)
         layout = QVBoxLayout(self)
@@ -264,24 +276,30 @@ class SendPacketsDialog(QDialog):
         self._stop_button.clicked.connect(self._stop_sending)
         close_button.clicked.connect(self.reject)
 
+    def _set_sending(self, sending: bool) -> None:
+        """Единое место смены состояния: кнопки + сигнал «Отправить …»
+        диалога истории (тот краснеет, пока идёт циклическая рассылка)."""
+        self._sending = sending
+        self._start_button.setEnabled(not sending)
+        self._stop_button.setEnabled(sending)
+        self.sending_changed.emit(sending)
+
     def _start_sending(self) -> None:
         if not self._packets:
             return
         self._pos = 0
         self._round = 0
         self._sent = 0
-        self._start_button.setEnabled(False)
-        self._stop_button.setEnabled(True)
+        self._set_sending(True)
         self._send_one()
         # «Разово» из одной строки заканчивается прямо в _send_one —
         # таймер запускаем, только если отправка не завершена.
-        if self._stop_button.isEnabled():
+        if self._sending:
             self._timer.start(max(1, self._pause_spin.value()))
 
     def _stop_sending(self) -> None:
         self._timer.stop()
-        self._start_button.setEnabled(True)
-        self._stop_button.setEnabled(False)
+        self._set_sending(False)
         if self._sent:
             self._status_label.setText(
                 tr("Отправлено: {0} — остановлено").format(self._sent)
@@ -302,17 +320,39 @@ class SendPacketsDialog(QDialog):
                 and self._round >= self._rounds_spin.value()
             ):
                 self._timer.stop()
-                self._start_button.setEnabled(True)
-                self._stop_button.setEnabled(False)
+                self._set_sending(False)
                 self._status_label.setText(
                     tr("Отправлено: {0} — готово").format(self._sent)
                 )
+        # Windows у свёрнутого и развёрнутого модального диалога могла
+        # потерять enabled-флаг «Стоп» — переприменяем на каждом тике.
+        self._start_button.setEnabled(not self._sending)
+        self._stop_button.setEnabled(self._sending)
 
     def _tick(self) -> None:
         self._send_one()
 
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        # После сворачивания/разворачивания (WindowStateChange) и смены
+        # активности восстанавливаем кнопки по флагу _sending — «Стоп»
+        # остаётся кликабельным, пока рассылка жива.
+        super().changeEvent(event)
+        if event.type() in (
+            QEvent.Type.WindowStateChange,
+            QEvent.Type.ActivationChange,
+        ):
+            self._start_button.setEnabled(not self._sending)
+            self._stop_button.setEnabled(self._sending)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._start_button.setEnabled(not self._sending)
+        self._stop_button.setEnabled(self._sending)
+
     def closeEvent(self, event) -> None:  # noqa: N802
         self._timer.stop()
+        # Кнопка «Отправить …» диалога истории должна погаснуть.
+        self._set_sending(False)
         super().closeEvent(event)
 
 
@@ -653,10 +693,56 @@ class _PercentGraph(QWidget):
         painter.end()
 
 
+class _HistoryByteDelegate(QStyledItemDelegate):
+    """Рисует ячейки байтовых колонок истории ID.
+
+    Включённый в анализ байт — белый шрифт; выключенный — тёмно-жёлтый;
+    при наведении курсора на галочку «N-байт» вся колонка подсвечивается
+    голубым фоном (без изменения item'ов — только при отрисовке)."""
+
+    HOVER_BG = QColor("#3F6FA0")
+    DISABLED_FG = QColor("#9A7B00")
+    ENABLED_FG = QColor("#FFFFFF")
+
+    def __init__(self, dialog: "IdHistoryDialog") -> None:
+        super().__init__(dialog)
+        self._dialog = dialog
+
+    def paint(self, painter, option, index) -> None:  # noqa: N802
+        byte_idx = index.column() - IdHistoryDialog.FIRST_BYTE_COL
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        # Заливка до drawControl стилем перекрывалась бы фоном ячейки —
+        # голубой фон отдаём стилю через backgroundBrush.
+        if byte_idx == self._dialog._hover_byte:
+            opt.backgroundBrush = QBrush(self.HOVER_BG)
+        opt.text = ""
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        style.drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget
+        )
+        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        if not text:
+            return
+        checked = (
+            0 <= byte_idx < len(self._dialog._byte_checks)
+            and self._dialog._byte_checks[byte_idx].isChecked()
+        )
+        fg = self.ENABLED_FG if checked else self.DISABLED_FG
+        painter.save()
+        painter.setFont(opt.font)
+        painter.setPen(fg)
+        painter.drawText(
+            opt.rect, Qt.AlignmentFlag.AlignCenter, text
+        )
+        painter.restore()
+
+
 class IdHistoryDialog(QDialog):
     """История одного CAN ID: таблица «время → data» + живой график %."""
 
     MAX_ROWS = 2000
+    FIRST_BYTE_COL = 2  # колонки 2..9 — байты DATA 0..7
 
     def __init__(
         self,
@@ -668,15 +754,19 @@ class IdHistoryDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.can_id = can_id
+        self._channel = channel
         # Разовая отправка строки на шину для тестирования — колбэк
         # монитора (can_id, data, dlc, rtr). None — без устройства.
         self._send_callback = send_callback
+        self._send_dialog: SendPacketsDialog | None = None
+        self._notes = IdNotes()
+        self._hover_byte = -1
         self.setWindowTitle(tr("История ID 0x{0:X} — CAN{1}").format(can_id, channel))
         # Окно анализа — сразу на весь доступный экран: таблица и
         # график читаются без прокрутки, кнопки остаются видимыми.
         self.setWindowState(Qt.WindowState.WindowMaximized)
         # Сырые сэмплы для пересчёта при смене набора байт графика
-        # (чекбоксы «Байт N», «весь DATA» = все отмечены) и инверсии.
+        # (чекбоксы «N-байт») и инверсии.
         self._samples_raw: list[tuple[float, bytes, bool, int]] = []
 
         font = QFont("Segoe UI", 9)
@@ -684,17 +774,62 @@ class IdHistoryDialog(QDialog):
         layout.setSpacing(6)
 
         self._table = QTableWidget()
-        self._table.setColumnCount(3)
-        self._table.setHorizontalHeaderLabels([tr("Время"), tr("DLC"), tr("Data")])
+        # Время + DLC + 8 колонок по байту — галочки «N-байт» под таблицей
+        # выравниваются ровно под каждой колонкой байта.
+        self._table.setColumnCount(10)
+        self._table.setHorizontalHeaderLabels(
+            [tr("Время"), tr("DLC")] + [str(i) for i in range(8)]
+        )
         self._table.setFont(font)
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Interactive
+        )
+        self._table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Interactive
+        )
+        self._table.setColumnWidth(0, 110)
+        self._table.setColumnWidth(1, 46)
+        for col in range(2, 10):
+            self._table.horizontalHeader().setSectionResizeMode(
+                col, QHeaderView.ResizeMode.Stretch
+            )
         # Мультивыбор строк — «Отправить …» шлёт все выделенные пакеты.
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_table_menu)
+        # Цвет байта (белый=в анализе, тёмно-жёлтый=выключен) и голубая
+        # подсветка колонки при наведении на её галочку — в делегате.
+        self._byte_delegate = _HistoryByteDelegate(self)
+        for col in range(self.FIRST_BYTE_COL, 10):
+            self._table.setItemDelegateForColumn(col, self._byte_delegate)
+
+        # Строка из 8 галочек «0-байт» … «7-байт» строго под колонками
+        # байтов: позиции синхронизируются с геометрией заголовков
+        # таблицы (ресайз/скролл). По умолчанию все включены.
+        self._byte_strip = QWidget(self)
+        self._byte_strip.setFixedHeight(26)
+        self._byte_checks: list[QCheckBox] = []
+        for i in range(8):
+            cb = QCheckBox(tr("{0}-байт").format(i), self._byte_strip)
+            cb.setFont(QFont("Segoe UI", 7))
+            cb.setChecked(True)
+            cb.setToolTip(tr("Байт {0} в анализе, сумме и на графике").format(i))
+            cb.installEventFilter(self)
+            cb.toggled.connect(lambda _c, _i=i: self._on_bytes_changed())
+            self._byte_checks.append(cb)
+        self._table.horizontalHeader().sectionResized.connect(
+            lambda *_a: self._sync_byte_checks()
+        )
+        self._table.horizontalScrollBar().valueChanged.connect(
+            lambda _v: self._sync_byte_checks()
+        )
+        self._table.horizontalScrollBar().rangeChanged.connect(
+            lambda *_a: self._sync_byte_checks()
+        )
+        self._table.installEventFilter(self)
 
         self._percent_label = QLabel("0%")
         self._percent_label.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
@@ -714,33 +849,19 @@ class IdHistoryDialog(QDialog):
         self._zoom_label.setFont(font)
         self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
 
+        self._note_button = QPushButton(tr("Пояснение"))
+        self._note_button.setFont(font)
+        self._note_button.setToolTip(
+            tr("Текстовая заметка к этому ID — хранится на ПК (VAG/MQB), "
+               "в мониторинге такой ID помечается «+»")
+        )
+        self._note_button.clicked.connect(self._edit_note)
+
         self._invert_button = QPushButton(tr("Инвертирование"))
         self._invert_button.setFont(font)
         self._invert_button.setCheckable(True)
         self._invert_button.setToolTip(tr("FF..FF = 0% внизу, 00..00 = 100% вверху"))
         self._invert_button.toggled.connect(self._on_invert_toggled)
-
-        # Выбор байтов источника графика: выпадающее меню с галочками
-        # «Байт 0..7». Процент и график считаются от СУММЫ отмеченных
-        # байт; ни одного — трактуем как «весь DATA» (все байты).
-        self._byte_actions: list[Any] = []
-        self._source_button = QPushButton(tr("Весь DATA ▾"))
-        self._source_button.setFont(font)
-        self._source_button.setToolTip(
-            tr("Байты DATA для графика и процентов — отметьте нужные")
-        )
-        source_menu = QMenu(self._source_button)
-        for i in range(8):
-            # Акции родим от диалога, а не от меню: на Windows нативное
-            # меню может уничтожаться с дочерними QAction, пока сам
-            # диалог ещё жив и продолжает получать кадры.
-            action = QAction(tr("Байт {0}").format(i), self)
-            action.setCheckable(True)
-            action.setChecked(True)
-            action.toggled.connect(lambda _c, idx=i: self._on_bytes_changed())
-            source_menu.addAction(action)
-            self._byte_actions.append(action)
-        self._source_button.setMenu(source_menu)
 
         self._export_button = QPushButton(tr("Экспорт CSV"))
         self._export_button.setFont(font)
@@ -771,9 +892,9 @@ class IdHistoryDialog(QDialog):
         bottom.addWidget(QLabel("="))
         bottom.addWidget(self._value_label)
         bottom.addSpacing(16)
-        bottom.addWidget(self._source_button)
         bottom.addWidget(self._zoom_label)
         bottom.addWidget(self._zoom_slider, 1)
+        bottom.addWidget(self._note_button)
         bottom.addWidget(self._invert_button)
         bottom.addWidget(self._calc_button)
         bottom.addWidget(self._copy_row_button)
@@ -781,6 +902,7 @@ class IdHistoryDialog(QDialog):
         bottom.addWidget(self._export_button)
 
         layout.addWidget(self._table, 1)
+        layout.addWidget(self._byte_strip)
         layout.addWidget(self._graph)
         layout.addLayout(bottom)
 
@@ -803,11 +925,56 @@ class IdHistoryDialog(QDialog):
         self._repaint_timer.timeout.connect(self._graph.update)
         self._repaint_timer.start(250)
 
+    def _sync_byte_checks(self) -> None:
+        """Расставляет галочки «N-байт» ровно под своими колонками
+        таблицы (пересчёт при ресайзе и горизонтальной прокрутке)."""
+        strip_w = self._byte_strip.width()
+        vp_x = self._table.viewport().x()
+        for i, cb in enumerate(self._byte_checks):
+            if not isValid(cb):
+                continue
+            col = self.FIRST_BYTE_COL + i
+            x = vp_x + self._table.columnViewportPosition(col)
+            w = self._table.columnWidth(col)
+            cb_w = min(cb.sizeHint().width(), max(18, w))
+            cb.setGeometry(
+                x + max(0, (w - cb_w) // 2), 0, cb_w, self._byte_strip.height()
+            )
+        self._byte_strip.setMinimumWidth(strip_w)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if watched is self._table and event.type() == QEvent.Type.Resize:
+            self._sync_byte_checks()
+            return False
+        # Наведение на галочку «N-байт» подсвечивает её колонку голубым;
+        # уход курсора — снимает подсветку (делегат перерисует видимые
+        # строки — клик/тогглинг штатно уходит дальше, возвращаем False).
+        try:
+            idx = self._byte_checks.index(watched)
+        except ValueError:
+            return False
+        if event.type() == QEvent.Type.Enter:
+            self._hover_byte = idx
+            self._table.viewport().update()
+        elif event.type() == QEvent.Type.Leave:
+            self._hover_byte = -1
+            self._table.viewport().update()
+        return False
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._sync_byte_checks()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        # Геометрия колонок достоверна после первого показа.
+        QTimer.singleShot(0, self._sync_byte_checks)
+
     def _selected_bytes(self) -> list[int] | None:
         """Индексы отмеченных байт DATA; все/ни одного — None (=весь)."""
         sel = [
-            i for i, a in enumerate(self._byte_actions)
-            if isValid(a) and a.isChecked()
+            i for i, cb in enumerate(self._byte_checks)
+            if isValid(cb) and cb.isChecked()
         ]
         return sel if 0 < len(sel) < 8 else None
 
@@ -827,11 +994,19 @@ class IdHistoryDialog(QDialog):
         row = self._table.rowCount()
         self._table.insertRow(row)
         timestamp = time.strftime("%H:%M:%S", time.localtime(t)) + f".{int((t % 1) * 1000):03d}"
-        data_text = "rtr" if rtr else " ".join(format_data_bytes(data))
-        for col, text in enumerate((timestamp, str(dlc), data_text)):
+        for col, text in enumerate((timestamp, str(dlc))):
             item = QTableWidgetItem(text)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._table.setItem(row, col, item)
+        if rtr:
+            rtr_item = QTableWidgetItem("rtr")
+            self._table.setItem(row, self.FIRST_BYTE_COL, rtr_item)
+        else:
+            for i in range(8):
+                text = f"{data[i]:02X}" if i < len(data) else ""
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._table.setItem(row, self.FIRST_BYTE_COL + i, item)
         self._samples_raw.append((t, bytes(data), rtr, dlc))
         if len(self._samples_raw) > self.MAX_ROWS:
             del self._samples_raw[: len(self._samples_raw) - self.MAX_ROWS]
@@ -885,6 +1060,11 @@ class IdHistoryDialog(QDialog):
     def _open_send_dialog(self) -> None:
         """«Отправить …»: выделенные строки → разово с паузой или
         циклически (до «Стоп»/N кругов по кругу)."""
+        # Открытый диалог рассылки — поднимаем его, а не плодим второй.
+        if self._send_dialog is not None and isValid(self._send_dialog):
+            self._send_dialog.raise_()
+            self._send_dialog.activateWindow()
+            return
         rows = sorted({i.row() for i in self._table.selectedIndexes()})
         if not rows:
             row = self._table.currentRow()
@@ -899,20 +1079,65 @@ class IdHistoryDialog(QDialog):
         if not packets:
             show_toast(self, tr("Выберите строку истории"), success=False)
             return
-        SendPacketsDialog(self.can_id, packets, self._send_callback, self).exec()
+        dialog = SendPacketsDialog(self.can_id, packets, self._send_callback, self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.sending_changed.connect(self._on_sending_changed)
+        dialog.destroyed.connect(self._on_send_dialog_destroyed)
+        self._send_dialog = dialog
+        # Немодально: «Стоп» должен оставаться кликабельным после
+        # сворачивания/разворачивания, а «Отправить …» — гореть красным.
+        dialog.show()
+
+    def _on_sending_changed(self, sending: bool) -> None:
+        """Красная кнопка «Отправить …», пока идёт циклическая рассылка."""
+        if sending:
+            self._send_row_button.setStyleSheet(
+                "background-color: #C62828; color: #FFFFFF; font-weight: bold;"
+            )
+        else:
+            self._send_row_button.setStyleSheet("")
+
+    def _on_send_dialog_destroyed(self) -> None:
+        self._send_dialog = None
+        self._on_sending_changed(False)
+
+    def _edit_note(self) -> None:
+        """«Пояснение»: заметка к этому ID, кэшируется на ПК в
+        <config>/VAG/MQB/notes.json — переживает обновления приложения."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(
+            tr("Пояснение к ID 0x{0:X}").format(self.can_id)
+        )
+        dialog.setMinimumSize(420, 220)
+        vbox = QVBoxLayout(dialog)
+        vbox.addWidget(
+            QLabel(
+                tr("Текст/символы, описывающие этот ID (например, «скорость, "
+                   "км/ч» или «VIN, часть 2»):")
+            )
+        )
+        edit = QPlainTextEdit()
+        edit.setPlainText(self._notes.get(self._channel, self.can_id))
+        vbox.addWidget(edit)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        vbox.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._notes.set(self._channel, self.can_id, edit.toPlainText())
+        # «+» в колонке «Пояснение» монитора — сразу, не дожидаясь
+        # следующего кадра этого ID.
+        parent = self.parent()
+        refresh = getattr(parent, "_refresh_note_marker", None)
+        if callable(refresh):
+            refresh(self.can_id)
 
     def _on_bytes_changed(self) -> None:
-        """Смена набора байт графика — чекбоксы «Байт N» в меню."""
-        sel = [
-            i for i, a in enumerate(self._byte_actions)
-            if isValid(a) and a.isChecked()
-        ]
-        if len(sel) == 8 or not sel:
-            self._source_button.setText(tr("Весь DATA ▾"))
-        else:
-            self._source_button.setText(
-                tr("Байты {0} ▾").format(",".join(str(i) for i in sel))
-            )
+        """Смена набора байт — пересчёт процента, суммы и графика."""
         self._graph.set_samples(
             [
                 (t, self._current_pct(data, rtr, dlc))
@@ -925,6 +1150,8 @@ class IdHistoryDialog(QDialog):
             shown = 100.0 - pct if self._invert_button.isChecked() else pct
             self._percent_label.setText(f"{shown:.1f}%")
             self._value_label.setText(str(self._current_sum(data, rtr, dlc)))
+        # Цвет байтов в таблице (белый/тёмно-жёлтый) — перерисовка.
+        self._table.viewport().update()
 
     def _on_zoom_changed(self, value: int) -> None:
         self._zoom_label.setText(tr("Развёртка: {0} с").format(value))
@@ -1071,6 +1298,9 @@ class CanChannelMonitor(QWidget):
         # диалога «История ID» из контекстного меню таблицы.
         self._id_history: dict[int, deque] = {}
         self._history_dialogs: list[IdHistoryDialog] = []
+        # Заметки оператора к ID (кластер <config>/VAG/MQB) — колонка
+        # «Пояснение» помечает такие ID символом «+».
+        self._notes = IdNotes()
         self._highlight_timers: dict[int, QTimer] = {}
         self._ignored_ids: set[int] = set()
         # Входная очередь кадров: при потоке с двух CAN один кадр = одно
@@ -1771,6 +2001,10 @@ class CanChannelMonitor(QWidget):
     ) -> list[str]:
         id_width = 8 if frame_id > 0x7FF else 3
         signals = "" if rtr else self._format_signals(frame_id, data)
+        # «+» — у этого ID есть заметка оператора (кнопка «Пояснение»
+        # в диалоге истории, хранится на ПК в VAG/MQB/notes.json).
+        if self._notes.has(self._channel, frame_id):
+            signals = "+ " + signals if signals else "+"
         return [
             int_to_hex(frame_id, id_width),
             str(dlc),
@@ -1807,7 +2041,12 @@ class CanChannelMonitor(QWidget):
         # данных, ×1.15 на битстаффинг, +3 бита interframe.
         self._packet_times.append((now, int((45 + dlc * 8) * 1.15) + 3))
         self._last_packet_time = now
-        self._id_data_variants.setdefault(frame_id, set()).add(data)
+        # Лимит вариантов на ID: кадры с rolling-counter/счётчиком
+        # дают новый DATA на каждом приёме — без потолка set рос бы
+        # вечно и съедал ОЗУ на длинных сессиях приёма.
+        variants = self._id_data_variants.setdefault(frame_id, set())
+        if len(variants) < 256:
+            variants.add(data)
         self._id_history.setdefault(frame_id, deque(maxlen=2000)).append(
             (now, data, rtr, dlc)
         )
@@ -2203,6 +2442,22 @@ class CanChannelMonitor(QWidget):
         )
         dialog.show()
 
+    def _refresh_note_marker(self, can_id: int) -> None:
+        """Обновляет «+» в колонке «Пояснение» после записи заметки из
+        диалога истории — не дожидаясь следующего кадра этого ID."""
+        row = self._id_to_row.get(can_id)
+        if row is None:
+            return
+        item = self._table.item(row, 6)
+        if item is None:
+            return
+        text = item.text()
+        if self._notes.has(self._channel, can_id):
+            if not text.startswith("+"):
+                item.setText("+ " + text if text else "+")
+        elif text.startswith("+"):
+            item.setText(text[1:].strip())
+
     def _show_bitmap(self, row: int) -> None:
         id_item = self._table.item(row, 0)
         data_item = self._table.item(row, 2)
@@ -2318,10 +2573,12 @@ class CanMonitorTab(QWidget):
         # Только бод-рейты, которые bxCAN реально умеет при APB1=36 МГц
         # (configure_bit_timing в прошивке): 33.3 и 800 кбит/с аппаратно
         # недостижимы на этом кварце — не показываем нерабочие варианты.
-        for preset in ["10", "20", "50", "100", "125", "250", "500", "1000"]:
+        # 83.3333 достижима точно: 36 МГц/(24·18 tq) = 83333.33 бод; на
+        # провод и в конфиг она уходит как 83 (целые кбит/с в uint16).
+        for preset in ["10", "20", "50", "83.3333", "100", "125", "250", "500", "1000"]:
             self._can1_speed_combo.addItem(preset)
         self._can1_speed_combo.setMaxVisibleItems(12)
-        self._can1_speed_combo.lineEdit().setValidator(QDoubleValidator(0.1, 10000.0, 1, self))
+        self._can1_speed_combo.lineEdit().setValidator(QDoubleValidator(0.1, 10000.0, 4, self))
         self._can1_speed_combo.lineEdit().setPlaceholderText(tr("кбит/с"))
 
         self._can1_speed_button = QPushButton()
@@ -2346,10 +2603,10 @@ class CanMonitorTab(QWidget):
         self._can2_speed_combo.setFont(compact_font)
         self._can2_speed_combo.setEditable(True)
         self._can2_speed_combo.setFixedWidth(100)
-        for preset in ["10", "20", "50", "100", "125", "250", "500", "1000"]:
+        for preset in ["10", "20", "50", "83.3333", "100", "125", "250", "500", "1000"]:
             self._can2_speed_combo.addItem(preset)
         self._can2_speed_combo.setMaxVisibleItems(12)
-        self._can2_speed_combo.lineEdit().setValidator(QDoubleValidator(0.1, 10000.0, 1, self))
+        self._can2_speed_combo.lineEdit().setValidator(QDoubleValidator(0.1, 10000.0, 4, self))
         self._can2_speed_combo.lineEdit().setPlaceholderText(tr("кбит/с"))
 
         self._can2_speed_button = QPushButton()
@@ -2506,6 +2763,8 @@ class CanMonitorTab(QWidget):
         """Форматирует скорость в кбит/с для отображения в комбобоксе."""
         if speed_bps == 33300:
             return "33.3"
+        if speed_bps == 83000:
+            return "83.3333"
         if speed_bps and speed_bps % 1000 == 0:
             return str(speed_bps // 1000)
         if speed_bps:

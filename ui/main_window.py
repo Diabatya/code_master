@@ -6,7 +6,17 @@ import sys
 import traceback
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QKeySequence, QShortcut
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -41,6 +51,49 @@ from ui.help_widget import show_help
 from ui.settings_window import ConnectionTab, SettingsWindow
 
 logger = get_logger(__name__)
+
+
+def _reload_icon(color: QColor, size: int = 96) -> QIcon:
+    """Жирный векторный значок «обновить»: дуга почти в полный круг
+    со стрелкой-наконечником. Emoji «🔄» не реагирует на font-weight,
+    а мастер просил стрелки жирнее — рисуем сами."""
+    import math
+
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(color)
+    pen.setWidthF(size * 0.10)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    margin = size * 0.24
+    rect = pm.rect().adjusted(margin, margin, -margin, -margin).toRectF()
+    cx, cy = rect.center().x(), rect.center().y()
+    r = rect.width() / 2
+    # Дуга против часовой от θ=30° до θ=330° — разрыв справа, как у ↻.
+    start_deg, end_deg = 30.0, 330.0
+    p.drawArc(rect, int(start_deg * 16), int((end_deg - start_deg) * 16))
+    # Наконечник в конце дуги: апекс чуть за точкой конца по касательной
+    # (направление движения — вверх-вправо), основание перпендикулярно.
+    th = math.radians(end_deg)
+    ex, ey = cx + r * math.cos(th), cy - r * math.sin(th)
+    tx, ty = -math.sin(th), -math.cos(th)          # касательная (CCW)
+    nx, ny = -math.cos(th), math.sin(th)          # нормаль к центру
+    head = size * 0.26
+    ax, ay = ex + tx * head * 0.55, ey + ty * head * 0.55
+    bx, by = ex - tx * head * 0.45, ey - ty * head * 0.45
+    half = head * 0.42
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(color)
+    path = QPainterPath()
+    path.moveTo(ax, ay)
+    path.lineTo(bx + nx * half, by + ny * half)
+    path.lineTo(bx - nx * half, by - ny * half)
+    path.closeSubpath()
+    p.drawPath(path)
+    p.end()
+    return QIcon(pm)
 
 
 class MainWindow(QMainWindow):
@@ -140,10 +193,21 @@ class MainWindow(QMainWindow):
         self._update_check_button.clicked.connect(self._on_check_updates_clicked)
 
         # Главные кнопки в теле окна
-        self._update_button = QPushButton("🔄 " + tr("Обновить"))
+        self._update_button = QPushButton()
         self._update_button.setFixedSize(240, 100)
-        self._update_button.setFont(QFont("Segoe UI", 16))
+        # Только жирные стрелки, без текста и фона: emoji «🔄» не
+        # реагирует на font-weight — значок рисуется векторно.
+        self._update_button.setIcon(_reload_icon(QColor("#DCE4FF")))
+        self._update_button.setIconSize(self._update_button.size() * 0.62)
         self._update_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Только жирные стрелки без фона — голубая плашка выпадала из
+        # общего стиля стартового экрана (отчёт мастера).
+        self._update_button.setStyleSheet(
+            "QPushButton { background: transparent; border: none; }"
+            "QPushButton:hover { background: rgba(108, 140, 255, 40); border-radius: 12px; }"
+            "QPushButton:pressed { background: rgba(108, 140, 255, 70); border-radius: 12px; }"
+        )
+        self._update_button.setToolTip(tr("Обновить"))
         self._update_button.clicked.connect(self._on_update_clicked)
 
         self._configure_button = QPushButton("⚙️ " + tr("Настроить"))
@@ -519,7 +583,7 @@ class MainWindow(QMainWindow):
         self._logs_button.setText("📄 " + tr("Логи"))
         self._help_button.setToolTip(tr("Помощь"))
         self._update_check_button.setToolTip(tr("Проверка обновлений"))
-        self._update_button.setText("🔄 " + tr("Обновить"))
+        self._update_button.setToolTip(tr("Обновить"))
         self._configure_button.setText("⚙️ " + tr("Настроить"))
         self._flash_button.setText(tr("Прошить\nмикроконтроллер"))
         self._flash_button.setToolTip(tr("Открыть окно прошивки"))

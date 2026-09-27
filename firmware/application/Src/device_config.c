@@ -258,7 +258,8 @@ static uint8_t is_supported_can_baud(uint32_t baud_kbps)
 {
   switch (baud_kbps) {
     case 1000U: case 500U: case 250U: case 125U:
-    case 100U:  case 50U:  case 20U:  case 10U:
+    case 100U:  case 83U:  case 50U:  case 20U:
+    case 10U:
       return 1U;
     default:
       return 0U;

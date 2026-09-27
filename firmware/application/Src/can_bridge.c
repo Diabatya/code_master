@@ -418,6 +418,7 @@ static uint8_t configure_bit_timing(CAN_HandleTypeDef *hcan, uint32_t baud_kbps)
     case 250:  prescaler = 8;  break;
     case 125:  prescaler = 16; break;
     case 100:  prescaler = 20; break;
+    case 83:   prescaler = 24; break; /* 36 МГц/(24·18tq) = 83.3333 кбит/с */
     case 50:   prescaler = 40; break;
     case 20:   prescaler = 100; break;
     case 10:   prescaler = 200; break;
@@ -443,7 +444,8 @@ static uint8_t is_supported_baud(uint32_t baud_kbps)
 {
   switch (baud_kbps) {
     case 1000: case 500: case 250: case 125:
-    case 100:  case 50:  case 20:  case 10:
+    case 100:  case 83:  case 50:  case 20:
+    case 10:
       return 1U;
     default:
       return 0U;

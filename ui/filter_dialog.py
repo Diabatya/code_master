@@ -3,7 +3,7 @@
 from typing import Any
 from collections.abc import Callable
 
-from PySide6.QtCore import QEvent, QRegularExpression, Qt, QTimer
+from PySide6.QtCore import QRegularExpression, Qt, QTimer
 from PySide6.QtGui import QFont, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -26,6 +26,16 @@ from PySide6.QtWidgets import (
 from models.translations import _ as tr
 from models.utils import hex_to_int, int_to_hex, parse_data_bytes
 from ui.hex_edit import HexDataEdit
+
+
+class _RowCheckBox(QCheckBox):
+    """Галка-строка списка ID: hitButton в Qt (стиле macOS и ряде
+    других) ограничен областью индикатора+текста — при растянутом на
+    всю строку виджете клики правее лейбла игнорировались. Считаем
+    попаданием весь rect: клик в любую точку строки переключает."""
+
+    def hitButton(self, pos) -> bool:  # noqa: N802
+        return self.rect().contains(pos)
 
 
 class FilterDialog(QDialog):
@@ -77,11 +87,12 @@ class FilterDialog(QDialog):
 
         self._accepted_list = QListWidget()
         self._accepted_list.setFont(self._font)
-        # Галка размером ~16px — под клик «по строке» мастер не
-        # попадал: переключаем состояние по клику в любое место строки
-        # (eventFilter — позиция из события, QCursor.pos() в offscreen
-        # и под Windows DPI врёт).
-        self._accepted_list.viewport().installEventFilter(self)
+        # Галка — настоящий QCheckBox через setItemWidget с расширенным
+        # hitButton (_RowCheckBox): клик по любой точке строки
+        # переключает. Раньше переключение имитировалось eventFilter'ом
+        # по геометрии индикатора (~24px) — под Windows/DPI
+        # предполагаемая зона расходилась с реальным checkRect делегата,
+        # и клик по краю галки срабатывал дважды = «не кликабельны».
 
         accepted_tab = QWidget()
         alayout = QVBoxLayout(accepted_tab)
@@ -252,36 +263,17 @@ class FilterDialog(QDialog):
         rule = self._rules_widgets.pop()
         rule["widget"].deleteLater()
 
-    def eventFilter(self, watched, event) -> bool:  # noqa: N802
-        """Клик по строке списка (не по индикатору) переключает галку.
-
-        Фильтр срабатывает ДО нативной обработки Qt: в зоне индикатора
-        (~24px слева) ничего не делаем — переключит сам Qt; по остальной
-        строке переключаем вручную.
-        """
-        if (
-            watched is self._accepted_list.viewport()
-            and event.type() == QEvent.Type.MouseButtonRelease
-            and event.button() == Qt.MouseButton.LeftButton
-        ):
-            item = self._accepted_list.itemAt(event.position().toPoint())
-            if item is not None:
-                rect = self._accepted_list.visualItemRect(item)
-                if event.position().x() - rect.x() > 24:
-                    item.setCheckState(
-                        Qt.CheckState.Unchecked
-                        if item.checkState() == Qt.CheckState.Checked
-                        else Qt.CheckState.Checked
-                    )
-        return False
+    def _accepted_checkbox(self, item: QListWidgetItem) -> QCheckBox | None:
+        w = self._accepted_list.itemWidget(item)
+        return w if isinstance(w, QCheckBox) else None
 
     def _set_all_ignored(self, ignored: bool) -> None:
         """«Отметить все»/«Снять все» в списке принятых ID."""
-        state = Qt.CheckState.Checked if ignored else Qt.CheckState.Unchecked
         for i in range(self._accepted_list.count()):
             item = self._accepted_list.item(i)
-            if item is not None:
-                item.setCheckState(state)
+            cb = self._accepted_checkbox(item) if item is not None else None
+            if cb is not None:
+                cb.setChecked(ignored)
 
     def _refresh_accepted_ids(self) -> None:
         if not self._accepted_list.isVisible():
@@ -303,11 +295,14 @@ class FilterDialog(QDialog):
         for can_id in sorted(current_ids):
             if can_id in existing:
                 continue
-            item = QListWidgetItem(f"{int_to_hex(can_id, 8)}")
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if can_id in self._ignored_ids else Qt.CheckState.Unchecked)
+            item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, can_id)
             self._accepted_list.addItem(item)
+            cb = _RowCheckBox(int_to_hex(can_id, 8))
+            cb.setFont(self._font)
+            cb.setChecked(can_id in self._ignored_ids)
+            item.setSizeHint(cb.sizeHint())
+            self._accepted_list.setItemWidget(item, cb)
 
     def closeEvent(self, event) -> None:
         self._refresh_timer.stop()
@@ -338,7 +333,8 @@ class FilterDialog(QDialog):
         ignored_ids: list[int] = []
         for i in range(self._accepted_list.count()):
             item = self._accepted_list.item(i)
-            if item.checkState() == Qt.CheckState.Checked:
+            cb = self._accepted_checkbox(item) if item is not None else None
+            if cb is not None and cb.isChecked():
                 can_id = item.data(Qt.ItemDataRole.UserRole)
                 if can_id is not None:
                     ignored_ids.append(can_id)

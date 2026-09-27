@@ -933,7 +933,10 @@ class SerialManager(QObject):
 
     # Бод-рейты, которые умеет выставить bxCAN при APB1 = 36 МГц
     # (configure_bit_timing в firmware/application/Src/can_bridge.c).
-    SUPPORTED_CAN_BAUD_KBPS = (1000, 500, 250, 125, 100, 50, 20, 10)
+    # Внимание: 83 по проводу — это 83.3333 кбит/с (36 МГц/(24·18 тq)
+    # точно); протокол передаёт целые кбит/с в uint16, дробная часть
+    # не влезает — 83 канонически означает 83.3333.
+    SUPPORTED_CAN_BAUD_KBPS = (1000, 500, 250, 125, 100, 83, 50, 20, 10)
 
     def set_can_speed(self, channel: int, baud_kbps: int) -> int:
         """Применяет бод-рейт CAN-канала к периферии МК и персистит его.

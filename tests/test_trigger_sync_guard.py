@@ -275,22 +275,23 @@ def test_legacy_trigger_without_active_loads_enabled(tab) -> None:
     assert tab._blocks[0]["group"].isChecked() is True
 
 
-def test_validate_warns_filled_but_disabled(tab) -> None:
-    """Заполненный, но выключенный триггер пишется в МК мёртвым —
-    оператор должен это видеть до записи."""
+def test_validate_silent_for_filled_but_disabled(tab) -> None:
+    """Заполненный, но выключенный триггер — осознанный выбор оператора,
+    не ошибка полей. Предупреждение на каждом «Сохранить» спамило —
+    теперь молчим (отчёт мастера)."""
     cfg = _cfg_trigger()
     cfg["active"] = False
     errors, warnings = tab._validate_config([cfg])
     assert not errors
-    assert any("выключен" in w for w in warnings)
+    assert not warnings
 
 
-def test_validate_warns_pc_only_trigger(tab) -> None:
-    """Триггер, не разворачивающийся в записи МК, исполняется
-    приложением и умрёт с ним — предупреждаем при записи."""
+def test_validate_silent_for_pc_only_trigger(tab) -> None:
+    """Триггер, исполняемый приложением (не помещается в записи МК), —
+    допустимая конфигурация, предупреждения не требует."""
     errors, warnings = tab._validate_config([_unexpandable_trigger()])
     assert not errors
-    assert any("приложением" in w for w in warnings)
+    assert not warnings
 
 
 def test_validate_silent_for_multiframe(tab) -> None:

@@ -472,6 +472,28 @@ class Translator:
                 "Фильтр": "Filter",
                 "Функция в разработке": "Feature under development",
                 "Пояснение": "Note",
+                "Пояснение к ID 0x{0:X}": "Note for ID 0x{0:X}",
+                "Текст/символы, описывающие этот ID (например, «скорость, "
+                "км/ч» или «VIN, часть 2»):":
+                    "Text/symbols describing this ID (e.g. 'speed, "
+                    "km/h' or 'VIN, part 2'):",
+                "{0}-байт": "byte {0}",
+                "Байт {0} в анализе, сумме и на графике": "Byte {0} in analysis, sum and graph",
+                "Поиск с переводом": "Translated search",
+                "Число (345678 → 05 46 4E), hex (5464E, 46 4E, 0x05464E)\n"
+                "или текст — VIN ищется как ASCII-байты:":
+                    "Number (345678 → 05 46 4E), hex (5464E, 46 4E, 0x05464E)\n"
+                    "or text — a VIN is searched as ASCII bytes:",
+                "Введите число (345678 → 05 46 4E), hex (5464E / 46 4E) "
+                "или текст (VIN — ищется как ASCII-байты) — совпадения "
+                "подсвечиваются в трейсе":
+                    "Enter a number (345678 → 05 46 4E), hex (5464E / 46 4E) "
+                    "or text (a VIN is searched as ASCII bytes) — matches "
+                    "are highlighted in the trace",
+                "Найти": "Find",
+                "Следующее": "Next",
+                "Не найдено": "Not found",
+                "Совпадений: {0}": "Matches: {0}",
                 "Канал": "Channel",
                 "Бит": "Bit",
                 "Задержка": "Delay",
