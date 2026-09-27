@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QPushButton, QSizePolicy, QStyle, QWidget
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QSizePolicy, QStyle, QToolButton, QWidget
 
 from models.logger import get_logger
 from models.translations import _ as tr
@@ -23,14 +23,17 @@ _PACKET_RE = re.compile(
 )
 
 
-def _style_clipboard_button(button: QPushButton) -> None:
-    """Настраивает внешний вид маленькой кнопки буфера обмена."""
+def _style_clipboard_button(button: QToolButton) -> None:
+    """Настраивает внешний вид маленькой кнопки буфера обмена.
+
+    QToolButton, не QPushButton: у QPushButton stylesheet-стиль Qt
+    рисует border-radius только у верхних углов — нижние квадратные."""
     button.setFixedSize(24, 24)
     button.setFont(QFont("Segoe UI", 8))
     button.setStyleSheet(
-        "QPushButton { background-color: palette(button); color: palette(text); border: none; border-radius: 4px; }"
-        "QPushButton:hover { background-color: palette(midlight); }"
-        "QPushButton:pressed { background-color: palette(mid); }"
+        "QToolButton { background-color: palette(button); color: palette(text); border: none; border-radius: 4px; }"
+        "QToolButton:hover { background-color: palette(midlight); }"
+        "QToolButton:pressed { background-color: palette(mid); }"
     )
 
 
@@ -60,11 +63,11 @@ def create_clipboard_buttons(
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-    copy_button = QPushButton()
+    copy_button = QToolButton()
     copy_button.setToolTip(tr("Копировать"))
     copy_button.setIcon(copy_button.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon))
 
-    paste_button = QPushButton()
+    paste_button = QToolButton()
     paste_button.setToolTip(tr("Вставить"))
     paste_button.setIcon(paste_button.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton))
 

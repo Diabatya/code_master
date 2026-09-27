@@ -100,7 +100,7 @@ class TriggerSimDialog(QDialog):
         run_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         run_btn.setStyleSheet(
             "QPushButton { background-color: #4CAF50; color: #FFFFFF;"
-            "border: none; border-radius: 4px; padding: 8px; }"
+            "border: none; border-radius: 4px; padding: 0px; min-height: 34px; }"
         )
         run_btn.clicked.connect(self._run)
         layout.addWidget(run_btn)

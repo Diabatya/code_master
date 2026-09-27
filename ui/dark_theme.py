@@ -51,8 +51,12 @@ QPushButton {
     color: $text;
     border: none;
     border-radius: 8px;
-    padding: 6px 14px;
-    min-height: 24px;
+    /* НЕЛЬЗЯ вертикальный padding: у QPushButton он ломает отрисовку
+     * нижних border-radius (нижние углы выходят квадратными — баг
+     * stylesheet-стиля Qt, проверено порендерно). Высоту держит
+     * min-height. */
+    padding: 0px 14px;
+    min-height: 30px;
     font-weight: 500;
 }
 QPushButton:hover {

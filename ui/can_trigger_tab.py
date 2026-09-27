@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QStyle,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -278,15 +279,15 @@ class CanTriggerTab(QWidget):
         data, data_widget = self._make_data_edits(font, allow_x=True)
         layout.addWidget(data_widget)
 
-        rtr = QPushButton(tr("RTR"))
+        rtr = self._round_button(tr("RTR"))
         # Те же размеры/стиль, что у кнопки RTR в строке «Ответ»
         # (64x20, Segoe UI 8) — в 38x24 надпись обрезалась.
         rtr.setFixedSize(64, 20)
         rtr.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         rtr.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
-            "QPushButton:hover { background-color: #4A4A6A; }"
-            "QPushButton:checked { background-color: #FF9800; color: #FFFFFF; }"
+            "QToolButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
+            "QToolButton:hover { background-color: #4A4A6A; }"
+            "QToolButton:checked { background-color: #FF9800; color: #FFFFFF; }"
         )
         rtr.setCheckable(True)
         rtr.setToolTip(tr("Срабатывать только на RTR-запрос (Remote Transmission Request)"))
@@ -297,15 +298,15 @@ class CanTriggerTab(QWidget):
 
         # «−» удаляет это условие (у первой строки не показывается —
         # минимум одно условие на триггер). «+» живёт в строке опций.
-        remove_button = QPushButton("−")
+        remove_button = self._round_button("−")
         remove_button.setFixedSize(24, 24)
         remove_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Black))
         remove_button.setStyleSheet(
             # padding-bottom 3px: глиф «−» при 16pt сидит ниже
             # геометрического центра кнопки — поднимаем визуально.
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
+            "QToolButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
             "border-radius: 4px; padding: 0px 0px 3px 0px; }"
-            "QPushButton:hover { background-color: #8A3A3A; }"
+            "QToolButton:hover { background-color: #8A3A3A; }"
         )
         remove_button.setToolTip(tr("Удалить условие приёма"))
         remove_button.setVisible(False)
@@ -395,13 +396,13 @@ class CanTriggerTab(QWidget):
         options_layout.addWidget(boot_delay)
         # «+» — ещё одно условие приёма (ИЛИ): свои канал/битность/ID/
         # DLC/Data/RTR. Ограничение — 3 бита индекса в rx_flags записи.
-        add_cond = QPushButton("+")
+        add_cond = self._round_button("+")
         add_cond.setFixedSize(24, 24)
         add_cond.setFont(QFont("Segoe UI", 16, QFont.Weight.Black))
         add_cond.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
+            "QToolButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
             "border-radius: 4px; padding: 0px 0px 2px 0px; }"
-            "QPushButton:hover { background-color: #4A4A6A; }"
+            "QToolButton:hover { background-color: #4A4A6A; }"
         )
         add_cond.setToolTip(tr("Добавить условие приёма (ИЛИ — до 8)"))
         options_layout.addWidget(add_cond)
@@ -531,15 +532,15 @@ class CanTriggerTab(QWidget):
         header_label = QLabel(tr("Фреймы ответа"))
         header.addWidget(header_label)
         header.addStretch()
-        add_button = QPushButton("+")
+        add_button = self._round_button("+")
         add_button.setFixedSize(32, 32)
         add_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
         add_button.setStyleSheet(
             # padding-bottom 4px: глифы «+»/«−» при 20pt сидят ниже
             # геометрического центра кнопки — поднимаем визуально.
-            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
+            "QToolButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
             "border-radius: 4px; padding: 0px 0px 4px 0px; }"
-            "QPushButton:hover { background-color: #5A5A7A; }"
+            "QToolButton:hover { background-color: #5A5A7A; }"
         )
         add_button.setToolTip(tr("Добавить фрейм"))
         header.addWidget(add_button)
@@ -573,15 +574,15 @@ class CanTriggerTab(QWidget):
         # RTR — на каждый фрейм ответа свой, над колонкой «Бит». При
         # включении поле Data этой строки блокируется и бледнеет, активны
         # только ID и DLC.
-        rtr = QPushButton(tr("RTR"))
+        rtr = self._round_button(tr("RTR"))
         rtr.setFixedSize(64, 20)
         rtr.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         rtr.setCheckable(True)
         rtr.setToolTip(tr("Remote Transmission Request"))
         rtr.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
-            "QPushButton:hover { background-color: #4A4A6A; }"
-            "QPushButton:checked { background-color: #FF9800; color: #FFFFFF; }"
+            "QToolButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
+            "QToolButton:hover { background-color: #4A4A6A; }"
+            "QToolButton:checked { background-color: #FF9800; color: #FFFFFF; }"
         )
         rtr.toggled.connect(
             lambda checked, d=data, w=data_widget, s=dlc: self._on_row_rtr_toggled(checked, d, w, s)
@@ -594,13 +595,13 @@ class CanTriggerTab(QWidget):
         count = self._make_count_spin(font, 999)
         count.setFixedWidth(60)
 
-        remove_button = QPushButton("\u2212")
+        remove_button = self._round_button("\u2212")
         remove_button.setFixedSize(32, 32)
         remove_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
         remove_button.setStyleSheet(
-            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
+            "QToolButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
             "border-radius: 4px; padding: 0px 0px 4px 0px; }"
-            "QPushButton:hover { background-color: #5A5A7A; }"
+            "QToolButton:hover { background-color: #5A5A7A; }"
         )
         remove_button.setToolTip(tr("Удалить фрейм"))
 
@@ -789,13 +790,13 @@ class CanTriggerTab(QWidget):
         header_label = QLabel(tr("Строки кэша"))
         header.addWidget(header_label)
         header.addStretch()
-        add_button = QPushButton("+")
+        add_button = self._round_button("+")
         add_button.setFixedSize(32, 32)
         add_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
         add_button.setStyleSheet(
-            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
+            "QToolButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
             "border-radius: 4px; padding: 0px 0px 4px 0px; }"
-            "QPushButton:hover { background-color: #5A5A7A; }"
+            "QToolButton:hover { background-color: #5A5A7A; }"
         )
         add_button.setToolTip(tr("Добавить строку кэша"))
         header.addWidget(add_button)
@@ -882,13 +883,13 @@ class CanTriggerTab(QWidget):
         line2.addWidget(count)
         line2.addStretch()
 
-        remove_button = QPushButton("\u2212")
+        remove_button = self._round_button("\u2212")
         remove_button.setFixedSize(32, 32)
         remove_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
         remove_button.setStyleSheet(
-            "QPushButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
+            "QToolButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
             "border-radius: 4px; padding: 0px 0px 4px 0px; }"
-            "QPushButton:hover { background-color: #5A5A7A; }"
+            "QToolButton:hover { background-color: #5A5A7A; }"
         )
         remove_button.setToolTip(tr("Удалить строку"))
         line2.addWidget(remove_button)
@@ -1153,28 +1154,28 @@ class CanTriggerTab(QWidget):
         # Крестик удаления — в шапке блока (верхний правый угол).
         # Символ «✕» в части шрифтов не рендерится, поэтому берём
         # стандартную иконку закрытия окна — она есть в любой теме.
-        delete_button = QPushButton()
+        delete_button = QToolButton()
         delete_button.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton)
         )
         delete_button.setFixedSize(24, 24)
         delete_button.setStyleSheet(
-            "QPushButton { background-color: transparent; border: none; border-radius: 4px; }"
-            "QPushButton:hover { background-color: #5A2A2A; }"
+            "QToolButton { background-color: transparent; border: none; border-radius: 4px; }"
+            "QToolButton:hover { background-color: #5A2A2A; }"
         )
         delete_button.setToolTip(tr("Удалить триггер"))
         delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
 
         # Копия триггера целиком — в буфер обмена (JSON с маркером),
         # вставка — кнопкой «Вставить триггер» рядом с «Добавить».
-        copy_button = QPushButton()
+        copy_button = QToolButton()
         copy_button.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
         )
         copy_button.setFixedSize(24, 24)
         copy_button.setStyleSheet(
-            "QPushButton { background-color: transparent; border: none; border-radius: 4px; }"
-            "QPushButton:hover { background-color: #2A4A5A; }"
+            "QToolButton { background-color: transparent; border: none; border-radius: 4px; }"
+            "QToolButton:hover { background-color: #2A4A5A; }"
         )
         copy_button.setToolTip(tr("Копировать триггер целиком"))
         copy_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1182,7 +1183,10 @@ class CanTriggerTab(QWidget):
         # «Тест» — ручной одиночный выстрел триггера (отправляет ответ
         # как при срабатывании). Голубая; на 0.7 с вспыхивает зелёным,
         # когда триггер реально отработал — видно живую диагностику.
-        test_button = QPushButton(tr("Тест"))
+        # QToolButton, не QPushButton: stylesheet-стиль Qt у QPushButton
+        # рисует border-radius только у ВЕРХНИХ углов — нижние остаются
+        # квадратными независимо от значения (проверено порендерно).
+        test_button = self._round_button(tr("Тест"))
         test_button.setFixedSize(72, 24)
         test_button.setFont(QFont("Segoe UI", 10, QFont.Weight.Black))
         test_button.setToolTip(tr("Отправить ответ триггера один раз"))
@@ -1202,24 +1206,31 @@ class CanTriggerTab(QWidget):
         }
 
     @staticmethod
-    def _apply_test_button_style(button: QPushButton, fired: bool) -> None:
-        # Радиусы заданы по углам явно: общий border-radius на части
-        # платформ не скругляет нижние углы (отчёт мастера).
-        radius = (
-            "border-top-left-radius: 4px; border-top-right-radius: 4px; "
-            "border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; "
-        )
+    def _round_button(text: str) -> QToolButton:
+        """Текстовая кнопка с честным скруглением всех четырёх углов.
+
+        У QPushButton stylesheet-стиль Qt рисует border-radius только у
+        верхних углов — нижние остаются квадратными при любом радиусе
+        (проверено порендерно; «сверху кругло, снизу прямо» — отчёт
+        мастера). QToolButton рисует все четыре угла корректно."""
+        button = QToolButton()
+        button.setText(text)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        return button
+
+    @staticmethod
+    def _apply_test_button_style(button: QToolButton, fired: bool) -> None:
         if fired:
             button.setStyleSheet(
-                "QPushButton { background-color: #2E7D32; color: #FFFFFF; "
-                "border: none; " + radius + "}"
+                "QToolButton { background-color: #2E7D32; color: #FFFFFF; "
+                "border: none; border-radius: 6px; }"
             )
         else:
             button.setStyleSheet(
-                "QPushButton { background-color: #1565C0; color: #FFFFFF; "
-                "border: none; " + radius + "}"
-                "QPushButton:hover { background-color: #1E88E5; }"
-                "QPushButton:pressed { background-color: #0D47A1; }"
+                "QToolButton { background-color: #1565C0; color: #FFFFFF; "
+                "border: none; border-radius: 6px; }"
+                "QToolButton:hover { background-color: #1E88E5; }"
+                "QToolButton:pressed { background-color: #0D47A1; }"
             )
 
     def _flash_test_button(self, index: int) -> None:
@@ -1497,23 +1508,23 @@ class CanTriggerTab(QWidget):
         self._blocks_layout.setSpacing(10)
         container_layout.addLayout(self._blocks_layout)
 
-        self._add_trigger_button = QPushButton(tr("Добавить триггер"))
+        self._add_trigger_button = self._round_button(tr("Добавить триггер"))
         self._add_trigger_button.setFont(QFont("Segoe UI", 9))
         self._add_trigger_button.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
+            "QToolButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
             "border-radius: 4px; padding: 6px 14px; }"
-            "QPushButton:hover { background-color: #4A4A6A; }"
-            "QPushButton:disabled { color: #777777; }"
+            "QToolButton:hover { background-color: #4A4A6A; }"
+            "QToolButton:disabled { color: #777777; }"
         )
         self._add_trigger_button.clicked.connect(self._on_add_trigger_clicked)
 
-        self._paste_trigger_button = QPushButton(tr("Вставить триггер"))
+        self._paste_trigger_button = self._round_button(tr("Вставить триггер"))
         self._paste_trigger_button.setFont(QFont("Segoe UI", 9))
         self._paste_trigger_button.setStyleSheet(
-            "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
+            "QToolButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
             "border-radius: 4px; padding: 6px 14px; }"
-            "QPushButton:hover { background-color: #4A4A6A; }"
-            "QPushButton:disabled { color: #777777; }"
+            "QToolButton:hover { background-color: #4A4A6A; }"
+            "QToolButton:disabled { color: #777777; }"
         )
         self._paste_trigger_button.setToolTip(
             tr("Вставить триггер из буфера обмена (кнопка копии в блоке триггера)")
@@ -1604,6 +1615,9 @@ class CanTriggerTab(QWidget):
             if not self._inside_any(widget, skip):
                 widget.clicked.connect(mark)
         for widget in root.findChildren(QPushButton):
+            if not self._inside_any(widget, skip):
+                widget.clicked.connect(mark)
+        for widget in root.findChildren(QToolButton):
             if not self._inside_any(widget, skip):
                 widget.clicked.connect(mark)
 

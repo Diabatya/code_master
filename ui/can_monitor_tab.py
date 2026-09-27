@@ -2637,13 +2637,13 @@ class CanMonitorTab(QWidget):
         if button.isChecked():
             button.setStyleSheet(
                 "QPushButton { background-color: #4CAF50; color: #FFFFFF; border: none; "
-                "border-radius: 4px; padding: 4px 10px; }"
+                "border-radius: 4px; padding: 0px 10px; }"
                 "QPushButton:hover { background-color: #45A049; }"
             )
         else:
             button.setStyleSheet(
                 "QPushButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
-                "border-radius: 4px; padding: 4px 10px; }"
+                "border-radius: 4px; padding: 0px 10px; }"
                 "QPushButton:hover { background-color: #4A4A6A; }"
             )
 

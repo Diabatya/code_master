@@ -167,6 +167,18 @@ void CanBridge_PollHealth(void)
         s_error_pending[channel] = 1U;
         s_last_error_code[channel] |= HAL_CAN_ERROR_BOF;
         EventLog_Add((uint8_t)EVLOG_CAN_BUSOFF, channel, 0U);
+        /* Снимаем зависшие TX-запросы: с ABOM контроллер после
+         * восстановления тут же ретранслирует яд-кадр, который уронил
+         * шину, → новый bus-off через ~0.5 с и шторм бесконечный
+         * (полевой лог: busoff/recover пара каждые 500 мс, err растёт
+         * ~60k/с, rx=0 — «приём и передача отсутствует»). Abort роняет
+         * кадр, но после авто-восстановления контроллер чист: приём
+         * живёт сразу, свежие передачи идут через CanBridge_Transmit и
+         * при сохраняющейся неисправности просто дадут ещё один
+         * bus-off — без самоподдерживающегося цикла. */
+        HAL_CAN_AbortTxRequest(handles[channel], CAN_TX_MAILBOX0);
+        HAL_CAN_AbortTxRequest(handles[channel], CAN_TX_MAILBOX1);
+        HAL_CAN_AbortTxRequest(handles[channel], CAN_TX_MAILBOX2);
       }
     } else if (s_busoff_active[channel]) {
       s_busoff_active[channel] = 0U;

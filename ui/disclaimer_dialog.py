@@ -88,7 +88,10 @@ class DisclaimerDialog(QDialog):
                 color: #FFFFFF;
                 border: 1px solid #3A3A5A;
                 border-radius: 14px;
-                padding: 8px 24px;
+                /* вертикальный padding ломает нижние border-radius у
+                 * QPushButton — высоту держит min-height */
+                padding: 0px 24px;
+                min-height: 34px;
                 min-width: 90px;
                 font: 11pt "Segoe UI";
             }
