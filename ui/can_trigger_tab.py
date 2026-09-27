@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -299,13 +300,11 @@ class CanTriggerTab(QWidget):
         # «−» удаляет это условие (у первой строки не показывается —
         # минимум одно условие на триггер). «+» живёт в строке опций.
         remove_button = self._round_button("−")
-        remove_button.setFixedSize(24, 24)
-        remove_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Black))
+        remove_button.setFixedSize(22, 22)
+        remove_button.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         remove_button.setStyleSheet(
-            # padding-bottom 3px: глиф «−» при 16pt сидит ниже
-            # геометрического центра кнопки — поднимаем визуально.
             "QToolButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
-            "border-radius: 4px; padding: 0px 0px 3px 0px; }"
+            "border-radius: 4px; padding: 0px 0px 2px 0px; }"
             "QToolButton:hover { background-color: #8A3A3A; }"
         )
         remove_button.setToolTip(tr("Удалить условие приёма"))
@@ -397,8 +396,8 @@ class CanTriggerTab(QWidget):
         # «+» — ещё одно условие приёма (ИЛИ): свои канал/битность/ID/
         # DLC/Data/RTR. Ограничение — 3 бита индекса в rx_flags записи.
         add_cond = self._round_button("+")
-        add_cond.setFixedSize(24, 24)
-        add_cond.setFont(QFont("Segoe UI", 16, QFont.Weight.Black))
+        add_cond.setFixedSize(22, 22)
+        add_cond.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         add_cond.setStyleSheet(
             "QToolButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
             "border-radius: 4px; padding: 0px 0px 2px 0px; }"
@@ -534,12 +533,10 @@ class CanTriggerTab(QWidget):
         header.addStretch()
         add_button = self._round_button("+")
         add_button.setFixedSize(32, 32)
-        add_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
+        add_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
         add_button.setStyleSheet(
-            # padding-bottom 4px: глифы «+»/«−» при 20pt сидят ниже
-            # геометрического центра кнопки — поднимаем визуально.
             "QToolButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
-            "border-radius: 4px; padding: 0px 0px 4px 0px; }"
+            "border-radius: 4px; padding: 0px 0px 2px 0px; }"
             "QToolButton:hover { background-color: #5A5A7A; }"
         )
         add_button.setToolTip(tr("Добавить фрейм"))
@@ -595,12 +592,12 @@ class CanTriggerTab(QWidget):
         count = self._make_count_spin(font, 999)
         count.setFixedWidth(60)
 
-        remove_button = self._round_button("\u2212")
+        remove_button = self._round_button("\u2013")
         remove_button.setFixedSize(32, 32)
-        remove_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
+        remove_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
         remove_button.setStyleSheet(
             "QToolButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
-            "border-radius: 4px; padding: 0px 0px 4px 0px; }"
+            "border-radius: 4px; padding: 0px 0px 2px 0px; }"
             "QToolButton:hover { background-color: #5A5A7A; }"
         )
         remove_button.setToolTip(tr("Удалить фрейм"))
@@ -792,10 +789,10 @@ class CanTriggerTab(QWidget):
         header.addStretch()
         add_button = self._round_button("+")
         add_button.setFixedSize(32, 32)
-        add_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
+        add_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
         add_button.setStyleSheet(
             "QToolButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
-            "border-radius: 4px; padding: 0px 0px 4px 0px; }"
+            "border-radius: 4px; padding: 0px 0px 2px 0px; }"
             "QToolButton:hover { background-color: #5A5A7A; }"
         )
         add_button.setToolTip(tr("Добавить строку кэша"))
@@ -883,12 +880,12 @@ class CanTriggerTab(QWidget):
         line2.addWidget(count)
         line2.addStretch()
 
-        remove_button = self._round_button("\u2212")
+        remove_button = self._round_button("\u2013")
         remove_button.setFixedSize(32, 32)
-        remove_button.setFont(QFont("Segoe UI", 20, QFont.Weight.Black))
+        remove_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
         remove_button.setStyleSheet(
             "QToolButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
-            "border-radius: 4px; padding: 0px 0px 4px 0px; }"
+            "border-radius: 4px; padding: 0px 0px 2px 0px; }"
             "QToolButton:hover { background-color: #5A5A7A; }"
         )
         remove_button.setToolTip(tr("Удалить строку"))
@@ -1498,6 +1495,142 @@ class CanTriggerTab(QWidget):
         if self._add_trigger_block() is not None:
             self._mark_dirty(len(self._blocks) - 1)
 
+    def _sim_records(self) -> list[dict[str, Any]]:
+        """Записи в формате firmware для симулятора — то же, что ушло бы
+        в МК по «Сохранить» (непустые блоки, enabled как в UI)."""
+        records = []
+        for index in range(len(self._blocks)):
+            block = self._blocks[index]
+            recv = block["recv"]
+            if recv["fire_on_boot"].isChecked():
+                conds = [(0, recv["conds"][0])]
+            else:
+                conds = [
+                    (i, c) for i, c in enumerate(recv["conds"])
+                    if self._parse_id(c["id"].text()) is not None
+                ] or [(0, recv["conds"][0])]
+            for cond_idx, cond in conds:
+                values = self._device_trigger_values(index, cond=cond)
+                values["rx_cond_idx"] = cond_idx
+                if not self._is_empty_trigger(values):
+                    records.append(values)
+        return records
+
+    def _open_simulation(self) -> None:
+        from ui.trigger_sim_dialog import TriggerSimDialog
+
+        dialog = TriggerSimDialog(self._sim_records, self)
+        dialog.exec()
+
+    @staticmethod
+    def _templates() -> dict[str, dict[str, Any]]:
+        """Готовые сценарии триггеров — заполненный блок в один клик,
+        дальше оператор правит ID/данные под себя."""
+        return {
+            tr("Эхо-ответ"): {
+                "active": True,
+                "recv_channel": 0,
+                "recv_bit": 0,
+                "recv_id": "100",
+                "recv_dlc": 8,
+                "recv_rtr": 0,
+                "recv_data": "",
+                "responses": [
+                    {
+                        "channel": 0, "bit": 0, "id": "101", "dlc": 8,
+                        "data": "00 00 00 00 00 00 00 00", "rtr": 0,
+                        "delay_before_send": 0, "delay_between": 0,
+                        "count": 1, "next_delay": 0,
+                    }
+                ],
+            },
+            tr("Маршрутизация CAN1 → CAN2"): {
+                "active": True,
+                "recv_channel": 0,
+                "recv_bit": 0,
+                "recv_id": "123",
+                "recv_dlc": 8,
+                "recv_rtr": 0,
+                "recv_data": "",
+                "responses": [
+                    {
+                        "channel": 1, "bit": 0, "id": "123", "dlc": 8,
+                        "data": "", "rtr": 0,
+                        "delay_before_send": 0, "delay_between": 0,
+                        "count": 1, "next_delay": 0,
+                    }
+                ],
+            },
+            tr("Ответ на RTR-запрос"): {
+                "active": True,
+                "recv_channel": 0,
+                "recv_bit": 0,
+                "recv_id": "200",
+                "recv_dlc": 0,
+                "recv_rtr": 1,
+                "recv_data": "",
+                "responses": [
+                    {
+                        "channel": 0, "bit": 0, "id": "200", "dlc": 8,
+                        "data": "00 00 00 00 00 00 00 00", "rtr": 0,
+                        "delay_before_send": 0, "delay_between": 0,
+                        "count": 1, "next_delay": 0,
+                    }
+                ],
+            },
+            tr("Ответ пачкой ×3 с паузой"): {
+                "active": True,
+                "recv_channel": 0,
+                "recv_bit": 0,
+                "recv_id": "210",
+                "recv_dlc": 8,
+                "recv_rtr": 0,
+                "recv_data": "",
+                "responses": [
+                    {
+                        "channel": 0, "bit": 0, "id": "211", "dlc": 8,
+                        "data": "", "rtr": 0,
+                        "delay_before_send": 50, "delay_between": 20,
+                        "count": 3, "next_delay": 0,
+                    }
+                ],
+            },
+            tr("Кэш-репитер CAN1 → CAN2"): {
+                "active": True,
+                "cache": True,
+                "recv_channel": 0,
+                "recv_bit": 0,
+                "recv_id": "300",
+                "recv_dlc": 0,
+                "recv_rtr": 0,
+                "recv_data": "",
+                "responses": [],
+                "cache_channel": 0,
+                "cache_bit": 0,
+                "cache_id": "300",
+                "cache_dlc": 8,
+                "cache_tx_channel": 1,
+                "cache_from_data": "",
+                "cache_to_data": "",
+                "cache_delay_before_send": 0,
+                "cache_delay_between": 0,
+                "cache_count": 1,
+            },
+        }
+
+    def _add_template_trigger(self, preset: dict[str, Any]) -> None:
+        """Добавляет блок триггера из шаблона (тем же путём, что загрузка
+        конфига: текущие блоки + пресет → set_config)."""
+        from copy import deepcopy
+
+        if len(self._blocks) >= TRIGGER_COUNT:
+            QMessageBox.warning(
+                self, tr("Шаблон"), tr("Страница триггеров заполнена")
+            )
+            return
+        self.set_config(self._collect_config() + [deepcopy(preset)])
+        self._mark_dirty(len(self._blocks) - 1)
+
     def _build_layout(self) -> None:
         container = QWidget()
         container_layout = QVBoxLayout(container)
@@ -1531,10 +1664,38 @@ class CanTriggerTab(QWidget):
         )
         self._paste_trigger_button.clicked.connect(self._on_paste_trigger_clicked)
 
+        self._sim_button = self._round_button(tr("Симуляция…"))
+        self._sim_button.setFont(QFont("Segoe UI", 9))
+        self._sim_button.setStyleSheet(
+            "QToolButton { background-color: #2A4A3A; color: #FFFFFF; border: none; "
+            "border-radius: 4px; padding: 6px 14px; }"
+            "QToolButton:hover { background-color: #3A6A4A; }"
+        )
+        self._sim_button.setToolTip(
+            tr("Прогнать кадры из лога через триггеры без железа")
+        )
+        self._sim_button.clicked.connect(self._open_simulation)
+
+        self._template_button = self._round_button(tr("Шаблон ▾"))
+        self._template_button.setFont(QFont("Segoe UI", 9))
+        self._template_button.setStyleSheet(
+            "QToolButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
+            "border-radius: 4px; padding: 6px 14px; }"
+            "QToolButton:hover { background-color: #4A4A6A; }"
+        )
+        template_menu = QMenu(self._template_button)
+        for title, preset in self._templates().items():
+            template_menu.addAction(
+                title, lambda _c=False, p=preset: self._add_template_trigger(p)
+            )
+        self._template_button.setMenu(template_menu)
+
         buttons_row = QHBoxLayout()
         buttons_row.setSpacing(8)
         buttons_row.addWidget(self._add_trigger_button)
         buttons_row.addWidget(self._paste_trigger_button)
+        buttons_row.addWidget(self._template_button)
+        buttons_row.addWidget(self._sim_button)
         buttons_row.addStretch()
         container_layout.addLayout(buttons_row)
         container_layout.addStretch()

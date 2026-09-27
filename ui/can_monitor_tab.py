@@ -9,6 +9,7 @@ from typing import Any, TextIO
 from PySide6.QtCore import QPointF, QRect, QRegularExpression, Qt, QTimer, Signal
 from shiboken6 import isValid
 from PySide6.QtGui import (
+    QAction,
     QBrush,
     QColor,
     QFont,
@@ -139,12 +140,10 @@ class DataVariantsDialog(QDialog):
         layout.addWidget(buttons)
 
 
-def _id_row_color(row_index: int, palette_size: int) -> QColor:
-    """Цвет ячейки ID по позиции строки: palette_size равномерно
-    разнесённых оттенков повторяются по кругу — глаз цепляется за цвет
-    соседних строк, а не за hex. Та же приглушённая гамма (S80/L40)."""
-    n = max(1, palette_size)
-    hue = int((row_index % n) * 360 / n)
+def _id_row_color(frame_id: int) -> QColor:
+    """Детерминированный приглушённый цвет ячейки ID — глаз цепляется
+    за цвет, а не за hex, когда кадры сыплются пачками."""
+    hue = (frame_id * 37) % 360
     return QColor.fromHsl(hue, 80, 40)
 
 
@@ -732,10 +731,14 @@ class IdHistoryDialog(QDialog):
         )
         source_menu = QMenu(self._source_button)
         for i in range(8):
-            action = source_menu.addAction(tr("Байт {0}").format(i))
+            # Акции родим от диалога, а не от меню: на Windows нативное
+            # меню может уничтожаться с дочерними QAction, пока сам
+            # диалог ещё жив и продолжает получать кадры.
+            action = QAction(tr("Байт {0}").format(i), self)
             action.setCheckable(True)
             action.setChecked(True)
             action.toggled.connect(lambda _c, idx=i: self._on_bytes_changed())
+            source_menu.addAction(action)
             self._byte_actions.append(action)
         self._source_button.setMenu(source_menu)
 
@@ -802,7 +805,10 @@ class IdHistoryDialog(QDialog):
 
     def _selected_bytes(self) -> list[int] | None:
         """Индексы отмеченных байт DATA; все/ни одного — None (=весь)."""
-        sel = [i for i, a in enumerate(self._byte_actions) if a.isChecked()]
+        sel = [
+            i for i, a in enumerate(self._byte_actions)
+            if isValid(a) and a.isChecked()
+        ]
         return sel if 0 < len(sel) < 8 else None
 
     def _current_pct(self, data: bytes, rtr: bool, dlc: int) -> float:
@@ -897,7 +903,10 @@ class IdHistoryDialog(QDialog):
 
     def _on_bytes_changed(self) -> None:
         """Смена набора байт графика — чекбоксы «Байт N» в меню."""
-        sel = [i for i, a in enumerate(self._byte_actions) if a.isChecked()]
+        sel = [
+            i for i, a in enumerate(self._byte_actions)
+            if isValid(a) and a.isChecked()
+        ]
         if len(sel) == 8 or not sel:
             self._source_button.setText(tr("Весь DATA ▾"))
         else:
@@ -1074,8 +1083,9 @@ class CanChannelMonitor(QWidget):
         self._rx_flush_timer.timeout.connect(self._flush_rx)
         # «Скрыть выделенное»: ID строк, скрытых кнопкой у поиска.
         self._hidden_ids: set[int] = set()
-        # Фон ячейки ID кодирует позицию строки в окне — количество
-        # различимых цветов задаёт оператор («кол-во строк» у RTR).
+        # «Кол-во строк» — сколько строк приёма должно умещаться в
+        # видимую высоту таблицы: если не влезают, строки и шрифт
+        # ужимаются (_apply_row_density).
         self._row_color_count = max(1, int(self._config.get("monitor_row_colors", 15) or 15))
         # Предыдущие значения счётчиков ошибок — для визуальных предупреждений
         # (чек-лист 4.2): bus-off/рост потерь подсвечивают строку статуса.
@@ -1249,17 +1259,16 @@ class CanChannelMonitor(QWidget):
         setCheckableWithIndicator(self._rtr_button)
         self._rtr_button.toggled.connect(self._on_rtr_toggled)
 
-        # «Кол-во строк»: сколько позиций таблицы умещается на экране —
-        # фон ячейки ID циклится по этому числу оттенков, чтобы каждая
-        # видимая строка имела различимый цвет.
+        # «Кол-во строк»: сколько строк приёма должно умещаться в
+        # видимую высоту таблицы — не влезают, строки и шрифт ужимаются.
         self._row_color_spin = QSpinBox()
         self._row_color_spin.setRange(1, 64)
         self._row_color_spin.setValue(self._row_color_count)
         self._row_color_spin.setFont(font)
         self._row_color_spin.setFixedWidth(52)
         self._row_color_spin.setToolTip(
-            tr("Число строк мониторинга на экране — фон ID циклится\n"
-               "по этому количеству оттенков")
+            tr("Сколько строк приёма уместить на экране —\n"
+               "при нехватке места строки и шрифт ужимаются")
         )
         self._row_color_spin.valueChanged.connect(self._on_row_color_count_changed)
 
@@ -1533,14 +1542,6 @@ class CanChannelMonitor(QWidget):
             self._hide_sel_button.setStyleSheet("")
         self._apply_search()
 
-    def _recolor_id_column(self, from_row: int = 0) -> None:
-        """Перекрашивает фон ID по позиции строки — после вставки/
-        удаления строк или смены «кол-во строк»."""
-        for row in range(from_row, self._table.rowCount()):
-            item = self._table.item(row, 0)
-            if item is not None:
-                item.setBackground(_id_row_color(row, self._row_color_count))
-
     def _apply_row_density(self) -> None:
         """«Кол-во строк» — сколько строк приёма должно умещаться на
         экране. Размер окна/таблицы НЕ трогаем (требование мастера):
@@ -1580,7 +1581,6 @@ class CanChannelMonitor(QWidget):
     def _on_row_color_count_changed(self, value: int) -> None:
         self._row_color_count = max(1, value)
         self._config.set("monitor_row_colors", self._row_color_count)
-        self._recolor_id_column(0)
         self._apply_row_density()
 
     def _update_sent_label(self) -> None:
@@ -1814,12 +1814,21 @@ class CanChannelMonitor(QWidget):
         for dialog in list(self._history_dialogs):
             # Ссылка могла пережить C++-объект (диалог закрыт, finished
             # не добежал) — add_sample на мёртвом виджете ронял слот
-            # RuntimeError «already deleted».
+            # RuntimeError «already deleted». То же — если у живого
+            # диалога умерли дочерние виджеты (нативное меню Windows).
             if not isValid(dialog):
                 self._history_dialogs.remove(dialog)
                 continue
             if dialog.can_id == frame_id:
-                dialog.add_sample(now, data, rtr, dlc)
+                try:
+                    dialog.add_sample(now, data, rtr, dlc)
+                except RuntimeError:
+                    logger.warning(
+                        "Диалог истории %s: внутренний объект Qt уже "
+                        "удалён — исключаю из live-обновлений",
+                        hex(frame_id),
+                    )
+                    self._history_dialogs.remove(dialog)
         return True
 
     def _flush_rx(self) -> None:
@@ -1898,10 +1907,9 @@ class CanChannelMonitor(QWidget):
                     item = QTableWidgetItem(text)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     if col == 0:
-                        # Тёмный фон кодирует позицию строки — текст явно
-                        # белый, иначе на светлой теме палитра давала
-                        # чёрный.
-                        item.setBackground(_id_row_color(row, self._row_color_count))
+                        # Тёмный фон кодирует ID — текст явно белый,
+                        # иначе на светлой теме палитра давала чёрный.
+                        item.setBackground(_id_row_color(frame_id))
                         item.setForeground(QColor("#FFFFFF"))
                     self._table.setItem(row, col, item)
                 else:
@@ -1945,7 +1953,7 @@ class CanChannelMonitor(QWidget):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if col == 0:
-                    item.setBackground(_id_row_color(row, self._row_color_count))
+                    item.setBackground(_id_row_color(frame_id))
                     item.setForeground(QColor("#FFFFFF"))
                 if tooltip:
                     item.setToolTip(tooltip)
@@ -1955,9 +1963,6 @@ class CanChannelMonitor(QWidget):
                     self._id_to_row[fid] = r + 1
             self._id_to_row[frame_id] = row
             self._paint_row_direction(row, tx_echo)
-            # Вставка посередине сдвигает позиции ниже — фон ID кодирует
-            # позицию, перекрашиваем хвост таблицы.
-            self._recolor_id_column(row + 1)
             self._apply_row_visibility(row)
 
         stats["last_receive_time"] = now
@@ -2187,6 +2192,10 @@ class CanChannelMonitor(QWidget):
         samples = list(self._id_history.get(can_id, ()))
         send_cb = self._send_frame_once if self._serial_manager.is_open() else None
         dialog = IdHistoryDialog(can_id, self._channel, samples, self, send_callback=send_cb)
+        # Закрытый диалог разрушается сразу — его таймер repaint и
+        # дочерние виджеты умирают вместе с ним, а не болтаются живыми
+        # в детях родителя до его уничтожения.
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._history_dialogs.append(dialog)
         dialog.finished.connect(
             lambda *_a, d=dialog: self._history_dialogs.remove(d)
