@@ -97,8 +97,7 @@ class _TranslatedSearchDialog(QDialog):
         layout.setSpacing(8)
 
         layout.addWidget(QLabel(tr(
-            "Число (345678 → 05 46 4E), hex (5464E, 46 4E, 0x05464E)\n"
-            "или текст — VIN ищется как ASCII-байты:"
+            "Введите латинские символы или цифры для поиска"
         )))
         self._edit = QLineEdit()
         self._edit.setFont(font)
@@ -159,7 +158,9 @@ class CanAnalyzer(QWidget):
         self._dbc_manager = DBCManager()
         self._analyzing = False
         self._start_time = 0.0
-        self._id_last_time: dict[int, float] = {}
+        # Период по паре (канал, ID) — одинаковый ID в CAN1 и CAN2 имеет
+        # свои метки времени, и «Очистить» канала сбрасывает только его.
+        self._id_last_time: dict[tuple[int, int], float] = {}
         # Обратная отправка строк таблицы в шину: очередь строк,
         # таймер рассылки и позиция «по кадрам» — на каждую таблицу.
         self._send_queues: dict[QTableWidget, list[int]] = {}
@@ -170,6 +171,7 @@ class CanAnalyzer(QWidget):
         self._send_buttons: dict[QTableWidget, tuple] = {}
         self._send_timed: dict[QTableWidget, bool] = {}
         self._send_prev_ms: dict[QTableWidget, float | None] = {}
+        self._clear_buttons: dict[QTableWidget, QPushButton] = {}
         # Приём батчится: per-frame insertRow + scrollToBottom на
         # насыщенной шине (сотни кадров/с) вместе с removeRow(0) по
         # кольцевому буферу давали главную долю нагрузки UI-потока.
@@ -194,6 +196,13 @@ class CanAnalyzer(QWidget):
         self._export_csv_button.setText(tr("Экспорт CSV"))
         self._export_custom_button.setText(tr("Экспорт .trace"))
         self._search_button.setText(tr("Поиск с переводом"))
+        for table, btn in self._clear_buttons.items():
+            btn.setText(tr("Очистить"))
+            btn.setToolTip(
+                tr("Очистить принятые пакеты CAN{0}").format(
+                    self._table_channel.get(table, "?")
+                )
+            )
         self._title.setText(tr("Трэйс CAN-шины"))
         for table in (self._table1, self._table2):
             table.setHorizontalHeaderLabels(
@@ -283,11 +292,13 @@ class CanAnalyzer(QWidget):
     def _build_table_panel(self, table: QTableWidget) -> QWidget:
         """Таблица + строка кнопок отправки принятых кадров обратно в шину."""
         font = QFont("Segoe UI", 9)
+        channel = self._table_channel.get(table, 1)
         send_btn = QPushButton(tr("Отправить"))
         replay_btn = QPushButton(tr("Replay ⏱"))
         stop_btn = QPushButton(tr("Стоп"))
         step_btn = QPushButton(tr("По кадрам"))
-        for btn in (send_btn, replay_btn, stop_btn, step_btn):
+        clear_btn = QPushButton(tr("Очистить"))
+        for btn in (send_btn, replay_btn, stop_btn, step_btn, clear_btn):
             btn.setFont(font)
             btn.setFixedHeight(26)
         send_btn.setToolTip(
@@ -298,16 +309,22 @@ class CanAnalyzer(QWidget):
             tr("Воспроизвести кадры с исходными таймингами из колонки времени")
         )
         step_btn.setToolTip(tr("Каждое нажатие отправляет следующий кадр"))
+        clear_btn.setToolTip(
+            tr("Очистить принятые пакеты CAN{0}").format(channel)
+        )
         stop_btn.setEnabled(False)
         send_btn.clicked.connect(lambda _c=False, t=table: self._send_all(t, timed=False))
         replay_btn.clicked.connect(lambda _c=False, t=table: self._send_all(t, timed=True))
         stop_btn.clicked.connect(lambda _c=False, t=table: self._stop_sending(t))
         step_btn.clicked.connect(lambda _c=False, t=table: self._send_next_frame(t))
+        clear_btn.clicked.connect(lambda _c=False, t=table: self._clear_channel(t))
         self._send_buttons[table] = (send_btn, stop_btn, step_btn)
         self._send_timed[table] = False
+        self._clear_buttons[table] = clear_btn
 
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 4, 0, 0)
+        buttons.addWidget(clear_btn)
         buttons.addWidget(send_btn)
         buttons.addWidget(replay_btn)
         buttons.addWidget(stop_btn)
@@ -445,9 +462,9 @@ class CanAnalyzer(QWidget):
         data = bytes(frame.get("data", b""))
         now = time.time()
         elapsed_text = f"{now - self._start_time:.3f}"
-        last_time = self._id_last_time.get(can_id)
+        last_time = self._id_last_time.get((channel, can_id))
         period_text = f"{int((now - last_time) * 1000)} ms" if last_time else ""
-        self._id_last_time[can_id] = now
+        self._id_last_time[(channel, can_id)] = now
 
         id_text = int_to_hex(can_id, 8 if can_id > 0x7FF else 3)
         data_text = " ".join(format_data_bytes(data))
@@ -506,9 +523,10 @@ class CanAnalyzer(QWidget):
         now = time.time()
         elapsed = now - self._start_time
         elapsed_text = f"{elapsed:.3f}"
-        last_time = self._id_last_time.get(can_id)
+        channel = self._table_channel.get(table, 1)
+        last_time = self._id_last_time.get((channel, can_id))
         period_text = f"{int((now - last_time) * 1000)} ms" if last_time else ""
-        self._id_last_time[can_id] = now
+        self._id_last_time[(channel, can_id)] = now
 
         id_width = 8 if can_id > 0x7FF else 3
         id_text = int_to_hex(can_id, id_width)
@@ -644,6 +662,44 @@ class CanAnalyzer(QWidget):
             send_btn, stop_btn, _step_btn = buttons
             send_btn.setEnabled(True)
             stop_btn.setEnabled(False)
+
+    def _clear_channel(self, table: QTableWidget) -> None:
+        """«Очистить» канала трейса: снимает принятые кадры только этой
+        таблицы — видимые строки, невылитую очередь батчинга, метки
+        периода её ID, покадровую позицию и очередь обратной отправки
+        (идущая рассылка останавливается — строки уйдут из-под неё)."""
+        channel = self._table_channel.get(table)
+        self._stop_sending(table)
+        self._pending_rows.pop(table, None)
+        self._pending_dirs.pop(table, None)
+        self._step_rows.pop(table, None)
+        self._step_pos.pop(table, None)
+        self._send_prev_ms.pop(table, None)
+        table.setRowCount(0)
+        if channel is not None:
+            for key in [
+                k for k in self._id_last_time if k[0] == channel
+            ]:
+                del self._id_last_time[key]
+        # Строки этой таблицы выпали из списка подсветки поиска —
+        # их айтемы уже уничтожены setRowCount(0).
+        self._search_hits = [
+            hit for hit in self._search_hits if hit[0] is not table
+        ]
+        kept_marks = []
+        for item, brush in self._search_marks:
+            try:
+                if item.tableWidget() is table:
+                    continue
+            except RuntimeError:
+                continue  # айтем уничтожен вместе со строкой
+            kept_marks.append((item, brush))
+        self._search_marks = kept_marks
+        if self._search_hit_pos >= len(self._search_hits):
+            self._search_hit_pos = 0
+        logger.info(
+            tr("Трейс CAN{0} очищен").format(channel if channel else "?")
+        )
 
     def _send_next_frame(self, table: QTableWidget) -> None:
         rows = self._target_rows(table)

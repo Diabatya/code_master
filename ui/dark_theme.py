@@ -199,10 +199,11 @@ QTabWidget::pane {
 QTabBar::tab {
     background: $bg_button;
     color: $text;
-    padding: 8px 18px;
-    border-top-left-radius: 8px;
-    border-top-right-radius: 8px;
-    margin-right: 4px;
+    padding: 15px 34px;
+    border-top-left-radius: 20px;
+    border-top-right-radius: 20px;
+    margin-right: 8px;
+    font-size: 14px;
 }
 QTabBar::tab:selected {
     background: $accent;

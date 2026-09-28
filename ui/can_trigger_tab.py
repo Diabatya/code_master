@@ -1124,14 +1124,24 @@ class CanTriggerTab(QWidget):
     def _apply_block_tint(group: QGroupBox, index: int) -> None:
         """Приглушённый оттенок фона блока — оператор при прокрутке
         различает триггеры визуально (та же идея, что цвет ID-строк
-        в мониторинге: hue по индексу, низкая насыщенность заливки)."""
+        в мониторинге: hue по индексу, низкая насыщенность заливки).
+
+        Любой stylesheet на QGroupBox переводит отрисовку заголовка
+        с под-контроля рамки внутрь box'а — без явного
+        QGroupBox::title заголовок «Триггер N» ложился поверх строки
+        статуса и пропадал. Поэтому title позиционируется явно:
+        поднимаем margin-top и кладём заголовок в отступ сверху."""
         hue = (index * 47) % 360
         sat, light, alpha = (70, 42, 34) if _is_dark_theme() else (80, 55, 46)
         color = QColor.fromHsl(hue, sat, light, alpha)
         group.setStyleSheet(
-            "QGroupBox { background-color: "
-            f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()});"
-            " border-radius: 8px; }"
+            "QGroupBox {"
+            f" background-color: rgba({color.red()},{color.green()},"
+            f"{color.blue()},{color.alpha()});"
+            " border-radius: 8px; margin-top: 14px; }"
+            "QGroupBox::title {"
+            " subcontrol-origin: margin; subcontrol-position: top left;"
+            " left: 10px; top: 0px; padding: 0 4px; }"
         )
 
     def _create_trigger_block(self, index: int) -> dict[str, Any]:
@@ -1475,10 +1485,7 @@ class CanTriggerTab(QWidget):
         if not trigger["responses"] and not trigger["cache_rows"]:
             show_toast(self, tr("У триггера нет ответа для отправки"), success=False)
             return
-        if trigger["cache"]:
-            self._send_cached_frames(trigger)
-        else:
-            self._send_responses(trigger)
+        self._fire_trigger_response(trigger)
         self._flash_test_button(index)
 
     def _add_trigger_block(self) -> int | None:
@@ -1898,15 +1905,22 @@ class CanTriggerTab(QWidget):
         recv["fire_spin"].setValue(max(1, min(9999, rx_fire_limit or 1)))
 
         cache = block["cache"]
-        cache_enabled = bool(values.get("cache_enabled", 0))
-        if cache_enabled:
+        # Группа может нести и филлеры кэша (cache_enabled=1), и
+        # ответные записи (cache_enabled=0) — комбо «кэш + ответ»
+        # протокола 8. Разбираем каждое подмножество независимо.
+        cache_base = [r for r in base_records if r.get("cache_enabled")]
+        resp_base = [r for r in base_records if not r.get("cache_enabled")]
+        cache_enabled = bool(
+            [r for r in group if r.get("cache_enabled")]
+        )
+        if cache_base:
             # Группа записей → строки кэша. Развёртка group_seq та же,
             # что у фреймов ответа: записи строки (seq 0..127) дают
             # строку, фрагменты (0x80|f) добавляют свой count.
             # Инвертированный диапазон (from>to) показываем как «X».
             row_records: list[dict[str, Any]] = []
             row_counts: list[int] = []
-            for record in base_records:
+            for record in cache_base:
                 if record.get("group_seq", 0) & GROUP_SEQ_FRAGMENT and row_counts:
                     row_counts[-1] += max(1, record.get("tx_count") or 1)
                 else:
@@ -1953,7 +1967,7 @@ class CanTriggerTab(QWidget):
                 cache_rows[row_index - 1]["next_delay"] = min(gap, 9999)
                 cache_rows[row_index]["delay_before_send"] = max(0, gap - 9999)
             self._set_cache_rows(cache, cache_rows)
-        else:
+        if resp_base or cache_enabled:
             # Группа записей → строки «Фреймы ответа». Записи начала
             # строки (group_seq 0..127) дают фрейм; фрагменты (0x80|f)
             # добавляют свой count к текущей строке (count>255 пишется
@@ -1961,9 +1975,12 @@ class CanTriggerTab(QWidget):
             # обратно: пауза между строками → next_delay предыдущей,
             # остаток сверх спина (9999 мс) — в скрытый
             # delay_before_send следующей строки, тайминг сохраняется.
+            # При включённом кэше ответные поля теперь живые — устаревшие
+            # значения очищаем пустым списком, иначе комбо отправило бы
+            # мусор, которого на устройстве нет.
             row_records: list[dict[str, Any]] = []
             row_counts: list[int] = []
-            for record in base_records:
+            for record in resp_base:
                 if record.get("group_seq", 0) & GROUP_SEQ_FRAGMENT and row_counts:
                     row_counts[-1] += max(1, record.get("tx_count") or 1)
                 else:
@@ -2104,6 +2121,7 @@ class CanTriggerTab(QWidget):
             or not record.get("rx_listen_echo", True)
             or record.get("src_fire_limit")
             or not record.get("src_listen_echo", True)
+            or record.get("src_cache_only")
             or record.get("rx_fire_on_boot")
             or record.get("rx_boot_delay")
             or record.get("rx_cond_idx")
@@ -2158,33 +2176,42 @@ class CanTriggerTab(QWidget):
                 else self._device_trigger_values(index, cond=cond)
             )
             values["rx_cond_idx"] = cond_idx
-            if block["cache"]["cache_check"].isChecked():
-                # Каждая строка кэша — отдельная запись с собственным
-                # src-фильтром и своим слотом кэша в прошивке. Строки
-                # связаны group_seq — как у многофреймового ответа.
-                cache_rows = [
+            cache_on = block["cache"]["cache_check"].isChecked()
+            cache_rows = (
+                [
                     self._collect_cache_row(row)
                     for row in block["cache"]["rows"]
                     if self._parse_id(row["id"].text()) is not None
                 ]
-                if cache_rows:
-                    schedule = expand_schedule(cache_rows)
-                    if schedule is None:
-                        return None
-                    records.extend(
-                        self._cache_row_record(
-                            index, cache_rows[row_index], delay, count, interval,
-                            seq, cond=cond, cond_idx=cond_idx,
-                        )
-                        for row_index, delay, count, interval, seq in schedule
+                if cache_on else []
+            )
+            rows = [
+                row for row in block["response"]["rows"]
+                if self._parse_id(row["id"].text()) is not None
+            ]
+            # Комбо «кэш + ответ» (протокол 8): строки кэша пишутся
+            # филлерами с src_flags CACHE_ONLY — наполняют кэш и не
+            # отвечают; фреймы ответа идут отдельными записями группы
+            # (cache_enabled=0) и шлют свои tx_* как обычно. Без
+            # заполненных строк ответа — прежняя семантика: ответом
+            # уходит последний закэшированный кадр.
+            combo = bool(cache_rows and rows)
+            if cache_rows:
+                # Каждая строка кэша — отдельная запись с собственным
+                # src-фильтром и своим слотом кэша в прошивке. Строки
+                # связаны group_seq — как у многофреймового ответа.
+                schedule = expand_schedule(cache_rows)
+                if schedule is None:
+                    return None
+                records.extend(
+                    self._cache_row_record(
+                        index, cache_rows[row_index], delay, count, interval,
+                        seq, cond=cond, cond_idx=cond_idx,
+                        cache_only=combo,
                     )
-                else:
-                    records.append(values)
-            else:
-                rows = [
-                    row for row in block["response"]["rows"]
-                    if self._parse_id(row["id"].text()) is not None
-                ]
+                    for row_index, delay, count, interval, seq in schedule
+                )
+            if rows or (cache_on and not cache_rows):
                 if not rows:
                     records.append(values)
                 else:
@@ -2199,9 +2226,28 @@ class CanTriggerTab(QWidget):
                     ])
                     if schedule is None:
                         return None
+                    # В комбо seq ответных записей сдвигаем за строки
+                    # кэша: голый seq=0 (и cond_idx=0) разорвал бы
+                    # группу при вычитке — ответ выглядел бы отдельным
+                    # триггером.
+                    seq_shift = len(cache_rows) if combo else 0
                     for row_index, delay, count, interval, seq in schedule:
                         row = rows[row_index]
                         record = dict(values)
+                        if cache_on:
+                            # Ответная запись комбо — обычная запись без
+                            # кэш-режима: src-* поля филлера зачищаем.
+                            record.update({
+                                "cache_enabled": 0,
+                                "src_channel": 0,
+                                "src_extended": 0,
+                                "src_id": 0,
+                                "src_dlc": 0,
+                                "src_from": b"",
+                                "src_to": b"",
+                                "src_listen_echo": True,
+                                "src_fire_limit": 0,
+                            })
                         record.update({
                             "tx_channel": row["channel"].currentIndex(),
                             "tx_extended": row["bit"].currentIndex(),
@@ -2214,7 +2260,10 @@ class CanTriggerTab(QWidget):
                             "delay_ms": delay,
                             "tx_count": count,
                             "tx_interval_ms": interval,
-                            "group_seq": seq,
+                            "group_seq": (
+                                seq if seq & GROUP_SEQ_FRAGMENT
+                                else seq + seq_shift
+                            ),
                         })
                         records.append(record)
         if (
@@ -2244,6 +2293,14 @@ class CanTriggerTab(QWidget):
             # пропала бы), а неизвестные биты rx_flags старой прошивкой
             # отбраковываются — запись была бы мёртвой.
             return None
+        if (
+            self._serial_manager.device_protocol_version() < 8
+            and any(r.get("src_cache_only") for r in records)
+        ):
+            # CACHE_ONLY появился в протоколе 8: старая прошивка
+            # отбракует запись по неизвестным битам src_flags — комбо
+            # «кэш+ответ» исполняет приложение (томбстоун enabled=0).
+            return None
         return records
 
     def _cache_row_record(
@@ -2256,9 +2313,13 @@ class CanTriggerTab(QWidget):
         seq: int,
         cond: dict[str, Any] | None = None,
         cond_idx: int = 0,
+        cache_only: bool = False,
     ) -> dict[str, Any]:
         """Запись trigger_t одной строки кэша: её src-фильтр и канал
-        отправки + абсолютный тайминг из расписания expand_schedule."""
+        отправки + абсолютный тайминг из расписания expand_schedule.
+        cache_only — комбо «кэш + ответ»: филлер только наполняет кэш,
+        ответ берут отдельные записи группы (src_flags бит CACHE_ONLY,
+        протокол 8)."""
         record = self._device_trigger_values(index, cache_row, cond=cond)
         record.update({
             "delay_ms": delay,
@@ -2266,6 +2327,7 @@ class CanTriggerTab(QWidget):
             "tx_interval_ms": interval,
             "group_seq": seq,
             "rx_cond_idx": cond_idx,
+            "src_cache_only": bool(cache_only),
         })
         return record
 
@@ -2910,10 +2972,7 @@ class CanTriggerTab(QWidget):
             logger.info("Триггер %d: сработка после старта устройства", index + 1)
             boot_delay = max(0, int(trigger.get("recv_boot_delay", 0)))
             if boot_delay == 0:
-                if trigger["cache"]:
-                    self._send_cached_frames(trigger)
-                else:
-                    self._send_responses(trigger)
+                self._fire_trigger_response(trigger)
                 self._flash_test_button(index)
             else:
                 # Поле «Задержка, мс» — пауза от старта сессии до
@@ -2933,10 +2992,7 @@ class CanTriggerTab(QWidget):
             return
         if index >= len(self._blocks) or not self._blocks[index]["group"].isChecked():
             return
-        if trigger["cache"]:
-            self._send_cached_frames(trigger)
-        else:
-            self._send_responses(trigger)
+        self._fire_trigger_response(trigger)
         self._flash_test_button(index)
 
     def _on_trigger_toggled_by_block(self, block: dict[str, Any], enabled: bool) -> None:
@@ -2972,20 +3028,16 @@ class CanTriggerTab(QWidget):
             widget.setGraphicsEffect(effect)
 
     def _set_cache_enabled(self, block: dict[str, Any], enabled: bool) -> None:
-        """Включает либо блок ответа, либо блок кэша в зависимости от чекбокса."""
-        response_group = block["response"]["group"]
-        cache_fields = block["cache"]["fields_widget"]
+        """Показывает настройки кэша при включённой автозаписи.
 
-        response_group.setEnabled(not enabled)
-        # Поля кэша не глушим целиком (setEnabled(False) на контейнере
-        # делал мёртвыми и чекбоксы строк — «Слушать отправляемое»/
-        # «Кол-во сработок», отчёт мастера): их надо настраивать ДО
-        # включения автозаписи. Выключенное состояние показывает
-        # приглушение прозрачностью ниже.
-        cache_fields.setEnabled(True)
-
-        self._set_widget_opacity(response_group, 0.5 if enabled else 1.0)
-        self._set_widget_opacity(cache_fields, 1.0 if enabled else 0.5)
+        Кэш и «Ответ» больше не взаимоисключают друг друга (отчёт
+        мастера): блок ответа остаётся активным — с заполненными
+        фреймами ответа триггер шлёт их, а кэш наполняется строками
+        кэша параллельно (прошивка: филлеры с битом CACHE_ONLY,
+        протокол 8). Без заполненного ответа поведение прежнее —
+        ответом уходит последний закэшированный кадр.
+        Выключенная автозапись прячет настройки кэша целиком."""
+        block["cache"]["fields_widget"].setVisible(enabled)
 
     def retranslate_ui(self) -> None:
         """Обновляет статические строки вкладки триггеров."""
@@ -3392,6 +3444,13 @@ class CanTriggerTab(QWidget):
                         int(crow.get("bit", 0)),
                         f"{label} {tr('кэш')} {j}",
                     )
+                # Без условия приёма триггер никогда не срабатывает:
+                # кэш наполняется по src-фильтру, но выстрел (закэши-
+                # рованный кадр или фреймы ответа) требует rx-матча.
+                if not rx_text and not trigger.get("recv_fire_on_boot"):
+                    warnings.append(
+                        f"{label}: " + tr("нет ID приёма — условие не задано")
+                    )
             elif rx_text:
                 errors += self._check_id_range(
                     rx_text, int(trigger.get("recv_bit", 0)), label
@@ -3746,10 +3805,7 @@ class CanTriggerTab(QWidget):
                     cond, data, frame_rtr
                 ):
                     continue
-                if trigger["cache"]:
-                    self._send_cached_frames(trigger)
-                else:
-                    self._send_responses(trigger)
+                self._fire_trigger_response(trigger)
                 self._flash_test_button(trigger["index"])
                 if rx_state is not None:
                     rx_state["count"] += 1
@@ -3796,10 +3852,9 @@ class CanTriggerTab(QWidget):
     ) -> bool:
         """Эхо-кадр совпадает с фреймом ответа триггера (ID+канал+
         битность+Data): МК исполнил триггер и его передача вернулась
-        к нам как tx_echo. Для кэш-триггеров tx_id динамический — эхо не
-        распознаётся, вспышка только у PC-исполнения."""
-        if trigger.get("cache"):
-            return False
+        к нам как tx_echo. В чистом кэш-режиме tx_id динамический
+        (последний закэшированный кадр) — эхо не распознаётся; в комбо
+        «кэш+ответ» фиксированный ответ распознаётся как обычно."""
         for resp in trigger.get("responses") or []:
             if int(resp.get("id", -1)) != frame_id:
                 continue
@@ -3812,6 +3867,17 @@ class CanTriggerTab(QWidget):
                 continue
             return True
         return False
+
+    def _fire_trigger_response(self, trigger: dict[str, Any]) -> None:
+        """Выстрел ответа триггера. Заполненные фреймы ответа шлются
+        как настроено — комбо «кэш + ответ» (протокол 8, филлеры
+        CACHE_ONLY наполняют кэш параллельно). Без них — прежняя
+        семантика кэш-режима: ответом уходит последний закэшированный
+        кадр."""
+        if trigger.get("responses"):
+            self._send_responses(trigger)
+        elif trigger.get("cache"):
+            self._send_cached_frames(trigger)
 
     def _send_responses(self, trigger: dict[str, Any]) -> None:
         """Последовательно отправляет фреймы ответа с задержками и паузами."""

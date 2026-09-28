@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QCompleter,
+    QDialog,
     QFileDialog,
     QGraphicsOpacityEffect,
     QHBoxLayout,
@@ -58,6 +59,7 @@ from ui.can_trigger_tab import CanTriggerTab, TriggerValidationAborted
 from ui.event_log_tab import EventLogTab
 from ui.flexible_logic_tab import FlexibleLogicTab
 from ui.hex_edit import HexDataEdit
+from ui.variables_tab import VariablesTab
 from ui.library_browser import LibraryBrowser
 from ui.memory_indicator import MemoryIndicator
 from ui.toast import show_toast
@@ -389,6 +391,7 @@ class SettingsWindow(QMainWindow):
         self._monitor_tab = CanMonitorTab(self._serial_manager, self)
         self._gateway_tab = CanGatewayTab(self._serial_manager, self)
         self._flexible_tab = FlexibleLogicTab(self._serial_manager, self)
+        self._variables_tab = VariablesTab(self)
         self._library_tab = LibraryBrowser(self._trigger_tab, self._flexible_tab, self)
         self._analyzer_tab = CanAnalyzer(self._serial_manager, self)
         self._topology_tab = CanTopologyWidget(self)
@@ -399,6 +402,7 @@ class SettingsWindow(QMainWindow):
         self._tabs.addTab(self._monitor_tab, "🔍 " + tr("Мониторинг"))
         self._tabs.addTab(self._gateway_tab, "🚦 " + tr("Шлюз"))
         self._tabs.addTab(self._flexible_tab, "🧩 " + tr("Гибкая логика"))
+        self._tabs.addTab(self._variables_tab, "🎛 " + tr("Переменные"))
         self._tabs.addTab(self._library_tab, "📚 " + tr("Библиотека"))
         self._tabs.addTab(self._analyzer_tab, "🔬 " + tr("Трэйс"))
         self._tabs.addTab(self._topology_tab, "🌐 " + tr("Топология"))
@@ -578,9 +582,17 @@ class SettingsWindow(QMainWindow):
         тоже получают отслеживание и помечают форму изменённой.
         """
         for widget in (root, *root.findChildren(QWidget)):
-            if not widget.property("_dirty_watched"):
-                widget.setProperty("_dirty_watched", True)
-                widget.installEventFilter(self)
+            if widget.property("_dirty_watched"):
+                continue
+            # Диалоги (история ID, отправка, заметки) и их содержимое
+            # не отслеживаем — это не поля настроек.
+            parent = widget
+            while parent is not None and not isinstance(parent, QDialog):
+                parent = parent.parentWidget()
+            if parent is not None:
+                continue
+            widget.setProperty("_dirty_watched", True)
+            widget.installEventFilter(self)
         for widget in root.findChildren(QComboBox):
             if not widget.property("_dt_combo"):
                 widget.setProperty("_dt_combo", True)
@@ -624,19 +636,33 @@ class SettingsWindow(QMainWindow):
         срабатывает при setParent(None)/уничтожении — то есть при любом
         удалении блока/строки, даже если само действие не пометило форму.
         """
-        event_type = event.type()
-        if event_type == QEvent.Type.ChildAdded:
-            child = event.child()
-            if isinstance(child, QWidget):
-                def _track(w: QWidget = child) -> None:
-                    # виджет может быть уже уничтожен
-                    with contextlib.suppress(RuntimeError):
-                        self._install_dirty_tracking(w)
+        # Любая ошибка внутри фильтра превращается в «Error calling
+        # Python override of QMainWindow::eventFilter» — а когда событие
+        # доставлялось вложенно (диалог открывается из чужого фильтра),
+        # текст накапливался рекурсией и сыпал пользователю сотней
+        # вложенных копий. Фильтр обязан быть непробиваемым.
+        try:
+            event_type = event.type()
+            if event_type == QEvent.Type.ChildAdded:
+                child = event.child()
+                # Диалоги (история ID, отправка пакетов, заметки) — не
+                # поля настроек: их виджеты не трекаем и «грязной»
+                # форму из-за них не помечаем. Это же отрезает фильтр
+                # от десятков внутренних виджетов каждого диалога.
+                if isinstance(child, QDialog):
+                    return False
+                if isinstance(child, QWidget):
+                    def _track(w: QWidget = child) -> None:
+                        # виджет может быть уже уничтожен
+                        with contextlib.suppress(RuntimeError):
+                            self._install_dirty_tracking(w)
 
-                QTimer.singleShot(0, _track)
-            self._mark_dirty()
-        elif event_type == QEvent.Type.ChildRemoved:
-            self._mark_dirty()
+                    QTimer.singleShot(0, _track)
+                self._mark_dirty()
+            elif event_type == QEvent.Type.ChildRemoved:
+                self._mark_dirty()
+        except Exception:
+            pass
         # False — «событие не наше»: super().eventFilter() в PySide6
         # пробрасывает событие в watched->event() заново, и когда у
         # watched есть свой фильтр (can_trigger_tab у wrapper'ов),
@@ -1173,6 +1199,7 @@ class SettingsWindow(QMainWindow):
             self._monitor_tab: "🔍 " + tr("Мониторинг"),
             self._gateway_tab: "🚦 " + tr("Шлюз"),
             self._flexible_tab: "🧩 " + tr("Гибкая логика"),
+            self._variables_tab: "🎛 " + tr("Переменные"),
             self._library_tab: "📚 " + tr("Библиотека"),
             self._analyzer_tab: "🔬 " + tr("Трэйс"),
             self._topology_tab: "🌐 " + tr("Топология"),
@@ -1195,6 +1222,7 @@ class SettingsWindow(QMainWindow):
             self._monitor_tab,
             self._gateway_tab,
             self._flexible_tab,
+            self._variables_tab,
             self._library_tab,
             self._analyzer_tab,
             self._topology_tab,

@@ -185,29 +185,24 @@ class MainWindow(QMainWindow):
         self._help_button.setToolTip(tr("Помощь"))
         self._help_button.clicked.connect(self._on_help_clicked)
 
-        self._update_check_button = QPushButton("🔄")
+        # Проверка обновлений — только векторная стрелка: emoji «🔄»
+        # не реагирует на font-weight, значок рисуется штатно.
+        self._update_check_button = QPushButton()
         self._update_check_button.setFixedSize(36, 28)
         self._update_check_button.setFont(font)
+        self._update_check_button.setIcon(_reload_icon(QColor("#DCE4FF")))
+        self._update_check_button.setIconSize(
+            self._update_check_button.size() * 0.62
+        )
         self._update_check_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._update_check_button.setToolTip(tr("Проверка обновлений"))
         self._update_check_button.clicked.connect(self._on_check_updates_clicked)
 
         # Главные кнопки в теле окна
-        self._update_button = QPushButton()
+        self._update_button = QPushButton("🔄 " + tr("Обновить"))
         self._update_button.setFixedSize(240, 100)
-        # Только жирные стрелки, без текста и фона: emoji «🔄» не
-        # реагирует на font-weight — значок рисуется векторно.
-        self._update_button.setIcon(_reload_icon(QColor("#DCE4FF")))
-        self._update_button.setIconSize(self._update_button.size() * 0.62)
+        self._update_button.setFont(QFont("Segoe UI", 16))
         self._update_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        # Только жирные стрелки без фона — голубая плашка выпадала из
-        # общего стиля стартового экрана (отчёт мастера).
-        self._update_button.setStyleSheet(
-            "QPushButton { background: transparent; border: none; }"
-            "QPushButton:hover { background: rgba(108, 140, 255, 40); border-radius: 12px; }"
-            "QPushButton:pressed { background: rgba(108, 140, 255, 70); border-radius: 12px; }"
-        )
-        self._update_button.setToolTip(tr("Обновить"))
         self._update_button.clicked.connect(self._on_update_clicked)
 
         self._configure_button = QPushButton("⚙️ " + tr("Настроить"))
@@ -583,7 +578,7 @@ class MainWindow(QMainWindow):
         self._logs_button.setText("📄 " + tr("Логи"))
         self._help_button.setToolTip(tr("Помощь"))
         self._update_check_button.setToolTip(tr("Проверка обновлений"))
-        self._update_button.setToolTip(tr("Обновить"))
+        self._update_button.setText("🔄 " + tr("Обновить"))
         self._configure_button.setText("⚙️ " + tr("Настроить"))
         self._flash_button.setText(tr("Прошить\nмикроконтроллер"))
         self._flash_button.setToolTip(tr("Открыть окно прошивки"))

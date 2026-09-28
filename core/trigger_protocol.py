@@ -33,6 +33,12 @@ TRIGGER_F_MUTE_ECHO = 0x01
 TRIGGER_F_FIRE_ON_BOOT = 0x02
 TRIGGER_F_COND_SHIFT = 2
 TRIGGER_F_COND_MASK = 0x1C
+# src_flags бит 1 = CACHE_ONLY: запись только наполняет кэш, ответ не
+# вооружается — так «автозапись DATA в кэш» и обычные «Фреймы ответа»
+# работают в одном триггере вместе (филлеры + ответные записи группы).
+# Поддержан прошивкой с protocol>=8; на старых такой блок исполняет
+# приложение (записи-томбстоуны, см. _project_block_records).
+TRIGGER_F_CACHE_ONLY = 0x02
 
 # Хранилище триггеров v3 (см. firmware/PROTOCOL.md и Inc/trigger.h):
 # записи упакованы в суффикс пула страниц над config-страницей
@@ -97,7 +103,13 @@ def count_configured_triggers(triggers: list) -> int:
         if not isinstance(trigger, dict):
             continue
         # Кэш-триггер разворачивается по строкам кэша (у каждой свой
-        # src-фильтр), обычный — по фреймам ответа.
+        # src-фильтр), обычный — по фреймам ответа. Комбо «кэш+ответ»
+        # занимает оба набора записей: филлеры + фреймы ответа.
+        filled: list = []
+        responses_filled = [
+            r for r in trigger.get("responses") or []
+            if isinstance(r, dict) and str(r.get("id", "")).strip()
+        ]
         if trigger.get("cache"):
             rows = trigger.get("cache_rows")
             if isinstance(rows, list):
@@ -110,10 +122,7 @@ def count_configured_triggers(triggers: list) -> int:
                     trigger.get("cache_id", "")
                 ).strip() else []
         else:
-            filled = [
-                r for r in trigger.get("responses") or []
-                if isinstance(r, dict) and str(r.get("id", "")).strip()
-            ]
+            filled = responses_filled
         conds = trigger.get("recv_conditions")
         n_conds = 1
         filled_conds = 0
@@ -144,6 +153,14 @@ def count_configured_triggers(triggers: list) -> int:
             # каждое условие с заполненным ID — каждое занимает свои
             # записи в пуле.
             count += (len(schedule) if schedule is not None else 1) * n_conds
+            # Комбо «кэш + ответ»: поверх филлеров кэша идут обычные
+            # ответные записи — считаем и их (только когда есть что
+            # кэшировать — пустой кэш проецируется без филлеров).
+            if trigger.get("cache") and filled and responses_filled:
+                resp_schedule = expand_schedule(responses_filled)
+                count += (
+                    len(resp_schedule) if resp_schedule is not None else 1
+                ) * n_conds
     return count
 
 
@@ -245,6 +262,8 @@ def pack_trigger(values: dict[str, Any], fmt_version: int = TRIGGER_FORMAT_VERSI
             int(values.get("rx_cond_idx", 0)) << TRIGGER_F_COND_SHIFT
         ) & TRIGGER_F_COND_MASK
         src_flags = 0 if values.get("src_listen_echo", True) else TRIGGER_F_MUTE_ECHO
+        if values.get("src_cache_only"):
+            src_flags |= TRIGGER_F_CACHE_ONLY
         raw = bytearray(
             struct.pack(
                 _TRIGGER_FORMAT,
@@ -276,6 +295,7 @@ def unpack_trigger(payload: bytes) -> dict[str, Any]:
             "rx_cond_idx": (values[29] & TRIGGER_F_COND_MASK) >> TRIGGER_F_COND_SHIFT,
             "src_fire_limit": values[30],
             "src_listen_echo": not (values[31] & TRIGGER_F_MUTE_ECHO),
+            "src_cache_only": bool(values[31] & TRIGGER_F_CACHE_ONLY),
             "rx_boot_delay": values[32],
         }
     elif len(payload) == TRIGGER_SIZE_V2:
@@ -291,6 +311,7 @@ def unpack_trigger(payload: bytes) -> dict[str, Any]:
             "rx_cond_idx": 0,
             "src_fire_limit": 0,
             "src_listen_echo": True,
+            "src_cache_only": False,
             "rx_boot_delay": 0,
         }
     else:

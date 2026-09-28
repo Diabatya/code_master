@@ -761,6 +761,7 @@ class IdHistoryDialog(QDialog):
         self._send_dialog: SendPacketsDialog | None = None
         self._notes = IdNotes()
         self._hover_byte = -1
+        self._syncing_checks = False
         self.setWindowTitle(tr("История ID 0x{0:X} — CAN{1}").format(can_id, channel))
         # Окно анализа — сразу на весь доступный экран: таблица и
         # график читаются без прокрутки, кнопки остаются видимыми.
@@ -928,19 +929,24 @@ class IdHistoryDialog(QDialog):
     def _sync_byte_checks(self) -> None:
         """Расставляет галочки «N-байт» ровно под своими колонками
         таблицы (пересчёт при ресайзе и горизонтальной прокрутке)."""
-        strip_w = self._byte_strip.width()
-        vp_x = self._table.viewport().x()
-        for i, cb in enumerate(self._byte_checks):
-            if not isValid(cb):
-                continue
-            col = self.FIRST_BYTE_COL + i
-            x = vp_x + self._table.columnViewportPosition(col)
-            w = self._table.columnWidth(col)
-            cb_w = min(cb.sizeHint().width(), max(18, w))
-            cb.setGeometry(
-                x + max(0, (w - cb_w) // 2), 0, cb_w, self._byte_strip.height()
-            )
-        self._byte_strip.setMinimumWidth(strip_w)
+        if self._syncing_checks or not isValid(self._byte_strip):
+            return
+        self._syncing_checks = True
+        try:
+            vp_x = self._table.viewport().x()
+            for i, cb in enumerate(self._byte_checks):
+                if not isValid(cb):
+                    continue
+                col = self.FIRST_BYTE_COL + i
+                x = vp_x + self._table.columnViewportPosition(col)
+                w = self._table.columnWidth(col)
+                cb_w = min(cb.sizeHint().width(), max(18, w))
+                cb.setGeometry(
+                    x + max(0, (w - cb_w) // 2), 0, cb_w,
+                    self._byte_strip.height(),
+                )
+        finally:
+            self._syncing_checks = False
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         if watched is self._table and event.type() == QEvent.Type.Resize:
@@ -949,9 +955,12 @@ class IdHistoryDialog(QDialog):
         # Наведение на галочку «N-байт» подсвечивает её колонку голубым;
         # уход курсора — снимает подсветку (делегат перерисует видимые
         # строки — клик/тогглинг штатно уходит дальше, возвращаем False).
+        # RuntimeError — если в watched пришёл уже разрушенный
+        # C++-объект (сравнение обёрток бросает) — фильтр не имеет
+        # права уронить доставку события.
         try:
             idx = self._byte_checks.index(watched)
-        except ValueError:
+        except (ValueError, RuntimeError):
             return False
         if event.type() == QEvent.Type.Enter:
             self._hover_byte = idx
@@ -1411,8 +1420,12 @@ class CanChannelMonitor(QWidget):
         self._table.viewport().installEventFilter(self)
         # Двойной клик ЛЕВОЙ кнопкой по строке — та же история ID
         # (таблица логирования, онлайн-график %, развёртка, инверсия).
+        # Открытие тоже отложено (singleShot): диалог изнутри
+        # доставки клика на Windows ронял eventFilter рекурсией.
         self._table.cellDoubleClicked.connect(
-            lambda row, _col: self._show_id_history(row)
+            lambda row, _col: QTimer.singleShot(
+                0, lambda r=row: self._show_id_history(r)
+            )
         )
         # DATA колонка — делегат побайтовой подсветки (жёлтый шрифт
         # изменившегося байта, а не заливка строки — отчёт мастера).
@@ -2318,7 +2331,12 @@ class CanChannelMonitor(QWidget):
         ):
             row = self._table.rowAt(event.position().toPoint().y())
             if row >= 0:
-                self._show_id_history(row)
+                # Открытие окна откладываем за пределы eventFilter:
+                # конструкция и show() диалога прямо внутри доставки
+                # события порождали вложенные вызовы фильтров
+                # (ChildAdded → ещё фильтры) и на Windows падали
+                # «Error calling Python override of eventFilter».
+                QTimer.singleShot(0, lambda r=row: self._show_id_history(r))
                 return True
         # False, а не super().eventFilter(): проброс события назад в
         # watched->event() даёт взаимную рекурсию между фильтрами.

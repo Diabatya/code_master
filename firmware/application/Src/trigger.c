@@ -421,7 +421,8 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
       || trig->src_dlc > 8U
       || (trig->rx_flags & ~(TRIGGER_F_MUTE_ECHO | TRIGGER_F_FIRE_ON_BOOT
                              | TRIGGER_F_COND_MASK)) != 0U
-      || (trig->src_flags & ~TRIGGER_F_MUTE_ECHO) != 0U) {
+      || (trig->src_flags & ~(TRIGGER_F_MUTE_ECHO
+                              | TRIGGER_F_CACHE_ONLY)) != 0U) {
     return 0U;
   }
   uint32_t rx_max = trig->rx_extended ? 0x1FFFFFFFU : 0x7FFU;
@@ -824,6 +825,12 @@ void Trigger_OnFrame(const can_frame_t *frame)
           s_src_state[i].suppress = 1U;
         }
       }
+    }
+    /* CACHE_ONLY — запись только наполняет кэш, ответ не вооружается:
+     * связка «кэш + обычный ответ» одного UI-триггера раскладывается в
+     * филлеры (cache_enabled+CACHE_ONLY) и ответные записи группы. */
+    if (t->src_flags & TRIGGER_F_CACHE_ONLY) {
+      continue;
     }
     /* rx_flags&MUTE_ECHO — триггер не реагирует на кадры, отправленные
      * самим МК (TX-эхо); 0 — слушает и внешние, и свои (как в v2).

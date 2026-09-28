@@ -480,10 +480,14 @@ class Translator:
                 "{0}-байт": "byte {0}",
                 "Байт {0} в анализе, сумме и на графике": "Byte {0} in analysis, sum and graph",
                 "Поиск с переводом": "Translated search",
-                "Число (345678 → 05 46 4E), hex (5464E, 46 4E, 0x05464E)\n"
-                "или текст — VIN ищется как ASCII-байты:":
-                    "Number (345678 → 05 46 4E), hex (5464E, 46 4E, 0x05464E)\n"
-                    "or text — a VIN is searched as ASCII bytes:",
+                "Введите латинские символы или цифры для поиска":
+                    "Enter Latin characters or digits to search",
+                "Очистить принятые пакеты CAN{0}":
+                    "Clear received packets of CAN{0}",
+                "Трейс CAN{0} очищен": "CAN{0} trace cleared",
+                "Переменные": "Variables",
+                "Чтение": "Read",
+                "Управление": "Control",
                 "Введите число (345678 → 05 46 4E), hex (5464E / 46 4E) "
                 "или текст (VIN — ищется как ASCII-байты) — совпадения "
                 "подсвечиваются в трейсе":
