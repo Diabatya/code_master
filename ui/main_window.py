@@ -38,7 +38,7 @@ from shiboken6 import isValid
 from core.dbc_manager import DBCManager
 from core.serial_manager import SerialManager
 from core.update_checker import check_for_updates
-from models.config import Config
+from models.config import CONFIG_FILE_FILTER, Config
 from models.logger import get_logger, get_log_dir
 from models.translations import _ as tr, set_language
 from models.version import VERSION
@@ -261,9 +261,6 @@ class MainWindow(QMainWindow):
         self._port_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._port_indicator.setToolTip(tr("Индикатор подключения COM-порта"))
 
-        self._port_label = QLabel(tr("Нет подключения"))
-        self._port_label.setFont(font)
-
         self._theme_button = QPushButton(tr("Тема"))
         self._theme_button.setFixedSize(70, 28)
         self._theme_button.setFont(font)
@@ -272,7 +269,6 @@ class MainWindow(QMainWindow):
         self._theme_menu = QMenu(self._theme_button)
         self._dark_theme_action = self._theme_menu.addAction(tr("Тёмный"), self._set_dark_theme)
         self._light_theme_action = self._theme_menu.addAction(tr("Светлый"), self._set_light_theme)
-        self._starline_theme_action = self._theme_menu.addAction(tr("StarLine"), self._set_starline_theme)
         self._theme_button.setMenu(self._theme_menu)
 
         self._language_combo = QComboBox()
@@ -308,16 +304,24 @@ class MainWindow(QMainWindow):
         self._update_check_button.setToolTip(tr("Проверка обновлений"))
         self._update_check_button.clicked.connect(self._on_check_updates_clicked)
 
-        # Левая колонка значков: первый — «папка» FAKE-настроек
-        # (эмулятор без устройства). Колонку будем пополнять.
+        # Левая колонка значков: «папка» — загрузка конфигурации из
+        # файла и FAKE-настройки (эмулятор без устройства). Колонку
+        # будем пополнять.
         self._fake_button = QPushButton("\U0001F4C2")
         self._fake_button.setFixedSize(48, 48)
         self._fake_button.setFont(QFont("Segoe UI", 16))
         self._fake_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._fake_button.setToolTip(
-            tr("FAKE-настройки (эмулятор устройства)")
+            tr("Загрузить конфигурацию / FAKE-настройки")
         )
-        self._fake_button.clicked.connect(self._on_fake_clicked)
+        self._fake_menu = QMenu(self._fake_button)
+        self._load_config_action = self._fake_menu.addAction(
+            tr("Загрузить конфигурацию из файла…"), self._on_load_config_file
+        )
+        self._fake_settings_action = self._fake_menu.addAction(
+            tr("FAKE-настройки (эмулятор устройства)"), self._on_fake_clicked
+        )
+        self._fake_button.setMenu(self._fake_menu)
 
         # Список карточек обнаруженных устройств.
         self._cards_box = QWidget()
@@ -398,7 +402,6 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self._language_combo)
         top_layout.addStretch()
         top_layout.addWidget(self._port_indicator)
-        top_layout.addWidget(self._port_label)
         top_layout.addSpacing(10)
         top_layout.addWidget(self._theme_button)
         top_layout.addWidget(self._logs_button)
@@ -635,10 +638,14 @@ class MainWindow(QMainWindow):
                 self._cards_layout.count() - 1, card
             )
         if not devices:
-            # Карточка-заглушка с баннером «подключите по USB».
+            # Устройства нет — карточку не рисуем: только текстовая
+            # подсказка без рамки и кнопок (по отчёту мастера).
+            hint = QLabel(tr("Подключите устройство по USB"))
+            hint.setFont(QFont("Segoe UI", 10))
+            hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            hint.setStyleSheet("color: #9A9AA5;")
             self._cards_layout.insertWidget(
-                self._cards_layout.count() - 1,
-                _DeviceCard(self, None, "CodeMaster", "", "", False),
+                self._cards_layout.count() - 1, hint
             )
 
     def _ensure_port_selected(self) -> bool:
@@ -727,16 +734,6 @@ class MainWindow(QMainWindow):
         self._config.set("theme", "light")
         apply_theme(app, True)
 
-    def _set_starline_theme(self) -> None:
-        """Устанавливает тему «StarLine»."""
-        from ui.dark_theme import apply_starline_theme
-        app = QApplication.instance()
-        if app is None:
-            return
-        self._config.set("light_theme", False)
-        self._config.set("theme", "starline")
-        apply_starline_theme(app)
-
     def _on_language_changed(self, index: int) -> None:
         """Переключает язык через выпадающий список и обновляет открытые окна."""
         lang = self._language_combo.itemData(index)
@@ -764,13 +761,10 @@ class MainWindow(QMainWindow):
         self._logo_label.setText("🛠️ " + tr("Код Мастер"))
         self._slogan_label.setText(tr("Разработано «КОД МАСТЕР»"))
         self._port_indicator.setToolTip(tr("Индикатор подключения COM-порта"))
-        if not self._serial_manager.is_open() and not self._config.get("port"):
-            self._port_label.setText(tr("Нет подключения"))
         self._theme_button.setText(tr("Тема"))
         self._theme_button.setToolTip(tr("Выбор темы оформления"))
         self._dark_theme_action.setText(tr("Тёмный"))
         self._light_theme_action.setText(tr("Светлый"))
-        self._starline_theme_action.setText(tr("StarLine"))
         self._logs_button.setText("📄 " + tr("Логи"))
         self._help_button.setToolTip(tr("Помощь"))
         self._update_check_button.setToolTip(tr("Проверка обновлений"))
@@ -784,6 +778,12 @@ class MainWindow(QMainWindow):
             tr("Подключенные адаптеры — выберите действие")
         )
         self._fake_button.setToolTip(
+            tr("Загрузить конфигурацию / FAKE-настройки")
+        )
+        self._load_config_action.setText(
+            tr("Загрузить конфигурацию из файла…")
+        )
+        self._fake_settings_action.setText(
             tr("FAKE-настройки (эмулятор устройства)")
         )
         self._cards_signature = ()
@@ -830,24 +830,28 @@ class MainWindow(QMainWindow):
         self._update_port_indicator()
 
     def _update_port_indicator(self) -> None:
-        """Обновляет индикатор и текст порта."""
+        """Обновляет индикатор порта (без строки имени устройства)."""
         base_style = "font-size: 14px; background: transparent;"
         if self._serial_manager.is_open():
             self._port_indicator.setStyleSheet(f"color: #4CAF50; {base_style}")
-            # Показываем записанное в устройство имя (поле «Устройство»),
-            # а не системное имя COM-порта.
-            name = (
-                self._config.get("device_name", "")
-                or self._config.get("device_type_name", "")
-                or self._serial_manager.current_port_name()
-            )
-            self._port_label.setText(name)
         elif self._config.get("port"):
             self._port_indicator.setStyleSheet(f"color: #F44336; {base_style}")
-            self._port_label.setText(tr("Не подключено"))
         else:
             self._port_indicator.setStyleSheet(f"color: #666666; {base_style}")
-            self._port_label.setText(tr("Нет подключения"))
+
+    def _on_load_config_file(self) -> None:
+        """Открывает диалог выбора файла и передаёт путь загрузчику
+        окна настроек (кнопка «папка» на главном экране)."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("Загрузить конфигурацию"),
+            self._config.get("last_config_dir", "") or "",
+            CONFIG_FILE_FILTER,
+        )
+        if not path:
+            return
+        self._open_settings_window()
+        self._settings_window.load_config_from_path(path)
 
     def _on_serial_error(self, message: str) -> None:
         """Показывает ошибку COM-порта."""

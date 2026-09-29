@@ -17,7 +17,7 @@ from core.serial_manager import SerialManager
 from models.config import Config
 from models.logger import setup_logging
 from models.version import VERSION, ENGINEERING_BUILD
-from ui.dark_theme import apply_dark_theme, apply_light_theme, apply_starline_theme
+from ui.dark_theme import apply_dark_theme, apply_light_theme
 from ui.disclaimer_dialog import DisclaimerDialog
 from ui.main_window import MainWindow
 
@@ -92,10 +92,7 @@ def main() -> int:
     app.setApplicationVersion(VERSION)
 
     config = Config()
-    theme = config.get("theme", "dark")
-    if theme == "starline":
-        apply_starline_theme(app)
-    elif config.get("light_theme", False):
+    if config.get("light_theme", False):
         apply_light_theme(app)
     else:
         apply_dark_theme(app)

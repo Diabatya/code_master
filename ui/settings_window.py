@@ -389,6 +389,8 @@ class SettingsWindow(QMainWindow):
         self._gateway_tab = CanGatewayTab(self._serial_manager, self)
         self._flexible_tab = FlexibleLogicTab(self._serial_manager, self)
         self._variables_tab = VariablesTab(self)
+        # Списки переменных для событий/условий/действий ГЛ.
+        self._flexible_tab.set_variables_tab(self._variables_tab)
         self._library_tab = LibraryBrowser(self._trigger_tab, self._flexible_tab, self)
         self._analyzer_tab = CanAnalyzer(self._serial_manager, self)
         self._topology_tab = CanTopologyWidget(self)
@@ -1177,7 +1179,6 @@ class SettingsWindow(QMainWindow):
         self._serial_label.setText(tr("Серийный номер"))
         self._search_edit.setPlaceholderText(tr("Поиск по разделам..."))
         titles = {
-            self._connection_tab: "🔌 " + tr("Подключение"),
             self._trigger_tab: "⚡ " + tr("Триггеры"),
             self._monitor_tab: "🔍 " + tr("Мониторинг"),
             self._gateway_tab: "🚦 " + tr("Шлюз"),
@@ -1592,6 +1593,11 @@ class SettingsWindow(QMainWindow):
         )
         if not path:
             return
+        self.load_config_from_path(path)
+
+    def load_config_from_path(self, path: str) -> None:
+        """Загружает конфигурацию из уже выбранного файла — точка
+        входа и для кнопки в настройках, и для главного окна."""
         try:
             payload, file_name, file_serial = unpack_config_file(Path(path).read_bytes())
         except Exception as exc:  # noqa: BLE001

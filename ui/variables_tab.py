@@ -8,12 +8,19 @@
 * «Статическая переменная» — неограниченный набор фреймов с
   маской X по DATA (как «Приём» в триггерах); у каждого фрейма справа
   выбор значения «→ 1» / «→ 0» — приход фрейма пишет это значение
-  в бит ОЗУ, привязанный к функции в ГЛ;
-* «Динамическая переменная» — ID/DLC/диапазон Data, выбор байтов и
-  редактируемый график перевода сырого значения в величину
-  (обороты ДВС, наддув, температура и т.п.).
+  в бит ОЗУ, привязанный к функции в ГЛ. Выбор канала здесь
+  отсутствует: канал фрейма задаётся в Гибкой логике (отчёт мастера);
+* «Динамическая переменная» — ID/DLC/диапазон Data и редактируемый
+  график перевода сырого значения в величину (обороты ДВС, наддув,
+  температура и т.п.). Байты для расчёта — это заполненные поля DATA
+  без «X» (отчёт мастера: галочки убраны).
 
-У каждой строки справа выбор носителя «ОЗУ / ПЗУ»; ПЗУ пока
+Поля ввода DATA — побайтовые, как в триггерах: отдельное поле на
+каждый байт, только HEX, «X» — байт не участвует в сравнении/расчёте,
+пустое поле тоже игнорируется.
+
+Носитель переменной «ОЗУ / ПЗУ» задаётся в диалоге настройки
+(при записи), а не в строке таблицы (отчёт мастера). ПЗУ пока
 некликабельно — появится после подключения EEPROM к МК.
 
 Хранение: кнопки «Загрузить переменные» / «Сохранить переменные»
@@ -27,12 +34,12 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtCore import QRegularExpression, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QRegularExpressionValidator
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -47,6 +54,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QStackedWidget,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -56,7 +64,10 @@ from PySide6.QtWidgets import (
 from models.config import Config
 from models.id_notes import IdNotes
 from models.translations import _ as tr
+from models.utils import hex_to_int
 from models.version import VERSION
+from ui.hex_edit import create_data_field_widget
+from ui.id_edit import IdPasteEdit
 
 _TYPE_STATIC = "static"
 _TYPE_DYNAMIC = "dynamic"
@@ -71,6 +82,105 @@ _CONFIG_INFO_NAME = "Конфиг Инфо.json"
 def _config_info_dir() -> str:
     """Отдельная папка для конфигураций переменных."""
     return str(Config().config_dir() / "variables")
+
+
+class _HexIdEdit(IdPasteEdit):
+    """Поле CAN ID с валидацией HEX как в триггерах: верхний регистр,
+    до 8 знаков, зелёный текст — валидный ID, красный — мусор."""
+
+    _HEX_RE = re.compile(r"^[0-9A-F]{0,8}$")
+
+    def __init__(self, font: QFont, placeholder: str = "ID") -> None:
+        super().__init__()
+        self.setFont(font)
+        self.setFixedWidth(70)
+        self.setMaxLength(8)
+        self.setPlaceholderText(placeholder)
+        self.setValidator(
+            QRegularExpressionValidator(
+                QRegularExpression(r"[0-9A-Fa-f]{0,8}")
+            )
+        )
+        self.textChanged.connect(self._restyle)
+
+    def _restyle(self, text: str) -> None:
+        upper = text.upper()
+        if text != upper:
+            self.blockSignals(True)
+            self.setText(upper)
+            self.blockSignals(False)
+            text = upper
+        text = text.strip()
+        if not text:
+            self.setStyleSheet("")
+            return
+        if not self._HEX_RE.match(text) or hex_to_int(text) is None:
+            self.setStyleSheet("color: #F44336;")
+        else:
+            self.setStyleSheet("color: #4CAF50;")
+
+
+def _data_tokens(edits: list[QLineEdit]) -> list[str]:
+    """Токены побайтового поля: введённое значение, «X» — wildcard,
+    «» — пустое (не участвует)."""
+    return [e.text().strip().upper() for e in edits]
+
+
+def _data_to_text(edits: list[QLineEdit]) -> str:
+    """Сериализация побайтового поля в строку 'AA BB X …' — в файле
+    конфигурации читается как раньше."""
+    tokens = _data_tokens(edits)
+    while tokens and tokens[-1] == "":
+        tokens.pop()
+    return " ".join(tokens)
+
+
+def _text_to_data(edits: list[QLineEdit], text: Any) -> None:
+    """Заполняет побайтовые поля из строки 'AA BB X …' (принимает и
+    список токенов из старых конфигов)."""
+    tokens = (
+        [str(t) for t in text]
+        if isinstance(text, (list, tuple))
+        else str(text or "").replace(",", " ").split()
+    )
+    for i, edit in enumerate(edits):
+        edit.setText(tokens[i].upper() if i < len(tokens) else "")
+
+
+def _data_bytes_used(edits: list[QLineEdit]) -> list[int]:
+    """Индексы байтов, участвующих в расчёте: поле заполнено и не «X»
+    (отчёт мастера: галочек нет — считаем по введённым байтам)."""
+    return [
+        i for i, t in enumerate(_data_tokens(edits))
+        if t and t != "X"
+    ]
+
+
+def _parse_axis_value(text: str) -> float | None:
+    """Значение точки графика: привычное десятичное число или HEX —
+    «FF», «0xFF», «FFh». Чистые цифры читаются как десятичные
+    («100» = сто, а не 0x100) — иначе молчаливая смена смысла старых
+    конфигов. HEX с буквами нужен, т.к. сырое значение DATA — байты
+    (отчёт мастера: «график по 2 точкам не строится» — HEX-значения
+    отбрасывались float-парсером)."""
+    text = text.strip().replace(",", ".")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    hex_text = text[:-1] if text.lower().endswith("h") else text
+    explicit = hex_text.lower().startswith("0x")
+    if explicit:
+        hex_text = hex_text[2:]
+    if (
+        hex_text
+        and all(ch in "0123456789abcdefABCDEF" for ch in hex_text)
+        and (explicit or re.search(r"[a-fA-F]", hex_text))
+    ):
+        return float(int(hex_text, 16))
+    return None
 
 
 class _GraphPreview(QWidget):
@@ -129,7 +239,10 @@ class _GraphPreview(QWidget):
 
 class _FrameRow(QWidget):
     """Строка фрейма статической переменной:
-    канал | ID | DLC | DATA (X — любой) | →1/→0 | ✕."""
+    ID | DLC | DATA по байтам (X — любой) | →1/→0 | ✕.
+
+    Выбора канала нет — по отчёту мастера канал фрейма задаётся
+    в Гибкой логике, а здесь фрейм описывает только «какой пакет»."""
 
     def __init__(
         self,
@@ -142,15 +255,7 @@ class _FrameRow(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
 
-        self.channel = QComboBox()
-        self.channel.setFont(font)
-        self.channel.addItems(["CAN1", "CAN2", tr("Любой")])
-        row.addWidget(self.channel)
-
-        self.can_id = QLineEdit()
-        self.can_id.setFont(font)
-        self.can_id.setFixedWidth(70)
-        self.can_id.setPlaceholderText("7A0")
+        self.can_id = _HexIdEdit(font)
         row.addWidget(self.can_id)
 
         self.dlc = QSpinBox()
@@ -160,10 +265,10 @@ class _FrameRow(QWidget):
         self.dlc.setFixedWidth(56)
         row.addWidget(self.dlc)
 
-        self.data = QLineEdit()
-        self.data.setFont(font)
-        self.data.setPlaceholderText("XX XX XX XX XX XX XX XX")
-        row.addWidget(self.data, 1)
+        self.data, data_widget = create_data_field_widget(
+            font, 8, edit_width=34, allow_x=True
+        )
+        row.addWidget(data_widget)
 
         # Выбор записываемого значения — справа от фрейма (по ТЗ).
         self.value = QComboBox()
@@ -181,24 +286,23 @@ class _FrameRow(QWidget):
 
     def read(self) -> dict[str, Any]:
         return {
-            "channel": self.channel.currentIndex(),
             "id": self.can_id.text(),
             "dlc": self.dlc.value(),
-            "data": self.data.text(),
+            "data": _data_to_text(self.data),
             "value": self.value.currentData(),
         }
 
     def write(self, data: dict[str, Any]) -> None:
-        self.channel.setCurrentIndex(int(data.get("channel", 0)))
         self.can_id.setText(str(data.get("id", "")))
         self.dlc.setValue(int(data.get("dlc", 8)))
-        self.data.setText(str(data.get("data", "")))
+        _text_to_data(self.data, data.get("data"))
         idx = self.value.findData(int(data.get("value", 1)))
         self.value.setCurrentIndex(idx if idx >= 0 else 0)
 
 
 class VariableDialog(QDialog):
-    """Настройка одной переменной: выбор вида и параметров."""
+    """Настройка одной переменной: выбор вида, имени, носителя
+    (ОЗУ/ПЗУ — при записи) и параметров."""
 
     def __init__(
         self,
@@ -229,6 +333,22 @@ class VariableDialog(QDialog):
         self._name_edit.setFont(font)
         self._name_edit.setFixedWidth(220)
         head.addWidget(self._name_edit)
+        head.addSpacing(16)
+        # Носитель задаётся здесь — при записи переменной; из строки
+        # таблицы убран по отчёту мастера.
+        head.addWidget(QLabel(tr("Хранить:")))
+        self._ram_radio = QRadioButton(tr("ОЗУ"))
+        self._rom_radio = QRadioButton(tr("ПЗУ"))
+        for radio in (self._ram_radio, self._rom_radio):
+            radio.setFont(font)
+        self._ram_radio.setChecked(config.get("storage", "ram") != "rom")
+        self._rom_radio.setChecked(config.get("storage") == "rom")
+        self._rom_radio.setEnabled(False)
+        self._rom_radio.setToolTip(
+            tr("ПЗУ появится после подключения EEPROM к МК")
+        )
+        head.addWidget(self._ram_radio)
+        head.addWidget(self._rom_radio)
         head.addStretch()
         layout.addLayout(head)
 
@@ -259,10 +379,10 @@ class VariableDialog(QDialog):
 
         hint = QLabel(tr(
             "Фреймов может быть сколько угодно: приход фрейма пишет "
-            "«→ 1» или «→ 0» в бит ОЗУ функции. X в DATA — любой байт. "
-            "Пример: фрейм «дверь открыта» → 1, «дверь закрыта» → 0. "
-            "МК держит бит до прихода фрейма с противоположным "
-            "значением; Гибкая логика опрашивает его в условии «Если»."
+            "«→ 1» или «→ 0» в бит ОЗУ функции. X в DATA — любой байт, "
+            "пустое поле не участвует в сравнении. Пример: фрейм "
+            "«дверь открыта» → 1, «дверь закрыта» → 0. Канал фрейма "
+            "задаётся в Гибкой логике."
         ))
         hint.setFont(font)
         hint.setWordWrap(True)
@@ -314,10 +434,7 @@ class VariableDialog(QDialog):
 
         line1 = QHBoxLayout()
         line1.addWidget(QLabel("ID:"))
-        self._graph_id = QLineEdit()
-        self._graph_id.setFont(font)
-        self._graph_id.setFixedWidth(80)
-        self._graph_id.setPlaceholderText("0C0")
+        self._graph_id = _HexIdEdit(font, "0C0")
         line1.addWidget(self._graph_id)
         line1.addWidget(QLabel("DLC:"))
         self._graph_dlc = QSpinBox()
@@ -326,35 +443,32 @@ class VariableDialog(QDialog):
         self._graph_dlc.setValue(8)
         self._graph_dlc.setFixedWidth(56)
         line1.addWidget(self._graph_dlc)
-        line1.addWidget(QLabel(tr("DATA от:")))
-        self._graph_from = QLineEdit()
-        self._graph_from.setFont(font)
-        self._graph_from.setPlaceholderText("00 00 00 00 00 00 00 00")
-        line1.addWidget(self._graph_from)
-        line1.addWidget(QLabel(tr("до:")))
-        self._graph_to = QLineEdit()
-        self._graph_to.setFont(font)
-        self._graph_to.setPlaceholderText("FF FF FF FF FF FF FF FF")
-        line1.addWidget(self._graph_to)
         line1.addStretch()
         layout.addLayout(line1)
 
         line2 = QHBoxLayout()
-        line2.addWidget(QLabel(tr("Байты для расчёта:")))
-        self._graph_bytes: list[QCheckBox] = []
-        for i in range(8):
-            cb = QCheckBox(str(i))
-            cb.setFont(font)
-            cb.setChecked(i < 2)
-            self._graph_bytes.append(cb)
-            line2.addWidget(cb)
+        line2.addWidget(QLabel(tr("DATA от:")))
+        self._graph_from, from_widget = create_data_field_widget(
+            font, 8, edit_width=34, allow_x=True
+        )
+        line2.addWidget(from_widget)
         line2.addStretch()
         layout.addLayout(line2)
 
+        line3 = QHBoxLayout()
+        line3.addWidget(QLabel(tr("    до:")))
+        self._graph_to, to_widget = create_data_field_widget(
+            font, 8, edit_width=34, allow_x=True
+        )
+        line3.addWidget(to_widget)
+        line3.addStretch()
+        layout.addLayout(line3)
+
         hint = QLabel(tr(
-            "График перевода: слева сырое значение выбранных байт, "
-            "справа — величина. Точки правятся в таблице, линия между "
-            "ними — интерполяция."
+            "В расчёт идут только заполненные байты без «X». "
+            "График перевода: слева сырое значение этих байт "
+            "(десятичное или HEX), справа — величина. Точки правятся "
+            "в таблице, линия между ними — интерполяция."
         ))
         hint.setFont(font)
         hint.setWordWrap(True)
@@ -408,20 +522,22 @@ class VariableDialog(QDialog):
             self._points_table.blockSignals(False)
             self._refresh_graph()
 
-    def _refresh_graph(self) -> None:
+    def _read_points(self) -> list[tuple[float, float]]:
         points: list[tuple[float, float]] = []
         for row in range(self._points_table.rowCount()):
             x_item = self._points_table.item(row, 0)
             y_item = self._points_table.item(row, 1)
             if x_item is None or y_item is None:
                 continue
-            try:
-                x = float(x_item.text().replace(",", "."))
-                y = float(y_item.text().replace(",", "."))
-            except ValueError:
+            x = _parse_axis_value(x_item.text())
+            y = _parse_axis_value(y_item.text())
+            if x is None or y is None:
                 continue
             points.append((x, y))
-        self._graph_preview.set_points(points)
+        return points
+
+    def _refresh_graph(self) -> None:
+        self._graph_preview.set_points(self._read_points())
 
     # ---- общее --------------------------------------------------------
 
@@ -434,6 +550,12 @@ class VariableDialog(QDialog):
             else tr("например, «Дверь водителя»")
         )
         self._name_edit.setPlaceholderText(example)
+        # У новой переменной таблица точек пуста — при первом заходе
+        # на динамическую страницу даём две стартовые точки, чтобы
+        # график сразу строился (отчёт мастера).
+        if index == 1 and self._points_table.rowCount() == 0:
+            self._add_point_row()
+            self._add_point_row()
 
     def _apply_config(self, config: dict[str, Any]) -> None:
         var_type = config.get("type", _TYPE_STATIC)
@@ -454,12 +576,14 @@ class VariableDialog(QDialog):
         else:
             self._graph_id.setText(str(config.get("id", "")))
             self._graph_dlc.setValue(int(config.get("dlc", 8)))
-            self._graph_from.setText(str(config.get("from", "")))
-            self._graph_to.setText(str(config.get("to", "")))
-            for i, cb in enumerate(self._graph_bytes):
-                cb.setChecked(i in (config.get("bytes") or [0, 1]))
+            _text_to_data(self._graph_from, config.get("from"))
+            _text_to_data(self._graph_to, config.get("to"))
             self._points_table.setRowCount(0)
-            for x, y in config.get("points") or []:
+            for point in config.get("points") or []:
+                try:
+                    x, y = point
+                except (TypeError, ValueError):
+                    continue
                 row = self._points_table.rowCount()
                 self._points_table.insertRow(row)
                 self._points_table.setItem(row, 0, QTableWidgetItem(str(x)))
@@ -472,37 +596,24 @@ class VariableDialog(QDialog):
     @property
     def config(self) -> dict[str, Any]:
         """Текущая конфигурация диалога."""
-        base: dict[str, Any] = {"name": self._name_edit.text().strip()}
+        base: dict[str, Any] = {
+            "name": self._name_edit.text().strip(),
+            "storage": "rom" if self._rom_radio.isChecked() else "ram",
+        }
         if self._type_combo.currentData() == _TYPE_STATIC:
             base.update({
                 "type": _TYPE_STATIC,
                 "frames": [row.read() for row in self._frame_rows],
             })
         else:
-            points: list[tuple[float, float]] = []
-            for row in range(self._points_table.rowCount()):
-                x_item = self._points_table.item(row, 0)
-                y_item = self._points_table.item(row, 1)
-                if x_item is None or y_item is None:
-                    continue
-                try:
-                    points.append((
-                        float(x_item.text().replace(",", ".")),
-                        float(y_item.text().replace(",", ".")),
-                    ))
-                except ValueError:
-                    continue
             base.update({
                 "type": _TYPE_DYNAMIC,
                 "id": self._graph_id.text().strip(),
                 "dlc": self._graph_dlc.value(),
-                "from": self._graph_from.text().strip(),
-                "to": self._graph_to.text().strip(),
-                "bytes": [
-                    i for i, cb in enumerate(self._graph_bytes)
-                    if cb.isChecked()
-                ],
-                "points": points,
+                "from": _data_to_text(self._graph_from),
+                "to": _data_to_text(self._graph_to),
+                "bytes": _data_bytes_used(self._graph_from),
+                "points": self._read_points(),
             })
         return base
 
@@ -510,11 +621,12 @@ class VariableDialog(QDialog):
 class _VariableRow(QFrame):
     """Строка переменной в колонке:
 
-    [название] | [состояние] | [○ ОЗУ / ○ ПЗУ] | [✕]
+    [название] | [состояние] | [✕]
 
     Клик по строке — редактор переменной. Состояние: у статической —
     «0»/«1», у динамической — число по графику (пока вводится с МК —
-    отображается «0»). ПЗУ некликабельно до подключения EEPROM."""
+    отображается «0»). Носитель (ОЗУ/ПЗУ) выбирается в диалоге
+    настройки — в строке не показывается (отчёт мастера)."""
 
     def __init__(
         self,
@@ -551,23 +663,10 @@ class _VariableRow(QFrame):
         self._state_label.setMinimumWidth(46)
         row.addWidget(self._state_label)
 
-        # Носитель: ОЗУ сейчас, ПЗУ — после подключения EEPROM.
-        self._ram_radio = QRadioButton(tr("ОЗУ"))
-        self._rom_radio = QRadioButton(tr("ПЗУ"))
-        for radio in (self._ram_radio, self._rom_radio):
-            radio.setFont(font)
-        self._ram_radio.setChecked(
-            self.config.get("storage", "ram") == "ram"
+        remove = QPushButton()
+        remove.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton)
         )
-        self._rom_radio.setEnabled(False)
-        self._rom_radio.setToolTip(
-            tr("ПЗУ появится после подключения EEPROM к МК")
-        )
-        self._ram_radio.toggled.connect(self._on_storage_changed)
-        row.addWidget(self._ram_radio)
-        row.addWidget(self._rom_radio)
-
-        remove = QPushButton("✕")
         remove.setFont(font)
         remove.setFixedSize(26, 26)
         remove.setToolTip(tr("Удалить переменную"))
@@ -576,21 +675,14 @@ class _VariableRow(QFrame):
 
         self._refresh_labels()
 
-    def _on_storage_changed(self, checked: bool) -> None:
-        self.config["storage"] = "ram" if checked else "rom"
-        self._column.persist()
-
     def _refresh_labels(self) -> None:
         name = self.config.get("name", "").strip()
         self._name_label.setText(name or tr("— (без имени)"))
-        if self.config.get("type") == _TYPE_DYNAMIC:
-            self._state_label.setText("0")
-        else:
-            self._state_label.setText("0")
+        self._state_label.setText("0")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        # Клик по свободному месту строки — редактор; по кнопкам/
-        # радио событие не долетает сюда (у них свой приём).
+        # Клик по свободному месту строки — редактор; по кнопке
+        # удаления событие сюда не долетает (у неё свой приём).
         if event.button() == Qt.MouseButton.LeftButton:
             self._column.edit_row(self)
         super().mousePressEvent(event)
@@ -743,6 +835,19 @@ class VariablesTab(QWidget):
 
         self._restore()
 
+    # ---- списки переменных для Гибкой логики -------------------------
+
+    def variable_names(self, column: str, var_type: str | None = None) -> list[str]:
+        """Имена переменных колонки («read»/«control»); var_type —
+        фильтр по виду («static»/«dynamic»), None — все."""
+        col = self._read_col if column == "read" else self._ctrl_col
+        names: list[str] = []
+        for cfg in col.configs():
+            if var_type is not None and cfg.get("type") != var_type:
+                continue
+            names.append(cfg.get("name", "").strip() or "—")
+        return names
+
     # ---- хранение ------------------------------------------------------
 
     def export_config(self) -> dict[str, Any]:
@@ -846,6 +951,4 @@ class VariablesTab(QWidget):
         for col in (self._read_col, self._ctrl_col):
             col._add_btn.setText(tr("＋ Добавить переменную"))
             for row in col._rows:
-                row._ram_radio.setText(tr("ОЗУ"))
-                row._rom_radio.setText(tr("ПЗУ"))
                 row._refresh_labels()

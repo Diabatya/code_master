@@ -154,13 +154,12 @@ def _id_row_color(frame_id: int) -> QColor:
     return QColor.fromHsl(hue, 80, 40)
 
 
-def _id_page_color(frame_id: int, row: int) -> QColor:
-    """«Страничная» тонировка колонки ID блоками по 15 строк: чётная
-    страница — базовый цвет ID, нечётная — светлее. Листая таблицу,
-    оператор видит границы уже просмотренных экранов (ТЗ мастера);
-    оттенок при этом продолжает кодировать сам ID."""
+def _id_page_color(frame_id: int, row: int, page_rows: int = _ID_PAGE_ROWS) -> QColor:
+    """«Страничная» тонировка колонки ID блоками по `page_rows` строк:
+    чётная группа — базовый цвет ID, нечётная — светлее. Размер группы
+    задаёт оператор спином «Кол-во строк» (отчёт мастера)."""
     color = _id_row_color(frame_id)
-    return color.lighter(135) if (row // _ID_PAGE_ROWS) % 2 else color
+    return color.lighter(135) if (row // max(1, page_rows)) % 2 else color
 
 
 def _is_dark_theme() -> bool:
@@ -186,6 +185,14 @@ def _row_base_bg() -> QColor:
     более тёмный фон виджета-таблицы (в тёмной теме строки выглядели
     почти чёрными — отчёт мастера)."""
     return QApplication.palette().color(QPalette.ColorRole.Window)
+
+
+def _row_alt_bg() -> QColor:
+    """Фон нечётной группы строк: при настроенном «Кол-во строк» = N
+    первые N строк идут базовым фоном, следующие N — этим оттенком,
+    потом снова базовый (группировка по позиции — отчёт мастера)."""
+    base = _row_base_bg()
+    return base.lighter(125) if _is_dark_theme() else base.darker(106)
 
 
 def _row_base_fg() -> QColor:
@@ -1368,15 +1375,12 @@ class CanChannelMonitor(QWidget):
 
         compact_font = QFont("Segoe UI", 9)
 
-        self._start_button = QPushButton(tr("Запустить"))
-        self._start_button.setFixedSize(80, 28)
-        self._start_button.setFont(compact_font)
-        self._start_button.clicked.connect(self._start)
-
-        self._stop_button = QPushButton(tr("Остановить"))
-        self._stop_button.setFixedSize(90, 28)
-        self._stop_button.setFont(compact_font)
-        self._stop_button.clicked.connect(self._stop)
+        # Одна кнопка запуска/остановки: в покое — зелёная «Запустить»,
+        # в работе — красная «Стоп» (отчёт мастера).
+        self._toggle_button = QPushButton(tr("Запустить"))
+        self._toggle_button.setFixedSize(90, 28)
+        self._toggle_button.setFont(compact_font)
+        self._toggle_button.clicked.connect(self._toggle)
 
         self._clear_button = QPushButton(tr("Очистить"))
         setup_button(self._clear_button, height=28)
@@ -1560,8 +1564,7 @@ class CanChannelMonitor(QWidget):
 
         control_layout = QHBoxLayout()
         control_layout.setSpacing(4)
-        control_layout.addWidget(self._start_button)
-        control_layout.addWidget(self._stop_button)
+        control_layout.addWidget(self._toggle_button)
         control_layout.addWidget(self._clear_button)
         control_layout.addWidget(QLabel(tr("Поиск:")))
         control_layout.addWidget(self._search_edit)
@@ -1706,25 +1709,30 @@ class CanChannelMonitor(QWidget):
         self.monitoring_state_changed.emit(self._channel, False)
         logger.info("Мониторинг CAN%d остановлен", self._channel)
 
-    def _update_monitor_buttons(self) -> None:
-        """Визуально отображает текущее состояние мониторинга."""
+    def _toggle(self) -> None:
         if self._running:
-            self._start_button.setText(tr("Запущено"))
-            self._start_button.setEnabled(False)
-            self._start_button.setStyleSheet(
-                "QPushButton { background-color: #4CAF50; color: #FFFFFF; border: none; border-radius: 4px; }"
-            )
-            self._stop_button.setText(tr("Остановить"))
-            self._stop_button.setEnabled(True)
-            self._stop_button.setStyleSheet("")
+            self._stop()
         else:
-            self._start_button.setText(tr("Запустить"))
-            self._start_button.setEnabled(True)
-            self._start_button.setStyleSheet("")
-            self._stop_button.setText(tr("Стоп"))
-            self._stop_button.setEnabled(False)
-            self._stop_button.setStyleSheet(
-                "QPushButton { background-color: #F44336; color: #FFFFFF; border: none; border-radius: 4px; }"
+            self._start()
+
+    def _update_monitor_buttons(self) -> None:
+        """Одна кнопка состояния: не работает — зелёная «Запустить»;
+        работает — красная «Стоп» (отчёт мастера)."""
+        if self._running:
+            self._toggle_button.setText(tr("Стоп"))
+            self._toggle_button.setStyleSheet(
+                "QPushButton { background-color: #F44336; color: #FFFFFF; "
+                "border: none; border-radius: 6px; }"
+                "QPushButton:hover { background-color: #E53935; }"
+                "QPushButton:pressed { background-color: #C62828; }"
+            )
+        else:
+            self._toggle_button.setText(tr("Запустить"))
+            self._toggle_button.setStyleSheet(
+                "QPushButton { background-color: #4CAF50; color: #FFFFFF; "
+                "border: none; border-radius: 6px; }"
+                "QPushButton:hover { background-color: #43A047; }"
+                "QPushButton:pressed { background-color: #388E3C; }"
             )
 
     def _clear(self) -> None:
@@ -1840,6 +1848,9 @@ class CanChannelMonitor(QWidget):
     def _on_row_color_count_changed(self, value: int) -> None:
         self._row_color_count = max(1, value)
         self._config.set("monitor_row_colors", self._row_color_count)
+        # Размер группы сменился — перекрашиваем всю таблицу.
+        self._id_pages_dirty = True
+        self._repaint_id_pages()
         self._apply_row_density()
 
     def _update_sent_label(self) -> None:
@@ -2122,22 +2133,47 @@ class CanChannelMonitor(QWidget):
             self._update_table_row(frame, count)
         self._repaint_id_pages()
 
+    def _row_page_bg(self, row: int) -> QColor:
+        """Фон ячеек строки по её позиции: группы по «Кол-во строк»
+        чередуют базовый фон и оттенок (отчёт мастера)."""
+        odd = (row // max(1, self._row_color_count)) % 2
+        return _row_alt_bg() if odd else _row_base_bg()
+
     def _repaint_id_pages(self) -> None:
-        """Перекраска страничных оттенков колонки ID после сдвига строк
-        (вставка нового ID в середину таблицы меняет номер страницы у
-        всех строк ниже). Отложено на конец flush — одно прохождение на
-        пачку кадров, а не на каждый insertRow."""
+        """Перекраска групп после сдвига строк (вставка нового ID в
+        середину таблицы меняет номер группы у всех строк ниже).
+        Красится вся строка: колонка ID — своим цветом с «страничным»
+        оттенком, остальные — чередующимся фоном группы. Отложено на
+        конец flush — одно прохождение на пачку кадров."""
         if not self._id_pages_dirty:
             return
         self._id_pages_dirty = False
         for row in range(self._table.rowCount()):
-            item = self._table.item(row, 0)
-            if item is None:
+            id_item = self._table.item(row, 0)
+            if id_item is None:
                 continue
-            fid = hex_to_int(item.text())
+            fid = hex_to_int(id_item.text())
             if fid is None:
                 continue
-            item.setBackground(_id_page_color(fid, row))
+            id_item.setBackground(
+                _id_page_color(fid, row, self._row_color_count)
+            )
+            data_item = self._table.item(row, 2)
+            is_tx = bool(
+                data_item is not None
+                and data_item.data(Qt.ItemDataRole.UserRole)
+            )
+            bg, fg = (
+                (self._row_page_bg(row), _tx_echo_colors()[1])
+                if is_tx
+                else (self._row_page_bg(row), _row_base_fg())
+            )
+            for col in range(1, self._table.columnCount()):
+                item = self._table.item(row, col)
+                if item is None:
+                    continue
+                item.setBackground(bg)
+                item.setForeground(fg)
 
     def add_frame(self, frame: dict[str, object]) -> None:
         """Одиночный кадр (холодный путь: тесты, всплывшие в командных
@@ -2192,7 +2228,9 @@ class CanChannelMonitor(QWidget):
             # привязан к позиции, перекрашиваем при обновлении.
             id_item = self._table.item(row, 0)
             if id_item is not None:
-                id_item.setBackground(_id_page_color(frame_id, row))
+                id_item.setBackground(
+                    _id_page_color(frame_id, row, self._row_color_count)
+                )
             for col, text in enumerate(items):
                 item = self._table.item(row, col)
                 if item is None:
@@ -2202,7 +2240,9 @@ class CanChannelMonitor(QWidget):
                         # Тёмный фон кодирует ID + страничный оттенок —
                         # текст явно белый, иначе на светлой теме
                         # палитра давала чёрный.
-                        item.setBackground(_id_page_color(frame_id, row))
+                        item.setBackground(
+                            _id_page_color(frame_id, row, self._row_color_count)
+                        )
                         item.setForeground(QColor("#FFFFFF"))
                     self._table.setItem(row, col, item)
                 else:
@@ -2247,7 +2287,9 @@ class CanChannelMonitor(QWidget):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if col == 0:
-                    item.setBackground(_id_page_color(frame_id, row))
+                    item.setBackground(
+                        _id_page_color(frame_id, row, self._row_color_count)
+                    )
                     item.setForeground(QColor("#FFFFFF"))
                 if tooltip:
                     item.setToolTip(tooltip)
@@ -2320,19 +2362,19 @@ class CanChannelMonitor(QWidget):
         цвет — он кодирует сам ID.
         Флаг пишется в ячейку DATA, чтобы _reset_data_background после
         вспышки подсветки вернул правильный цвет, а не дефолт."""
-        bg, fg = _tx_echo_colors()
+        _, fg = _tx_echo_colors()
+        page_bg = self._row_page_bg(row)
         for col in range(1, self._table.columnCount()):
             item = self._table.item(row, col)
             if item is None:
                 continue
             if is_tx:
-                item.setBackground(bg)
+                item.setBackground(page_bg)
                 item.setForeground(fg)
             else:
-                # Обычная строка — фон как общий фон окна, в тёмной теме
-                # шрифт явно белый (отчёт мастера: строки были почти
-                # чёрными на тёмном фоне).
-                item.setBackground(_row_base_bg())
+                # Обычная строка — фон группы по позиции («Кол-во
+                # строк»), шрифт явно белый в тёмной теме.
+                item.setBackground(page_bg)
                 item.setForeground(_row_base_fg())
         data_item = self._table.item(row, 2)
         if data_item is not None:

@@ -1559,6 +1559,7 @@ class CanTriggerTab(QWidget):
 
         buttons_row = QHBoxLayout()
         buttons_row.setSpacing(8)
+        buttons_row.addStretch()
         buttons_row.addWidget(self._add_trigger_button)
         buttons_row.addWidget(self._paste_trigger_button)
         buttons_row.addStretch()
