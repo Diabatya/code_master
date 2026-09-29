@@ -87,6 +87,7 @@ from core.stm32_info import (
     parse_legacy_device_config,
 )
 from models.config import Config
+from models.version import VERSION
 from ui.com_settings_dialog import ComSettingsDialog
 from models.logger import get_logger
 from models.translations import _ as tr
@@ -1567,6 +1568,18 @@ class FlashDialog(QDialog):
         self._serial_edit = QLineEdit()
         self._serial_edit.setFont(font)
 
+        # Версия ПО — грузится вместе с именем и серийником в
+        # конфиг-страницу (запись «VER1» рядом с основной). По
+        # умолчанию — номер релиза приложения, оператор может
+        # переписать вручную (отчёт мастера).
+        self._fw_version_label = QLabel(tr("Версия ПО"))
+        self._fw_version_label.setFont(font)
+        self._fw_version_edit = QLineEdit()
+        self._fw_version_edit.setFont(font)
+        self._fw_version_edit.setFixedWidth(90)
+        self._fw_version_edit.setMaxLength(16)
+        self._fw_version_edit.setPlaceholderText(f"v{VERSION}")
+
         self._method_label = QLabel(tr("Способ программирования"))
         self._method_label.setFont(font)
         self._method_combo = QComboBox()
@@ -1673,6 +1686,8 @@ class FlashDialog(QDialog):
         top_grid.addWidget(self._device_name_edit, 1)
         top_grid.addWidget(self._serial_label)
         top_grid.addWidget(self._serial_edit)
+        top_grid.addWidget(self._fw_version_label)
+        top_grid.addWidget(self._fw_version_edit)
         top_grid.addWidget(self._method_label)
         top_grid.addWidget(self._method_combo)
         top_grid.addWidget(self._port_button)
@@ -1759,6 +1774,11 @@ class FlashDialog(QDialog):
                 "device_serial": self._serial_edit.text().strip(),
             })
         )
+        self._fw_version_edit.editingFinished.connect(
+            lambda: self._config.set(
+                "device_fw_version", self._fw_version_edit.text().strip()
+            )
+        )
 
         self._chip_combo.currentIndexChanged.connect(self._on_chip_changed)
         self._config_button.toggled.connect(self._on_config_toggled)
@@ -1784,6 +1804,10 @@ class FlashDialog(QDialog):
             self._read_size_edit.setCurrentText(str(total_kb))
         self._device_name_edit.setText(
             self._config.get("device_name", "") or self._config.get("device_type_name", "")
+        )
+        # Версия ПО по умолчанию — номер релиза приложения.
+        self._fw_version_edit.setText(
+            self._config.get("device_fw_version", "") or VERSION
         )
         self._update_power_button()
         self._on_method_changed(self._method_combo.currentIndex())
@@ -1850,7 +1874,9 @@ class FlashDialog(QDialog):
         if not serial:
             raise ValueError(tr("Введите серийный номер"))
 
-        page = build_device_config_page(name, serial)
+        page = build_device_config_page(
+            name, serial, fw_version=self._fw_version_edit.text().strip() or None
+        )
         # Как и в _prepare_firmware_with_config: обновляем кэш идентичности,
         # чтобы шапка/список портов не показывали старое имя после прошивки.
         port_names = dict(self._config.get("port_names", {}) or {})
@@ -2052,7 +2078,9 @@ class FlashDialog(QDialog):
         if firmware_offset < 0 or firmware_offset + len(data) > flash_size:
             raise ValueError(tr("Прошивка не помещается в выбранный размер Flash"))
 
-        page = build_device_config_page(name, serial)
+        page = build_device_config_page(
+            name, serial, fw_version=self._fw_version_edit.text().strip() or None
+        )
         # Запоминаем имя для списка портов и шапки настроек: после прошивки
         # устройство пере-энумерируется с iSerial = serial. Без обновления
         # device_name/device_serial при сбое CMD_CFG_READ шапка показывала

@@ -40,6 +40,7 @@ from typing import Any
 from PySide6.QtCore import QRegularExpression, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QRegularExpressionValidator
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -184,23 +185,69 @@ def _parse_axis_value(text: str) -> float | None:
 
 
 class _GraphPreview(QWidget):
-    """Мини-превью графика «сырое значение → величина»: ломаная по
-    точкам таблицы правок. Только отображение — точки правятся
+    """График «сырое значение → величина»: ломаная по точкам таблицы
+    правок. Ось X — сырое значение DATA в HEX, ось Y — величина; у
+    обеих осей разметка. Наведение курсора на линию/точку показывает
+    табличку «0xXXX = величина» (отчёт мастера). Точки правятся
     в таблице рядом."""
+
+    # Отступы под подписи осей: слева — Y, снизу — X.
+    _MARGIN_LEFT = 52
+    _MARGIN_BOTTOM = 30
+    _MARGIN_TOP = 8
+    _MARGIN_RIGHT = 8
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._points: list[tuple[float, float]] = []
-        self.setMinimumHeight(140)
+        self.setMinimumHeight(160)
+        self.setMouseTracking(True)
 
     def set_points(self, points: list[tuple[float, float]]) -> None:
         self._points = sorted(points)
         self.update()
 
+    def _plot_rect(self):
+        return self.rect().adjusted(
+            self._MARGIN_LEFT, self._MARGIN_TOP,
+            -self._MARGIN_RIGHT, -self._MARGIN_BOTTOM,
+        )
+
+    def _range(self) -> tuple[float, float, float, float]:
+        xs = [p[0] for p in self._points]
+        ys = [p[1] for p in self._points]
+        x0, x1 = (min(xs), max(xs)) if xs else (0.0, 1.0)
+        y0, y1 = (min(ys), max(ys)) if ys else (0.0, 1.0)
+        if x1 == x0:
+            x1 = x0 + 1
+        if y1 == y0:
+            y1 = y0 + 1
+        return x0, x1, y0, y1
+
+    def _to_screen(self, rect, x: float, y: float) -> tuple[float, float]:
+        x0, x1, y0, y1 = self._range()
+        px = rect.left() + (x - x0) / (x1 - x0) * rect.width()
+        py = rect.bottom() - (y - y0) / (y1 - y0) * rect.height()
+        return px, py
+
+    def _from_screen(self, rect, px: float, py: float) -> tuple[float, float]:
+        x0, x1, y0, y1 = self._range()
+        x = x0 + (px - rect.left()) / max(1, rect.width()) * (x1 - x0)
+        y = y0 + (rect.bottom() - py) / max(1, rect.height()) * (y1 - y0)
+        return x, y
+
+    @staticmethod
+    def _fmt_x(value: float) -> str:
+        return f"0x{int(round(value)):X}"
+
+    @staticmethod
+    def _fmt_y(value: float) -> str:
+        return f"{value:g}"
+
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = self.rect().adjusted(8, 8, -8, -8)
+        rect = self._plot_rect()
         painter.fillRect(rect, QColor(38, 38, 48))
         painter.setPen(QPen(QColor(90, 90, 110), 1))
         painter.drawRect(rect)
@@ -212,29 +259,75 @@ class _GraphPreview(QWidget):
             )
             painter.end()
             return
-        xs = [p[0] for p in self._points]
-        ys = [p[1] for p in self._points]
-        x0, x1 = min(xs), max(xs)
-        y0, y1 = min(ys), max(ys)
-        if x1 == x0:
-            x1 = x0 + 1
-        if y1 == y0:
-            y1 = y0 + 1
+
+        # Разметка осей: X — сырое значение в HEX, Y — величина.
+        x0, x1, y0, y1 = self._range()
+        tick_pen = QPen(QColor(150, 150, 165), 1)
+        text_pen = QPen(QColor(170, 170, 185), 1)
+        font = painter.font()
+        font.setPointSize(7)
+        painter.setFont(font)
+        painter.setPen(tick_pen)
+        for _x in sorted({x0, x1, *(p[0] for p in self._points)}):
+            px, _ = self._to_screen(rect, _x, y0)
+            painter.drawLine(int(px), rect.bottom(), int(px), rect.bottom() + 4)
+        for _y in sorted({y0, y1, *(p[1] for p in self._points)}):
+            _, py = self._to_screen(rect, x0, _y)
+            painter.drawLine(rect.left() - 4, int(py), rect.left(), int(py))
+        painter.setPen(text_pen)
+        for _x in sorted({x0, x1, *(p[0] for p in self._points)}):
+            px, _ = self._to_screen(rect, _x, y0)
+            painter.drawText(
+                int(px) - 26, rect.bottom() + 6, 52, 16,
+                Qt.AlignmentFlag.AlignHCenter, self._fmt_x(_x),
+            )
+        for _y in sorted({y0, y1, *(p[1] for p in self._points)}):
+            _, py = self._to_screen(rect, x0, _y)
+            painter.drawText(
+                0, int(py) - 8, self._MARGIN_LEFT - 8, 16,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                self._fmt_y(_y),
+            )
+
         painter.setPen(QPen(QColor(108, 140, 255), 2))
         prev = None
         for x, y in self._points:
-            px = rect.left() + (x - x0) / (x1 - x0) * rect.width()
-            py = rect.bottom() - (y - y0) / (y1 - y0) * rect.height()
+            px, py = self._to_screen(rect, x, y)
             if prev is not None:
                 painter.drawLine(int(prev[0]), int(prev[1]), int(px), int(py))
             prev = (px, py)
         painter.setPen(QPen(QColor(255, 170, 80), 1))
         painter.setBrush(QColor(255, 170, 80))
         for x, y in self._points:
-            px = rect.left() + (x - x0) / (x1 - x0) * rect.width()
-            py = rect.bottom() - (y - y0) / (y1 - y0) * rect.height()
+            px, py = self._to_screen(rect, x, y)
             painter.drawEllipse(int(px) - 3, int(py) - 3, 6, 6)
         painter.end()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        """Табличка под курсором: X в HEX и величина на линии графика."""
+        if len(self._points) < 2:
+            self.setToolTip("")
+            return super().mouseMoveEvent(event)
+        rect = self._plot_rect()
+        x_raw, _y = self._from_screen(rect, event.position().x(), event.position().y())
+        x0, x1, _y0, _y1 = self._range()
+        x_clamped = min(max(x_raw, x0), x1)
+        # Ближайшая точка ломаной — показываем её пару «X = Y».
+        nearest = min(
+            self._points, key=lambda p: abs(p[0] - x_clamped)
+        )
+        # Если курсор на сегменте — интерполированное значение.
+        value = nearest[1]
+        pts = self._points
+        for i in range(len(pts) - 1):
+            a, b = pts[i], pts[i + 1]
+            if a[0] <= x_clamped <= b[0] and b[0] != a[0]:
+                value = a[1] + (b[1] - a[1]) * (x_clamped - a[0]) / (b[0] - a[0])
+                break
+        self.setToolTip(
+            tr("{0} → {1}").format(self._fmt_x(x_clamped), f"{value:g}")
+        )
+        super().mouseMoveEvent(event)
 
 
 class _FrameRow(QWidget):
@@ -277,8 +370,12 @@ class _FrameRow(QWidget):
         self.value.addItem(tr("→ 0"), 0)
         row.addWidget(self.value)
 
-        remove = QPushButton("✕")
-        remove.setFont(font)
+        # Крестик — стандартная иконка закрытия: символ «✕» в части
+        # шрифтов не рендерится (отчёт мастера).
+        remove = QPushButton()
+        remove.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton)
+        )
         remove.setFixedSize(26, 26)
         remove.setToolTip(tr("Удалить фрейм"))
         remove.clicked.connect(lambda: on_remove(self))
@@ -337,16 +434,22 @@ class VariableDialog(QDialog):
         # Носитель задаётся здесь — при записи переменной; из строки
         # таблицы убран по отчёту мастера.
         head.addWidget(QLabel(tr("Хранить:")))
+        # Галочка кэширования настройки в бит — рядом с «Хранить»
+        # (отчёт мастера). Включённая — выбор ОЗУ/ПЗУ запоминается
+        # в присвоенном бите состояния переменной.
+        self._cache_bit_check = QCheckBox(tr("в бит"))
+        self._cache_bit_check.setFont(font)
+        self._cache_bit_check.setChecked(bool(config.get("cache_bit", True)))
+        self._cache_bit_check.setToolTip(
+            tr("Кэшировать настройку хранения в бите переменной")
+        )
+        head.addWidget(self._cache_bit_check)
         self._ram_radio = QRadioButton(tr("ОЗУ"))
         self._rom_radio = QRadioButton(tr("ПЗУ"))
         for radio in (self._ram_radio, self._rom_radio):
             radio.setFont(font)
         self._ram_radio.setChecked(config.get("storage", "ram") != "rom")
         self._rom_radio.setChecked(config.get("storage") == "rom")
-        self._rom_radio.setEnabled(False)
-        self._rom_radio.setToolTip(
-            tr("ПЗУ появится после подключения EEPROM к МК")
-        )
         head.addWidget(self._ram_radio)
         head.addWidget(self._rom_radio)
         head.addStretch()
@@ -378,11 +481,12 @@ class VariableDialog(QDialog):
         layout.setSpacing(6)
 
         hint = QLabel(tr(
-            "Фреймов может быть сколько угодно: приход фрейма пишет "
-            "«→ 1» или «→ 0» в бит ОЗУ функции. X в DATA — любой байт, "
-            "пустое поле не участвует в сравнении. Пример: фрейм "
-            "«дверь открыта» → 1, «дверь закрыта» → 0. Канал фрейма "
-            "задаётся в Гибкой логике."
+            "Фреймов может быть сколько угодно: приход любого из них "
+            "пишет «→ 1» или «→ 0» в один и тот же бит ОЗУ функции — "
+            "разные фреймы могут включать и выключать её. X в DATA — "
+            "любой байт, пустое поле не участвует в сравнении. "
+            "Пример: фрейм «дверь открыта» → 1, «дверь закрыта» → 0. "
+            "Канал фрейма задаётся в Гибкой логике."
         ))
         hint.setFont(font)
         hint.setWordWrap(True)
@@ -599,6 +703,7 @@ class VariableDialog(QDialog):
         base: dict[str, Any] = {
             "name": self._name_edit.text().strip(),
             "storage": "rom" if self._rom_radio.isChecked() else "ram",
+            "cache_bit": self._cache_bit_check.isChecked(),
         }
         if self._type_combo.currentData() == _TYPE_STATIC:
             base.update({

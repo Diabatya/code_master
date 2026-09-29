@@ -7,8 +7,13 @@ DFU, а конфигурацию (имя/серийный номер) прило
 config-страницу 0x0803D800 тем же сеансом (см. _prepare_firmware_with_config
 в ui/flash_dialog.py).
 
+Если передан --version, в начало config-страницы пишется версионная
+запись «VER1» с номером релиза — приложение она нужна, чтобы устройство
+могло отчитаться о версии ПО; оператор в окне прошивки может переписать
+её вручную.
+
 Использование:
-    python3 make_full_image.py <bootloader.hex> <app.hex> <out.hex> [out.bin]
+    python3 make_full_image.py <bootloader.hex> <app.hex> <out.hex> [out.bin] [--version 1.2.3]
 """
 
 import sys
@@ -16,13 +21,24 @@ from pathlib import Path
 
 from intelhex import IntelHex
 
+# core/ лежит у корня репозитория — добавляем его в путь, чтобы
+# разметка версионной записи не дублировалась.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 
 def main() -> int:
-    if len(sys.argv) < 4:
+    argv = [a for a in sys.argv[1:] if not a.startswith("--")]
+    version = ""
+    for i, arg in enumerate(sys.argv):
+        if arg == "--version" and i + 1 < len(sys.argv):
+            version = sys.argv[i + 1].strip().lstrip("v")
+            break
+
+    if len(argv) < 3:
         print(__doc__)
         return 1
 
-    boot_path, app_path, out_hex = sys.argv[1:4]
+    boot_path, app_path, out_hex = argv[:3]
     image = IntelHex(boot_path)
     app = IntelHex(app_path)
     # У обоих файлов разные records стартового адреса — при объединении
@@ -31,11 +47,29 @@ def main() -> int:
     app.start_addr = None
     image.merge(app, overlap="error")
 
+    if version:
+        from core.stm32_info import (
+            DEVICE_CONFIG_PAGE_ADDR,
+            DEVICE_CONFIG_VER_OFFSET,
+            build_device_config_page,
+        )
+
+        # Имя/серийник оператор задаст при прошивке — в образ кладём
+        # только версионную запись (смещение 32), первый блок страницы
+        # остаётся стёртым (0xFF), иначе устройство прочитало бы
+        # валидную конфиг-запись с пустыми именем и серийником.
+        page = build_device_config_page("", "", fw_version=version)
+        image.puts(
+            DEVICE_CONFIG_PAGE_ADDR + DEVICE_CONFIG_VER_OFFSET,
+            page[DEVICE_CONFIG_VER_OFFSET : DEVICE_CONFIG_VER_OFFSET + 32],
+        )
+        print(f"full image: версия ПО прошивки v{version}", flush=True)
+
     out_hex_path = Path(out_hex)
     image.write_hex_file(out_hex_path)
 
-    if len(sys.argv) > 4:
-        image.tofile(sys.argv[4], format="bin")
+    if len(argv) > 3:
+        image.tofile(argv[3], format="bin")
 
     segments = list(image.segments())
     total = sum(end - start for start, end in segments)

@@ -457,9 +457,311 @@ class _FrameEventPage(QWidget):
         self.fire_limit.setValue(int(event.get("fire_limit", 1)))
 
 
+class _EventItem(QWidget):
+    """Одно событие программы: компактная строка «имя · функция»,
+    выбор типа события, страница настроек и крестик удаления
+    (в программе событий может быть несколько — ИЛИ, отчёт мастера)."""
+
+    _PAGES = (_EVENT_DYN, _EVENT_STATIC, _EVENT_AUX, _EVENT_FRAME)
+
+    def __init__(self, row: RuleRowWidget, font: QFont, event: dict | None = None) -> None:
+        super().__init__(row)
+        self._row = row
+        self.setStyleSheet(
+            "_EventItem { border: 1px solid #454552; border-radius: 6px; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.setContentsMargins(6, 4, 6, 6)
+
+        # Компактная строка: «Обороты · Стало больше» и т.п.
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        self._summary = QLabel()
+        self._summary.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self._summary.setStyleSheet("color: #7C9EFF;")
+        head.addWidget(self._summary, 1)
+        self._remove = QPushButton("✕")
+        self._remove.setFont(font)
+        self._remove.setFixedSize(20, 20)
+        self._remove.setToolTip(tr("Удалить событие"))
+        self._remove.clicked.connect(lambda: row._remove_event(self))
+        head.addWidget(self._remove)
+        layout.addLayout(head)
+
+        self._type = QComboBox()
+        self._type.setFont(font)
+        self._type.addItem(tr("Динамическая переменная"), _EVENT_DYN)
+        self._type.addItem(tr("Статическая переменная"), _EVENT_STATIC)
+        self._type.addItem(tr("Доп канал"), _EVENT_AUX)
+        self._type.addItem(tr("Фрейм"), _EVENT_FRAME)
+        self._type.currentIndexChanged.connect(self._on_type)
+        layout.addWidget(self._type)
+
+        self._stack = QStackedWidget()
+        self._dyn = _DynEventPage(font, row._mark_dirty)
+        self._static = _StaticEventPage(font, row._mark_dirty)
+        self._aux = _AuxEventPage(font)
+        self._frame = _FrameEventPage(font, row._mark_dirty)
+        for page in (self._dyn, self._static, self._aux, self._frame):
+            self._stack.addWidget(page)
+        layout.addWidget(self._stack)
+
+        # Сводка обновляется при любом изменении полей события.
+        for page in (self._dyn, self._static, self._frame):
+            for child in page.findChildren(QWidget):
+                if isinstance(child, QComboBox):
+                    child.currentIndexChanged.connect(self._update_summary)
+                elif isinstance(child, QLineEdit):
+                    child.textChanged.connect(self._update_summary)
+                elif isinstance(child, QSpinBox):
+                    child.valueChanged.connect(self._update_summary)
+        if event is not None:
+            self.write(event)
+        self._update_summary()
+
+    def _on_type(self, index: int) -> None:
+        self._stack.setCurrentIndex(index)
+        self._update_summary()
+        self._row._mark_dirty()
+
+    def read(self) -> dict[str, Any]:
+        pages = (self._dyn, self._static, self._aux, self._frame)
+        return pages[self._type.currentIndex()].read()
+
+    def write(self, event: dict[str, Any]) -> None:
+        etype = event.get("type", _EVENT_FRAME)
+        idx = self._type.findData(etype)
+        self._type.setCurrentIndex(idx if idx >= 0 else 3)
+        self._stack.setCurrentIndex(self._type.currentIndex())
+        page = {
+            _EVENT_DYN: self._dyn,
+            _EVENT_STATIC: self._static,
+            _EVENT_AUX: self._aux,
+            _EVENT_FRAME: self._frame,
+        }[etype if idx >= 0 else _EVENT_FRAME]
+        page.write(event)
+
+    def refresh_variables(self) -> None:
+        """Обновляет списки переменных в комбобоксах события."""
+        tab = self._row._tab._variables_tab
+        dyn = tab.variable_names("read", "dynamic") if tab else []
+        st = tab.variable_names("read", "static") if tab else []
+        self._dyn.var.set_names(dyn, tr("— не выбрано —"))
+        self._static.var.set_names(st, tr("— не выбрано —"))
+
+    def _update_summary(self, *_args) -> None:
+        """Компактная подпись события: имя + функция (отчёт мастера)."""
+        etype = self._type.currentData()
+        if etype == _EVENT_DYN:
+            name = self._dyn.var.get_name() or "—"
+            func = tr("Стало больше") if self._dyn.direction.currentData() == "gt" else tr("Стало меньше")
+            text = f"{name} · {func} {self._dyn.value.text().strip()}".rstrip()
+        elif etype == _EVENT_STATIC:
+            name = self._static.var.get_name() or "—"
+            func = self._static.edge.currentText()
+            text = f"{name} · {func}"
+        elif etype == _EVENT_FRAME:
+            can_id = self._frame.can_id.text().strip()
+            text = f"ID {can_id}" if can_id else tr("Фрейм")
+        else:
+            text = tr("Доп канал")
+        self._summary.setText(text)
+
+
+class _CondItem(QWidget):
+    """Одно условие программы: компактная строка + тип + настройки.
+    Условий может быть несколько — все должны выполняться (И)."""
+
+    _PAGES = (_COND_NONE, _COND_STATIC, _COND_DYN, _COND_AUX)
+
+    def __init__(self, row: RuleRowWidget, font: QFont, cond: dict | None = None) -> None:
+        super().__init__(row)
+        self._row = row
+        self.setStyleSheet(
+            "_CondItem { border: 1px solid #454552; border-radius: 6px; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.setContentsMargins(6, 4, 6, 6)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        self._summary = QLabel()
+        self._summary.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self._summary.setStyleSheet("color: #7C9EFF;")
+        head.addWidget(self._summary, 1)
+        self._remove = QPushButton("✕")
+        self._remove.setFont(font)
+        self._remove.setFixedSize(20, 20)
+        self._remove.setToolTip(tr("Удалить условие"))
+        self._remove.clicked.connect(lambda: row._remove_cond(self))
+        head.addWidget(self._remove)
+        layout.addLayout(head)
+
+        self._type = QComboBox()
+        self._type.setFont(font)
+        self._type.addItem(tr("Нет"), _COND_NONE)
+        self._type.addItem(tr("Статическая переменная"), _COND_STATIC)
+        self._type.addItem(tr("Динамическая переменная"), _COND_DYN)
+        self._type.addItem(tr("Доп канал"), _COND_AUX)
+        self._type.currentIndexChanged.connect(self._on_type)
+        layout.addWidget(self._type)
+
+        self._stack = QStackedWidget()
+        none_page = QWidget()
+        none_layout = QVBoxLayout(none_page)
+        none_layout.setContentsMargins(0, 0, 0, 0)
+        none_label = QLabel(tr("Без проверки — действие сразу"))
+        none_label.setFont(font)
+        none_label.setStyleSheet("color: #9A9AA5;")
+        none_layout.addWidget(none_label)
+        none_layout.addStretch()
+
+        static_page = QWidget()
+        st_layout = QVBoxLayout(static_page)
+        st_layout.setSpacing(4)
+        st_layout.setContentsMargins(0, 0, 0, 0)
+        st_layout.addWidget(_small_label(tr("Переменная:"), font))
+        self.st_var = _VarCombo(font)
+        st_layout.addWidget(self.st_var)
+        st_layout.addWidget(_small_label(tr("Состояние:"), font))
+        self.st_state = QComboBox()
+        self.st_state.setFont(font)
+        self.st_state.addItem(tr("Включена (1)"), 1)
+        self.st_state.addItem(tr("Выключена (0)"), 0)
+        st_layout.addWidget(self.st_state)
+        st_layout.addStretch()
+
+        dyn_page = QWidget()
+        dyn_layout = QVBoxLayout(dyn_page)
+        dyn_layout.setSpacing(4)
+        dyn_layout.setContentsMargins(0, 0, 0, 0)
+        dyn_layout.addWidget(_small_label(tr("Переменная:"), font))
+        self.dyn_var = _VarCombo(font)
+        dyn_layout.addWidget(self.dyn_var)
+        dyn_row = QHBoxLayout()
+        self.dyn_op = QComboBox()
+        self.dyn_op.setFont(font)
+        self.dyn_op.addItem(tr("Больше"), "gt")
+        self.dyn_op.addItem(tr("Меньше"), "lt")
+        self.dyn_op.addItem(tr("Равно"), "eq")
+        dyn_row.addWidget(self.dyn_op)
+        self.dyn_value = QLineEdit()
+        self.dyn_value.setFont(font)
+        self.dyn_value.setPlaceholderText(tr("значение"))
+        self.dyn_value.setFixedWidth(80)
+        dyn_row.addWidget(self.dyn_value)
+        dyn_row.addStretch()
+        dyn_layout.addLayout(dyn_row)
+        dyn_layout.addStretch()
+
+        aux_page = QWidget()
+        aux_layout = QVBoxLayout(aux_page)
+        aux_layout.setContentsMargins(0, 0, 0, 0)
+        aux_label = QLabel(tr("Доп канал — скоро"))
+        aux_label.setFont(font)
+        aux_label.setStyleSheet("color: #9A9AA5;")
+        aux_layout.addWidget(aux_label)
+        aux_layout.addStretch()
+
+        for page in (none_page, static_page, dyn_page, aux_page):
+            self._stack.addWidget(page)
+        layout.addWidget(self._stack)
+
+        self.st_var.currentIndexChanged.connect(self._update_summary)
+        self.st_state.currentIndexChanged.connect(self._update_summary)
+        self.dyn_var.currentIndexChanged.connect(self._update_summary)
+        self.dyn_op.currentIndexChanged.connect(self._update_summary)
+        self.dyn_value.textChanged.connect(self._update_summary)
+        self.st_var.currentIndexChanged.connect(row._mark_dirty)
+        self.st_state.currentIndexChanged.connect(row._mark_dirty)
+        self.dyn_var.currentIndexChanged.connect(row._mark_dirty)
+        self.dyn_op.currentIndexChanged.connect(row._mark_dirty)
+        self.dyn_value.textChanged.connect(row._mark_dirty)
+
+        if cond is not None:
+            self.write(cond)
+        self._update_summary()
+
+    def _on_type(self, index: int) -> None:
+        self._stack.setCurrentIndex(index)
+        self._update_summary()
+        self._row._mark_dirty()
+
+    def read(self) -> dict[str, Any]:
+        ctype = self._type.currentData()
+        if ctype == _COND_STATIC:
+            return {
+                "type": _COND_STATIC,
+                "var": self.st_var.get_name(),
+                "state": self.st_state.currentData(),
+            }
+        if ctype == _COND_DYN:
+            return {
+                "type": _COND_DYN,
+                "var": self.dyn_var.get_name(),
+                "op": self.dyn_op.currentData(),
+                "value": self.dyn_value.text().strip(),
+            }
+        if ctype == _COND_AUX:
+            return {"type": _COND_AUX}
+        return {"type": _COND_NONE}
+
+    def write(self, cond: dict[str, Any]) -> None:
+        ctype = cond.get("type", _COND_NONE)
+        idx = self._type.findData(ctype)
+        self._type.setCurrentIndex(idx if idx >= 0 else 0)
+        self._stack.setCurrentIndex(self._type.currentIndex())
+        if ctype == _COND_STATIC:
+            self.st_var.set_name(str(cond.get("var", "")))
+            sidx = self.st_state.findData(int(cond.get("state", 1)))
+            self.st_state.setCurrentIndex(sidx if sidx >= 0 else 0)
+        elif ctype == _COND_DYN:
+            self.dyn_var.set_name(str(cond.get("var", "")))
+            oidx = self.dyn_op.findData(cond.get("op", "gt"))
+            self.dyn_op.setCurrentIndex(oidx if oidx >= 0 else 0)
+            self.dyn_value.setText(str(cond.get("value", "")))
+
+    def refresh_variables(self) -> None:
+        tab = self._row._tab._variables_tab
+        dyn = tab.variable_names("read", "dynamic") if tab else []
+        st = tab.variable_names("read", "static") if tab else []
+        self.st_var.set_names(st, tr("— не выбрано —"))
+        self.dyn_var.set_names(dyn, tr("— не выбрано —"))
+
+    def _update_summary(self, *_args) -> None:
+        ctype = self._type.currentData()
+        if ctype == _COND_STATIC:
+            text = f"{self.st_var.get_name() or '—'} · {self.st_state.currentText()}"
+        elif ctype == _COND_DYN:
+            text = (
+                f"{self.dyn_var.get_name() or '—'} · {self.dyn_op.currentText()} "
+                f"{self.dyn_value.text().strip()}"
+            ).rstrip()
+        elif ctype == _COND_AUX:
+            text = tr("Доп канал")
+        else:
+            text = tr("Нет")
+        self._summary.setText(text)
+
+
+def _centered_group(title: str, font: QFont) -> QGroupBox:
+    """Группа с заголовком по центру сверху (отчёт мастера)."""
+    group = QGroupBox(title)
+    group.setFont(font)
+    group.setStyleSheet(
+        "QGroupBox::title { subcontrol-origin: margin;"
+        " subcontrol-position: top center; padding: 0 6px; }"
+    )
+    return group
+
+
 class RuleRowWidget(QWidget):
-    """Одна программа: шапка (галочка, имя, ✕) + колонки
-    ЕСЛИ «Событие» / ПРИ «Условие» / ТО «Действие»."""
+    """Одна программа: шапка (галочка, №, имя, сводка, свёртка, ✕)
+    + колонки ЕСЛИ «Событие» / ПРИ «Условие» / ТО «Действие».
+    Событий может быть несколько — программа стартует по любому
+    (ИЛИ); условий — тоже, но выполняться должны все (И)."""
 
     def __init__(
         self,
@@ -482,7 +784,7 @@ class RuleRowWidget(QWidget):
     def _create_widgets(self) -> None:
         font = QFont("Segoe UI", 9)
 
-        # Шапка программы: вкл/выкл, имя, свёртка, удаление.
+        # Шапка программы: вкл/выкл, №, имя, свёртка, удаление.
         self._active_check = QCheckBox()
         self._active_check.setFont(font)
         self._active_check.setToolTip(tr("Включить/выключить программу"))
@@ -511,104 +813,36 @@ class RuleRowWidget(QWidget):
         self._counter_label.setFixedWidth(36)
         self._counter_label.setToolTip(tr("Срабатываний"))
 
-        # ---- Событие ---------------------------------------------------
-        self._event_group = QGroupBox(tr("Событие"))
-        self._event_group.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        self._event_type = QComboBox()
-        self._event_type.setFont(font)
-        self._event_type.addItem(tr("Динамическая переменная"), _EVENT_DYN)
-        self._event_type.addItem(tr("Статическая переменная"), _EVENT_STATIC)
-        self._event_type.addItem(tr("Доп канал"), _EVENT_AUX)
-        self._event_type.addItem(tr("Фрейм"), _EVENT_FRAME)
-        self._event_type.currentIndexChanged.connect(self._on_event_type)
-        self._event_stack = QStackedWidget()
-        self._ev_dyn = _DynEventPage(font, self._mark_dirty)
-        self._ev_static = _StaticEventPage(font, self._mark_dirty)
-        self._ev_aux = _AuxEventPage(font)
-        self._ev_frame = _FrameEventPage(font, self._mark_dirty)
-        for page in (self._ev_dyn, self._ev_static, self._ev_aux, self._ev_frame):
-            self._event_stack.addWidget(page)
+        self._number_label = QLabel("№")
+        self._number_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._number_label.setStyleSheet("color: #9A9AA5;")
 
-        # ---- Условие ----------------------------------------------------
-        self._cond_group = QGroupBox(tr("Условие"))
-        self._cond_group.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        self._cond_type = QComboBox()
-        self._cond_type.setFont(font)
-        self._cond_type.addItem(tr("Нет"), _COND_NONE)
-        self._cond_type.addItem(tr("Статическая переменная"), _COND_STATIC)
-        self._cond_type.addItem(tr("Динамическая переменная"), _COND_DYN)
-        self._cond_type.addItem(tr("Доп канал"), _COND_AUX)
-        self._cond_type.currentIndexChanged.connect(self._on_cond_type)
+        # ---- События (несколько, ИЛИ между ними) ----------------------
+        self._event_group = _centered_group(
+            tr("Событие"), QFont("Segoe UI", 9, QFont.Weight.Bold)
+        )
+        self._event_items: list[_EventItem] = []
+        self._event_separators: list[QLabel] = []
+        self._events_layout: QVBoxLayout | None = None
+        self._add_event_button = QPushButton(tr("＋ событие"))
+        self._add_event_button.setFont(font)
+        self._add_event_button.clicked.connect(lambda: self._add_event())
 
-        self._cond_stack = QStackedWidget()
-        none_page = QWidget()
-        none_layout = QVBoxLayout(none_page)
-        none_layout.setContentsMargins(0, 0, 0, 0)
-        none_label = QLabel(tr("Без проверки — действие сразу"))
-        none_label.setFont(font)
-        none_label.setStyleSheet("color: #9A9AA5;")
-        none_layout.addWidget(none_label)
-        none_layout.addStretch()
-
-        static_page = QWidget()
-        st_layout = QVBoxLayout(static_page)
-        st_layout.setSpacing(4)
-        st_layout.setContentsMargins(0, 0, 0, 0)
-        st_layout.addWidget(_small_label(tr("Переменная:"), font))
-        self._cd_st_var = _VarCombo(font)
-        st_layout.addWidget(self._cd_st_var)
-        st_layout.addWidget(_small_label(tr("Состояние:"), font))
-        self._cd_st_state = QComboBox()
-        self._cd_st_state.setFont(font)
-        self._cd_st_state.addItem(tr("Включена (1)"), 1)
-        self._cd_st_state.addItem(tr("Выключена (0)"), 0)
-        st_layout.addWidget(self._cd_st_state)
-        st_layout.addStretch()
-
-        dyn_page = QWidget()
-        dyn_layout = QVBoxLayout(dyn_page)
-        dyn_layout.setSpacing(4)
-        dyn_layout.setContentsMargins(0, 0, 0, 0)
-        dyn_layout.addWidget(_small_label(tr("Переменная:"), font))
-        self._cd_dyn_var = _VarCombo(font)
-        dyn_layout.addWidget(self._cd_dyn_var)
-        dyn_row = QHBoxLayout()
-        self._cd_dyn_op = QComboBox()
-        self._cd_dyn_op.setFont(font)
-        self._cd_dyn_op.addItem(tr("Больше"), "gt")
-        self._cd_dyn_op.addItem(tr("Меньше"), "lt")
-        self._cd_dyn_op.addItem(tr("Равно"), "eq")
-        dyn_row.addWidget(self._cd_dyn_op)
-        self._cd_dyn_value = QLineEdit()
-        self._cd_dyn_value.setFont(font)
-        self._cd_dyn_value.setPlaceholderText(tr("значение"))
-        self._cd_dyn_value.setFixedWidth(80)
-        dyn_row.addWidget(self._cd_dyn_value)
-        dyn_row.addStretch()
-        dyn_layout.addLayout(dyn_row)
-        dyn_layout.addStretch()
-
-        aux_page = QWidget()
-        aux_layout = QVBoxLayout(aux_page)
-        aux_layout.setContentsMargins(0, 0, 0, 0)
-        aux_label = QLabel(tr("Доп канал — скоро"))
-        aux_label.setFont(font)
-        aux_label.setStyleSheet("color: #9A9AA5;")
-        aux_layout.addWidget(aux_label)
-        aux_layout.addStretch()
-
-        for page in (none_page, static_page, dyn_page, aux_page):
-            self._cond_stack.addWidget(page)
-
-        self._cd_st_var.currentIndexChanged.connect(self._mark_dirty)
-        self._cd_st_state.currentIndexChanged.connect(self._mark_dirty)
-        self._cd_dyn_var.currentIndexChanged.connect(self._mark_dirty)
-        self._cd_dyn_op.currentIndexChanged.connect(self._mark_dirty)
-        self._cd_dyn_value.textChanged.connect(self._mark_dirty)
+        # ---- Условия (несколько, И между ними) ------------------------
+        self._cond_group = _centered_group(
+            tr("Условие"), QFont("Segoe UI", 9, QFont.Weight.Bold)
+        )
+        self._cond_items: list[_CondItem] = []
+        self._cond_separators: list[QLabel] = []
+        self._conds_layout: QVBoxLayout | None = None
+        self._add_cond_button = QPushButton(tr("＋ условие"))
+        self._add_cond_button.setFont(font)
+        self._add_cond_button.clicked.connect(lambda: self._add_cond())
 
         # ---- Действие ----------------------------------------------------
-        self._action_group = QGroupBox(tr("Действие"))
-        self._action_group.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self._action_group = _centered_group(
+            tr("Действие"), QFont("Segoe UI", 9, QFont.Weight.Bold)
+        )
 
         # Переменная из «Управление».
         self._act_var = _VarCombo(font)
@@ -623,6 +857,25 @@ class RuleRowWidget(QWidget):
         self._act_var_num.setPlaceholderText(tr("значение"))
         self._act_var_num.setFixedWidth(80)
         self._act_var_num.textChanged.connect(self._mark_dirty)
+
+        # Задержка включения доп. канала и время его работы:
+        # 0 мс — без задержки / бесконечно (отчёт мастера).
+        self._act_var_delay = QSpinBox()
+        self._act_var_delay.setRange(0, 999999)
+        self._act_var_delay.setSuffix(tr(" мс"))
+        self._act_var_delay.setFont(font)
+        self._act_var_delay.setFixedWidth(96)
+        self._act_var_delay.setToolTip(tr("Задержка включения доп. канала"))
+        self._act_var_delay.valueChanged.connect(self._mark_dirty)
+        self._act_var_duration = QSpinBox()
+        self._act_var_duration.setRange(0, 999999)
+        self._act_var_duration.setSuffix(tr(" мс"))
+        self._act_var_duration.setFont(font)
+        self._act_var_duration.setFixedWidth(96)
+        self._act_var_duration.setToolTip(
+            tr("Время работы канала, 0 — бесконечно")
+        )
+        self._act_var_duration.valueChanged.connect(self._mark_dirty)
 
         # Ручной фрейм (канал — здесь, по отчёту мастера).
         self._act_frame_box = QGroupBox(tr("Фрейм"))
@@ -735,6 +988,7 @@ class RuleRowWidget(QWidget):
         header_layout.setContentsMargins(8, 4, 8, 4)
         header_layout.setSpacing(8)
         header_layout.addWidget(self._active_check)
+        header_layout.addWidget(self._number_label)
         header_layout.addWidget(self._name_edit, 1)
         header_layout.addWidget(self._summary_label, 2)
         header_layout.addWidget(_small_label(tr("Срабатываний:"), font))
@@ -748,22 +1002,26 @@ class RuleRowWidget(QWidget):
         body_layout.setSpacing(8)
         body_layout.setContentsMargins(0, 0, 0, 0)
 
-        # ЕСЛИ — Событие
+        # ЕСЛИ — События (ИЛИ между событиями)
         body_layout.addWidget(_connector(tr("ЕСЛИ")), 0)
         ev_layout = QVBoxLayout(self._event_group)
         ev_layout.setSpacing(4)
-        ev_layout.setContentsMargins(8, 8, 8, 8)
-        ev_layout.addWidget(self._event_type)
-        ev_layout.addWidget(self._event_stack, 1)
+        ev_layout.setContentsMargins(8, 10, 8, 8)
+        self._events_layout = QVBoxLayout()
+        self._events_layout.setSpacing(2)
+        ev_layout.addLayout(self._events_layout, 1)
+        ev_layout.addWidget(self._add_event_button)
         body_layout.addWidget(self._event_group, 1)
 
-        # ПРИ — Условие
+        # ПРИ — Условия (И между условиями — выполняются все)
         body_layout.addWidget(_connector(tr("ПРИ")), 0)
         cd_layout = QVBoxLayout(self._cond_group)
         cd_layout.setSpacing(4)
-        cd_layout.setContentsMargins(8, 8, 8, 8)
-        cd_layout.addWidget(self._cond_type)
-        cd_layout.addWidget(self._cond_stack, 1)
+        cd_layout.setContentsMargins(8, 10, 8, 8)
+        self._conds_layout = QVBoxLayout()
+        self._conds_layout.setSpacing(2)
+        cd_layout.addLayout(self._conds_layout, 1)
+        cd_layout.addWidget(self._add_cond_button)
         body_layout.addWidget(self._cond_group, 1)
 
         # ТО — Действие
@@ -778,6 +1036,15 @@ class RuleRowWidget(QWidget):
         var_row.addWidget(self._act_var_value)
         var_row.addWidget(self._act_var_num)
         act_layout.addLayout(var_row)
+
+        delay_row = QHBoxLayout()
+        delay_row.addWidget(_small_label(tr("Задержка:"), font))
+        delay_row.addWidget(self._act_var_delay)
+        delay_row.addWidget(_small_label(tr("Время работы:"), font))
+        delay_row.addWidget(self._act_var_duration)
+        delay_row.addWidget(_small_label(tr("(0 — бесконечно)"), font))
+        delay_row.addStretch()
+        act_layout.addLayout(delay_row)
 
         frame_layout = QVBoxLayout(self._act_frame_box)
         frame_layout.setSpacing(4)
@@ -846,27 +1113,84 @@ class RuleRowWidget(QWidget):
         «Переменные» (события/условия — колонка «Чтение», действия —
         «Управление»). Выбранное имя сохраняется."""
         tab = self._tab._variables_tab
-        dyn_read = tab.variable_names("read", "dynamic") if tab else []
-        st_read = tab.variable_names("read", "static") if tab else []
         ctrl = tab.variable_names("control") if tab else []
 
         def refill(combo: _VarCombo, names: list[str]) -> None:
             combo.set_names(names, tr("— не выбрано —"))
 
-        refill(self._ev_dyn.var, dyn_read)
-        refill(self._ev_static.var, st_read)
-        refill(self._cd_st_var, st_read)
-        refill(self._cd_dyn_var, dyn_read)
+        for item in self._event_items:
+            item.refresh_variables()
+        for item in self._cond_items:
+            item.refresh_variables()
         refill(self._act_var, ctrl)
         self._on_act_var_changed()
 
-    def _on_event_type(self, index: int) -> None:
-        self._event_stack.setCurrentIndex(index)
+    # ---- события/условия (списки) --------------------------------------
+
+    def _add_event(self, event: dict | None = None) -> _EventItem:
+        """Новое событие в колонке ЕСЛИ; между событиями — ИЛИ."""
+        font = QFont("Segoe UI", 9)
+        item = _EventItem(self, font, event)
+        item.refresh_variables()
+        assert self._events_layout is not None
+        if self._event_items:
+            sep = self._separator_label(tr("ИЛИ"), font)
+            self._event_separators.append(sep)
+            self._events_layout.addWidget(sep)
+        self._event_items.append(item)
+        self._events_layout.addWidget(item)
+        self._mark_dirty()
+        return item
+
+    def _remove_event(self, item: _EventItem) -> None:
+        if len(self._event_items) <= 1:
+            return  # хотя бы одно событие должно остаться
+        idx = self._event_items.index(item)
+        self._event_items.pop(idx)
+        item.setParent(None)
+        item.deleteLater()
+        if self._event_items:
+            sep_idx = idx - 1 if idx > 0 else 0
+            sep = self._event_separators.pop(sep_idx)
+            sep.setParent(None)
+            sep.deleteLater()
         self._mark_dirty()
 
-    def _on_cond_type(self, index: int) -> None:
-        self._cond_stack.setCurrentIndex(index)
+    def _add_cond(self, cond: dict | None = None) -> _CondItem:
+        """Новое условие в колонке ПРИ; между условиями — И."""
+        font = QFont("Segoe UI", 9)
+        item = _CondItem(self, font, cond)
+        item.refresh_variables()
+        assert self._conds_layout is not None
+        if self._cond_items:
+            sep = self._separator_label(tr("И"), font)
+            self._cond_separators.append(sep)
+            self._conds_layout.addWidget(sep)
+        self._cond_items.append(item)
+        self._conds_layout.addWidget(item)
         self._mark_dirty()
+        return item
+
+    def _remove_cond(self, item: _CondItem) -> None:
+        if len(self._cond_items) <= 1:
+            return  # хотя бы одно условие должно остаться («Нет»)
+        idx = self._cond_items.index(item)
+        self._cond_items.pop(idx)
+        item.setParent(None)
+        item.deleteLater()
+        if self._cond_items:
+            sep_idx = idx - 1 if idx > 0 else 0
+            sep = self._cond_separators.pop(sep_idx)
+            sep.setParent(None)
+            sep.deleteLater()
+        self._mark_dirty()
+
+    def _separator_label(self, text: str, font: QFont) -> QLabel:
+        label = QLabel(text)
+        label.setFont(QFont(font.family(), font.pointSize(), QFont.Weight.Bold))
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("color: #9A9AA5;")
+        return label
 
     def _on_act_var_changed(self, *_args) -> None:
         """Для статической переменной — выбор →1/→0, для динамической —
@@ -889,7 +1213,7 @@ class RuleRowWidget(QWidget):
         """Старый формат (id/mask/condition_data → resp_*) — в новую
         схему: событие «Фрейм» + действие «Фрейм». Байт маски 0x00
         становится «X», ответная маска 0x00 — подстановкой из кадра."""
-        if "event" in rule:
+        if "event" in rule or "events" in rule:
             return rule
         mask = str(rule.get("mask", "")).split()
         cond = str(rule.get("condition_data", "")).split()
@@ -937,39 +1261,29 @@ class RuleRowWidget(QWidget):
         self._active_check.setChecked(rule.get("active", True))
         self._name_edit.setText(str(rule.get("title", "")))
 
-        event = rule.get("event") or {}
-        etype = event.get("type", _EVENT_FRAME)
-        eidx = self._event_type.findData(etype)
-        self._event_type.setCurrentIndex(eidx if eidx >= 0 else 3)
-        self._event_stack.setCurrentIndex(self._event_type.currentIndex())
-        page = {
-            _EVENT_DYN: self._ev_dyn,
-            _EVENT_STATIC: self._ev_static,
-            _EVENT_AUX: self._ev_aux,
-            _EVENT_FRAME: self._ev_frame,
-        }[etype if eidx >= 0 else _EVENT_FRAME]
-        page.write(event)
+        # События: список «events» или одиночное «event» (старое).
+        events = rule.get("events")
+        if not isinstance(events, list) or not events:
+            events = [rule.get("event") or {"type": _EVENT_FRAME}]
+        for event in events:
+            self._add_event(event if isinstance(event, dict) else None)
 
-        cond = rule.get("condition") or {}
-        ctype = cond.get("type", _COND_NONE)
-        cidx = self._cond_type.findData(ctype)
-        self._cond_type.setCurrentIndex(cidx if cidx >= 0 else 0)
-        self._cond_stack.setCurrentIndex(self._cond_type.currentIndex())
-        if ctype == _COND_STATIC:
-            self._cd_st_var.set_name(str(cond.get("var", "")))
-            sidx = self._cd_st_state.findData(int(cond.get("state", 1)))
-            self._cd_st_state.setCurrentIndex(sidx if sidx >= 0 else 0)
-        elif ctype == _COND_DYN:
-            self._cd_dyn_var.set_name(str(cond.get("var", "")))
-            oidx = self._cd_dyn_op.findData(cond.get("op", "gt"))
-            self._cd_dyn_op.setCurrentIndex(oidx if oidx >= 0 else 0)
-            self._cd_dyn_value.setText(str(cond.get("value", "")))
+        # Условия: список «conditions» или одиночное «condition».
+        conds = rule.get("conditions")
+        if not isinstance(conds, list) or not conds:
+            conds = [rule.get("condition") or {"type": _COND_NONE}]
+        for cond in conds:
+            self._add_cond(cond if isinstance(cond, dict) else None)
 
         action = rule.get("action") or {}
         self._act_var.set_name(str(action.get("var", "")))
         vidx = self._act_var_value.findData(int(action.get("var_value", 1) or 0))
         self._act_var_value.setCurrentIndex(vidx if vidx >= 0 else 0)
         self._act_var_num.setText(str(action.get("var_num", "")))
+        self._act_var_delay.setValue(int(action.get("var_delay", 0) or 0))
+        self._act_var_duration.setValue(
+            int(action.get("var_duration", 0) or 0)
+        )
         self._act_frame_box.setChecked(bool(action.get("frame_enabled", False)))
         self._act_channel.setCurrentIndex(int(action.get("channel", 0) or 0))
         self._act_bit.setCurrentIndex(1 if action.get("extended") else 0)
@@ -1011,47 +1325,28 @@ class RuleRowWidget(QWidget):
             else tr("Свернуть программу")
         )
         if collapsed:
-            rule = self.get_rule()
-            event = rule.get("event") or {}
-            src = (
-                event.get("id") or "—"
-                if event.get("type") == _EVENT_FRAME
-                else event.get("var") or "—"
-            )
-            action = rule.get("action") or {}
+            # Сводка: компактные строки событий через «ИЛИ» (имя +
+            # функция), затем «→ действие».
+            parts = [item._summary.text() for item in self._event_items]
+            src = " / ".join(p for p in parts if p) or "—"
+            action = self.get_rule().get("action") or {}
             dst = action.get("var") or action.get("id") or "—"
             self._summary_label.setText(
-                tr("{0} → {1}").format(src or "—", dst or "—")
+                tr("{0} → {1}").format(src, dst or "—")
             )
         self._mark_dirty()
 
     def get_rule(self) -> dict[str, Any]:
         """Собирает программу из полей строки."""
-        pages = (self._ev_dyn, self._ev_static, self._ev_aux, self._ev_frame)
-        event = pages[self._event_type.currentIndex()].read()
-
-        cond: dict[str, Any] = {"type": _COND_NONE}
-        ctype = self._cond_type.currentData()
-        if ctype == _COND_STATIC:
-            cond = {
-                "type": _COND_STATIC,
-                "var": self._cd_st_var.get_name(),
-                "state": self._cd_st_state.currentData(),
-            }
-        elif ctype == _COND_DYN:
-            cond = {
-                "type": _COND_DYN,
-                "var": self._cd_dyn_var.get_name(),
-                "op": self._cd_dyn_op.currentData(),
-                "value": self._cd_dyn_value.text().strip(),
-            }
-        elif ctype == _COND_AUX:
-            cond = {"type": _COND_AUX}
+        events = [item.read() for item in self._event_items]
+        conditions = [item.read() for item in self._cond_items]
 
         action: dict[str, Any] = {
             "var": self._act_var.get_name(),
             "var_value": self._act_var_value.currentData(),
             "var_num": self._act_var_num.text().strip(),
+            "var_delay": self._act_var_delay.value(),
+            "var_duration": self._act_var_duration.value(),
             "frame_enabled": self._act_frame_box.isChecked(),
             "channel": self._act_channel.currentIndex(),
             "extended": self._act_bit.currentIndex() == 1,
@@ -1075,8 +1370,8 @@ class RuleRowWidget(QWidget):
         return {
             "title": self._name_edit.text().strip(),
             "active": self._active_check.isChecked(),
-            "event": event,
-            "condition": cond,
+            "events": events,
+            "conditions": conditions,
             "action": action,
             "collapsed": self._body.isHidden(),
         }
@@ -1084,10 +1379,16 @@ class RuleRowWidget(QWidget):
     def set_counter(self, value: int) -> None:
         self._counter_label.setText(str(value))
 
+    def set_number(self, number: int) -> None:
+        """Номер программы в шапке («№ N», отчёт мастера)."""
+        self._number_label.setText(f"№ {number}")
+
     def retranslate_ui(self) -> None:
         self._event_group.setTitle(tr("Событие"))
         self._cond_group.setTitle(tr("Условие"))
         self._action_group.setTitle(tr("Действие"))
+        self._add_event_button.setText(tr("＋ событие"))
+        self._add_cond_button.setText(tr("＋ условие"))
         self._act_frame_box.setTitle(tr("Фрейм"))
         self._act_cache_box.setTitle(tr("Автоматическая запись DATA в кэш"))
         self._name_edit.setPlaceholderText(tr("Программа"))
@@ -1123,11 +1424,13 @@ class FlexibleLogicTab(QWidget):
         self._dyn_values: dict[str, float] = {}
         # Признак «условие дин. события уже истинно» — событие «Стало
         # больше/меньше» — фронт булева состояния, а не каждый кадр.
-        self._dyn_flags: dict[tuple[int, str], bool] = {}
+        # Ключ: (программа, событие, имя переменной).
+        self._dyn_flags: dict[tuple[int, int, str], bool] = {}
         # Кэш действий: индекс программы → последний подошедший кадр.
         self._fl_cache: dict[int, dict[str, Any]] = {}
-        # «Сработок на DATA» событий-фреймов: индекс → (last_data, n).
-        self._event_fire: dict[int, tuple[bytes | None, int]] = {}
+        # «Сработок на DATA» событий-фреймов:
+        # (программа, событие) → (last_data, n).
+        self._event_fire: dict[tuple[int, int], tuple[bytes | None, int]] = {}
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(600)
@@ -1235,6 +1538,7 @@ class FlexibleLogicTab(QWidget):
         row = RuleRowWidget(self, rule)
         self._row_widgets.append(row)
         self._rows_layout.insertWidget(self._rows_layout.count() - 1, row)
+        self._renumber_rows()
         return row
 
     def _remove_row(self, widget: RuleRowWidget) -> None:
@@ -1246,7 +1550,13 @@ class FlexibleLogicTab(QWidget):
         widget.setParent(None)
         widget.deleteLater()
         self._rule_counters = [0] * len(self._row_widgets)
+        self._renumber_rows()
         self.mark_dirty()
+
+    def _renumber_rows(self) -> None:
+        """Нумерация программ в шапках (№ 1, № 2, …)."""
+        for i, row in enumerate(self._row_widgets, 1):
+            row.set_number(i)
 
     def _on_add(self) -> None:
         """Добавляет новую пустую программу."""
@@ -1394,6 +1704,10 @@ class FlexibleLogicTab(QWidget):
         #    из обратной интерполяции графика.
         var_name = str(action.get("var", "")).strip()
         if var_name:
+            # «Задержка» — пауза до включения канала, «Время работы» —
+            # через сколько вернуть канал в 0 (0 — бесконечно).
+            var_delay = int(action.get("var_delay", 0) or 0)
+            var_duration = int(action.get("var_duration", 0) or 0)
             for var in self._variable_defs():
                 if var.get("name", "").strip() != var_name:
                     continue
@@ -1414,6 +1728,34 @@ class FlexibleLogicTab(QWidget):
                         self._send_frame(
                             int(action.get("channel", 0)) + 1, fid,
                             bytes(payload[: int(fdef.get("dlc", 8) or 8)]),
+                            var_delay,
+                        )
+                    # «Время работы»: по истечении возвращаем канал в 0
+                    # его же выключающим фреймом; 0 — бесконечно.
+                    if var_duration > 0 and want == 1:
+                        off_at = var_delay + var_duration
+                        for fdef in var.get("frames") or []:
+                            if int(fdef.get("value", 1) or 0) != 0:
+                                continue
+                            fid = hex_to_int(str(fdef.get("id", "")))
+                            if fid is None:
+                                continue
+                            tokens = str(fdef.get("data", "")).split()
+                            payload = bytearray(8)
+                            for i, t in enumerate(tokens[:8]):
+                                v = hex_to_int(t)
+                                payload[i] = (
+                                    v if v is not None and t != "X" else 0
+                                )
+                            self._send_frame(
+                                int(action.get("channel", 0)) + 1, fid,
+                                bytes(payload[: int(fdef.get("dlc", 8) or 8)]),
+                                off_at,
+                            )
+                        QTimer.singleShot(
+                            off_at,
+                            lambda n=var_name: self._static_states.
+                            __setitem__(n, 0),
                         )
                 else:
                     try:
@@ -1432,6 +1774,7 @@ class FlexibleLogicTab(QWidget):
                     self._send_frame(
                         int(action.get("channel", 0)) + 1, fid,
                         bytes(payload[: int(var.get("dlc", 8) or 8)]),
+                        var_delay,
                     )
                 break
 
@@ -1475,6 +1818,66 @@ class FlexibleLogicTab(QWidget):
     def set_dbc(self, dbc_manager) -> None:
         """Обновляет логику при смене DBC (заглушка)."""
 
+    def _event_fired(
+        self,
+        rule_index: int,
+        sub_index: int,
+        event: dict[str, Any],
+        frame: dict[str, Any],
+        frame_data: bytes,
+        changed_static: dict[str, int],
+    ) -> bool:
+        """Проверяет одно событие программы по пришедшему кадру."""
+        etype = event.get("type", _EVENT_FRAME)
+        if etype == _EVENT_FRAME:
+            if not self._frame_event_matches(event, frame):
+                return False
+            # «Сработок на DATA»: одинаковый поток не перезапускает
+            # программу; новая DATA — заново. Счётчик ведётся по
+            # (программа, событие) — событий может быть несколько.
+            limit = max(1, int(event.get("fire_limit", 1) or 1))
+            key = (rule_index, sub_index)
+            last, count = self._event_fire.get(key, (None, 0))
+            if last != frame_data:
+                last, count = frame_data, 0
+            fired = count < limit
+            if fired:
+                count += 1
+            self._event_fire[key] = (last, count)
+            return fired
+        if etype == _EVENT_STATIC:
+            name = str(event.get("var", "")).strip()
+            if name not in changed_static:
+                return False
+            edge = event.get("edge", "both")
+            return (
+                edge == "both"
+                or (edge == "on" and changed_static[name] == 1)
+                or (edge == "off" and changed_static[name] == 0)
+            )
+        if etype == _EVENT_DYN:
+            name = str(event.get("var", "")).strip()
+            if name not in self._dyn_values:
+                return False
+            try:
+                threshold = float(
+                    str(event.get("value", "")).replace(",", ".")
+                )
+            except ValueError:
+                return False
+            flag = (
+                self._dyn_values[name] > threshold
+                if event.get("dir", "gt") == "gt"
+                else self._dyn_values[name] < threshold
+            )
+            key = (rule_index, sub_index, name)
+            # Фронт истинности: «стало больше/меньше» стреляет
+            # один раз на переход через порог.
+            fired = flag and not self._dyn_flags.get(key, False)
+            self._dyn_flags[key] = flag
+            return fired
+        return False  # _EVENT_AUX — заглушка, не срабатывает.
+
     def process_frame(self, frame: dict[str, Any]) -> None:
         """Проверяет входящий кадр: обновляет переменные, кэши действий,
         затем события ЕСЛИ → условия ПРИ → действия ТО.
@@ -1500,62 +1903,38 @@ class FlexibleLogicTab(QWidget):
         for internal in self._internal_rules:
             rule_index = internal["index"]
             rule = internal["rule"]
-            event = rule.get("event") or {}
+            events = rule.get("events")
+            if not isinstance(events, list) or not events:
+                events = [rule.get("event") or {}]
+            conditions = rule.get("conditions")
+            if not isinstance(conditions, list) or not conditions:
+                conditions = [rule.get("condition") or {}]
             action = rule.get("action") or {}
 
             # Кэш пополняется независимо от срабатывания программы
             # (как строки кэша триггеров).
             self._update_cache(rule_index, action, frame)
 
-            etype = event.get("type", _EVENT_FRAME)
+            # Несколько событий объединены по ИЛИ: программа
+            # стартует по любому из них (отчёт мастера).
             fired = False
-            if etype == _EVENT_FRAME:
-                if self._frame_event_matches(event, frame):
-                    # «Сработок на DATA»: одинаковый поток не
-                    # перезапускает программу; новая DATA — заново.
-                    limit = max(1, int(event.get("fire_limit", 1) or 1))
-                    last, count = self._event_fire.get(rule_index, (None, 0))
-                    if last != frame_data:
-                        last, count = frame_data, 0
-                    if count < limit:
-                        count += 1
-                        fired = True
-                    self._event_fire[rule_index] = (last, count)
-            elif etype == _EVENT_STATIC:
-                name = str(event.get("var", "")).strip()
-                if name in changed_static:
-                    edge = event.get("edge", "both")
-                    fired = (
-                        edge == "both"
-                        or (edge == "on" and changed_static[name] == 1)
-                        or (edge == "off" and changed_static[name] == 0)
-                    )
-            elif etype == _EVENT_DYN:
-                name = str(event.get("var", "")).strip()
-                if name in self._dyn_values:
-                    try:
-                        threshold = float(
-                            str(event.get("value", "")).replace(",", ".")
-                        )
-                    except ValueError:
-                        threshold = None
-                    if threshold is not None:
-                        flag = (
-                            self._dyn_values[name] > threshold
-                            if event.get("dir", "gt") == "gt"
-                            else self._dyn_values[name] < threshold
-                        )
-                        key = (rule_index, name)
-                        # Фронт истинности: «стало больше/меньше»
-                        # стреляет один раз на переход через порог.
-                        if flag and not self._dyn_flags.get(key, False):
-                            fired = True
-                        self._dyn_flags[key] = flag
-            # _EVENT_AUX — заглушка, не срабатывает.
+            fired_etype = ""
+            for sub_index, event in enumerate(events):
+                if self._event_fired(
+                    rule_index, sub_index, event, frame,
+                    frame_data, changed_static,
+                ):
+                    fired = True
+                    fired_etype = str(event.get("type", _EVENT_FRAME))
+                    break
 
             if not fired:
                 continue
-            if not self._condition_passed(rule.get("condition") or {}):
+            # Несколько условий объединены по И: должны
+            # выполняться все (отчёт мастера).
+            if not all(
+                self._condition_passed(cond) for cond in conditions
+            ):
                 continue
 
             self._rule_counters[rule_index] += 1
@@ -1566,7 +1945,7 @@ class FlexibleLogicTab(QWidget):
             logger.info(
                 "Сработала программа ГЛ «%s» (событие %s)",
                 rule.get("title") or rule_index,
-                etype,
+                fired_etype,
             )
 
     def retranslate_ui(self) -> None:

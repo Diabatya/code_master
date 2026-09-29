@@ -122,13 +122,17 @@ jobs:
       - name: Collect firmware artifacts
         run: |
           # В релиз идёт единый объединённый образ (bootloader + app +
-          # метаданные): оператор работает всегда с одним файлом.
+          # метаданные + версионная запись): оператор работает всегда
+          # с одним файлом. --version проставляет номер релиза в поле
+          # «Версия ПО» конфиг-страницы (отчёт мастера).
           mkdir firmware-artifacts
+          FW_VERSION=$(python3 -c "import re; print(re.search(r'VERSION = \"([^\"]+)\"', open('models/version.py').read()).group(1))")
           python3 firmware/tools/make_full_image.py \
             firmware/bootloader/build/codemaster_bootloader.hex \
             firmware/application/build/codemaster_app.hex \
             firmware-artifacts/codemaster_full.hex \
-            firmware-artifacts/codemaster_full.bin
+            firmware-artifacts/codemaster_full.bin \
+            --version "$FW_VERSION"
           (cd firmware-artifacts && sha256sum * > SHA256SUMS.txt)
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v5

@@ -204,7 +204,7 @@ class CanTriggerTab(QWidget):
 
     def _make_id_edit(self, font: QFont, bit_combo: QComboBox) -> IdPasteEdit:
         edit = IdPasteEdit()
-        edit.setFixedWidth(90)
+        edit.setFixedWidth(120)
         edit.setFont(font)
         edit.setPlaceholderText("ID")
         edit._id_validator = _IdValidator(edit, bit_combo)
@@ -213,20 +213,20 @@ class CanTriggerTab(QWidget):
     def _make_data_edits(
         self, font: QFont, allow_x: bool = False
     ) -> tuple[list[QLineEdit], QWidget]:
-        return create_data_field_widget(font, 8, edit_width=42, allow_x=allow_x)
+        return create_data_field_widget(font, 8, edit_width=52, allow_x=allow_x)
 
     def _make_channel_combo(self, font: QFont) -> QComboBox:
         combo = QComboBox()
         combo.setFont(font)
         combo.addItems(CHANNELS)
-        combo.setFixedWidth(110)
+        combo.setFixedWidth(140)
         return combo
 
     def _make_bit_combo(self, font: QFont) -> QComboBox:
         combo = QComboBox()
         combo.setFont(font)
         combo.addItems(BIT_RATES)
-        combo.setFixedWidth(90)
+        combo.setFixedWidth(115)
         return combo
 
     def _make_dlc_spin(self, font: QFont) -> QSpinBox:
@@ -234,7 +234,7 @@ class CanTriggerTab(QWidget):
         spin.setRange(1, 8)
         spin.setValue(8)
         spin.setFont(font)
-        spin.setFixedWidth(50)
+        spin.setFixedWidth(64)
         return spin
 
     def _make_count_spin(self, font: QFont, max_value: int = 100) -> QSpinBox:
@@ -242,7 +242,7 @@ class CanTriggerTab(QWidget):
         spin.setRange(1, max_value)
         spin.setValue(1)
         spin.setFont(font)
-        spin.setFixedWidth(70)
+        spin.setFixedWidth(115)
         return spin
 
     def _make_delay_spin(self, font: QFont) -> QSpinBox:
@@ -251,7 +251,7 @@ class CanTriggerTab(QWidget):
         spin.setValue(0)
         spin.setSuffix(tr(" мс"))
         spin.setFont(font)
-        spin.setFixedWidth(90)
+        spin.setFixedWidth(115)
         return spin
 
     def _create_cond_row(self, font: QFont, label: str | None) -> dict[str, Any]:
@@ -263,6 +263,21 @@ class CanTriggerTab(QWidget):
         """
         layout = QHBoxLayout()
         layout.setSpacing(4)
+
+        rtr = self._round_button(tr("RTR"))
+        # Кнопка RTR в приёме — максимально влево, буквы серые
+        # (отчёт мастера). Те же размеры, что у RTR в строке «Ответ».
+        rtr.setFixedSize(84, 28)
+        rtr.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        rtr.setStyleSheet(
+            "QToolButton { background-color: #3A3A5A; color: #9A9AA5; border: none; border-radius: 4px; padding: 0px; }"
+            "QToolButton:hover { background-color: #4A4A6A; }"
+            "QToolButton:checked { background-color: #FF9800; color: #FFFFFF; }"
+        )
+        rtr.setCheckable(True)
+        rtr.setToolTip(tr("Срабатывать только на RTR-запрос (Remote Transmission Request)"))
+        layout.addWidget(rtr)
+
         if label:
             layout.addWidget(QLabel(label))
         channel = self._make_channel_combo(font)
@@ -280,27 +295,13 @@ class CanTriggerTab(QWidget):
         data, data_widget = self._make_data_edits(font, allow_x=True)
         layout.addWidget(data_widget)
 
-        rtr = self._round_button(tr("RTR"))
-        # Те же размеры/стиль, что у кнопки RTR в строке «Ответ»
-        # (64x20, Segoe UI 8) — в 38x24 надпись обрезалась.
-        rtr.setFixedSize(64, 20)
-        rtr.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-        rtr.setStyleSheet(
-            "QToolButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
-            "QToolButton:hover { background-color: #4A4A6A; }"
-            "QToolButton:checked { background-color: #FF9800; color: #FFFFFF; }"
-        )
-        rtr.setCheckable(True)
-        rtr.setToolTip(tr("Срабатывать только на RTR-запрос (Remote Transmission Request)"))
-        layout.addWidget(rtr)
-
         copy_paste = create_clipboard_buttons(self, can_id, dlc, data, bit)
         layout.addWidget(copy_paste)
 
         # «−» удаляет это условие (у первой строки не показывается —
         # минимум одно условие на триггер). «+» живёт в строке опций.
         remove_button = self._round_button("−")
-        remove_button.setFixedSize(22, 22)
+        remove_button.setFixedSize(28, 28)
         remove_button.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         remove_button.setStyleSheet(
             "QToolButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
@@ -371,7 +372,7 @@ class CanTriggerTab(QWidget):
         fire_spin.setRange(1, 9999)
         fire_spin.setValue(1)
         fire_spin.setFont(font)
-        fire_spin.setFixedWidth(70)
+        fire_spin.setFixedWidth(115)
         fire_spin.setEnabled(False)
         fire_check.toggled.connect(fire_spin.setEnabled)
         options_layout.addWidget(fire_spin)
@@ -390,7 +391,7 @@ class CanTriggerTab(QWidget):
         boot_delay.setRange(0, 9999)
         boot_delay.setValue(0)
         boot_delay.setFont(font)
-        boot_delay.setFixedWidth(70)
+        boot_delay.setFixedWidth(115)
         boot_delay.setEnabled(False)
         boot_delay.setToolTip(
             tr("Пауза от включения МК до сработки триггера, 0–9999 мс "
@@ -401,7 +402,7 @@ class CanTriggerTab(QWidget):
         # «+» — ещё одно условие приёма (ИЛИ): свои канал/битность/ID/
         # DLC/Data/RTR. Ограничение — 3 бита индекса в rx_flags записи.
         add_cond = self._round_button("+")
-        add_cond.setFixedSize(22, 22)
+        add_cond.setFixedSize(28, 28)
         add_cond.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         add_cond.setStyleSheet(
             "QToolButton { background-color: #3A3A5A; color: #FFFFFF; border: none; "
@@ -537,7 +538,7 @@ class CanTriggerTab(QWidget):
         header.addWidget(header_label)
         header.addStretch()
         add_button = self._round_button("+")
-        add_button.setFixedSize(32, 32)
+        add_button.setFixedSize(38, 38)
         add_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
         add_button.setStyleSheet(
             "QToolButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
@@ -577,7 +578,7 @@ class CanTriggerTab(QWidget):
         # включении поле Data этой строки блокируется и бледнеет, активны
         # только ID и DLC.
         rtr = self._round_button(tr("RTR"))
-        rtr.setFixedSize(64, 20)
+        rtr.setFixedSize(84, 28)
         rtr.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         rtr.setCheckable(True)
         rtr.setToolTip(tr("Remote Transmission Request"))
@@ -591,14 +592,14 @@ class CanTriggerTab(QWidget):
         )
 
         delay_before_send = self._make_delay_spin(font)
-        delay_before_send.setFixedWidth(80)
+        delay_before_send.setFixedWidth(105)
         delay_between = self._make_delay_spin(font)
-        delay_between.setFixedWidth(80)
+        delay_between.setFixedWidth(105)
         count = self._make_count_spin(font, 999)
-        count.setFixedWidth(60)
+        count.setFixedWidth(78)
 
         remove_button = self._round_button("\u2013")
-        remove_button.setFixedSize(32, 32)
+        remove_button.setFixedSize(38, 38)
         remove_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
         remove_button.setStyleSheet(
             "QToolButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
@@ -614,7 +615,6 @@ class CanTriggerTab(QWidget):
         # затем RTR и кнопки копировать/вставить в той же строке —
         # все поля на одной высоте (просьба мастера: «БИТ», ID и DLC
         # не должны плясать по вертикали).
-        row_layout.addWidget(QLabel(tr("Канал")))
         row_layout.addWidget(channel)
         row_layout.addWidget(QLabel(tr("Бит")))
         row_layout.addWidget(bit)
@@ -643,7 +643,7 @@ class CanTriggerTab(QWidget):
         self._set_data_enabled(data, dlc.value())
 
         next_delay = self._make_delay_spin(font)
-        next_delay.setFixedWidth(80)
+        next_delay.setFixedWidth(105)
         pause_widget = self._create_pause_widget(font, next_delay)
 
         row = {
@@ -782,7 +782,7 @@ class CanTriggerTab(QWidget):
         header.addWidget(header_label)
         header.addStretch()
         add_button = self._round_button("+")
-        add_button.setFixedSize(32, 32)
+        add_button.setFixedSize(38, 38)
         add_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
         add_button.setStyleSheet(
             "QToolButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
@@ -859,23 +859,23 @@ class CanTriggerTab(QWidget):
         line2.addWidget(delay_before_label)
         delay_before_send = self._make_delay_spin(font)
         delay_before_send.setSuffix("")
-        delay_before_send.setFixedWidth(80)
+        delay_before_send.setFixedWidth(105)
         line2.addWidget(delay_before_send)
         line2.addWidget(delay_between_label)
         delay_between = self._make_delay_spin(font)
         delay_between.setSuffix("")
-        delay_between.setFixedWidth(80)
+        delay_between.setFixedWidth(105)
         line2.addWidget(delay_between)
         count_label = QLabel(tr("Кол-во отправок"))
         line2.addWidget(count_label)
         count = self._make_count_spin(font, 999)
         count.setSuffix("")
-        count.setFixedWidth(60)
+        count.setFixedWidth(78)
         line2.addWidget(count)
         line2.addStretch()
 
         remove_button = self._round_button("\u2013")
-        remove_button.setFixedSize(32, 32)
+        remove_button.setFixedSize(38, 38)
         remove_button.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
         remove_button.setStyleSheet(
             "QToolButton { background-color: #4A4A6A; color: #FFFFFF; border: none; "
@@ -909,7 +909,7 @@ class CanTriggerTab(QWidget):
         fire_spin.setRange(1, 9999)
         fire_spin.setValue(1)
         fire_spin.setFont(font)
-        fire_spin.setFixedWidth(70)
+        fire_spin.setFixedWidth(115)
         fire_spin.setEnabled(False)
         fire_check.toggled.connect(fire_spin.setEnabled)
         line3.addWidget(fire_spin)
@@ -925,7 +925,7 @@ class CanTriggerTab(QWidget):
         self._set_data_enabled(to_data, dlc.value())
 
         next_delay = self._make_delay_spin(font)
-        next_delay.setFixedWidth(80)
+        next_delay.setFixedWidth(105)
         pause_widget = self._create_pause_widget(font, next_delay)
 
         row = {
@@ -1109,7 +1109,8 @@ class CanTriggerTab(QWidget):
         self._set_data_enabled(row["to_data"], dlc)
 
     def _create_widgets(self) -> None:
-        self._font = QFont("Segoe UI", 9)
+        # Поля ввода и подписи в полтора раза крупнее (отчёт мастера).
+        self._font = QFont("Segoe UI", 13)
         # Блоки триггеров создаются лениво: кнопкой «Добавить триггер»,
         # загрузкой конфига или синхронизацией с устройством. Заводское
         # состояние — один пустой блок.
@@ -1132,7 +1133,9 @@ class CanTriggerTab(QWidget):
             "QGroupBox {"
             f" background-color: rgba({color.red()},{color.green()},"
             f"{color.blue()},{color.alpha()});"
-            " border-radius: 8px; margin-top: 14px; }"
+            # Толстая серая рамка вокруг каждого триггера (отчёт мастера).
+            " border: 2px solid #8A8A95; border-radius: 10px;"
+            " margin-top: 16px; }"
             "QGroupBox::title {"
             " subcontrol-origin: margin; subcontrol-position: top left;"
             " left: 10px; top: 0px; padding: 0 4px; }"
@@ -1142,7 +1145,8 @@ class CanTriggerTab(QWidget):
         """Создаёт виджеты одного блока триггера (позиция = index)."""
         font = self._font
         group = QGroupBox(tr("Триггер {0}").format(index + 1))
-        group.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        # Заголовок и имя — в 1.5 раза крупнее (отчёт мастера).
+        group.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
         self._apply_block_tint(group, index)
 
         # Галка «включён» — отдельный виджет в шапке блока, НЕ checkable
@@ -1160,10 +1164,11 @@ class CanTriggerTab(QWidget):
         status.setStyleSheet("color: #9E9E9E;")
 
         name_edit = QLineEdit()
-        name_edit.setFont(font)
+        name_edit.setFont(QFont("Segoe UI", 13))
         name_edit.setPlaceholderText(tr("Имя триггера"))
         name_edit.setMaxLength(TRIGGER_NAME_MAX_LEN)
-        name_edit.setFixedWidth(160)
+        name_edit.setFixedWidth(240)
+        name_edit.setFixedHeight(36)
         name_edit.setToolTip(
             tr("Имя хранится в МК — появится на пустом устройстве "
                "после применения конфигурации (первые {0} триггеров)")
@@ -1182,7 +1187,7 @@ class CanTriggerTab(QWidget):
         delete_button.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton)
         )
-        delete_button.setFixedSize(24, 24)
+        delete_button.setFixedSize(30, 30)
         delete_button.setStyleSheet(
             "QToolButton { background-color: transparent; border: none; border-radius: 4px; }"
             "QToolButton:hover { background-color: #5A2A2A; }"
@@ -1196,7 +1201,7 @@ class CanTriggerTab(QWidget):
         copy_button.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
         )
-        copy_button.setFixedSize(24, 24)
+        copy_button.setFixedSize(30, 30)
         copy_button.setStyleSheet(
             "QToolButton { background-color: transparent; border: none; border-radius: 4px; }"
             "QToolButton:hover { background-color: #2A4A5A; }"
@@ -1211,7 +1216,7 @@ class CanTriggerTab(QWidget):
         # рисует border-radius только у ВЕРХНИХ углов — нижние остаются
         # квадратными независимо от значения (проверено порендерно).
         test_button = self._round_button(tr("Тест"))
-        test_button.setFixedSize(72, 24)
+        test_button.setFixedSize(92, 30)
         test_button.setFont(QFont("Segoe UI", 10, QFont.Weight.Black))
         test_button.setToolTip(tr("Отправить ответ триггера один раз"))
         test_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1288,6 +1293,14 @@ class CanTriggerTab(QWidget):
         content_layout.addLayout(block["recv"]["conds_layout"])
         content_layout.addLayout(block["recv"]["options_layout"])
         content_layout.addWidget(block["response"]["group"])
+        # Тонкая однообразная серая линия между ответами и кэшем
+        # (отчёт мастера).
+        resp_cache_line = QFrame()
+        resp_cache_line.setFrameShape(QFrame.Shape.HLine)
+        resp_cache_line.setFrameShadow(QFrame.Shadow.Plain)
+        resp_cache_line.setStyleSheet("background-color: #8A8A95;")
+        resp_cache_line.setFixedHeight(1)
+        content_layout.addWidget(resp_cache_line)
         content_layout.addWidget(block["cache"]["group"])
         self._set_cache_enabled(block, False)
         block["cache"]["cache_check"].setEnabled(True)
@@ -1531,7 +1544,8 @@ class CanTriggerTab(QWidget):
         container_layout.setContentsMargins(8, 8, 8, 8)
 
         self._blocks_layout = QVBoxLayout()
-        self._blocks_layout.setSpacing(20)
+        # Больший воздух между триггерами — по отчёту мастера.
+        self._blocks_layout.setSpacing(32)
         container_layout.addLayout(self._blocks_layout)
 
         self._add_trigger_button = self._round_button(tr("Добавить триггер"))

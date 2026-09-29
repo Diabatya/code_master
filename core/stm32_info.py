@@ -36,6 +36,12 @@ DEVICE_CONFIG_FORMAT_VERSION = 1
 DEVICE_CONFIG_RECORD_SIZE = 32
 DEVICE_CONFIG_DEFAULT_VID = 0x0483
 DEVICE_CONFIG_DEFAULT_PID = 0x5740
+# Версия ПО хранится рядом с основной записью — вторым 32-байтным
+# блоком страницы (магия "VER1"). МК может читать её без разбора
+# первой записи; старая прошивка байты 32..63 игнорирует.
+DEVICE_CONFIG_VER_OFFSET = 32
+DEVICE_CONFIG_VER_MAGIC = 0x56455231
+DEVICE_CONFIG_VERSION_MAX = 16
 
 
 def device_config_crc8(data: bytes) -> int:
@@ -52,11 +58,13 @@ def build_device_config_page(
     name: str,
     serial: str,
     existing_page: bytes | None = None,
+    fw_version: str | None = None,
 ) -> bytes:
     """Формирует полную 2-КБ страницу конфигурации firmware.
 
     При наличии валидной страницы сохраняет VID/PID, reserved и прочие байты
-    страницы; изменяются только поля имени, serial и CRC.
+    страницы; изменяются только поля имени, serial и CRC. Если передана
+    ``fw_version``, обновляется и версионная запись (смещение 32).
     """
     page = bytearray(existing_page[:DEVICE_CONFIG_PAGE_SIZE] if existing_page else b"\xFF" * DEVICE_CONFIG_PAGE_SIZE)
     if len(page) < DEVICE_CONFIG_PAGE_SIZE:
@@ -83,7 +91,32 @@ def build_device_config_page(
     record[30] = DEVICE_CONFIG_RECORD_SIZE
     record[31] = device_config_crc8(record[:31])
     page[:32] = record
+    if fw_version is not None:
+        ver = fw_version.encode("ascii", errors="ignore")[:DEVICE_CONFIG_VERSION_MAX]
+        vrec = bytearray(32)
+        vrec[0:4] = DEVICE_CONFIG_VER_MAGIC.to_bytes(4, "little")
+        vrec[4] = len(ver)
+        vrec[5 : 5 + DEVICE_CONFIG_VERSION_MAX] = ver.ljust(
+            DEVICE_CONFIG_VERSION_MAX, b"\x00"
+        )
+        vrec[31] = device_config_crc8(vrec[:31])
+        page[DEVICE_CONFIG_VER_OFFSET : DEVICE_CONFIG_VER_OFFSET + 32] = vrec
     return bytes(page)
+
+
+def parse_device_fw_version(page: bytes) -> str | None:
+    """Читает версионную запись «VER1» со страницы конфигурации."""
+    off = DEVICE_CONFIG_VER_OFFSET
+    if len(page) < off + 32:
+        return None
+    if int.from_bytes(page[off : off + 4], "little") != DEVICE_CONFIG_VER_MAGIC:
+        return None
+    ver_len = page[off + 4]
+    if ver_len > DEVICE_CONFIG_VERSION_MAX:
+        return None
+    if device_config_crc8(page[off : off + 31]) != page[off + 31]:
+        return None
+    return page[off + 5 : off + 5 + ver_len].decode("ascii", errors="ignore")
 
 
 def parse_device_config(page: bytes) -> tuple[str, str, int, int] | None:

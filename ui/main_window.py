@@ -3,6 +3,7 @@
 import subprocess
 import sys
 import traceback
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import (
@@ -20,11 +21,13 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QStackedWidget,
@@ -36,7 +39,13 @@ from serial.tools.list_ports import comports
 from shiboken6 import isValid
 
 from core.dbc_manager import DBCManager
+from core.firmware_utils import guess_firmware_base, load_firmware_bytes
 from core.serial_manager import SerialManager
+from core.stm32_info import (
+    APPLICATION_BASE_ADDR,
+    DEVICE_CONFIG_PAGE_ADDR,
+    parse_device_config,
+)
 from core.update_checker import check_for_updates
 from models.config import CONFIG_FILE_FILTER, Config
 from models.logger import get_logger, get_log_dir
@@ -44,7 +53,7 @@ from models.translations import _ as tr, set_language
 from models.version import VERSION
 from ui.dark_theme import apply_theme
 from ui.com_logger import ComLoggerWindow
-from ui.firmware_page import FirmwarePage
+from ui.firmware_page import BootloaderWorker, FirmwarePage
 from ui.flash_dialog import FlashDialog
 from ui.help_widget import show_help
 from ui.settings_window import SettingsWindow
@@ -52,45 +61,68 @@ from ui.settings_window import SettingsWindow
 logger = get_logger(__name__)
 
 
-def _reload_icon(color: QColor, size: int = 96) -> QIcon:
-    """Жирный векторный значок «обновить»: дуга почти в полный круг
-    со стрелкой-наконечником. Emoji «🔄» не реагирует на font-weight,
-    а мастер просил стрелки жирнее — рисуем сами."""
-    import math
-
+def _up_arrow_icon(color: QColor, size: int = 96) -> QIcon:
+    """Векторная «стрелка вверх» для кнопки обновления приложения
+    (отчёт мастера: вместо круговой стрелки)."""
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     pen = QPen(color)
-    pen.setWidthF(size * 0.10)
+    pen.setWidthF(size * 0.12)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    cx = size / 2
+    top, bottom = size * 0.16, size * 0.84
+    span = size * 0.30
+    # Ствол
+    p.drawLine(int(cx), int(top + size * 0.10), int(cx), int(bottom))
+    # Наконечник: две дуги-усики от ствола вверх-наружу
+    p.drawLine(int(cx - span), int(top + span + size * 0.10), int(cx), int(top))
+    p.drawLine(int(cx), int(top), int(cx + span), int(top + span + size * 0.10))
+    p.end()
+    return QIcon(pm)
+
+
+def _usb_icon(color: QColor, size: int = 96) -> QIcon:
+    """Векторный значок USB-трезубца в стилистике карточки
+    (отчёт мастера: вместо «планеты»)."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(color)
+    pen.setWidthF(size * 0.075)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     p.setPen(pen)
-    margin = size * 0.24
-    rect = pm.rect().adjusted(margin, margin, -margin, -margin).toRectF()
-    cx, cy = rect.center().x(), rect.center().y()
-    r = rect.width() / 2
-    # Дуга против часовой от θ=30° до θ=330° — разрыв справа, как у ↻.
-    start_deg, end_deg = 30.0, 330.0
-    p.drawArc(rect, int(start_deg * 16), int((end_deg - start_deg) * 16))
-    # Наконечник в конце дуги: апекс чуть за точкой конца по касательной
-    # (направление движения — вверх-вправо), основание перпендикулярно.
-    th = math.radians(end_deg)
-    ex, ey = cx + r * math.cos(th), cy - r * math.sin(th)
-    tx, ty = -math.sin(th), -math.cos(th)          # касательная (CCW)
-    nx, ny = -math.cos(th), math.sin(th)          # нормаль к центру
-    head = size * 0.26
-    ax, ay = ex + tx * head * 0.55, ey + ty * head * 0.55
-    bx, by = ex - tx * head * 0.45, ey - ty * head * 0.45
-    half = head * 0.42
+    cx = size * 0.5
+    # Ствол снизу-вверх
+    y_root, y_tip = size * 0.86, size * 0.12
+    p.drawLine(int(cx), int(y_root), int(cx), int(y_tip))
+    # Левая ветвь с кружком
+    y1, x1 = size * 0.58, size * 0.28
+    p.drawLine(int(cx), int(size * 0.66), int(x1), int(y1))
+    p.drawLine(int(x1), int(y1), int(x1), int(y1 - size * 0.10))
+    # Правая ветвь с квадратом
+    y2, x2 = size * 0.44, size * 0.72
+    p.drawLine(int(cx), int(size * 0.50), int(x2), int(y2))
+    p.drawLine(int(x2), int(y2), int(x2), int(y2 - size * 0.10))
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(color)
+    r = size * 0.085
+    # Кружок слева, квадрат справа, стрелка сверху
+    p.drawEllipse(int(x1 - r), int(y1 - size * 0.10 - 2 * r), int(2 * r), int(2 * r))
+    sq = size * 0.13
+    p.drawRect(int(x2 - sq / 2), int(y2 - size * 0.10 - sq), int(sq), int(sq))
     path = QPainterPath()
-    path.moveTo(ax, ay)
-    path.lineTo(bx + nx * half, by + ny * half)
-    path.lineTo(bx - nx * half, by - ny * half)
+    path.moveTo(cx, y_tip)
+    path.lineTo(cx - r * 1.3, y_tip + size * 0.14)
+    path.lineTo(cx + r * 1.3, y_tip + size * 0.14)
     path.closeSubpath()
     p.drawPath(path)
+    # Кружок в основании ствола
+    p.drawEllipse(int(cx - r), int(y_root - r), int(2 * r), int(2 * r))
     p.end()
     return QIcon(pm)
 
@@ -104,10 +136,9 @@ _USB_PID_BOOT = 0x5741
 class _DeviceCard(QWidget):
     """Карточка устройства на стартовом экране (по ТЗ мастера):
 
-    [🌐]  Имя (bold)            [ОБНОВИТЬ] [НАСТРОИТЬ]
-         ID / серийник / fw
-         [синий баннер «подключите по USB», если порт не открыт]
-    """
+    [USB] [рамка: Имя / ID / серийник / fw]  [ОБНОВИТЬ] [НАСТРОИТЬ]
+
+    Кнопки — напротив данных справа, данные — в серой рамке."""
 
     def __init__(
         self,
@@ -123,29 +154,33 @@ class _DeviceCard(QWidget):
         self._port = port
         font = QFont("Segoe UI", 10)
 
-        self.setStyleSheet(
-            "_DeviceCard { border: 1px solid #454552; border-radius: 12px;"
-            " background: rgba(255,255,255,0.03); }"
-        )
-        root = QVBoxLayout(self)
-        root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(8)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(12)
 
-        head = QHBoxLayout()
-        icon = QLabel("🌐")
-        icon.setFixedSize(40, 40)
+        # USB-значок в той же круглой стилистике, что была у «планеты».
+        icon = QLabel()
+        icon.setFixedSize(44, 44)
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setPixmap(_usb_icon(QColor("#3A7BD5"), 40).pixmap(40, 40))
         icon.setStyleSheet(
-            "border: 2px solid #3A7BD5; border-radius: 20px;"
-            " font-size: 18px; background: rgba(58,123,213,0.12);"
+            "border: 2px solid #3A7BD5; border-radius: 22px;"
+            " background: rgba(58,123,213,0.12);"
         )
-        head.addWidget(icon)
-        head.addSpacing(10)
-        text_col = QVBoxLayout()
-        text_col.setSpacing(2)
+        root.addWidget(icon)
+
+        # Данные устройства в серой рамке — напротив кнопок справа.
+        info_frame = QWidget()
+        info_frame.setStyleSheet(
+            "border: 1px solid #6A6A75; border-radius: 10px;"
+            " background: rgba(255,255,255,0.03);"
+        )
+        info_col = QVBoxLayout(info_frame)
+        info_col.setContentsMargins(12, 8, 12, 8)
+        info_col.setSpacing(2)
         name_label = QLabel(name)
         name_label.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        text_col.addWidget(name_label)
+        info_col.addWidget(name_label)
         info_font = QFont("Segoe UI", 9)
         for line in (
             tr("ID: {0}").format(port or "—"),
@@ -155,26 +190,11 @@ class _DeviceCard(QWidget):
             label = QLabel(line)
             label.setFont(info_font)
             label.setStyleSheet("color: #9A9AA5;")
-            text_col.addWidget(label)
-        head.addLayout(text_col, 1)
-        root.addLayout(head)
+            info_col.addWidget(label)
+        root.addWidget(info_frame, 1)
 
-        if not connected:
-            banner = QLabel(tr(
-                "Для обновления ПО и настройки подключите устройство "
-                "по USB"
-            ))
-            banner.setFont(info_font)
-            banner.setWordWrap(True)
-            banner.setStyleSheet(
-                "border: 1px solid #3A7BD5; border-radius: 6px;"
-                " padding: 8px; color: #9CC3FF;"
-                " background: rgba(58,123,213,0.08);"
-            )
-            root.addWidget(banner)
-
-        buttons = QHBoxLayout()
-        buttons.addStretch()
+        buttons = QVBoxLayout()
+        buttons.setSpacing(8)
         update_btn = QPushButton(tr("Обновить"))
         update_btn.setFont(font)
         update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -195,8 +215,10 @@ class _DeviceCard(QWidget):
             "QPushButton:hover { background: #4A8BE5; }"
         )
         configure_btn.clicked.connect(self._on_configure)
+        buttons.addStretch()
         buttons.addWidget(update_btn)
         buttons.addWidget(configure_btn)
+        buttons.addStretch()
         root.addLayout(buttons)
 
     def _on_update(self) -> None:
@@ -252,8 +274,11 @@ class MainWindow(QMainWindow):
         self._logo_label.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         self._logo_label.setProperty("title", True)
 
-        self._slogan_label = QLabel(tr("Разработано «КОД МАСТЕР»"))
-        self._slogan_label.setFont(QFont("Segoe UI", 8))
+        # Версия приложения рядом с «Код Мастер» — соответствует
+        # номеру релиза на хабе (models/version.py).
+        self._version_label = QLabel(f"v{VERSION}")
+        self._version_label.setFont(QFont("Segoe UI", 10))
+        self._version_label.setStyleSheet("color: #9A9AA5;")
 
         self._port_indicator = QLabel("●")
         self._port_indicator.setFixedSize(20, 20)
@@ -291,12 +316,13 @@ class MainWindow(QMainWindow):
         self._help_button.setToolTip(tr("Помощь"))
         self._help_button.clicked.connect(self._on_help_clicked)
 
-        # Проверка обновлений — только векторная стрелка: emoji «🔄»
-        # не реагирует на font-weight, значок рисуется штатно.
+        # Обновление приложения — векторная «стрелка вверх» в левой
+        # колонке значков под кнопкой загрузки конфигурации
+        # (отчёт мастера: вместо круговой стрелки справа вверху).
         self._update_check_button = QPushButton()
-        self._update_check_button.setFixedSize(36, 28)
+        self._update_check_button.setFixedSize(48, 48)
         self._update_check_button.setFont(font)
-        self._update_check_button.setIcon(_reload_icon(QColor("#DCE4FF")))
+        self._update_check_button.setIcon(_up_arrow_icon(QColor("#DCE4FF")))
         self._update_check_button.setIconSize(
             self._update_check_button.size() * 0.62
         )
@@ -365,12 +391,9 @@ class MainWindow(QMainWindow):
         self._firmware_page_back_button.setFixedSize(100, 30)
         self._firmware_page_back_button.clicked.connect(self._show_startup_page)
 
-        # Статус-бар
+        # Статус-бар без постоянной подписи «Готов» (отчёт мастера):
+        # сообщения всплывают на 4 с и гаснут.
         self._status_bar = QStatusBar()
-        self._status_label = QLabel(tr("Готов"))
-        self._status_label.setFont(font)
-        self._status_bar.addWidget(self._status_label)
-        self._status_bar.showMessage(f"v{VERSION}")
 
         # Таймер heartbeat
         self._heartbeat_timer = QTimer(self)
@@ -392,21 +415,23 @@ class MainWindow(QMainWindow):
         top_layout.setSpacing(10)
 
         self._brand_widget = QWidget()
-        brand_layout = QVBoxLayout(self._brand_widget)
+        brand_layout = QHBoxLayout(self._brand_widget)
         brand_layout.setContentsMargins(0, 0, 0, 0)
-        brand_layout.setSpacing(0)
+        brand_layout.setSpacing(8)
         brand_layout.addWidget(self._logo_label)
-        brand_layout.addWidget(self._slogan_label)
+        brand_layout.addWidget(
+            self._version_label, 0, Qt.AlignmentFlag.AlignBottom
+        )
         top_layout.addWidget(self._brand_widget)
 
-        top_layout.addWidget(self._language_combo)
         top_layout.addStretch()
         top_layout.addWidget(self._port_indicator)
         top_layout.addSpacing(10)
         top_layout.addWidget(self._theme_button)
         top_layout.addWidget(self._logs_button)
         top_layout.addWidget(self._help_button)
-        top_layout.addWidget(self._update_check_button)
+        # Выбор языка — максимально справа (отчёт мастера).
+        top_layout.addWidget(self._language_combo)
         root.addWidget(self._top_panel)
 
         startup_layout = QVBoxLayout(self._startup_page)
@@ -425,15 +450,22 @@ class MainWindow(QMainWindow):
 
         body = QHBoxLayout()
         body.setSpacing(12)
-        # Левая колонка значков (расширяемая).
+        # Левая колонка значков (расширяемая): конфигурация, обновление
+        # приложения. Отделяется вертикальной линией (отчёт мастера).
         icon_col = QVBoxLayout()
         icon_col.setSpacing(8)
         icon_col.addWidget(self._fake_button)
+        icon_col.addWidget(self._update_check_button)
         icon_col.addStretch()
         icon_wrap = QWidget()
         icon_wrap.setLayout(icon_col)
         icon_wrap.setFixedWidth(64)
         body.addWidget(icon_wrap)
+        icon_line = QFrame()
+        icon_line.setFrameShape(QFrame.Shape.VLine)
+        icon_line.setFrameShadow(QFrame.Shadow.Plain)
+        icon_line.setStyleSheet("color: #454552;")
+        body.addWidget(icon_line)
         body.addWidget(self._cards_scroll, 1)
         startup_layout.addLayout(body, 1)
 
@@ -486,7 +518,7 @@ class MainWindow(QMainWindow):
         """Сохраняет текущие настройки."""
         try:
             self._config.save()
-            self._status_label.setText(tr("Настройки сохранены"))
+            self._status_bar.showMessage(tr("Настройки сохранены"), 4000)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить настройки: {0}").format(exc))
 
@@ -503,11 +535,11 @@ class MainWindow(QMainWindow):
         if any_running:
             monitor_tab._monitor1._stop()
             monitor_tab._monitor2._stop()
-            self._status_label.setText(tr("Мониторинг остановлен"))
+            self._status_bar.showMessage(tr("Мониторинг остановлен"), 4000)
         else:
             monitor_tab._monitor1._start()
             monitor_tab._monitor2._start()
-            self._status_label.setText(tr("Мониторинг запущен"))
+            self._status_bar.showMessage(tr("Мониторинг запущен"), 4000)
 
     def _on_add_trigger_hotkey(self) -> None:
         """Открывает вкладку триггеров и активирует первый свободный блок."""
@@ -568,10 +600,108 @@ class MainWindow(QMainWindow):
             )
             return
         if flash:
-            self._central_stack.setCurrentIndex(1)
-            self._status_label.setText(tr("Страница прошивки"))
+            self._update_device_via_cdc()
         else:
             self._open_settings_window()
+
+    def _update_device_via_cdc(self) -> None:
+        """«Обновить» на карточке устройства: выбор файла прошивки и
+        заливка приложения через USB CDC (bootloader-протокол AN3155) —
+        сам загрузчик при этом не переписывается.
+
+        Проверки по отчёту мастера:
+        * образ с областью загрузчика (< 0x08008000) через CDC не шьём —
+          предупреждаем, что такую прошивку ставят через DFU;
+        * если в образе есть страница конфигурации с именем устройства
+          и оно не совпадает с подключённым — предупреждение с выбором
+          «продолжить/отмена».
+        """
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("Выбор прошивки"),
+            self._config.get("last_fw_dir", "") or "",
+            tr("Прошивки (*.hex *.bin);;Все файлы (*.*)"),
+        )
+        if not path:
+            return
+        self._config.set("last_fw_dir", str(Path(path).parent))
+
+        try:
+            data, base = load_firmware_bytes(path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self, tr("Ошибка"), tr("Не удалось открыть прошивку: {0}").format(exc)
+            )
+            return
+        if base == 0:
+            base = guess_firmware_base(data)
+
+        # Образ покрывает область загрузчика — через CDC его не трогаем:
+        # такую прошивку ставят полным образом через DFU.
+        if base < APPLICATION_BASE_ADDR:
+            QMessageBox.warning(
+                self,
+                tr("Обновление"),
+                tr("Прошивка содержит область загрузчика — обновите "
+                   "устройство через DFU (кнопка «Прошить МК», способ "
+                   "«USB (DFU)»)."),
+            )
+            return
+
+        # Сверка имени устройства с конфиг-страницей внутри прошивки.
+        cfg_off = DEVICE_CONFIG_PAGE_ADDR - base
+        fw_cfg = (
+            parse_device_config(data[cfg_off : cfg_off + 32])
+            if cfg_off >= 0 and cfg_off + 32 <= len(data)
+            else None
+        )
+        if fw_cfg is not None and fw_cfg[0]:
+            dev_name = self._config.get("device_name", "") or self._config.get(
+                "device_type_name", ""
+            )
+            if dev_name and fw_cfg[0] != dev_name:
+                answer = QMessageBox.warning(
+                    self,
+                    tr("Проверка прошивки"),
+                    tr("Прошивка собрана для устройства «{0}», "
+                       "подключено «{1}». Продолжить?").format(fw_cfg[0], dev_name),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+
+        progress = QProgressDialog(
+            tr("Обновление устройства…"), tr("Отмена"), 0, 100, self
+        )
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+
+        worker = BootloaderWorker(
+            self._serial_manager, "flash", firmware_path=path, parent=self
+        )
+        progress.canceled.connect(worker.stop)
+        worker.progress.connect(progress.setValue)
+        result: dict[str, str | None] = {"message": None, "error": None}
+        worker.finished_success.connect(
+            lambda msg: (result.__setitem__("message", msg), progress.done(100))
+        )
+        worker.finished_error.connect(
+            lambda msg: (result.__setitem__("error", msg), progress.done(100))
+        )
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        progress.exec()
+        if progress.wasCanceled():
+            worker.stop()
+            return
+        worker.wait(5000)
+        if result["error"]:
+            QMessageBox.critical(self, tr("Ошибка обновления"), result["error"])
+        elif result["message"]:
+            QMessageBox.information(self, tr("Обновление"), result["message"])
 
     def _on_fake_clicked(self) -> None:
         """Значок «папки»: FAKE-настройки на эмуляторе устройства."""
@@ -637,16 +767,11 @@ class MainWindow(QMainWindow):
             self._cards_layout.insertWidget(
                 self._cards_layout.count() - 1, card
             )
-        if not devices:
-            # Устройства нет — карточку не рисуем: только текстовая
-            # подсказка без рамки и кнопок (по отчёту мастера).
-            hint = QLabel(tr("Подключите устройство по USB"))
-            hint.setFont(QFont("Segoe UI", 10))
-            hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            hint.setStyleSheet("color: #9A9AA5;")
-            self._cards_layout.insertWidget(
-                self._cards_layout.count() - 1, hint
-            )
+        # Без подключённого камня центральная область пустая:
+        # ни карточек, ни подсказок, ни заголовков (отчёт мастера).
+        has_devices = bool(devices)
+        self._startup_title.setVisible(has_devices)
+        self._startup_subtitle.setVisible(has_devices)
 
     def _ensure_port_selected(self) -> bool:
         """Единственное видимое устройство подключается само — без
@@ -663,7 +788,7 @@ class MainWindow(QMainWindow):
         if not self._ensure_port_selected():
             return
         self._central_stack.setCurrentIndex(1)
-        self._status_label.setText(tr("Страница прошивки"))
+        self._status_bar.showMessage(tr("Страница прошивки"), 4000)
 
     def _on_flash_clicked(self) -> None:
         """Открывает полноценный диалог прошивки микроконтроллера."""
@@ -677,7 +802,7 @@ class MainWindow(QMainWindow):
         self._com_logger_window.show()
         self._com_logger_window.raise_()
         self._com_logger_window.activateWindow()
-        self._status_label.setText(tr("Открыт COM-логгер"))
+        self._status_bar.showMessage(tr("Открыт COM-логгер"), 4000)
 
     def _on_configure_clicked(self) -> None:
         """«Настроить» без таблицы портов: единственное видимое
@@ -694,12 +819,12 @@ class MainWindow(QMainWindow):
         self._settings_window.raise_()
         self._settings_window.activateWindow()
         self.hide()
-        self._status_label.setText(tr("Открыто окно настроек"))
+        self._status_bar.showMessage(tr("Открыто окно настроек"), 4000)
 
     def _show_startup_page(self) -> None:
         """Возвращает центральную область к главному меню."""
         self._central_stack.setCurrentIndex(0)
-        self._status_label.setText(tr("Готов"))
+        self._status_bar.clearMessage()
 
     def _open_logs(self) -> None:
         """Открывает папку с логами с учётом платформы."""
@@ -759,7 +884,7 @@ class MainWindow(QMainWindow):
         """Обновляет все статические строки главного окна."""
         self.setWindowTitle(tr("Код Мастер"))
         self._logo_label.setText("🛠️ " + tr("Код Мастер"))
-        self._slogan_label.setText(tr("Разработано «КОД МАСТЕР»"))
+        self._version_label.setText(f"v{VERSION}")
         self._port_indicator.setToolTip(tr("Индикатор подключения COM-порта"))
         self._theme_button.setText(tr("Тема"))
         self._theme_button.setToolTip(tr("Выбор темы оформления"))
@@ -788,7 +913,7 @@ class MainWindow(QMainWindow):
         )
         self._cards_signature = ()
         self._refresh_device_cards()
-        self._status_label.setText(tr("Готов"))
+        self._status_bar.clearMessage()
 
     def _set_theme_button_icon(self) -> None:
         """Оставляет текст кнопки темы без изменений."""
@@ -801,7 +926,7 @@ class MainWindow(QMainWindow):
             return
         dbc_manager = DBCManager()
         if dbc_manager.load_dbc(path):
-            self._status_label.setText(tr("DBC загружен: {0}").format(path))
+            self._status_bar.showMessage(tr("DBC загружен: {0}").format(path), 4000)
             if self._settings_window is not None:
                 self._settings_window.set_dbc(dbc_manager)
         else:
@@ -809,9 +934,9 @@ class MainWindow(QMainWindow):
 
     def _on_check_updates_clicked(self) -> None:
         """Проверяет обновления."""
-        self._status_label.setText(tr("Проверка обновлений"))
+        self._status_bar.showMessage(tr("Проверка обновлений"), 4000)
         available, message = check_for_updates()
-        self._status_label.setText(tr("Готов"))
+        self._status_bar.clearMessage()
         if available:
             QMessageBox.information(self, tr("Доступно обновление"), message)
         else:
@@ -856,12 +981,12 @@ class MainWindow(QMainWindow):
     def _on_serial_error(self, message: str) -> None:
         """Показывает ошибку COM-порта."""
         logger.error("Ошибка COM-порта: %s", message)
-        self._status_label.setText(tr("Ошибка порта"))
+        self._status_bar.showMessage(tr("Ошибка порта"), 4000)
 
     def _on_critical_error(self, message: str) -> None:
         """Поток чтения остановлен: соединение мертво, нужно переподключение."""
         logger.critical("Критическая ошибка COM-порта: %s", message)
-        self._status_label.setText(tr("Связь потеряна"))
+        self._status_bar.showMessage(tr("Связь потеряна"), 4000)
         if self._serial_manager.auto_reconnect_enabled:
             return  # автопереподключение само восстановит порт
         if self.isVisible():
