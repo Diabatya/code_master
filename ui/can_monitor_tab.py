@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFrame,
     QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
     QSpinBox,
@@ -142,11 +144,23 @@ class DataVariantsDialog(QDialog):
         layout.addWidget(buttons)
 
 
+_ID_PAGE_ROWS = 15
+
+
 def _id_row_color(frame_id: int) -> QColor:
     """Детерминированный приглушённый цвет ячейки ID — глаз цепляется
     за цвет, а не за hex, когда кадры сыплются пачками."""
     hue = (frame_id * 37) % 360
     return QColor.fromHsl(hue, 80, 40)
+
+
+def _id_page_color(frame_id: int, row: int) -> QColor:
+    """«Страничная» тонировка колонки ID блоками по 15 строк: чётная
+    страница — базовый цвет ID, нечётная — светлее. Листая таблицу,
+    оператор видит границы уже просмотренных экранов (ТЗ мастера);
+    оттенок при этом продолжает кодировать сам ID."""
+    color = _id_row_color(frame_id)
+    return color.lighter(135) if (row // _ID_PAGE_ROWS) % 2 else color
 
 
 def _is_dark_theme() -> bool:
@@ -728,7 +742,12 @@ class _HistoryByteDelegate(QStyledItemDelegate):
             0 <= byte_idx < len(self._dialog._byte_checks)
             and self._dialog._byte_checks[byte_idx].isChecked()
         )
-        fg = self.ENABLED_FG if checked else self.DISABLED_FG
+        # Белый — только на тёмной теме; на светлой байты были
+        # невидимы (белый по белому).
+        enabled_fg = (
+            self.ENABLED_FG if _is_dark_theme() else QColor("#202020")
+        )
+        fg = enabled_fg if checked else self.DISABLED_FG
         painter.save()
         painter.setFont(opt.font)
         painter.setPen(fg)
@@ -739,10 +758,16 @@ class _HistoryByteDelegate(QStyledItemDelegate):
 
 
 class IdHistoryDialog(QDialog):
-    """История одного CAN ID: таблица «время → data» + живой график %."""
+    """История одного CAN ID: таблица «время → data» + живой график %.
+
+    Раскладка рассчитана на будущий CAN FD: число колонок/галочек
+    задаётся константой BYTE_COUNT (сейчас 8 классических байт,
+    под 64 байта достаточно поднять константу — галочки сидят в
+    сетке левой панели, колонки таблицы строятся циклом)."""
 
     MAX_ROWS = 2000
-    FIRST_BYTE_COL = 2  # колонки 2..9 — байты DATA 0..7
+    FIRST_BYTE_COL = 2  # колонки 2.. — байты DATA 0..N-1
+    BYTE_COUNT = 8
 
     def __init__(
         self,
@@ -761,7 +786,6 @@ class IdHistoryDialog(QDialog):
         self._send_dialog: SendPacketsDialog | None = None
         self._notes = IdNotes()
         self._hover_byte = -1
-        self._syncing_checks = False
         self.setWindowTitle(tr("История ID 0x{0:X} — CAN{1}").format(can_id, channel))
         # Окно анализа — сразу на весь доступный экран: таблица и
         # график читаются без прокрутки, кнопки остаются видимыми.
@@ -775,11 +799,12 @@ class IdHistoryDialog(QDialog):
         layout.setSpacing(6)
 
         self._table = QTableWidget()
-        # Время + DLC + 8 колонок по байту — галочки «N-байт» под таблицей
-        # выравниваются ровно под каждой колонкой байта.
-        self._table.setColumnCount(10)
+        # Время + DLC + BYTE_COUNT колонок по байту. Галочки «N-байт»
+        # живут в левой панели сеткой — количество колонок не привязано
+        # к ширине окна и масштабируется до 64 байт (CAN FD).
+        self._table.setColumnCount(2 + self.BYTE_COUNT)
         self._table.setHorizontalHeaderLabels(
-            [tr("Время"), tr("DLC")] + [str(i) for i in range(8)]
+            [tr("Время"), tr("DLC")] + [str(i) for i in range(self.BYTE_COUNT)]
         )
         self._table.setFont(font)
         self._table.verticalHeader().setVisible(False)
@@ -792,7 +817,7 @@ class IdHistoryDialog(QDialog):
         )
         self._table.setColumnWidth(0, 110)
         self._table.setColumnWidth(1, 46)
-        for col in range(2, 10):
+        for col in range(2, 2 + self.BYTE_COUNT):
             self._table.horizontalHeader().setSectionResizeMode(
                 col, QHeaderView.ResizeMode.Stretch
             )
@@ -804,33 +829,25 @@ class IdHistoryDialog(QDialog):
         # Цвет байта (белый=в анализе, тёмно-жёлтый=выключен) и голубая
         # подсветка колонки при наведении на её галочку — в делегате.
         self._byte_delegate = _HistoryByteDelegate(self)
-        for col in range(self.FIRST_BYTE_COL, 10):
+        for col in range(self.FIRST_BYTE_COL, self.FIRST_BYTE_COL + self.BYTE_COUNT):
             self._table.setItemDelegateForColumn(col, self._byte_delegate)
 
-        # Строка из 8 галочек «0-байт» … «7-байт» строго под колонками
-        # байтов: позиции синхронизируются с геометрией заголовков
-        # таблицы (ресайз/скролл). По умолчанию все включены.
-        self._byte_strip = QWidget(self)
-        self._byte_strip.setFixedHeight(26)
+        # Галочки «N-байт» — сеткой в левой панели (4 в ряд: при 64
+        # байтах они не уползают за ширину окна). По умолчанию все
+        # включены.
         self._byte_checks: list[QCheckBox] = []
-        for i in range(8):
-            cb = QCheckBox(tr("{0}-байт").format(i), self._byte_strip)
-            cb.setFont(QFont("Segoe UI", 7))
+        byte_grid = QGridLayout()
+        byte_grid.setSpacing(2)
+        byte_grid.setContentsMargins(0, 0, 0, 0)
+        for i in range(self.BYTE_COUNT):
+            cb = QCheckBox(tr("{0}-байт").format(i))
+            cb.setFont(QFont("Segoe UI", 8))
             cb.setChecked(True)
             cb.setToolTip(tr("Байт {0} в анализе, сумме и на графике").format(i))
             cb.installEventFilter(self)
             cb.toggled.connect(lambda _c, _i=i: self._on_bytes_changed())
+            byte_grid.addWidget(cb, i // 4, i % 4)
             self._byte_checks.append(cb)
-        self._table.horizontalHeader().sectionResized.connect(
-            lambda *_a: self._sync_byte_checks()
-        )
-        self._table.horizontalScrollBar().valueChanged.connect(
-            lambda _v: self._sync_byte_checks()
-        )
-        self._table.horizontalScrollBar().rangeChanged.connect(
-            lambda *_a: self._sync_byte_checks()
-        )
-        self._table.installEventFilter(self)
 
         self._percent_label = QLabel("0%")
         self._percent_label.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
@@ -888,24 +905,56 @@ class IdHistoryDialog(QDialog):
         self._calc_button.setToolTip(tr("BIN/DEC/HEX/CHAR — ввод в любое поле пересчитывает остальные"))
         self._calc_button.clicked.connect(lambda: CalculatorDialog(self).exec())
 
-        bottom = QHBoxLayout()
-        bottom.addWidget(self._percent_label)
-        bottom.addWidget(QLabel("="))
-        bottom.addWidget(self._value_label)
-        bottom.addSpacing(16)
-        bottom.addWidget(self._zoom_label)
-        bottom.addWidget(self._zoom_slider, 1)
-        bottom.addWidget(self._note_button)
-        bottom.addWidget(self._invert_button)
-        bottom.addWidget(self._calc_button)
-        bottom.addWidget(self._copy_row_button)
-        bottom.addWidget(self._send_row_button)
-        bottom.addWidget(self._export_button)
+        # Левая панель: сводка и контролы (просьба мастера — информация
+        # слева). Таблица и график справа занимают всю остальную ширину.
+        left_panel = QWidget()
+        left_panel.setFixedWidth(190)
+        left_col = QVBoxLayout(left_panel)
+        left_col.setSpacing(6)
+        left_col.setContentsMargins(0, 0, 8, 0)
+        pct_row = QHBoxLayout()
+        pct_row.setContentsMargins(0, 0, 0, 0)
+        pct_row.addWidget(self._percent_label)
+        pct_row.addWidget(QLabel("="))
+        pct_row.addWidget(self._value_label)
+        pct_row.addStretch()
+        left_col.addLayout(pct_row)
+        left_col.addWidget(self._zoom_label)
+        left_col.addWidget(self._zoom_slider)
+        bytes_label = QLabel(tr("Байты в анализе:"))
+        bytes_label.setFont(font)
+        left_col.addWidget(bytes_label)
+        byte_holder = QWidget()
+        byte_holder.setLayout(byte_grid)
+        byte_scroll = QScrollArea()
+        byte_scroll.setWidgetResizable(True)
+        byte_scroll.setWidget(byte_holder)
+        byte_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        byte_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        byte_scroll.setMinimumHeight(56)
+        byte_scroll.setMaximumHeight(200)
+        left_col.addWidget(byte_scroll)
+        left_col.addWidget(self._note_button)
+        left_col.addWidget(self._invert_button)
+        left_col.addWidget(self._calc_button)
+        left_col.addWidget(self._copy_row_button)
+        left_col.addWidget(self._send_row_button)
+        left_col.addWidget(self._export_button)
+        left_col.addStretch()
 
-        layout.addWidget(self._table, 1)
-        layout.addWidget(self._byte_strip)
-        layout.addWidget(self._graph)
-        layout.addLayout(bottom)
+        right_col = QVBoxLayout()
+        right_col.setSpacing(6)
+        right_col.setContentsMargins(0, 0, 0, 0)
+        right_col.addWidget(self._table, 1)
+        right_col.addWidget(self._graph)
+
+        body = QHBoxLayout()
+        body.setSpacing(8)
+        body.addWidget(left_panel)
+        body.addLayout(right_col, 1)
+        layout.addLayout(body, 1)
 
         for sample in samples:
             self._append_row(*sample, repaint=False)
@@ -926,32 +975,7 @@ class IdHistoryDialog(QDialog):
         self._repaint_timer.timeout.connect(self._graph.update)
         self._repaint_timer.start(250)
 
-    def _sync_byte_checks(self) -> None:
-        """Расставляет галочки «N-байт» ровно под своими колонками
-        таблицы (пересчёт при ресайзе и горизонтальной прокрутке)."""
-        if self._syncing_checks or not isValid(self._byte_strip):
-            return
-        self._syncing_checks = True
-        try:
-            vp_x = self._table.viewport().x()
-            for i, cb in enumerate(self._byte_checks):
-                if not isValid(cb):
-                    continue
-                col = self.FIRST_BYTE_COL + i
-                x = vp_x + self._table.columnViewportPosition(col)
-                w = self._table.columnWidth(col)
-                cb_w = min(cb.sizeHint().width(), max(18, w))
-                cb.setGeometry(
-                    x + max(0, (w - cb_w) // 2), 0, cb_w,
-                    self._byte_strip.height(),
-                )
-        finally:
-            self._syncing_checks = False
-
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
-        if watched is self._table and event.type() == QEvent.Type.Resize:
-            self._sync_byte_checks()
-            return False
         # Наведение на галочку «N-байт» подсвечивает её колонку голубым;
         # уход курсора — снимает подсветку (делегат перерисует видимые
         # строки — клик/тогглинг штатно уходит дальше, возвращаем False).
@@ -969,15 +993,6 @@ class IdHistoryDialog(QDialog):
             self._hover_byte = -1
             self._table.viewport().update()
         return False
-
-    def resizeEvent(self, event) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self._sync_byte_checks()
-
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        # Геометрия колонок достоверна после первого показа.
-        QTimer.singleShot(0, self._sync_byte_checks)
 
     def _selected_bytes(self) -> list[int] | None:
         """Индексы отмеченных байт DATA; все/ни одного — None (=весь)."""
@@ -1011,7 +1026,7 @@ class IdHistoryDialog(QDialog):
             rtr_item = QTableWidgetItem("rtr")
             self._table.setItem(row, self.FIRST_BYTE_COL, rtr_item)
         else:
-            for i in range(8):
+            for i in range(self.BYTE_COUNT):
                 text = f"{data[i]:02X}" if i < len(data) else ""
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1311,6 +1326,7 @@ class CanChannelMonitor(QWidget):
         # «Пояснение» помечает такие ID символом «+».
         self._notes = IdNotes()
         self._highlight_timers: dict[int, QTimer] = {}
+        self._id_pages_dirty = False
         self._ignored_ids: set[int] = set()
         # Входная очередь кадров: при потоке с двух CAN один кадр = одно
         # обновление таблицы — это тысячи setItem/с и главный источник
@@ -1705,7 +1721,7 @@ class CanChannelMonitor(QWidget):
             self._start_button.setText(tr("Запустить"))
             self._start_button.setEnabled(True)
             self._start_button.setStyleSheet("")
-            self._stop_button.setText(tr("Остановлено"))
+            self._stop_button.setText(tr("Стоп"))
             self._stop_button.setEnabled(False)
             self._stop_button.setStyleSheet(
                 "QPushButton { background-color: #F44336; color: #FFFFFF; border: none; border-radius: 4px; }"
@@ -2104,6 +2120,24 @@ class CanChannelMonitor(QWidget):
                 entry[1] += 1
         for frame, count in merged.values():
             self._update_table_row(frame, count)
+        self._repaint_id_pages()
+
+    def _repaint_id_pages(self) -> None:
+        """Перекраска страничных оттенков колонки ID после сдвига строк
+        (вставка нового ID в середину таблицы меняет номер страницы у
+        всех строк ниже). Отложено на конец flush — одно прохождение на
+        пачку кадров, а не на каждый insertRow."""
+        if not self._id_pages_dirty:
+            return
+        self._id_pages_dirty = False
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            if item is None:
+                continue
+            fid = hex_to_int(item.text())
+            if fid is None:
+                continue
+            item.setBackground(_id_page_color(fid, row))
 
     def add_frame(self, frame: dict[str, object]) -> None:
         """Одиночный кадр (холодный путь: тесты, всплывшие в командных
@@ -2112,6 +2146,7 @@ class CanChannelMonitor(QWidget):
             return
         if self._account_frame(frame):
             self._update_table_row(frame, 1)
+            self._repaint_id_pages()
 
     def _update_table_row(self, frame: dict[str, object], count: int = 1) -> None:
         """Обновляет строку таблицы последним состоянием кадра; count —
@@ -2153,15 +2188,21 @@ class CanChannelMonitor(QWidget):
 
         if frame_id in self._id_to_row:
             row = self._id_to_row[frame_id]
+            # Строка могла сместиться вставками — страничный оттенок
+            # привязан к позиции, перекрашиваем при обновлении.
+            id_item = self._table.item(row, 0)
+            if id_item is not None:
+                id_item.setBackground(_id_page_color(frame_id, row))
             for col, text in enumerate(items):
                 item = self._table.item(row, col)
                 if item is None:
                     item = QTableWidgetItem(text)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     if col == 0:
-                        # Тёмный фон кодирует ID — текст явно белый,
-                        # иначе на светлой теме палитра давала чёрный.
-                        item.setBackground(_id_row_color(frame_id))
+                        # Тёмный фон кодирует ID + страничный оттенок —
+                        # текст явно белый, иначе на светлой теме
+                        # палитра давала чёрный.
+                        item.setBackground(_id_page_color(frame_id, row))
                         item.setForeground(QColor("#FFFFFF"))
                     self._table.setItem(row, col, item)
                 else:
@@ -2184,7 +2225,7 @@ class CanChannelMonitor(QWidget):
                         != (data[i] if i < len(data) else None)
                     }
                     if changed:
-                        self._highlight_data_cell(row, changed)
+                        self._highlight_data_cell(row, changed, frame_id)
         else:
             if self._table.rowCount() >= MAX_TABLE_ROWS:
                 last_row = self._table.rowCount() - 1
@@ -2199,13 +2240,14 @@ class CanChannelMonitor(QWidget):
                 for fid, r in list(self._id_to_row.items()):
                     if r >= last_row:
                         self._id_to_row[fid] = r - 1
+                self._id_pages_dirty = True
             row = self._find_insert_row(frame_id)
             self._table.insertRow(row)
             for col, text in enumerate(items):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if col == 0:
-                    item.setBackground(_id_row_color(frame_id))
+                    item.setBackground(_id_page_color(frame_id, row))
                     item.setForeground(QColor("#FFFFFF"))
                 if tooltip:
                     item.setToolTip(tooltip)
@@ -2214,6 +2256,7 @@ class CanChannelMonitor(QWidget):
                 if r >= row:
                     self._id_to_row[fid] = r + 1
             self._id_to_row[frame_id] = row
+            self._id_pages_dirty = True
             self._paint_row_direction(row, tx_echo)
             self._apply_row_visibility(row)
 
@@ -2295,10 +2338,16 @@ class CanChannelMonitor(QWidget):
         if data_item is not None:
             data_item.setData(Qt.ItemDataRole.UserRole, bool(is_tx))
 
-    def _highlight_data_cell(self, row: int, changed_bytes: set[int]) -> None:
-        if row in self._highlight_timers:
-            self._highlight_timers[row].stop()
-            del self._highlight_timers[row]
+    def _highlight_data_cell(
+        self, row: int, changed_bytes: set[int], frame_id: int
+    ) -> None:
+        # Таймер ведём по ID кадра, а не по строке: вставка нового ID
+        # сдвигает строки таблицы, и сброс по устаревшему индексу
+        # зажигал подсветку навсегда («замершая жёлтая DATA» — отчёт
+        # мастера, особенно при смене интервала подсветки).
+        if frame_id in self._highlight_timers:
+            self._highlight_timers[frame_id].stop()
+            del self._highlight_timers[frame_id]
         data_item = self._table.item(row, 2)
         if data_item is None:
             return
@@ -2307,15 +2356,17 @@ class CanChannelMonitor(QWidget):
         data_item.setData(_DATA_HL_ROLE, sorted(changed_bytes))
         timer = QTimer(self)
         timer.setSingleShot(True)
-        timer.timeout.connect(lambda r=row: self._reset_data_background(r))
+        timer.timeout.connect(lambda f=frame_id: self._reset_data_background(f))
         timer.start(500)
-        self._highlight_timers[row] = timer
+        self._highlight_timers[frame_id] = timer
 
-    def _reset_data_background(self, row: int) -> None:
-        data_item = self._table.item(row, 2)
-        if data_item is not None:
-            data_item.setData(_DATA_HL_ROLE, None)
-        self._highlight_timers.pop(row, None)
+    def _reset_data_background(self, frame_id: int) -> None:
+        row = self._id_to_row.get(frame_id)
+        if row is not None:
+            data_item = self._table.item(row, 2)
+            if data_item is not None:
+                data_item.setData(_DATA_HL_ROLE, None)
+        self._highlight_timers.pop(frame_id, None)
 
     def _show_filter_dialog(self) -> None:
         """Переключено на глобальное управление фильтром в CanMonitorTab."""
@@ -2324,6 +2375,28 @@ class CanChannelMonitor(QWidget):
         """Двойной клик ПКМ по строке таблицы открывает историю ID."""
         from PySide6.QtCore import QEvent
 
+        if (
+            watched in (self._table, self._table.viewport())
+            and event.type() == QEvent.Type.KeyPress
+        ):
+            # Клавиши ↑/↓/PgUp/PgDn крутят таблицу даже когда фокус не на
+            # ячейке — иначе в потоке кадров при автопрокрутке «вверх»
+            # не увести без бегунка (отчёт мастера). Уход снизу сам
+            # отключает автоследование (was_at_bottom).
+            sb = self._table.verticalScrollBar()
+            key = event.key()
+            if key in (
+                Qt.Key.Key_Up, Qt.Key.Key_Down,
+                Qt.Key.Key_PageUp, Qt.Key.Key_PageDown,
+            ):
+                step = (
+                    sb.singleStep()
+                    if key in (Qt.Key.Key_Up, Qt.Key.Key_Down)
+                    else sb.pageStep()
+                )
+                sign = -1 if key in (Qt.Key.Key_Up, Qt.Key.Key_PageUp) else 1
+                sb.setValue(sb.value() + sign * step)
+                return True
         if (
             watched is self._table.viewport()
             and event.type() == QEvent.Type.MouseButtonDblClick

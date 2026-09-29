@@ -105,6 +105,9 @@ class Translator:
                 "Прошивка": "Firmware",
                 "Мониторинг": "Monitoring",
                 "Гибкая логика": "Flexible logic",
+                "Свернуть правило": "Collapse rule",
+                "Развернуть правило": "Expand rule",
+                "{0} → {1} (канал {2})": "{0} → {1} (channel {2})",
                 "Готов": "Ready",
                 "Индикатор подключения COM-порта": "COM port connection indicator",
                 # Начальное окно
@@ -535,6 +538,98 @@ class Translator:
                 "История ID…": "ID history…",
                 "История ID 0x{0:X} — CAN{1}": "History of ID 0x{0:X} — CAN{1}",
                 "Развёртка: 30 с": "Sweep: 30 s",
+                "Устройства": "Devices",
+                "Подключенные адаптеры — выберите действие":
+                    "Connected adapters — choose an action",
+                "FAKE-настройки (эмулятор устройства)":
+                    "FAKE settings (device emulator)",
+                "Для обновления ПО и настройки подключите устройство "
+                "по USB":
+                    "Connect the device via USB for firmware update "
+                    "and configuration",
+                "ID: {0}": "ID: {0}",
+                "Серийный номер: {0}": "Serial number: {0}",
+                "Версия ПО: {0}": "Firmware version: {0}",
+                "Прошить МК": "Flash MCU",
+                "COM-логгер": "COM logger",
+                "CodeMaster (режим прошивки)": "CodeMaster (bootloader mode)",
+                "Эмулятор": "Emulator",
+                "Не удалось запустить эмулятор устройства":
+                    "Failed to start the device emulator",
+                "Загрузить переменные": "Load variables",
+                "Сохранить переменные": "Save variables",
+                "＋ Добавить переменную": "＋ Add variable",
+                "＋ Добавить фрейм": "＋ Add frame",
+                "Статическая переменная": "Static variable",
+                "Динамическая переменная": "Dynamic variable",
+                "Настройка переменной": "Variable settings",
+                "Вид переменной:": "Variable type:",
+                "Имя функции:": "Function name:",
+                "например, «Дверь водителя»": "e.g. 'Driver door'",
+                "например, «Обороты ДВС»": "e.g. 'Engine RPM'",
+                "ОЗУ": "RAM",
+                "ПЗУ": "ROM",
+                "ПЗУ появится после подключения EEPROM к МК":
+                    "ROM appears after connecting EEPROM to the MCU",
+                "Удалить переменную": "Delete variable",
+                "→ 1": "→ 1",
+                "→ 0": "→ 0",
+                "— (без имени)": "— (unnamed)",
+                "Конфиг Инфо": "Config Info",
+                "Конфиг инфо не соответствует действующей версии приложения":
+                    "Config Info does not match the current application version",
+                "Конфиг Инфо (*.json)": "Config Info (*.json)",
+                "Все файлы (*)": "All files (*)",
+                "Переменные — именованные состояния и величины, которые "
+                "Гибкая логика опрашивает в условиях «Если» и использует в "
+                "действиях. Клик по строке — настройка переменной.":
+                    "Variables are named states and quantities polled by "
+                    "Flexible Logic in 'If' conditions and used in actions. "
+                    "Click a row to configure the variable.",
+                "Фреймов может быть сколько угодно: приход фрейма пишет "
+                "«→ 1» или «→ 0» в бит ОЗУ функции. X в DATA — любой байт. "
+                "Пример: фрейм «дверь открыта» → 1, «дверь закрыта» → 0. "
+                "МК держит бит до прихода фрейма с противоположным "
+                "значением; Гибкая логика опрашивает его в условии «Если».":
+                    "Any number of frames: an incoming frame writes '→ 1' "
+                    "or '→ 0' to the function's RAM bit. X in DATA means any "
+                    "byte. Example: 'door open' frame → 1, 'door closed' → 0. "
+                    "The MCU holds the bit until a frame with the opposite "
+                    "value arrives; Flexible Logic polls it in 'If'.",
+                "Байты для расчёта:": "Bytes for calculation:",
+                "DATA от:": "DATA from:",
+                "до:": "to:",
+                "Добавьте минимум 2 точки": "Add at least 2 points",
+                "+ точка": "+ point",
+                "− точка": "− point",
+                "Значение DATA": "DATA value",
+                "Величина": "Quantity",
+                "График перевода: слева сырое значение выбранных байт, "
+                "справа — величина. Точки правятся в таблице, линия между "
+                "ними — интерполяция.":
+                    "Conversion graph: raw value of the selected bytes on "
+                    "the left, quantity on the right. Points are edited in "
+                    "the table, the line between them is interpolation.",
+                "＋ Добавить программу": "＋ Add program",
+                "Программа": "Program",
+                "Свернуть программу": "Collapse program",
+                "Развернуть программу": "Expand program",
+                "Удалить программу": "Delete program",
+                "Включить/выключить программу": "Enable/disable program",
+                "Сработок на DATA": "Fires per DATA",
+                "Сколько раз программа срабатывает, пока DATA условия "
+                "не изменится. По умолчанию 1 — одинаковые пакеты "
+                "не перезапускают программу.":
+                    "How many times the program fires while condition DATA "
+                    "is unchanged. Default 1 — identical packets do not "
+                    "restart the program.",
+                "Несовпадение конфигурации": "Configuration mismatch",
+                "Конфигурация не соответствует подключенному устройству. "
+                "Запрограммировать?":
+                    "The configuration does not match the connected "
+                    "device. Program anyway?",
+                "⚠ прошивка устарела (протокол {0}, требуется {1})":
+                    "⚠ firmware outdated (protocol {0}, required {1})",
                 "Развёртка: {0} с": "Sweep: {0} s",
                 "Инвертирование": "Invert",
                 "FF..FF = 0% внизу, 00..00 = 100% вверху": "FF..FF = 0% at bottom, 00..00 = 100% at top",

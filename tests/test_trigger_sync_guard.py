@@ -226,7 +226,7 @@ def test_pc_only_tombstone_restored_from_config(tab) -> None:
     assert tab.sync_from_device() is True
     assert len(tab._blocks) == 1
     block = tab._blocks[0]
-    assert block["group"].isChecked() is True
+    assert block["enabled_check"].isChecked() is True
     assert tab._device_managed == [False]
     assert len(block["response"]["rows"]) == 1
     assert block["response"]["rows"][0]["count"].value() == 999
@@ -241,7 +241,7 @@ def test_user_disabled_record_stays_disabled(tab) -> None:
     tab._read_device_triggers = lambda: [_tombstone()]
 
     assert tab.sync_from_device() is True
-    assert tab._blocks[0]["group"].isChecked() is False
+    assert tab._blocks[0]["enabled_check"].isChecked() is False
     assert tab._device_managed == [True]
 
 
@@ -253,7 +253,7 @@ def test_inactive_config_tombstone_stays_disabled(tab) -> None:
     tab._read_device_triggers = lambda: [_tombstone()]
 
     assert tab.sync_from_device() is True
-    assert tab._blocks[0]["group"].isChecked() is False
+    assert tab._blocks[0]["enabled_check"].isChecked() is False
 
 
 def test_tombstone_without_config_match_stays_disabled(tab) -> None:
@@ -263,7 +263,7 @@ def test_tombstone_without_config_match_stays_disabled(tab) -> None:
 
     assert tab.sync_from_device() is True
     assert len(tab._blocks) == 1
-    assert tab._blocks[0]["group"].isChecked() is False
+    assert tab._blocks[0]["enabled_check"].isChecked() is False
 
 
 def test_legacy_trigger_without_active_loads_enabled(tab) -> None:
@@ -272,7 +272,7 @@ def test_legacy_trigger_without_active_loads_enabled(tab) -> None:
     cfg = _cfg_trigger()
     del cfg["active"]
     tab.set_config([cfg])
-    assert tab._blocks[0]["group"].isChecked() is True
+    assert tab._blocks[0]["enabled_check"].isChecked() is True
 
 
 def test_validate_silent_for_filled_but_disabled(tab) -> None:
@@ -334,7 +334,7 @@ def test_multiframe_group_syncs_back_to_one_block(tab) -> None:
     assert tab.sync_from_device() is True
     assert len(tab._blocks) == 1
     block = tab._blocks[0]
-    assert block["group"].isChecked() is True
+    assert block["enabled_check"].isChecked() is True
     assert tab._device_managed == [True]
     rows = block["response"]["rows"]
     assert len(rows) == 2
@@ -388,7 +388,7 @@ def test_disabled_multiframe_group_stays_disabled(tab) -> None:
     tab._read_device_triggers = lambda: records
     assert tab.sync_from_device() is True
     block = tab._blocks[0]
-    assert block["group"].isChecked() is False
+    assert block["enabled_check"].isChecked() is False
     assert len(block["response"]["rows"]) == 2
     # Не PC-only: запись полностью во Flash, приложение не исполняет.
     assert tab._device_managed == [True]

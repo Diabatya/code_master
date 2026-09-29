@@ -117,3 +117,14 @@ class IdNotes:
         else:
             self._notes.pop(key, None)
         self._save()
+
+    def export_all(self) -> dict[str, str]:
+        """Все заметки текущей ветки — для файла «Конфиг Инфо»."""
+        return dict(self._notes)
+
+    def import_all(self, notes: dict[str, str]) -> None:
+        """Заменяет ветку заметками из «Конфиг Инфо»."""
+        self._notes = {
+            str(k): str(v) for k, v in notes.items() if str(v).strip()
+        }
+        self._save()

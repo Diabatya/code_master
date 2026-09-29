@@ -370,8 +370,6 @@ class SettingsWindow(QMainWindow):
         self._serial_value.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         self._serial_value.setMinimumWidth(120)
         self._serial_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._system_info_label = QLabel(tr("Firmware: не определена"))
-        self._system_info_label.setFont(QFont("Segoe UI", 9))
 
         device_layout = QHBoxLayout()
         device_layout.setSpacing(8)
@@ -380,7 +378,6 @@ class SettingsWindow(QMainWindow):
         device_layout.addWidget(self._conn_status_label)
         device_layout.addWidget(self._serial_label)
         device_layout.addWidget(self._serial_value)
-        device_layout.addWidget(self._system_info_label)
         device_layout.addStretch()
         self._device_layout = device_layout
 
@@ -399,17 +396,18 @@ class SettingsWindow(QMainWindow):
         self._analog_tab: AnalogPortsTab | None = None
 
         self._tabs.addTab(self._trigger_tab, "⚡ " + tr("Триггеры"))
-        self._tabs.addTab(self._monitor_tab, "🔍 " + tr("Мониторинг"))
-        self._tabs.addTab(self._gateway_tab, "🚦 " + tr("Шлюз"))
-        self._tabs.addTab(self._flexible_tab, "🧩 " + tr("Гибкая логика"))
         self._tabs.addTab(self._variables_tab, "🎛 " + tr("Переменные"))
-        self._tabs.addTab(self._library_tab, "📚 " + tr("Библиотека"))
-        self._tabs.addTab(self._analyzer_tab, "🔬 " + tr("Трэйс"))
+        self._tabs.addTab(self._flexible_tab, "🧩 " + tr("Гибкая логика"))
+        self._tabs.addTab(self._gateway_tab, "🚦 " + tr("Шлюз"))
+        self._tabs.addTab(self._monitor_tab, "🔍 " + tr("Мониторинг"))
+        self._tabs.addTab(self._analyzer_tab, "\U0001F52C " + tr("Трейс"))
+        self._tabs.addTab(self._library_tab, "\U0001F4DA " + tr("Библиотека"))
         self._tabs.addTab(self._topology_tab, "🌐 " + tr("Топология"))
         self._tabs.addTab(self._event_log_tab, "🧾 " + tr("Лог МК"))
         self._update_analog_tab()
         self._serial_manager.device_identified.connect(self._update_analog_tab)
-        self._serial_manager.device_identified.connect(self._update_device_info)
+        self._serial_manager.device_identified.connect(self._on_device_identified)
+        self._connected_device_type: int | None = None
         self._update_device_info(0, 0)
 
         search_layout = QHBoxLayout()
@@ -972,9 +970,10 @@ class SettingsWindow(QMainWindow):
 
     def _update_conn_status(self, connected: bool) -> None:
         """Индикатор связи между «Устройство» и «Серийный номер»."""
-        self._conn_status_label.setText(
-            tr("Подключено") if connected else tr("Не подключено")
-        )
+        text = tr("Подключено") if connected else tr("Не подключено")
+        if connected and getattr(self, "_firmware_outdated", False):
+            text += " · " + self._firmware_outdated
+        self._conn_status_label.setText(text)
         self._conn_status_label.setStyleSheet(
             f"color: {'#4CAF50' if connected else '#E53935'};"
         )
@@ -1126,6 +1125,12 @@ class SettingsWindow(QMainWindow):
         DEVICE_TYPE_CAN_FD: "2 CAN FD",
     }
 
+    def _on_device_identified(self, device_type: int, device_version: int) -> None:
+        """Запоминает тип реально подключённого устройства — сверка
+        типа при записи конфига опирается на него, а не на поля файла."""
+        self._connected_device_type = device_type
+        self._update_device_info(device_type, device_version)
+
     def _update_device_info(
         self, device_type: int = 0, device_version: int = 0, query_device: bool = True
     ) -> None:
@@ -1151,41 +1156,19 @@ class SettingsWindow(QMainWindow):
                 and not self._config.get("emulation", False)
             ):
                 info = self._serial_manager.read_system_info()
-                text = tr(
-                    "Firmware: app {0}, protocol {1}, Flash {2} KB, size {3} B, CRC32 {4}, config v{5} ({6})"
-                ).format(
-                    info["application_version"],
-                    info["protocol_version"],
-                    info["flash_size_kb"],
-                    info["application_size"],
-                    f"0x{info['application_crc32']:08X}",
-                    info["config_format_version"],
-                    tr("valid") if info["config_valid"] else tr("defaults"),
-                )
-                extras = []
-                if info.get("mcu_uid"):
-                    extras.append(tr("UID {0}").format(info["mcu_uid"]))
-                if info.get("build_datetime"):
-                    extras.append(tr("сборка {0}").format(info["build_datetime"]))
-                if info.get("git_commit"):
-                    extras.append(tr("commit {0}").format(info["git_commit"]))
-                if extras:
-                    text += "\n" + ", ".join(extras)
                 # Сверка протокола: на старой прошивке новые команды
                 # (stage/commit триггеров и т.п.) отсутствуют и вылезают
-                # непонятными таймаутами — лучше сразу предупредить.
+                # непонятными таймаутами — помечаем статус подключения.
                 proto = int(info.get("protocol_version", 0))
-                if proto < EXPECTED_PROTOCOL_VERSION:
-                    text += "\n" + tr(
-                        "⚠ Прошивка устарела (протокол {0}, требуется {1}) — обновите МК"
-                    ).format(proto, EXPECTED_PROTOCOL_VERSION)
-                    self._system_info_label.setStyleSheet("color: #FFB74D;")
-                else:
-                    self._system_info_label.setStyleSheet("")
-                self._system_info_label.setText(text)
+                self._firmware_outdated = (
+                    tr("⚠ прошивка устарела (протокол {0}, требуется {1})")
+                    .format(proto, EXPECTED_PROTOCOL_VERSION)
+                    if proto < EXPECTED_PROTOCOL_VERSION else False
+                )
+                if self._firmware_outdated:
+                    self._update_conn_status(True)
         except Exception:  # noqa: BLE001
-            self._system_info_label.setStyleSheet("")
-            self._system_info_label.setText(tr("Firmware: информация недоступна"))
+            pass
 
     def retranslate_ui(self) -> None:
         """Обновляет статические строки окна настроек и всех вкладок."""
@@ -1201,7 +1184,7 @@ class SettingsWindow(QMainWindow):
             self._flexible_tab: "🧩 " + tr("Гибкая логика"),
             self._variables_tab: "🎛 " + tr("Переменные"),
             self._library_tab: "📚 " + tr("Библиотека"),
-            self._analyzer_tab: "🔬 " + tr("Трэйс"),
+            self._analyzer_tab: "🔬 " + tr("Трейс"),
             self._topology_tab: "🌐 " + tr("Топология"),
             self._event_log_tab: "🧾 " + tr("Лог МК"),
         }
@@ -1702,6 +1685,29 @@ class SettingsWindow(QMainWindow):
             logger.warning("Сохранение настроек без открытого COM-порта")
         try:
             self._config.save()
+            # Тип устройства из загруженного конфига может не совпадать
+            # с подключённым (файл выгружен с другой модели) — спрашиваем
+            # до записи в МК.
+            connected_type = getattr(self, "_connected_device_type", None)
+            config_type = self._config.get("device_type")
+            if (
+                connected_type is not None
+                and config_type is not None
+                and int(config_type) != int(connected_type)
+                and self._serial_manager.is_open()
+                and not self._config.get("emulation", False)
+            ):
+                answer = QMessageBox.question(
+                    self,
+                    tr("Несовпадение конфигурации"),
+                    tr("Конфигурация не соответствует подключенному "
+                       "устройству. Запрограммировать?"),
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return False
             self._trigger_tab._save_config()
             self._flexible_tab._save_config()
             if hasattr(self._gateway_tab, "_save_config"):

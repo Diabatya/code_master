@@ -1,18 +1,25 @@
-"""Страница «Гибкая логика» с правилами if-then для CAN-кадров."""
+"""Страница «Гибкая логика» — программы if-then для CAN-кадров.
 
-import json
-from pathlib import Path
+Каждая программа — карточка: слева вверху галочка включения и поле
+имени, справа вверху «✕» удаления; тело — колонки «Условие» /
+«Действие» / «Параметры», сворачивается кнопкой ▾/▸.
 
-from PySide6.QtCore import Qt, QTimer
+Сохранение — в общий конфиг приложения (ключ flexible_rules), без
+отдельных файлов. Обработка автономна: включённая программа
+срабатывает сама, без кнопки «Применить»; на неизменной DATA — строго
+«Сработок на DATA» раз (по умолчанию 1), сколько бы одинаковых
+пакетов ни пришло; при смене DATA счётчик сбрасывается.
+"""
+
+from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
-    QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -33,9 +40,14 @@ logger = get_logger(__name__)
 
 
 class RuleRowWidget(QWidget):
-    """Одна строка правила: три вертикальные колонки с CAN-параметрами."""
+    """Одна программа: шапка (галочка, имя, ✕) + три колонки
+    с CAN-параметрами. Сворачивается в строку-сводку."""
 
-    def __init__(self, tab: "FlexibleLogicTab", rule: dict[str, object] | None = None) -> None:
+    def __init__(
+        self,
+        tab: "FlexibleLogicTab",
+        rule: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(tab)
         self._tab = tab
         self._rule = rule or {}
@@ -43,8 +55,36 @@ class RuleRowWidget(QWidget):
         self._build_layout()
         self._load_rule()
 
+    @Slot()
+    def _mark_dirty(self, *_args) -> None:
+        self._tab.mark_dirty()
+
     def _create_widgets(self) -> None:
         font = QFont("Segoe UI", 9)
+
+        # Шапка программы: вкл/выкл, имя, свёртка, удаление.
+        self._active_check = QCheckBox()
+        self._active_check.setFont(font)
+        self._active_check.setToolTip(tr("Включить/выключить программу"))
+        self._active_check.toggled.connect(self._mark_dirty)
+        self._name_edit = QLineEdit()
+        self._name_edit.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._name_edit.setPlaceholderText(tr("Программа"))
+        self._name_edit.setClearButtonEnabled(True)
+        self._name_edit.textChanged.connect(self._mark_dirty)
+        self._collapse_button = QPushButton("▾")
+        self._collapse_button.setFont(font)
+        self._collapse_button.setFixedWidth(30)
+        self._collapse_button.setToolTip(tr("Свернуть программу"))
+        self._collapse_button.clicked.connect(self._toggle_collapsed)
+        self._remove_button = QPushButton("✕")
+        self._remove_button.setFont(font)
+        self._remove_button.setFixedSize(26, 26)
+        self._remove_button.setToolTip(tr("Удалить программу"))
+        self._remove_button.clicked.connect(self._on_remove)
+        self._summary_label = QLabel()
+        self._summary_label.setFont(font)
+        self._summary_label.setVisible(False)
 
         # Условие
         self._condition_group = QGroupBox(tr("Условие"))
@@ -80,8 +120,6 @@ class RuleRowWidget(QWidget):
         # Параметры
         self._params_group = QGroupBox(tr("Параметры"))
         self._params_group.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        self._active_check = QCheckBox(tr("Активно"))
-        self._active_check.setFont(font)
         self._resp_channel_edit = QLineEdit()
         self._resp_channel_edit.setFont(font)
         self._resp_channel_edit.setPlaceholderText(tr("1 или 2"))
@@ -92,17 +130,55 @@ class RuleRowWidget(QWidget):
         self._delay_spin.setSuffix(tr(" мс"))
         self._delay_spin.setFont(font)
         self._delay_spin.setFixedWidth(90)
+        self._fire_limit_spin = QSpinBox()
+        self._fire_limit_spin.setRange(1, 99)
+        self._fire_limit_spin.setValue(1)
+        self._fire_limit_spin.setFont(font)
+        self._fire_limit_spin.setFixedWidth(70)
+        self._fire_limit_spin.setToolTip(tr(
+            "Сколько раз программа срабатывает, пока DATA условия "
+            "не изменится. По умолчанию 1 — одинаковые пакеты "
+            "не перезапускают программу."
+        ))
         self._counter_label = QLabel("0")
         self._counter_label.setFont(font)
         self._counter_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._remove_button = QPushButton(tr("Удалить"))
-        self._remove_button.setFont(font)
-        self._remove_button.clicked.connect(self._on_remove)
+
+        # Любое редактирование полей — пересборка правил и
+        # отложенное сохранение в общий конфиг.
+        for edit in (
+            self._id_edit, self._mask_edit, self._condition_data_edit,
+            self._resp_id_edit, self._resp_data_edit, self._resp_mask_edit,
+            self._resp_channel_edit,
+        ):
+            edit.textChanged.connect(self._mark_dirty)
+        for spin in (self._delay_spin, self._fire_limit_spin):
+            spin.valueChanged.connect(self._mark_dirty)
 
     def _build_layout(self) -> None:
-        layout = QHBoxLayout(self)
-        layout.setSpacing(8)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 8)
+
+        self._header = QFrame()
+        self._header.setStyleSheet(
+            "QFrame { background: rgba(255,255,255,0.04);"
+            " border: 1px solid #454552; border-radius: 8px; }"
+        )
+        header_layout = QHBoxLayout(self._header)
+        header_layout.setContentsMargins(8, 4, 8, 4)
+        header_layout.setSpacing(8)
+        header_layout.addWidget(self._active_check)
+        header_layout.addWidget(self._name_edit, 1)
+        header_layout.addWidget(self._summary_label, 2)
+        header_layout.addWidget(self._collapse_button)
+        header_layout.addWidget(self._remove_button)
+        layout.addWidget(self._header)
+
+        self._body = QWidget()
+        body_layout = QHBoxLayout(self._body)
+        body_layout.setSpacing(8)
+        body_layout.setContentsMargins(0, 0, 0, 0)
 
         cond_layout = QVBoxLayout(self._condition_group)
         cond_layout.setSpacing(4)
@@ -130,22 +206,27 @@ class RuleRowWidget(QWidget):
         params_layout = QVBoxLayout(self._params_group)
         params_layout.setSpacing(4)
         params_layout.setContentsMargins(8, 8, 8, 8)
-        params_layout.addWidget(self._active_check)
-        params_layout.addWidget(QLabel(tr("Канал")))
+        self._channel_label = QLabel(tr("Канал"))
+        params_layout.addWidget(self._channel_label)
         params_layout.addWidget(self._resp_channel_edit)
-        params_layout.addWidget(QLabel(tr("Задержка")))
+        self._delay_label = QLabel(tr("Задержка"))
+        params_layout.addWidget(self._delay_label)
         params_layout.addWidget(self._delay_spin)
+        self._fire_limit_label = QLabel(tr("Сработок на DATA"))
+        params_layout.addWidget(self._fire_limit_label)
+        params_layout.addWidget(self._fire_limit_spin)
         params_layout.addWidget(QLabel(tr("Срабатываний")))
         params_layout.addWidget(self._counter_label)
-        params_layout.addWidget(self._remove_button)
         params_layout.addStretch()
 
-        layout.addWidget(self._condition_group, 1)
-        layout.addWidget(self._action_group, 1)
-        layout.addWidget(self._params_group, 1)
+        body_layout.addWidget(self._condition_group, 1)
+        body_layout.addWidget(self._action_group, 1)
+        body_layout.addWidget(self._params_group, 1)
+        layout.addWidget(self._body)
 
     def _load_rule(self) -> None:
         self._active_check.setChecked(self._rule.get("active", True))
+        self._name_edit.setText(str(self._rule.get("title", "")))
         self._id_edit.setText(self._rule.get("id", ""))
         self._mask_edit.setText(self._rule.get("mask", ""))
         self._condition_data_edit.setText(self._rule.get("condition_data", ""))
@@ -157,6 +238,14 @@ class RuleRowWidget(QWidget):
             self._delay_spin.setValue(int(self._rule.get("delay", 0)))
         except ValueError:
             self._delay_spin.setValue(0)
+        try:
+            self._fire_limit_spin.setValue(
+                int(self._rule.get("fire_limit", 1))
+            )
+        except ValueError:
+            self._fire_limit_spin.setValue(1)
+        if self._rule.get("collapsed"):
+            self._toggle_collapsed()
 
     def _on_from_dbc(self) -> None:
         """Заполняет условие из выбранного DBC-сигнала."""
@@ -174,21 +263,46 @@ class RuleRowWidget(QWidget):
     def _on_remove(self) -> None:
         self._tab._remove_row(self)
 
+    def _toggle_collapsed(self) -> None:
+        """Сворачивает тело программы до шапки со сводкой и обратно."""
+        # isVisible() ложно до первого показа окна — опираемся на
+        # собственный флаг видимости виджета.
+        collapsed = not self._body.isHidden()
+        self._body.setVisible(not collapsed)
+        self._summary_label.setVisible(collapsed)
+        self._collapse_button.setText("▸" if collapsed else "▾")
+        self._collapse_button.setToolTip(
+            tr("Развернуть программу") if collapsed
+            else tr("Свернуть программу")
+        )
+        if collapsed:
+            self._summary_label.setText(
+                tr("{0} → {1} (канал {2})").format(
+                    self._id_edit.text() or "—",
+                    self._resp_id_edit.text() or "—",
+                    self._resp_channel_edit.text() or "—",
+                )
+            )
+        self._mark_dirty()
+
     def get_rule(self) -> dict[str, object]:
-        """Собирает правило из полей строки."""
-        can_id = hex_to_int(self._id_edit.text())
-        id_text = self._id_edit.text().strip() if can_id is None else self._id_edit.text().strip()
+        """Собирает программу из полей строки."""
+        id_text = self._id_edit.text().strip()
         resp_id = hex_to_int(self._resp_id_edit.text())
         return {
+            "title": self._name_edit.text().strip(),
             "active": self._active_check.isChecked(),
             "id": id_text,
             "mask": self._mask_edit.text().strip(),
             "condition_data": self._condition_data_edit.text().strip(),
-            "resp_id": int_to_hex(resp_id, 8) if resp_id is not None else self._resp_id_edit.text().strip(),
+            "resp_id": int_to_hex(resp_id, 8) if resp_id is not None
+                else self._resp_id_edit.text().strip(),
             "resp_data": self._resp_data_edit.text().strip(),
             "resp_mask": self._resp_mask_edit.text().strip(),
             "resp_channel": self._resp_channel_edit.text().strip(),
             "delay": self._delay_spin.value(),
+            "fire_limit": self._fire_limit_spin.value(),
+            "collapsed": self._body.isHidden(),
         }
 
     def set_counter(self, value: int) -> None:
@@ -205,114 +319,108 @@ class RuleRowWidget(QWidget):
         self._resp_id_edit.setPlaceholderText(tr("ID HEX"))
         self._resp_data_edit.setPlaceholderText(tr("D0 D1 ... (8 байт)"))
         self._resp_mask_edit.setPlaceholderText(tr("FF FF ... (8 байт)"))
-        self._active_check.setText(tr("Активно"))
         self._resp_channel_edit.setPlaceholderText(tr("1 или 2"))
         self._delay_spin.setSuffix(tr(" мс"))
-        self._remove_button.setText(tr("Удалить"))
+        self._name_edit.setPlaceholderText(tr("Программа"))
+        self._channel_label.setText(tr("Канал"))
+        self._delay_label.setText(tr("Задержка"))
+        self._fire_limit_label.setText(tr("Сработок на DATA"))
+        self._collapse_button.setToolTip(
+            tr("Развернуть программу") if self._body.isHidden()
+            else tr("Свернуть программу")
+        )
 
 
 class FlexibleLogicTab(QWidget):
-    """Вкладка гибкой логики с тремя колонками и неограниченными строками."""
+    """Вкладка гибкой логики: программы применяются сами —
+    включённая галочка = программа активна."""
 
-    def __init__(self, serial_manager: SerialManager, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        serial_manager: SerialManager,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._config = Config()
-        self._active = False
         self._rules: list[dict[str, object]] = []
         self._rule_counters: list[int] = []
         self._row_widgets: list[RuleRowWidget] = []
+        self._internal_rules: list[dict[str, object]] = []
+        self._rules_dirty = True
+        # Отложенное сохранение: Config.set пишет файл на каждый
+        # вызов, а правки идут посимвольно — схлопываем в один сейв.
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(600)
+        self._save_timer.timeout.connect(self._save_config)
         self._create_widgets()
         self._build_layout()
         self._load_config()
 
     def _create_widgets(self) -> None:
-        self._title = QLabel(tr("Гибкая логика"))
-        self._title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
-        self._title.setProperty("title", True)
-
-        self._subtitle = QLabel(tr("Правила if-then для CAN-кадров"))
-        self._subtitle.setFont(QFont("Segoe UI", 11))
-
         self._rows_widget = QWidget()
         self._rows_layout = QVBoxLayout(self._rows_widget)
-        self._rows_layout.setSpacing(8)
+        self._rows_layout.setSpacing(10)
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
         self._rows_layout.addStretch()
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setWidget(self._rows_widget)
-        self._scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self._scroll.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }"
+        )
 
-        self._add_button = QPushButton(tr("Добавить правило"))
-        setup_button(self._add_button, height=28)
+        self._add_button = QPushButton(tr("＋ Добавить программу"))
+        setup_button(self._add_button, bold=True, height=34)
+        self._add_button.setMinimumWidth(240)
         self._add_button.clicked.connect(self._on_add)
-
-        self._apply_button = QPushButton(tr("Применить правила"))
-        setup_button(self._apply_button, bold=True, height=30)
-        self._apply_button.clicked.connect(self._apply_rules)
-
-        self._stop_button = QPushButton(tr("Остановить"))
-        setup_button(self._stop_button, height=30)
-        self._stop_button.clicked.connect(self._stop_rules)
-
-        self._save_button = QPushButton(tr("Сохранить в файл"))
-        setup_button(self._save_button, height=28)
-        self._save_button.clicked.connect(self._save_rules_to_file)
-
-        self._load_button = QPushButton(tr("Загрузить из файла"))
-        setup_button(self._load_button, height=28)
-        self._load_button.clicked.connect(self._load_rules_from_file)
 
     def _build_layout(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
-        layout.addWidget(self._title)
-        layout.addWidget(self._subtitle)
+
+        top = QHBoxLayout()
+        top.addStretch()
+        top.addWidget(self._add_button)
+        top.addStretch()
+        layout.addLayout(top)
+
         layout.addWidget(self._scroll, 1)
 
-        buttons_layout = QHBoxLayout()
-        buttons_layout.setSpacing(8)
-        buttons_layout.addWidget(self._add_button)
-        buttons_layout.addWidget(self._apply_button)
-        buttons_layout.addWidget(self._stop_button)
-        buttons_layout.addStretch()
-        layout.addLayout(buttons_layout)
-
-        file_layout = QHBoxLayout()
-        file_layout.setSpacing(8)
-        file_layout.addStretch()
-        file_layout.addWidget(self._save_button)
-        file_layout.addWidget(self._load_button)
-        layout.addLayout(file_layout)
-
     def _load_config(self) -> None:
-        """Загружает правила из конфигурации."""
+        """Загружает программы из общей конфигурации."""
         rules = self._config.get("flexible_rules", [])
         if not isinstance(rules, list):
             rules = []
         self._rules = rules
         self._rule_counters = [0] * len(rules)
         self._rebuild_rows()
+        self._rules_dirty = True
+
+    def mark_dirty(self) -> None:
+        """Поля поменялись: пересобрать правила и отложенно сейвить."""
+        self._rules_dirty = True
+        self._save_timer.start()
 
     def _collect_rules(self) -> list[dict[str, object]]:
-        """Собирает правила из всех строк."""
+        """Собирает программы из всех строк."""
         return [row.get_rule() for row in self._row_widgets]
 
     def _save_config(self) -> None:
-        """Сохраняет правила в конфигурацию."""
+        """Сохраняет программы в общую конфигурацию."""
         self._rules = self._collect_rules()
         self._config.set("flexible_rules", self._rules)
 
     def get_config(self) -> list[dict[str, object]]:
-        """Возвращает текущие правила для экспорта."""
+        """Возвращает текущие программы для экспорта."""
         self._save_config()
         return self._config.get("flexible_rules", [])
 
     def set_config(self, rules: list[dict[str, object]]) -> None:
-        """Загружает правила из импортированного профиля."""
+        """Загружает программы из импортированного профиля."""
         self._config.set("flexible_rules", rules)
         self._load_config()
 
@@ -324,15 +432,18 @@ class FlexibleLogicTab(QWidget):
             self._add_row_widget(rule)
         self._rule_counters = [0] * len(self._row_widgets)
 
-    def _add_row_widget(self, rule: dict[str, object] | None = None) -> RuleRowWidget:
-        """Добавляет виджет строки в конец списка."""
+    def _add_row_widget(
+        self,
+        rule: dict[str, object] | None = None,
+    ) -> RuleRowWidget:
+        """Добавляет виджет программы в конец списка."""
         row = RuleRowWidget(self, rule)
         self._row_widgets.append(row)
         self._rows_layout.insertWidget(self._rows_layout.count() - 1, row)
         return row
 
     def _remove_row(self, widget: RuleRowWidget) -> None:
-        """Удаляет виджет строки."""
+        """Удаляет виджет программы."""
         if widget in self._row_widgets:
             self._row_widgets.remove(widget)
         # setParent(None) до отложенного deleteLater — снимок полей окна
@@ -340,50 +451,53 @@ class FlexibleLogicTab(QWidget):
         widget.setParent(None)
         widget.deleteLater()
         self._rule_counters = [0] * len(self._row_widgets)
+        self.mark_dirty()
 
     def _on_add(self) -> None:
-        """Добавляет новое пустое правило."""
+        """Добавляет новую пустую программу."""
         self._add_row_widget()
         self._rule_counters.append(0)
-
-    def _apply_rules(self) -> None:
-        """Активирует обработку правил."""
-        self._save_config()
-        self._build_internal_rules()
-        self._active = True
-        logger.info("Гибкая логика применена: %d активных правил", len(self._internal_rules))
-        QMessageBox.information(self, tr("Гибкая логика"), tr("Правила применены и активны"))
-
-    def _stop_rules(self) -> None:
-        """Останавливает обработку правил."""
-        self._active = False
-        logger.info("Обработка гибкой логики остановлена")
-        QMessageBox.information(self, tr("Гибкая логика"), tr("Обработка правил остановлена"))
+        self.mark_dirty()
 
     def _build_internal_rules(self) -> None:
-        """Формирует внутренний список активных правил для обработки кадров."""
+        """Формирует внутренний список активных программ."""
         self._internal_rules = []
         self._rule_counters = [0] * len(self._row_widgets)
         for row_index, row in enumerate(self._row_widgets):
             rule = row.get_rule()
             if not rule.get("active", False):
                 continue
-            can_id = hex_to_int(rule.get("id", ""))
+            can_id = hex_to_int(str(rule.get("id", "")))
             if can_id is None:
                 continue
-            mask = self._pad_8(parse_data_bytes(str(rule.get("mask", "")).split()))
-            condition_data = self._pad_8(parse_data_bytes(str(rule.get("condition_data", "")).split()))
-            resp_id = hex_to_int(rule.get("resp_id", ""))
+            mask = self._pad_8(
+                parse_data_bytes(str(rule.get("mask", "")).split())
+            )
+            condition_data = self._pad_8(
+                parse_data_bytes(str(rule.get("condition_data", "")).split())
+            )
+            resp_id = hex_to_int(str(rule.get("resp_id", "")))
             if resp_id is None:
                 resp_id = can_id
-            resp_data = self._pad_8(parse_data_bytes(str(rule.get("resp_data", "")).split()))
-            resp_mask = self._pad_8(parse_data_bytes(str(rule.get("resp_mask", "")).split()))
+            resp_data = self._pad_8(
+                parse_data_bytes(str(rule.get("resp_data", "")).split())
+            )
+            resp_mask = self._pad_8(
+                parse_data_bytes(str(rule.get("resp_mask", "")).split())
+            )
             try:
                 delay_ms = int(rule.get("delay", 0))
             except ValueError:
                 delay_ms = 0
             try:
-                resp_channel = int(rule.get("resp_channel", "")) if rule.get("resp_channel", "") else None
+                fire_limit = int(rule.get("fire_limit", 1))
+            except ValueError:
+                fire_limit = 1
+            try:
+                resp_channel = (
+                    int(str(rule.get("resp_channel", "")))
+                    if str(rule.get("resp_channel", "")) else None
+                )
             except ValueError:
                 resp_channel = None
             self._internal_rules.append({
@@ -396,6 +510,10 @@ class FlexibleLogicTab(QWidget):
                 "resp_mask": resp_mask,
                 "resp_channel": resp_channel,
                 "delay": max(0, delay_ms),
+                "fire_limit": max(1, fire_limit),
+                # Состояние «строго N раз на неизменной DATA».
+                "last_data": None,
+                "data_fires": 0,
             })
 
     @staticmethod
@@ -410,18 +528,22 @@ class FlexibleLogicTab(QWidget):
 
     def set_dbc(self, dbc_manager) -> None:
         """Обновляет логику при смене DBC (заглушка)."""
-        pass
 
     def process_frame(self, frame: dict[str, object]) -> None:
-        """Проверяет входящий кадр на совпадение с активными правилами."""
-        if not self._active:
-            return
+        """Проверяет входящий кадр на совпадение с активными программами.
+
+        Работает всегда — включённость программы задаёт её галочка.
+        На неизменной DATA программа срабатывает не более
+        «Сработок на DATA» раз, сколько бы одинаковых пакетов ни шло."""
         if frame.get("tx_echo"):
             # Эхо собственной передачи МК — не внешний кадр; без этого
-            # фильтра ответ правила, совпадающий с условием, мог
-            # перезапускать то же правило бесконечно.
+            # фильтра ответ программы, совпадающий с условием, мог
+            # перезапускать ту же программу бесконечно.
             return
-        if not getattr(self, "_internal_rules", []):
+        if self._rules_dirty:
+            self._build_internal_rules()
+            self._rules_dirty = False
+        if not self._internal_rules:
             return
 
         frame_id = int(frame["id"])
@@ -431,80 +553,65 @@ class FlexibleLogicTab(QWidget):
         for rule in self._internal_rules:
             if rule["id"] != frame_id:
                 continue
-            # Проверка данных по маске
             match = True
             for i in range(8):
                 if (
                     rule["mask"][i]
-                    and (frame_data[i] & rule["mask"][i]) != (rule["condition_data"][i] & rule["mask"][i])
+                    and (frame_data[i] & rule["mask"][i])
+                    != (rule["condition_data"][i] & rule["mask"][i])
                 ):
                     match = False
                     break
             if not match:
                 continue
 
+            # «Строго N раз на неизменной DATA»: одинаковый поток не
+            # перезапускает программу; новая DATA — счётчик заново.
+            data_key = bytes(frame_data)
+            if rule["last_data"] != data_key:
+                rule["last_data"] = data_key
+                rule["data_fires"] = 0
+            if rule["data_fires"] >= rule["fire_limit"]:
+                continue
+            rule["data_fires"] += 1
+
             idx = rule["index"]
             self._rule_counters[idx] += 1
             self._row_widgets[idx].set_counter(self._rule_counters[idx])
 
-            # Формируем ответные данные: по resp_mask берём из resp_data, иначе из входящего кадра
+            # Ответные данные: по resp_mask из resp_data, иначе — из
+            # входящего кадра.
             resp_data = [
-                (rule["resp_data"][i] & rule["resp_mask"][i]) | (frame_data[i] & (0xFF ^ rule["resp_mask"][i]))
+                (rule["resp_data"][i] & rule["resp_mask"][i])
+                | (frame_data[i] & (0xFF ^ rule["resp_mask"][i]))
                 for i in range(8)
             ]
-            channel = rule["resp_channel"] if rule["resp_channel"] in (1, 2) else frame_channel
-            resp_frame = pack_can_frame(channel, rule["resp_id"], bytes(resp_data))
-            delay_ms = rule.get("delay", 0)
+            channel = (
+                rule["resp_channel"]
+                if rule["resp_channel"] in (1, 2) else frame_channel
+            )
+            resp_frame = pack_can_frame(
+                channel, rule["resp_id"], bytes(resp_data)
+            )
+            delay_ms = rule["delay"]
             if delay_ms > 0:
-                QTimer.singleShot(delay_ms, lambda rf=resp_frame: self._send_rule_response(rf))
+                QTimer.singleShot(
+                    delay_ms,
+                    lambda rf=resp_frame: self._send_rule_response(rf),
+                )
             else:
                 self._send_rule_response(resp_frame)
             logger.info(
-                "Сработало правило гибкой логики: ID=0x%s -> ответ ID=0x%s в канал %d (задержка %d мс)",
+                "Сработала программа ГЛ: ID=0x%s -> ответ ID=0x%s "
+                "в канал %d (задержка %d мс)",
                 int_to_hex(frame_id, 8),
                 int_to_hex(rule["resp_id"], 8),
                 channel,
                 delay_ms,
             )
 
-    def _save_rules_to_file(self) -> None:
-        """Сохраняет правила в JSON-файл."""
-        path, _ = QFileDialog.getSaveFileName(self, tr("Сохранить правила"), "", "JSON files (*.json)")
-        if not path:
-            return
-        try:
-            self._save_config()
-            Path(path).write_text(json.dumps(self._rules, ensure_ascii=False, indent=2), encoding="utf-8")
-            logger.info("Правила гибкой логики сохранены в %s", path)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Ошибка сохранения правил: %s", exc)
-            QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить правила: {0}").format(exc))
-
-    def _load_rules_from_file(self) -> None:
-        """Загружает правила из JSON-файла."""
-        path, _ = QFileDialog.getOpenFileName(self, tr("Загрузить правила"), "", "JSON files (*.json)")
-        if not path:
-            return
-        try:
-            rules = json.loads(Path(path).read_text(encoding="utf-8"))
-            if not isinstance(rules, list):
-                raise ValueError(tr("Файл должен содержать список правил"))
-            self._rules = rules
-            self._save_config()
-            self._rebuild_rows()
-            logger.info("Правила гибкой логики загружены из %s", path)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Ошибка загрузки правил: %s", exc)
-            QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось загрузить правила: {0}").format(exc))
-
     def retranslate_ui(self) -> None:
         """Обновляет статические строки вкладки."""
-        self._title.setText(tr("Гибкая логика"))
-        self._subtitle.setText(tr("Правила if-then для CAN-кадров"))
-        self._add_button.setText(tr("Добавить правило"))
-        self._apply_button.setText(tr("Применить правила"))
-        self._stop_button.setText(tr("Остановить"))
-        self._save_button.setText(tr("Сохранить в файл"))
-        self._load_button.setText(tr("Загрузить из файла"))
+        self._add_button.setText(tr("＋ Добавить программу"))
         for row in self._row_widgets:
             row.retranslate_ui()

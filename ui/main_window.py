@@ -1,6 +1,5 @@
 """Главное окно приложения «Код Мастер»."""
 
-import contextlib
 import subprocess
 import sys
 import traceback
@@ -20,7 +19,6 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -28,11 +26,13 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QStatusBar,
     QVBoxLayout,
     QWidget,
 )
+from serial.tools.list_ports import comports
 from shiboken6 import isValid
 
 from core.dbc_manager import DBCManager
@@ -42,13 +42,12 @@ from models.config import Config
 from models.logger import get_logger, get_log_dir
 from models.translations import _ as tr, set_language
 from models.version import VERSION
-from ui.com_settings_dialog import ComSettingsDialog
 from ui.dark_theme import apply_theme
 from ui.com_logger import ComLoggerWindow
 from ui.firmware_page import FirmwarePage
 from ui.flash_dialog import FlashDialog
 from ui.help_widget import show_help
-from ui.settings_window import ConnectionTab, SettingsWindow
+from ui.settings_window import SettingsWindow
 
 logger = get_logger(__name__)
 
@@ -96,6 +95,117 @@ def _reload_icon(color: QColor, size: int = 96) -> QIcon:
     return QIcon(pm)
 
 
+# VID/PID нашего адаптера: приложение и bootloader (см. AGENTS.md).
+_USB_VID = 0x0483
+_USB_PID_APP = 0x5740
+_USB_PID_BOOT = 0x5741
+
+
+class _DeviceCard(QWidget):
+    """Карточка устройства на стартовом экране (по ТЗ мастера):
+
+    [🌐]  Имя (bold)            [ОБНОВИТЬ] [НАСТРОИТЬ]
+         ID / серийник / fw
+         [синий баннер «подключите по USB», если порт не открыт]
+    """
+
+    def __init__(
+        self,
+        window: "MainWindow",
+        port: str | None,
+        name: str,
+        serial: str,
+        version: str,
+        connected: bool,
+    ) -> None:
+        super().__init__(window)
+        self._window = window
+        self._port = port
+        font = QFont("Segoe UI", 10)
+
+        self.setStyleSheet(
+            "_DeviceCard { border: 1px solid #454552; border-radius: 12px;"
+            " background: rgba(255,255,255,0.03); }"
+        )
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(8)
+
+        head = QHBoxLayout()
+        icon = QLabel("🌐")
+        icon.setFixedSize(40, 40)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setStyleSheet(
+            "border: 2px solid #3A7BD5; border-radius: 20px;"
+            " font-size: 18px; background: rgba(58,123,213,0.12);"
+        )
+        head.addWidget(icon)
+        head.addSpacing(10)
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        name_label = QLabel(name)
+        name_label.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        text_col.addWidget(name_label)
+        info_font = QFont("Segoe UI", 9)
+        for line in (
+            tr("ID: {0}").format(port or "—"),
+            tr("Серийный номер: {0}").format(serial or "—"),
+            tr("Версия ПО: {0}").format(version or "—"),
+        ):
+            label = QLabel(line)
+            label.setFont(info_font)
+            label.setStyleSheet("color: #9A9AA5;")
+            text_col.addWidget(label)
+        head.addLayout(text_col, 1)
+        root.addLayout(head)
+
+        if not connected:
+            banner = QLabel(tr(
+                "Для обновления ПО и настройки подключите устройство "
+                "по USB"
+            ))
+            banner.setFont(info_font)
+            banner.setWordWrap(True)
+            banner.setStyleSheet(
+                "border: 1px solid #3A7BD5; border-radius: 6px;"
+                " padding: 8px; color: #9CC3FF;"
+                " background: rgba(58,123,213,0.08);"
+            )
+            root.addWidget(banner)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        update_btn = QPushButton(tr("Обновить"))
+        update_btn.setFont(font)
+        update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        update_btn.setStyleSheet(
+            "QPushButton { border: 1px solid #3A7BD5; border-radius: 6px;"
+            " color: #7C9EFF; padding: 6px 22px; background: transparent; }"
+            "QPushButton:hover { background: rgba(58,123,213,0.15); }"
+            "QPushButton:disabled { color: #666; border-color: #555; }"
+        )
+        update_btn.setEnabled(port is not None)
+        update_btn.clicked.connect(self._on_update)
+        configure_btn = QPushButton(tr("Настроить"))
+        configure_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        configure_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        configure_btn.setStyleSheet(
+            "QPushButton { border: none; border-radius: 6px;"
+            " color: white; padding: 6px 22px; background: #3A7BD5; }"
+            "QPushButton:hover { background: #4A8BE5; }"
+        )
+        configure_btn.clicked.connect(self._on_configure)
+        buttons.addWidget(update_btn)
+        buttons.addWidget(configure_btn)
+        root.addLayout(buttons)
+
+    def _on_update(self) -> None:
+        self._window._card_action(self._port, flash=True)
+
+    def _on_configure(self) -> None:
+        self._window._card_action(self._port, flash=False)
+
+
 class MainWindow(QMainWindow):
     """Главное окно приложения «Код Мастер»."""
 
@@ -120,7 +230,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self._settings_window: SettingsWindow | None = None
-        self._connection_dialog: QDialog | None = None
         self._create_widgets()
         self._build_layout()
         self._connect_signals()
@@ -128,6 +237,7 @@ class MainWindow(QMainWindow):
         self._set_theme_button_icon()
         self._set_language_combo()
         self._update_port_indicator()
+        self._refresh_device_cards()
 
     def _create_widgets(self) -> None:
         """Создаёт виджеты главного окна."""
@@ -198,29 +308,42 @@ class MainWindow(QMainWindow):
         self._update_check_button.setToolTip(tr("Проверка обновлений"))
         self._update_check_button.clicked.connect(self._on_check_updates_clicked)
 
-        # Главные кнопки в теле окна
-        self._update_button = QPushButton("🔄 " + tr("Обновить"))
-        self._update_button.setFixedSize(240, 100)
-        self._update_button.setFont(QFont("Segoe UI", 16))
-        self._update_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._update_button.clicked.connect(self._on_update_clicked)
+        # Левая колонка значков: первый — «папка» FAKE-настроек
+        # (эмулятор без устройства). Колонку будем пополнять.
+        self._fake_button = QPushButton("\U0001F4C2")
+        self._fake_button.setFixedSize(48, 48)
+        self._fake_button.setFont(QFont("Segoe UI", 16))
+        self._fake_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fake_button.setToolTip(
+            tr("FAKE-настройки (эмулятор устройства)")
+        )
+        self._fake_button.clicked.connect(self._on_fake_clicked)
 
-        self._configure_button = QPushButton("⚙️ " + tr("Настроить"))
-        self._configure_button.setFixedSize(240, 100)
-        self._configure_button.setFont(QFont("Segoe UI", 16))
-        self._configure_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._configure_button.clicked.connect(self._on_configure_clicked)
+        # Список карточек обнаруженных устройств.
+        self._cards_box = QWidget()
+        self._cards_layout = QVBoxLayout(self._cards_box)
+        self._cards_layout.setContentsMargins(0, 0, 0, 0)
+        self._cards_layout.setSpacing(10)
+        self._cards_layout.addStretch()
+        self._cards_signature: tuple = ()
+        self._cards_scroll = QScrollArea()
+        self._cards_scroll.setWidgetResizable(True)
+        self._cards_scroll.setWidget(self._cards_box)
+        self._cards_scroll.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }"
+        )
 
-        self._flash_button = QPushButton(tr("Прошить\nмикроконтроллер"))
-        self._flash_button.setFixedSize(260, 110)
-        self._flash_button.setFont(QFont("Segoe UI", 13))
+        # Нижние служебные кнопки стартового экрана.
+        self._flash_button = QPushButton(tr("Прошить МК"))
+        self._flash_button.setFixedSize(220, 44)
+        self._flash_button.setFont(QFont("Segoe UI", 11))
         self._flash_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._flash_button.setToolTip(tr("Открыть окно прошивки"))
         self._flash_button.clicked.connect(self._on_flash_clicked)
 
-        self._com_logger_button = QPushButton(tr("Comlogger\n(COM-порт)"))
-        self._com_logger_button.setFixedSize(260, 110)
-        self._com_logger_button.setFont(QFont("Segoe UI", 13))
+        self._com_logger_button = QPushButton(tr("COM-логгер"))
+        self._com_logger_button.setFixedSize(220, 44)
+        self._com_logger_button.setFont(QFont("Segoe UI", 11))
         self._com_logger_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._com_logger_button.setToolTip(tr("Открыть COM-логгер"))
         self._com_logger_button.clicked.connect(self._on_com_logger_clicked)
@@ -248,6 +371,7 @@ class MainWindow(QMainWindow):
         # Таймер heartbeat
         self._heartbeat_timer = QTimer(self)
         self._heartbeat_timer.timeout.connect(self._reset_port_indicator)
+        self._heartbeat_timer.timeout.connect(self._refresh_device_cards)
         self._heartbeat_timer.start(1500)
         # closeEvent выставляет True — дочерние окна по нему понимают,
         # что закрывается всё приложение, и не воскрешают это окно.
@@ -282,45 +406,41 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self._update_check_button)
         root.addWidget(self._top_panel)
 
-        action_layout = QHBoxLayout()
-        action_layout.setContentsMargins(20, 20, 20, 0)
-        action_layout.setSpacing(16)
-        action_layout.addStretch()
-        action_layout.addWidget(self._update_button)
-        action_layout.addWidget(self._configure_button)
-        action_layout.addStretch()
-        root.addLayout(action_layout)
-
-        flash_layout = QHBoxLayout()
-        flash_layout.setContentsMargins(20, 16, 20, 0)
-        flash_layout.setSpacing(16)
-        flash_layout.addStretch()
-        flash_layout.addWidget(self._flash_button)
-        flash_layout.addStretch()
-        root.addLayout(flash_layout)
-
-        logger_layout = QHBoxLayout()
-        logger_layout.setContentsMargins(20, 16, 20, 20)
-        logger_layout.setSpacing(16)
-        logger_layout.addStretch()
-        logger_layout.addWidget(self._com_logger_button)
-        logger_layout.addStretch()
-        root.addLayout(logger_layout)
-
         startup_layout = QVBoxLayout(self._startup_page)
-        startup_layout.setContentsMargins(40, 40, 40, 40)
-        startup_layout.setSpacing(30)
-        startup_layout.addStretch(1)
-        self._startup_title = QLabel(tr("Код Мастер"))
-        self._startup_title.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
-        self._startup_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        startup_layout.setContentsMargins(24, 16, 24, 16)
+        startup_layout.setSpacing(12)
+        self._startup_title = QLabel(tr("Устройства"))
+        self._startup_title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
         self._startup_title.setProperty("title", True)
         startup_layout.addWidget(self._startup_title)
-        self._startup_subtitle = QLabel(tr("Выберите режим работы"))
-        self._startup_subtitle.setFont(QFont("Segoe UI", 12))
-        self._startup_subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._startup_subtitle = QLabel(tr(
+            "Подключенные адаптеры — выберите действие"
+        ))
+        self._startup_subtitle.setFont(QFont("Segoe UI", 10))
+        self._startup_subtitle.setStyleSheet("color: #9A9AA5;")
         startup_layout.addWidget(self._startup_subtitle)
-        startup_layout.addStretch(2)
+
+        body = QHBoxLayout()
+        body.setSpacing(12)
+        # Левая колонка значков (расширяемая).
+        icon_col = QVBoxLayout()
+        icon_col.setSpacing(8)
+        icon_col.addWidget(self._fake_button)
+        icon_col.addStretch()
+        icon_wrap = QWidget()
+        icon_wrap.setLayout(icon_col)
+        icon_wrap.setFixedWidth(64)
+        body.addWidget(icon_wrap)
+        body.addWidget(self._cards_scroll, 1)
+        startup_layout.addLayout(body, 1)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(16)
+        bottom.addStretch()
+        bottom.addWidget(self._flash_button)
+        bottom.addWidget(self._com_logger_button)
+        bottom.addStretch()
+        startup_layout.addLayout(bottom)
 
         firmware_container = QWidget()
         firmware_layout = QVBoxLayout(firmware_container)
@@ -402,15 +522,134 @@ class MainWindow(QMainWindow):
                     block["recv"]["conds"][0]["id"].setFocus()
                     break
 
-    def _ensure_port_selected(self) -> bool:
-        """Если порт не выбран, открывает диалог подключения."""
-        if self._serial_manager.is_open() or self._config.get("port"):
+    def _detect_devices(self) -> list[dict[str, object]]:
+        """Наши адаптеры среди COM-портов по USB VID/PID."""
+        devices: list[dict[str, object]] = []
+        try:
+            for p in comports():
+                if p.vid == _USB_VID and p.pid in (_USB_PID_APP, _USB_PID_BOOT):
+                    devices.append({
+                        "port": p.device,
+                        "serial": (p.serial_number or "").strip(),
+                        "bootloader": p.pid == _USB_PID_BOOT,
+                    })
+        except Exception:  # noqa: BLE001
+            pass
+        return devices
+
+    def _connect_port(self, port: str) -> bool:
+        """Открывает порт устройства (скорость для USB CDC не нужна)."""
+        if (
+            self._serial_manager.is_open()
+            and self._serial_manager.current_port_name() == port
+        ):
             return True
-        dialog = ComSettingsDialog(self._serial_manager, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._update_port_indicator()
-            return self._serial_manager.is_open() or bool(self._config.get("port"))
-        return False
+        baud = int(self._config.get("baudrate", 115200) or 115200)
+        self._config.set_bulk({"port": port, "emulation": False})
+        return bool(
+            self._serial_manager.open_port(port, baud, auto_reconnect=True)
+        )
+
+    def _card_action(self, port: str | None, flash: bool) -> None:
+        """Кнопки карточки: «Обновить» → страница прошивки,
+        «Настроить» → окно настроек. Порт подключается сам."""
+        if port is None:
+            # Заглушка «устройств нет»: настройки доступны и офлайн.
+            if not flash:
+                self._open_settings_window()
+            return
+        if not self._connect_port(port):
+            QMessageBox.warning(
+                self, tr("Подключение"),
+                tr("Не удалось подключиться к {0}").format(port),
+            )
+            return
+        if flash:
+            self._central_stack.setCurrentIndex(1)
+            self._status_label.setText(tr("Страница прошивки"))
+        else:
+            self._open_settings_window()
+
+    def _on_fake_clicked(self) -> None:
+        """Значок «папки»: FAKE-настройки на эмуляторе устройства."""
+        baud = int(self._config.get("baudrate", 115200) or 115200)
+        self._config.set_bulk({"port": "FAKE", "emulation": True})
+        if self._serial_manager.open_port(
+            "FAKE", baud, emulation=True, auto_reconnect=True
+        ):
+            self._open_settings_window()
+        else:
+            QMessageBox.warning(
+                self, tr("Эмулятор"),
+                tr("Не удалось запустить эмулятор устройства"),
+            )
+
+    def _refresh_device_cards(self) -> None:
+        """Перестраивает карточки устройств при смене набора портов."""
+        if not isValid(self) or self._central_stack.currentIndex() != 0:
+            return
+        devices = self._detect_devices()
+        connected_port = (
+            self._serial_manager.current_port_name()
+            if self._serial_manager.is_open() else None
+        )
+        signature = (
+            tuple((d["port"], d["serial"], d["bootloader"]) for d in devices)
+            + (
+                connected_port,
+                self._config.get("device_name", ""),
+                self._config.get("device_serial", ""),
+                self._config.get("device_version", 0),
+            )
+        )
+        if signature == self._cards_signature:
+            return
+        self._cards_signature = signature
+        while self._cards_layout.count() > 1:
+            item = self._cards_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        port_names = self._config.get("port_names", {}) or {}
+        for d in devices:
+            connected = connected_port == d["port"]
+            name = (
+                port_names.get(d["serial"], "")
+                or (self._config.get("device_name", "") if connected else "")
+                or (
+                    tr("CodeMaster (режим прошивки)")
+                    if d["bootloader"] else "CodeMaster"
+                )
+            )
+            serial = (
+                self._config.get("device_serial", "") if connected else ""
+            ) or str(d["serial"])
+            version = (
+                str(self._config.get("device_version") or "—")
+                if connected else "—"
+            )
+            card = _DeviceCard(
+                self, str(d["port"]), name, serial, version, connected
+            )
+            self._cards_layout.insertWidget(
+                self._cards_layout.count() - 1, card
+            )
+        if not devices:
+            # Карточка-заглушка с баннером «подключите по USB».
+            self._cards_layout.insertWidget(
+                self._cards_layout.count() - 1,
+                _DeviceCard(self, None, "CodeMaster", "", "", False),
+            )
+
+    def _ensure_port_selected(self) -> bool:
+        """Единственное видимое устройство подключается само — без
+        таблицы выбора порта/скорости."""
+        if self._serial_manager.is_open():
+            return True
+        devices = self._detect_devices()
+        if len(devices) == 1:
+            return self._connect_port(str(devices[0]["port"]))
+        return bool(self._config.get("port"))
 
     def _on_update_clicked(self) -> None:
         """Открывает страницу прошивки после проверки порта."""
@@ -434,54 +673,11 @@ class MainWindow(QMainWindow):
         self._status_label.setText(tr("Открыт COM-логгер"))
 
     def _on_configure_clicked(self) -> None:
-        """Сначала открывает диалог подключения, затем окно настроек CAN."""
-        if self._connection_dialog is not None:
-            # Ссылка могла пережить C++-объект: WA_DeleteOnClose удаляет
-            # диалог, а если _finish не добежал (исключение в shutdown(),
-            # вложенный processEvents при создании окна настроек) —
-            # Python-обёртка оставалась указывать на мёртвый QDialog и
-            # raise_() ронял приложение: «QDialog already deleted».
-            if isValid(self._connection_dialog):
-                self._connection_dialog.raise_()
-                self._connection_dialog.activateWindow()
-                return
-            self._connection_dialog = None
-        dialog = QDialog()
-        dialog.setWindowTitle(tr("Подключение"))
-        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        dialog.resize(450, 300)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(12, 12, 12, 12)
-        connection = ConnectionTab(self._serial_manager, dialog)
-        layout.addWidget(connection)
-        cancel_button = QPushButton(tr("Отмена"))
-        cancel_button.clicked.connect(dialog.reject)
-        layout.addWidget(cancel_button)
-        connection.connected.connect(dialog.accept)
-        # Храним ссылку, иначе диалог исчезнет сразу после return:
-        # локальная переменная удалится, и Qt-объект без родителя соберёт GC.
-        self._connection_dialog = dialog
-        # После закрытия чистим ссылку, иначе GC обернётся мёртвым объектом,
-        # и гасим вкладку: останавливаем автоопределение и отписываем её от
-        # сигналов SerialManager — иначе device_identified/connection_changed
-        # вызывали бы слоты уже удалённого диалога (падение при повторном
-        # входе в настройки: «QComboBox already deleted»).
-        def _finish(_result: int) -> None:
-            # shutdown() не должен помешать очистке ссылки — иначе
-            # исключение оставляло self._connection_dialog указывающим
-            # на мёртвый диалог и следующее «Настроить» падало.
-            with contextlib.suppress(Exception):
-                connection.shutdown()
-            self._on_connection_finished()
-
-        dialog.finished.connect(_finish)
-        dialog.accepted.connect(self._open_settings_window)
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
-
-    def _on_connection_finished(self) -> None:
-        self._connection_dialog = None
+        """«Настроить» без таблицы портов: единственное видимое
+        устройство подключается само, дальше — окно настроек."""
+        if self._serial_manager.is_open() or len(self._detect_devices()) == 1:
+            self._ensure_port_selected()
+        self._open_settings_window()
 
     def _open_settings_window(self) -> None:
         """Показывает окно настроек CAN."""
@@ -578,15 +774,20 @@ class MainWindow(QMainWindow):
         self._logs_button.setText("📄 " + tr("Логи"))
         self._help_button.setToolTip(tr("Помощь"))
         self._update_check_button.setToolTip(tr("Проверка обновлений"))
-        self._update_button.setText("🔄 " + tr("Обновить"))
-        self._configure_button.setText("⚙️ " + tr("Настроить"))
-        self._flash_button.setText(tr("Прошить\nмикроконтроллер"))
+        self._flash_button.setText(tr("Прошить МК"))
         self._flash_button.setToolTip(tr("Открыть окно прошивки"))
-        self._com_logger_button.setText(tr("Comlogger\n(COM-порт)"))
+        self._com_logger_button.setText(tr("COM-логгер"))
         self._com_logger_button.setToolTip(tr("Открыть COM-логгер"))
         self._firmware_page_back_button.setText(tr("← Назад"))
-        self._startup_title.setText(tr("Код Мастер"))
-        self._startup_subtitle.setText(tr("Выберите режим работы"))
+        self._startup_title.setText(tr("Устройства"))
+        self._startup_subtitle.setText(
+            tr("Подключенные адаптеры — выберите действие")
+        )
+        self._fake_button.setToolTip(
+            tr("FAKE-настройки (эмулятор устройства)")
+        )
+        self._cards_signature = ()
+        self._refresh_device_cards()
         self._status_label.setText(tr("Готов"))
 
     def _set_theme_button_icon(self) -> None:

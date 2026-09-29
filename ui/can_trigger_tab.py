@@ -332,12 +332,17 @@ class CanTriggerTab(QWidget):
         return row
 
     def _create_receive_row(self, font: QFont, label: str) -> dict[str, Any]:
-        # Условия приёма — список строк (ИЛИ между собой). Первая строка
-        # с подписью «Приём», остальные добавляются «+» в строке опций.
+        # Условия приёма — список строк (ИЛИ между собой). Подпись
+        # «Приём» — отдельной строкой сверху (просьба мастера), поля
+        # начинаются со следующей строки; остальные условия
+        # добавляются «+» в строке опций.
         conds_layout = QVBoxLayout()
         conds_layout.setSpacing(4)
         conds_layout.setContentsMargins(0, 0, 0, 0)
-        cond0 = self._create_cond_row(font, label)
+        recv_label = QLabel(label)
+        recv_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        conds_layout.addWidget(recv_label)
+        cond0 = self._create_cond_row(font, None)
         conds_layout.addLayout(cond0["layout"])
 
         # Вторая строка приёма — опции: реагировать ли на кадры,
@@ -605,43 +610,32 @@ class CanTriggerTab(QWidget):
         delay_before_label = QLabel(tr("Пауза перед отправкой"))
         delay_between_label = QLabel(tr("Пауза между пакетами"))
 
-        # Все элементы строки прижимаем к нижнему краю — иначе колонка
-        # «Бит» с RTR сверху делала бы ряд выше, и остальные поля
-        # центрировались бы над строкой ввода.
-        bottom = Qt.AlignmentFlag.AlignBottom
-        row_layout.addWidget(QLabel(tr("Канал")), alignment=bottom)
-        row_layout.addWidget(channel, alignment=bottom)
-        # Колонка «Бит» с кнопкой RTR над ней (RTR относится к этой
-        # строке ответа, а не ко всему триггеру).
-        bit_container = QWidget()
-        bit_column = QVBoxLayout(bit_container)
-        bit_column.setSpacing(1)
-        bit_column.setContentsMargins(0, 0, 0, 0)
-        bit_column.addWidget(rtr, alignment=Qt.AlignmentFlag.AlignHCenter)
-        bit_row = QHBoxLayout()
-        bit_row.setSpacing(2)
-        bit_row.setContentsMargins(0, 0, 0, 0)
-        bit_row.addWidget(QLabel(tr("Бит")))
-        bit_row.addWidget(bit)
-        bit_column.addLayout(bit_row)
-        row_layout.addWidget(bit_container, alignment=bottom)
-        row_layout.addWidget(QLabel(tr("ID")), alignment=bottom)
-        row_layout.addWidget(can_id, alignment=bottom)
-        row_layout.addWidget(QLabel(tr("DLC")), alignment=bottom)
-        row_layout.addWidget(dlc, alignment=bottom)
-        row_layout.addWidget(data_widget, alignment=bottom)
+        # Порядок как в строке «Приём»: канал, битность, ID, DLC, Data,
+        # затем RTR и кнопки копировать/вставить в той же строке —
+        # все поля на одной высоте (просьба мастера: «БИТ», ID и DLC
+        # не должны плясать по вертикали).
+        row_layout.addWidget(QLabel(tr("Канал")))
+        row_layout.addWidget(channel)
+        row_layout.addWidget(QLabel(tr("Бит")))
+        row_layout.addWidget(bit)
+        row_layout.addWidget(QLabel(tr("ID")))
+        row_layout.addWidget(can_id)
+        row_layout.addWidget(QLabel(tr("DLC")))
+        row_layout.addWidget(dlc)
+        row_layout.addWidget(data_widget)
+        row_layout.addWidget(rtr)
 
         copy_paste = create_clipboard_buttons(self, can_id, dlc, data, bit)
-        row_layout.addWidget(copy_paste, alignment=bottom)
+        row_layout.addWidget(copy_paste)
 
         row_layout.addStretch()
-        row_layout.addWidget(delay_before_label, alignment=bottom)
-        row_layout.addWidget(delay_before_send, alignment=bottom)
-        row_layout.addWidget(delay_between_label, alignment=bottom)
-        row_layout.addWidget(delay_between, alignment=bottom)
-        row_layout.addWidget(QLabel(tr("Кол-во")), alignment=bottom)
-        row_layout.addWidget(count, alignment=bottom)
-        row_layout.addWidget(remove_button, alignment=bottom)
+        row_layout.addWidget(delay_before_label)
+        row_layout.addWidget(delay_before_send)
+        row_layout.addWidget(delay_between_label)
+        row_layout.addWidget(delay_between)
+        row_layout.addWidget(QLabel(tr("Кол-во")))
+        row_layout.addWidget(count)
+        row_layout.addWidget(remove_button)
 
         dlc.valueChanged.connect(
             lambda value: self._set_data_enabled(data, 0 if rtr.isChecked() else value)
@@ -1148,10 +1142,18 @@ class CanTriggerTab(QWidget):
         """Создаёт виджеты одного блока триггера (позиция = index)."""
         font = self._font
         group = QGroupBox(tr("Триггер {0}").format(index + 1))
-        group.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        group.setCheckable(True)
-        group.setChecked(False)
+        group.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         self._apply_block_tint(group, index)
+
+        # Галка «включён» — отдельный виджет в шапке блока, НЕ checkable
+        # QGroupBox: чекабельная группа глушит ВСЕ дочерние поля при
+        # снятой галке, а оператору нужно править данные выключенного
+        # триггера (отчёт мастера).
+        enabled_check = QCheckBox()
+        enabled_check.setFont(font)
+        enabled_check.setChecked(False)
+        enabled_check.setToolTip(tr("Триггер включён"))
+        self._wire_toggle_checkbox_style(enabled_check)
 
         status = QLabel(tr("Статус: не читался"))
         status.setFont(font)
@@ -1217,6 +1219,7 @@ class CanTriggerTab(QWidget):
 
         return {
             "group": group,
+            "enabled_check": enabled_check,
             "status": status,
             "name": name_edit,
             "recv": recv,
@@ -1289,17 +1292,19 @@ class CanTriggerTab(QWidget):
         self._set_cache_enabled(block, False)
         block["cache"]["cache_check"].setEnabled(True)
 
-        # Шапка блока: статус слева, имя триггера справа от него.
+        # Шапка блока: галка «включён», статус слева, имя триггера
+        # справа от него. Содержимое не прячется при выключении — поля
+        # должны оставаться редактируемыми.
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.addWidget(block["enabled_check"])
         header_row.addWidget(block["status"])
         header_row.addSpacing(10)
         header_row.addWidget(block["name"])
         header_row.addStretch()
         group_layout.addLayout(header_row)
         group_layout.addWidget(content)
-        block["group"].toggled.connect(lambda checked, c=content: c.setVisible(checked))
-        block["group"].toggled.connect(lambda checked, b=block: self._on_trigger_toggled_by_block(b, checked))
+        block["enabled_check"].toggled.connect(lambda checked, b=block: self._on_trigger_toggled_by_block(b, checked))
         block["content"] = content
 
         # Крестик удаления — НЕ ребёнок checkable QGroupBox: иначе Qt
@@ -1526,7 +1531,7 @@ class CanTriggerTab(QWidget):
         container_layout.setContentsMargins(8, 8, 8, 8)
 
         self._blocks_layout = QVBoxLayout()
-        self._blocks_layout.setSpacing(10)
+        self._blocks_layout.setSpacing(20)
         container_layout.addLayout(self._blocks_layout)
 
         self._add_trigger_button = self._round_button(tr("Добавить триггер"))
@@ -1586,7 +1591,7 @@ class CanTriggerTab(QWidget):
             except ValueError:
                 self._mark_dirty()
 
-        block["group"].toggled.connect(mark)
+        block["enabled_check"].toggled.connect(mark)
         skip = [
             *(cond["copy_paste"] for cond in block["recv"]["conds"]),
             block["recv"]["add_cond_button"],
@@ -1760,7 +1765,7 @@ class CanTriggerTab(QWidget):
             src_fire_limit = 0
 
         return {
-            "enabled": int(block["group"].isChecked()),
+            "enabled": int(block["enabled_check"].isChecked()),
             "rx_channel": cond["channel"].currentIndex(),
             "rx_extended": rx_extended,
             "rx_id": recv_id,
@@ -1811,7 +1816,7 @@ class CanTriggerTab(QWidget):
         state: 'unknown' | 'enabled' | 'disabled' | 'synced' | 'differs' | 'written'
         """
         label = self._blocks[index]["status"]
-        enabled = self._blocks[index]["group"].isChecked()
+        enabled = self._blocks[index]["enabled_check"].isChecked()
         on_off = tr("вкл") if enabled else tr("выкл")
         if state == "synced":
             text = tr("Статус: {0}, совпадает с устройством").format(on_off)
@@ -1879,7 +1884,7 @@ class CanTriggerTab(QWidget):
             cond_groups.setdefault(int(record.get("rx_cond_idx", 0)), []).append(record)
         base_records = cond_groups.get(0) or next(iter(cond_groups.values()))
         values = base_records[0]
-        block["group"].setChecked(bool(values["enabled"]))
+        block["enabled_check"].setChecked(bool(values["enabled"]))
         # Имя присутствует только на прошивках протокола ≥5 (таблица
         # trigger_names в config-странице). На старых — не трогаем поле,
         # чтобы не затирать имя из загруженного конфига ПК.
@@ -2358,7 +2363,7 @@ class CanTriggerTab(QWidget):
         """Полностью очищает блок (пустой слот устройства — не оставляем
         в полях старые данные из кэша конфигурации)."""
         block = self._blocks[index]
-        block["group"].setChecked(False)
+        block["enabled_check"].setChecked(False)
         block["name"].setText("")
         block["cache"]["cache_check"].setChecked(False)
         self._on_cache_active_changed(
@@ -2835,7 +2840,7 @@ class CanTriggerTab(QWidget):
             # «Вкл, исполняется приложением» — блок активен, но в trigger_t
             # не влез: в МК записан томбстоун enabled=0, отвечает ПК.
             pc_only = (
-                self._blocks[block_index]["group"].isChecked()
+                self._blocks[block_index]["enabled_check"].isChecked()
                 and not self._device_managed[block_index]
             )
             remote_payload = device[new_index] if new_index < len(device) else None
@@ -2990,7 +2995,7 @@ class CanTriggerTab(QWidget):
         """
         if not self._serial_manager.is_open():
             return
-        if index >= len(self._blocks) or not self._blocks[index]["group"].isChecked():
+        if index >= len(self._blocks) or not self._blocks[index]["enabled_check"].isChecked():
             return
         self._fire_trigger_response(trigger)
         self._flash_test_button(index)
@@ -3119,7 +3124,7 @@ class CanTriggerTab(QWidget):
     def _build_internal_triggers(self) -> list[dict[str, Any]]:
         triggers = []
         for i, block in enumerate(self._blocks):
-            if not block["group"].isChecked():
+            if not block["enabled_check"].isChecked():
                 continue
             fire_on_boot = block["recv"]["fire_on_boot"].isChecked()
             # Условия приёма — список строк (ИЛИ). Пустые строки
@@ -3304,7 +3309,7 @@ class CanTriggerTab(QWidget):
             for cond in recv["conds"]
         ]
         config = {
-            "active": block["group"].isChecked(),
+            "active": block["enabled_check"].isChecked(),
             "name": block["name"].text().strip(),
             "cache": block["cache"]["cache_check"].isChecked(),
             "recv_conditions": conds,
@@ -3552,7 +3557,7 @@ class CanTriggerTab(QWidget):
         block = self._blocks[index]
         self._applying_device_state = True
         try:
-            block["group"].setChecked(bool(trigger.get("active", True)))
+            block["enabled_check"].setChecked(bool(trigger.get("active", True)))
             block["name"].setText(str(trigger.get("name", "")))
             cache_active = bool(trigger.get("cache", False))
             block["cache"]["cache_check"].setChecked(cache_active)
@@ -4022,7 +4027,7 @@ class CanTriggerTab(QWidget):
         block = self._add_trigger_block()
         if block is None:
             return
-        block["group"].setChecked(True)
+        block["enabled_check"].setChecked(True)
         cond = block["recv"]["conds"][0]
         can_id = int(packet["id"])
         cond["id"].setText(int_to_hex(can_id, 8 if can_id > 0x7FF else 3))
