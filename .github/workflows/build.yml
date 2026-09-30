@@ -147,6 +147,7 @@ jobs:
       contents: write
     if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
     steps:
+      - uses: actions/checkout@v5
       - name: Determine release info
         id: release_info
         shell: bash
@@ -161,6 +162,10 @@ jobs:
             echo "release_name=Latest build" >> $GITHUB_OUTPUT
             echo "is_tag=false" >> $GITHUB_OUTPUT
           fi
+          # Версия релиза — из models/version.py: она же прошивается
+          # в МК (VER1 в полном образе, отчёт мастера).
+          VER=$(python3 -c "import re; print(re.search(r'VERSION = \"([^\"]+)\"', open('models/version.py').read()).group(1))")
+          echo "version=$VER" >> $GITHUB_OUTPUT
       - name: Download all artifacts
         uses: actions/download-artifact@v7
         with:
@@ -168,11 +173,18 @@ jobs:
       - name: Rename artifacts for release
         run: |
           mkdir dist
-          mv artifacts/CodeMaster-windows/CodeMaster.exe dist/CodeMaster.exe
-          mv artifacts/CodeMaster-macos/CodeMaster.dmg dist/CodeMaster.dmg
-          mv artifacts/CodeMaster-linux/CodeMaster dist/CodeMaster
-          cp artifacts/CodeMaster-firmware/* dist/
-          chmod +x dist/CodeMaster
+          VER="${{ steps.release_info.outputs.version }}"
+          # Имена по отчёту мастера: приложение «CODMaster (ver)»,
+          # прошивка «CAN 2 (ver)» — ver = версия релиза, она же
+          # зашита в МК.
+          mv artifacts/CodeMaster-windows/CodeMaster.exe "dist/CODMaster ($VER).exe"
+          mv artifacts/CodeMaster-macos/CodeMaster.dmg "dist/CODMaster ($VER).dmg"
+          mv artifacts/CodeMaster-linux/CodeMaster "dist/CODMaster ($VER)"
+          mv artifacts/CodeMaster-firmware/codemaster_full.hex "dist/CAN 2 ($VER).hex"
+          mv artifacts/CodeMaster-firmware/codemaster_full.bin "dist/CAN 2 ($VER).bin"
+          chmod +x "dist/CODMaster ($VER)"
+          # Контрольные суммы — уже под финальными именами файлов.
+          (cd dist && sha256sum * > SHA256SUMS.txt)
       - name: Create/Update latest release
         id: release_latest
         if: steps.release_info.outputs.is_tag == 'false'
@@ -186,12 +198,7 @@ jobs:
           allowUpdates: true
           replacesArtifacts: true
           artifacts: |
-            dist/CodeMaster.exe
-            dist/CodeMaster.dmg
-            dist/CodeMaster
-            dist/codemaster_full.hex
-            dist/codemaster_full.bin
-            dist/SHA256SUMS.txt
+            dist/*
       - name: Fallback release upload (gh CLI)
         if: steps.release_latest.outcome == 'failure'
         env:
@@ -219,12 +226,7 @@ jobs:
           name: ${{ steps.release_info.outputs.release_name }}
           prerelease: false
           files: |
-            dist/CodeMaster.exe
-            dist/CodeMaster.dmg
-            dist/CodeMaster
-            dist/codemaster_full.hex
-            dist/codemaster_full.bin
-            dist/SHA256SUMS.txt
+            dist/*
           fail_on_unmatched_files: true
           generate_release_notes: true
         env:

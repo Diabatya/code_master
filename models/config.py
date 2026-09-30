@@ -174,6 +174,10 @@ class Config:
         "can2_terminator",
         "sleep_time",
         "sleep_mode",
+        # Переменные больше не кэшируются в config.json — хранятся
+        # только в файле «Config Variable» (отчёт мастера: после
+        # перепрошивки МК всплывали старые переменные).
+        "variables",
     )
 
     def load(self) -> None:

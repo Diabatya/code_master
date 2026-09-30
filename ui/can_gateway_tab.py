@@ -32,14 +32,19 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -66,18 +71,56 @@ _DIR_BOTH = 2   # ↔ : обе стороны
 _MODE_IGNORE = "ignore"
 _MODE_SUBSTITUTE = "substitute"
 
-# Неактивная стрелка — белый контур, активная — красная.
+# Стрелки направления — голубые (отчёт мастера): неактивная —
+# голубой контур, активная — голубая заливка.
 _ARROW_STYLE = (
     "QPushButton {"
-    " border: 2px solid #FFFFFF; color: #FFFFFF;"
+    " border: 2px solid #3A7BD5; color: #3A7BD5;"
     " background: transparent; border-radius: 6px;"
     " font-size: 18px; font-weight: bold; padding: 2px 10px;"
     "}"
     "QPushButton:checked {"
-    " border-color: #F44336; color: #F44336;"
-    " background: rgba(244, 67, 54, 60);"
+    " border-color: #3A7BD5; color: #FFFFFF;"
+    " background: #3A7BD5;"
     "}"
+    "QPushButton:hover:!checked { background: rgba(58,123,213,40); }"
 )
+
+# Голубой крестик закрытия — как на вкладке «Гибкая логика»
+# (отчёт мастера).
+_CLOSE_STYLE = (
+    "QPushButton { color: #7C9EFF; border: none; font-weight: bold;"
+    " font-size: 14px; padding: 0 2px; }"
+    "QPushButton:hover { color: #FFFFFF; }"
+)
+
+# Голубая округлая рамка вокруг программы (дизайн как в ГЛ).
+_CARD_STYLE = (
+    "QGroupBox { border: 2px solid #3A7BD5; border-radius: 8px;"
+    " margin-top: 10px; padding-top: 8px; }"
+)
+
+
+def _close_button(font: QFont, tooltip: str) -> QPushButton:
+    """Голубой крестик «✕» — как в ГЛ (отчёт мастера)."""
+    button = QPushButton("✕")
+    button.setFont(font)
+    button.setStyleSheet(_CLOSE_STYLE)
+    button.setFixedSize(22, 22)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setToolTip(tooltip)
+    return button
+
+
+def _set_data_enabled(edits: list[QLineEdit], count: int) -> None:
+    """DLC ограничивает поля DATA: за пределами DLC поля пустые
+    и неактивные — как в триггерах (отчёт мастера)."""
+    for i, edit in enumerate(edits):
+        if i >= count:
+            edit.setText("")
+            edit.setEnabled(False)
+        else:
+            edit.setEnabled(True)
 
 
 def _spec_match(spec: dict[str, Any], frame_id: int, data: bytes) -> bool:
@@ -103,9 +146,13 @@ def _spec_filled(spec: dict[str, Any]) -> bool:
 
 
 class _FrameSpec(QWidget):
-    """Спецификация CAN-фрейма: ID + 8 байт DATA с wildcard «X»."""
+    """Спецификация CAN-фрейма: ID + DLC + 8 байт DATA с wildcard
+    «X». DLC ограничивает число доступных байтовых полей — как в
+    триггерах (отчёт мастера: DLC везде, где ручной ввод DATA)."""
 
-    def __init__(self, font: QFont, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, font: QFont, mark_dirty=None, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setSpacing(4)
@@ -115,6 +162,13 @@ class _FrameSpec(QWidget):
         id_row.addWidget(QLabel("ID"))
         self.can_id = _HexIdEdit(font)
         id_row.addWidget(self.can_id)
+        id_row.addWidget(QLabel("DLC"))
+        self.dlc = QSpinBox()
+        self.dlc.setFont(font)
+        self.dlc.setRange(1, 8)
+        self.dlc.setValue(8)
+        self.dlc.setFixedWidth(54)
+        id_row.addWidget(self.dlc)
         id_row.addStretch()
         layout.addLayout(id_row)
 
@@ -126,17 +180,30 @@ class _FrameSpec(QWidget):
         clip = create_clipboard_buttons(self, self.can_id, None, self.data)
         layout.addWidget(clip)
 
+        self.dlc.valueChanged.connect(
+            lambda v: _set_data_enabled(self.data, v)
+        )
+        if mark_dirty is not None:
+            self.can_id.textChanged.connect(mark_dirty)
+            self.dlc.valueChanged.connect(mark_dirty)
+            for edit in self.data:
+                edit.textChanged.connect(mark_dirty)
+        _set_data_enabled(self.data, self.dlc.value())
+
     def read(self) -> dict[str, Any]:
         return {
             "id": self.can_id.text().strip(),
+            "dlc": self.dlc.value(),
             "data": " ".join(e.text().strip().upper() for e in self.data),
         }
 
     def write(self, spec: dict[str, Any]) -> None:
         self.can_id.setText(str(spec.get("id", "")))
+        self.dlc.setValue(int(spec.get("dlc", 8) or 8))
         tokens = str(spec.get("data", "")).split()
         for i, edit in enumerate(self.data):
             edit.setText(tokens[i] if i < len(tokens) else "")
+        _set_data_enabled(self.data, self.dlc.value())
 
 
 class _CurveEditor(QWidget):
@@ -144,7 +211,10 @@ class _CurveEditor(QWidget):
     0x00–0xFF) → выходной байт (ось Y). Клик по полю — новая точка,
     перетаскивание точки — правка, двойной клик по точке — удаление.
     Ломаная между точками — интерполяция: так оператор наклоняет
-    прямую, сдвигает её вверх/вниз и строит кривую (отчёт мастера)."""
+    прямую, сдвигает её вверх/вниз и строит кривую (отчёт мастера).
+    Линии подписаны именами каналов («Приём CAN 1»/«Подмена CAN 2»),
+    правки курсором синхронно отражаются в «Таблице привязки»
+    (сигнал on_changed)."""
 
     _RADIUS = 5
     _MARGIN = 14
@@ -153,9 +223,25 @@ class _CurveEditor(QWidget):
         super().__init__(parent)
         self._points: list[tuple[int, int]] = []
         self._drag_index: int | None = None
+        self._rx_name = ""
+        self._tx_name = ""
+        # Колбэк после правки точек курсором — таблица привязки
+        # перечитывает график (отчёт мастера).
+        self.on_changed = None
         self.setMinimumHeight(170)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def set_line_names(self, rx_name: str, tx_name: str) -> None:
+        """Подписи линий по каналам: «Приём CAN 1» (диагональ
+        входящих данных) и «Подмена CAN 2» (кривая)."""
+        self._rx_name = rx_name
+        self._tx_name = tx_name
+        self.update()
+
+    def _emit_changed(self) -> None:
+        if self.on_changed is not None:
+            self.on_changed()
 
     def points(self) -> list[list[int]]:
         return [[x, y] for x, y in sorted(self._points)]
@@ -196,8 +282,6 @@ class _CurveEditor(QWidget):
         return None
 
     def paintEvent(self, _event) -> None:  # noqa: N802
-        from PySide6.QtGui import QColor, QPainter, QPen
-
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = self._rect()
@@ -225,13 +309,16 @@ class _CurveEditor(QWidget):
                 0, int(sy) - 6, r.left() - 4, 12,
                 Qt.AlignmentFlag.AlignRight, f"0x{v:02X}",
             )
-        # Диагональ «без подмены» — тонкая пунктирная ориентира.
-        painter.setPen(QPen(QColor(120, 120, 140), 1, Qt.PenStyle.DashLine))
+        # Диагональ «без подмены» — линия приёма на своём канале:
+        # «Приём CAN n» (отчёт мастера — имена по каналам).
+        rx_color = QColor(124, 158, 255)
+        painter.setPen(QPen(rx_color, 1, Qt.PenStyle.DashLine))
         x0, y0 = self._to_screen(0, 0)
         x1, y1 = self._to_screen(255, 255)
         painter.drawLine(int(x0), int(y0), int(x1), int(y1))
-        # Кривая подмены.
-        painter.setPen(QPen(QColor(255, 170, 80), 2))
+        # Кривая подмены — «Подмена CAN m».
+        tx_color = QColor(255, 170, 80)
+        painter.setPen(QPen(tx_color, 2))
         prev = None
         for x, y in sorted(self._points):
             sx, sy = self._to_screen(x, y)
@@ -240,12 +327,33 @@ class _CurveEditor(QWidget):
                     int(prev[0]), int(prev[1]), int(sx), int(sy)
                 )
             prev = (sx, sy)
-        painter.setBrush(QColor(255, 170, 80))
+        painter.setBrush(tx_color)
         for x, y in self._points:
             sx, sy = self._to_screen(x, y)
             painter.drawEllipse(
                 int(sx) - self._RADIUS, int(sy) - self._RADIUS,
                 self._RADIUS * 2, self._RADIUS * 2,
+            )
+        # Легенда с именами каналов (отчёт мастера).
+        legend_font = painter.font()
+        legend_font.setPointSize(8)
+        legend_font.setBold(True)
+        painter.setFont(legend_font)
+        ly = r.top() + 4
+        if self._rx_name:
+            painter.setPen(rx_color)
+            painter.drawText(
+                r.left() + 6, ly, r.width() - 12, 14,
+                Qt.AlignmentFlag.AlignLeft,
+                f"— {self._rx_name}",
+            )
+            ly += 14
+        if self._tx_name:
+            painter.setPen(tx_color)
+            painter.drawText(
+                r.left() + 6, ly, r.width() - 12, 14,
+                Qt.AlignmentFlag.AlignLeft,
+                f"— {self._tx_name}",
             )
         painter.end()
 
@@ -261,6 +369,7 @@ class _CurveEditor(QWidget):
                 self._points.sort()
                 self._drag_index = self._points.index((x, y))
                 self.update()
+                self._emit_changed()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
@@ -273,7 +382,12 @@ class _CurveEditor(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        self._drag_index = None
+        if self._drag_index is not None:
+            self._drag_index = None
+            self.update()
+            # Отражение правок курсора в «Таблице привязки» —
+            # после отпускания (отчёт мастера).
+            self._emit_changed()
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
@@ -283,6 +397,7 @@ class _CurveEditor(QWidget):
             del self._points[hit]
             self._drag_index = None
             self.update()
+            self._emit_changed()
         super().mouseDoubleClickEvent(event)
 
 
@@ -313,10 +428,212 @@ def _curve_map(curve: Any, value: int) -> int:
     return value
 
 
+class _BindTable(QTableWidget):
+    """«Таблица привязки» подмены — те же правила, что в
+    «Переменных»: колонка «Приём» и «Подмена» принимают только HEX
+    (0x00–0xFF); строки — точки кривой графика. Пустые строки
+    допустимы и пропускаются (отчёт мастера)."""
+
+    _MAX_ROWS = 32
+
+    def __init__(
+        self, font: QFont, on_changed, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self._on_changed = on_changed
+        self._updating = False
+        self.setFont(font)
+        self.setColumnCount(2)
+        self.setHorizontalHeaderLabels([tr("Приём"), tr("Подмена")])
+        self.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.verticalHeader().setVisible(False)
+        self.setFixedHeight(120)
+        self.itemChanged.connect(self._on_item_changed)
+
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        """Проверка записи: только HEX-байт 0x00–0xFF, пустая —
+        пропускается (те же правила, что в «Переменных»)."""
+        if self._updating:
+            return
+        text = item.text().strip().upper()
+        if text and (hex_to_int(text) is None or len(text) > 2):
+            # Невалидная запись — откатываем (правило таблицы
+            # привязки из «Переменных», отчёт мастера).
+            self._updating = True
+            item.setText("")
+            self._updating = False
+            return
+        self._updating = True
+        item.setText(text)
+        self._updating = False
+        if self._on_changed is not None:
+            self._on_changed()
+
+    def points(self) -> list[list[int]]:
+        """Точки кривой из заполненных пар «Приём/Подмена»."""
+        points: list[list[int]] = []
+        for row in range(self.rowCount()):
+            rx_item = self.item(row, 0)
+            tx_item = self.item(row, 1)
+            rx_text = rx_item.text().strip() if rx_item else ""
+            tx_text = tx_item.text().strip() if tx_item else ""
+            rx = hex_to_int(rx_text)
+            tx = hex_to_int(tx_text)
+            if rx is None or tx is None:
+                continue
+            points.append([rx, tx])
+        return points
+
+    def set_points(self, points: list[list[int]]) -> None:
+        """Переписывает таблицу по точкам графика — отражение
+        правок курсором (отчёт мастера)."""
+        self._updating = True
+        self.setRowCount(0)
+        for x, y in points:
+            row = self.rowCount()
+            if row >= self._MAX_ROWS:
+                break
+            self.insertRow(row)
+            self.setItem(row, 0, QTableWidgetItem(f"{x:02X}"))
+            self.setItem(row, 1, QTableWidgetItem(f"{y:02X}"))
+        self._updating = False
+
+    def add_row(self) -> None:
+        if self.rowCount() >= self._MAX_ROWS:
+            return
+        row = self.rowCount()
+        self.insertRow(row)
+        self.setItem(row, 0, QTableWidgetItem(""))
+        self.setItem(row, 1, QTableWidgetItem(""))
+
+    def remove_selected_row(self) -> None:
+        row = self.currentRow()
+        if row >= 0:
+            self.removeRow(row)
+            if self._on_changed is not None:
+                self._on_changed()
+
+
+class _SubCurveBlock(QWidget):
+    """Блок подмены для одного направления: «ОТ»/«ДО» — байты DATA,
+    к которым применяется кривая; «Таблица привязки» — точки графика
+    (HEX-пары приём→подмена); график правится курсором и отражается
+    в таблице (отчёт мастера). Линии подписаны каналами:
+    «Приём CAN a» / «Подмена CAN b»."""
+
+    def __init__(
+        self,
+        font: QFont,
+        rx_channel: int,
+        tx_channel: int,
+        mark_dirty,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self._rx_channel = rx_channel
+        self._tx_channel = tx_channel
+
+        head = QHBoxLayout()
+        self._title = QLabel()
+        self._title.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        head.addWidget(self._title)
+        head.addStretch()
+        head.addWidget(QLabel(tr("DATA ОТ:")))
+        self.byte_from = QSpinBox()
+        self.byte_from.setFont(font)
+        self.byte_from.setRange(1, 8)
+        self.byte_from.setValue(1)
+        self.byte_from.setFixedWidth(54)
+        head.addWidget(self.byte_from)
+        head.addWidget(QLabel(tr("ДО:")))
+        self.byte_to = QSpinBox()
+        self.byte_to.setFont(font)
+        self.byte_to.setRange(1, 8)
+        self.byte_to.setValue(8)
+        self.byte_to.setFixedWidth(54)
+        head.addWidget(self.byte_to)
+        layout.addLayout(head)
+
+        table_row = QHBoxLayout()
+        self.table = _BindTable(font, self._on_table_changed)
+        table_row.addWidget(self.table, 1)
+        table_btns = QVBoxLayout()
+        add_btn = QPushButton("＋")
+        add_btn.setFont(font)
+        add_btn.setFixedSize(24, 24)
+        add_btn.setToolTip(tr("Добавить точку привязки"))
+        add_btn.clicked.connect(self.table.add_row)
+        remove_btn = QPushButton("−")
+        remove_btn.setFont(font)
+        remove_btn.setFixedSize(24, 24)
+        remove_btn.setToolTip(tr("Удалить выбранную точку"))
+        remove_btn.clicked.connect(self.table.remove_selected_row)
+        table_btns.addWidget(add_btn)
+        table_btns.addWidget(remove_btn)
+        table_btns.addStretch()
+        table_row.addLayout(table_btns)
+        layout.addLayout(table_row)
+
+        self.curve = _CurveEditor()
+        self.curve.on_changed = self._on_curve_changed
+        layout.addWidget(self.curve)
+        self._refresh_names()
+
+        self.byte_from.valueChanged.connect(self._validate_range)
+        self.byte_to.valueChanged.connect(self._validate_range)
+        self.byte_from.valueChanged.connect(mark_dirty)
+        self.byte_to.valueChanged.connect(mark_dirty)
+
+    def _validate_range(self, *_args) -> None:
+        """ОТ не больше ДО — поля автоматически выравниваются."""
+        if self.byte_from.value() > self.byte_to.value():
+            self.byte_to.setValue(self.byte_from.value())
+
+    def _refresh_names(self) -> None:
+        """Имена линий по каналам: «Приём CAN a» и «Подмена CAN b»
+        (при обратном направлении — наоборот; отчёт мастера)."""
+        self._title.setText(
+            tr("CAN{0} → CAN{1}").format(self._rx_channel, self._tx_channel)
+        )
+        self.curve.set_line_names(
+            tr("Приём CAN {0}").format(self._rx_channel),
+            tr("Подмена CAN {0}").format(self._tx_channel),
+        )
+
+    def _on_table_changed(self) -> None:
+        """Правка таблицы → перерисовка кривой."""
+        self.curve.set_points(self.table.points())
+
+    def _on_curve_changed(self) -> None:
+        """Правка кривой курсором → отражение в таблице привязки."""
+        self.table.set_points(self.curve.points())
+
+    def read(self) -> dict[str, Any]:
+        return {
+            "from": self.byte_from.value(),
+            "to": self.byte_to.value(),
+            "points": self.curve.points(),
+        }
+
+    def write(self, data: dict[str, Any]) -> None:
+        self.byte_from.setValue(int(data.get("from", 1) or 1))
+        self.byte_to.setValue(int(data.get("to", 8) or 8))
+        points = data.get("points") or []
+        self.table.set_points(points)
+        self.curve.set_points(points)
+
+
 class _DirectionButtons(QWidget):
     """Три кнопки-стрелки направления: ← (CAN2→CAN1), → (CAN1→CAN2),
-    ↔ (обе стороны). Неактивная — белый контур, активная — красная.
-    Одновременно активна только одна стрелка."""
+    ↔ (обе стороны). Стрелки голубые (отчёт мастера); хинты
+    поясняют, какую передачу блокирует программа. Одновременно
+    активна только одна стрелка."""
 
     def __init__(self, font: QFont, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -324,20 +641,22 @@ class _DirectionButtons(QWidget):
         layout.setSpacing(6)
         layout.setContentsMargins(2, 0, 2, 0)
         self._buttons: dict[int, QPushButton] = {}
-        for direction, symbol in (
-            (_DIR_LEFT, "←"),
-            (_DIR_RIGHT, "→"),
-            (_DIR_BOTH, "↔"),
+        self.on_changed = None
+        # Хинты блокировки направления — формулировки отчёта мастера.
+        for direction, symbol, hint in (
+            (_DIR_LEFT, "←",
+             tr("Блокируем передачу данных из CAN 2 в CAN 1")),
+            (_DIR_RIGHT, "→",
+             tr("Блокируем передачу данных из CAN 1 в CAN 2")),
+            (_DIR_BOTH, "↔",
+             tr("Блокируем передачу данных CAN 1 в CAN 2 "
+                "в обе стороны")),
         ):
             button = QPushButton(symbol)
             button.setFont(font)
             button.setCheckable(True)
             button.setStyleSheet(_ARROW_STYLE)
-            button.setToolTip({
-                _DIR_LEFT: tr("CAN2 → CAN1"),
-                _DIR_RIGHT: tr("CAN1 → CAN2"),
-                _DIR_BOTH: tr("Обе стороны"),
-            }[direction])
+            button.setToolTip(hint)
             button.clicked.connect(
                 lambda checked, d=direction: self._select(d, checked)
             )
@@ -350,6 +669,8 @@ class _DirectionButtons(QWidget):
             button.blockSignals(True)
             button.setChecked(checked and d == direction)
             button.blockSignals(False)
+        if self.on_changed is not None:
+            self.on_changed()
 
     def direction(self) -> int | None:
         for d, button in self._buttons.items():
@@ -366,7 +687,9 @@ class _GatewayProgram(QGroupBox):
     """Карточка программы шлюза: половина CAN1 | стрелки | половина
     CAN2. Для «Игнорирования» обе половины — блокируемые фреймы;
     для «Подмены» — пакет приёма на своей стороне и подмена в
-    противоположный канал."""
+    противоположный канал. Дизайн — как на вкладке ГЛ: имя
+    программы по центру крупно, голубой крестик закрытия
+    (отчёт мастера)."""
 
     def __init__(
         self,
@@ -379,32 +702,36 @@ class _GatewayProgram(QGroupBox):
         self._tab = tab
         self.mode = mode
         self.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        # Толстая серая рамка вокруг программы (отчёт мастера).
-        self.setStyleSheet(
-            "QGroupBox { border: 2px solid #6E6E78; border-radius: 8px;"
-            " margin-top: 10px; padding-top: 8px; }"
-            "QGroupBox::title { subcontrol-origin: margin;"
-            " subcontrol-position: top left; padding: 0 6px; }"
-        )
+        # Голубая округлая рамка вокруг программы — как в ГЛ.
+        self.setStyleSheet(_CARD_STYLE)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(6)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        # Шапка: №/название программы, активность, удаление.
+        # Шапка: № слева, имя программы по центру крупно (как в
+        # триггерах — отчёт мастера), активность, голубой крестик.
         header = QHBoxLayout()
-        self._title_label = QLabel()
-        self._title_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        header.addWidget(self._title_label)
-        header.addStretch()
+        self._number_label = QLabel()
+        self._number_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._number_label.setStyleSheet("color: #9A9AA5;")
+        header.addWidget(self._number_label)
+        self._name_edit = QLineEdit()
+        name_font = QFont("Segoe UI", 13, QFont.Weight.Bold)
+        self._name_edit.setFont(name_font)
+        self._name_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._name_edit.setPlaceholderText(self._default_name())
+        self._name_edit.setStyleSheet(
+            "QLineEdit { background: transparent; border: none; }"
+        )
+        self._name_edit.setMaxLength(40)
+        self._name_edit.textChanged.connect(tab.mark_dirty)
+        header.addWidget(self._name_edit, 1)
         self._active = QCheckBox(tr("Активна"))
         self._active.setFont(font)
         self._active.toggled.connect(tab.mark_dirty)
         header.addWidget(self._active)
-        self._remove = QPushButton("✕")
-        self._remove.setFont(font)
-        self._remove.setFixedSize(24, 24)
-        self._remove.setToolTip(tr("Удалить программу"))
+        self._remove = _close_button(font, tr("Удалить программу"))
         self._remove.clicked.connect(lambda: tab.remove_program(self))
         header.addWidget(self._remove)
         layout.addLayout(header)
@@ -416,18 +743,19 @@ class _GatewayProgram(QGroupBox):
         left_group = QGroupBox("CAN1")
         left_group.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         left_layout = QVBoxLayout(left_group)
-        self.spec_left = _FrameSpec(font)
+        self.spec_left = _FrameSpec(font, tab.mark_dirty)
         left_layout.addWidget(self.spec_left)
         left_layout.addStretch()
         body.addWidget(left_group, 1)
 
         self.direction = _DirectionButtons(font)
+        self.direction.on_changed = self._on_direction_changed
         body.addWidget(self.direction, 0)
 
         right_group = QGroupBox("CAN2")
         right_group.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         right_layout = QVBoxLayout(right_group)
-        self.spec_right = _FrameSpec(font)
+        self.spec_right = _FrameSpec(font, tab.mark_dirty)
         right_layout.addWidget(self.spec_right)
         right_layout.addStretch()
         body.addWidget(right_group, 1)
@@ -443,66 +771,122 @@ class _GatewayProgram(QGroupBox):
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
-        # Графическая подмена DATA — только для программ «Подмена»:
-        # кликом ставятся точки, ломаная задаёт перевод входящего
-        # байта в исходящий (наклон/сдвиг/кривая — отчёт мастера).
+        # Подмена DATA по графику — только для программ «Подмена»:
+        # по блоку на направление («ОТ»/«ДО» — байты DATA, к которым
+        # применяется кривая; «Таблица привязки» — HEX-пары;
+        # график правится курсором и отражается в таблице).
+        # Линии подписаны каналами: «Приём CAN a»/«Подмена CAN b».
         self._curve_check = QCheckBox(tr("Подмена DATA по графику"))
         self._curve_check.setFont(font)
         self._curve_check.setToolTip(tr(
-            "Клик — новая точка, перетаскивание — правка, "
-            "двойной клик по точке — удаление. Байты с «X» в половине "
-            "подмены берутся из входящего кадра через кривую."
+            "Клик по графику — новая точка, перетаскивание — правка, "
+            "двойной клик по точке — удаление. Байты «X»/пустые в "
+            "диапазоне ОТ–ДО половины подмены проходят через кривую."
         ))
         layout.addWidget(self._curve_check)
-        self._curve_editor = _CurveEditor()
-        self._curve_editor.setVisible(False)
-        layout.addWidget(self._curve_editor)
-        self._curve_check.toggled.connect(self._curve_editor.setVisible)
+        self._curve_widget = QWidget()
+        curve_layout = QVBoxLayout(self._curve_widget)
+        curve_layout.setSpacing(6)
+        curve_layout.setContentsMargins(0, 0, 0, 0)
+        # CAN1 → CAN2: приём слева, подмена справа.
+        self._curve_12 = _SubCurveBlock(font, 1, 2, tab.mark_dirty)
+        # CAN2 → CAN1: приём справа, подмена слева.
+        self._curve_21 = _SubCurveBlock(font, 2, 1, tab.mark_dirty)
+        curve_layout.addWidget(self._curve_12)
+        curve_layout.addWidget(self._curve_21)
+        self._curve_widget.setVisible(False)
+        layout.addWidget(self._curve_widget)
+        self._curve_check.toggled.connect(self._curve_widget.setVisible)
         self._curve_check.toggled.connect(lambda _c: tab.mark_dirty())
+        self._curve_check.toggled.connect(
+            lambda _c: self._refresh_curve_visibility()
+        )
         if self.mode != _MODE_SUBSTITUTE:
             self._curve_check.setVisible(False)
-            self._curve_editor.setVisible(False)
+            self._curve_widget.setVisible(False)
 
         self.refresh_title()
+        self._refresh_curve_visibility()
         if rule is not None:
             self.write(rule)
 
-    def refresh_title(self) -> None:
-        name = (
+    def _default_name(self) -> str:
+        return (
             tr("Игнорирование")
             if self.mode == _MODE_IGNORE
             else tr("Подмена")
         )
-        index = self._tab._programs.index(self) + 1 if self in self._tab._programs else 0
-        self._title_label.setText(f"№ {index} · {name}")
+
+    def _on_direction_changed(self) -> None:
+        """Стрелка направления: показываются блоки кривых только
+        выбранных направлений (↔ — оба)."""
+        self._refresh_curve_visibility()
+        self._tab.mark_dirty()
+
+    def _refresh_curve_visibility(self) -> None:
+        """Видимость блоков подмены по выбранной стрелке."""
+        if self.mode != _MODE_SUBSTITUTE:
+            return
+        direction = self.direction.direction()
+        self._curve_12.setVisible(
+            direction in (_DIR_RIGHT, _DIR_BOTH)
+        )
+        self._curve_21.setVisible(
+            direction in (_DIR_LEFT, _DIR_BOTH)
+        )
+
+    def refresh_title(self) -> None:
+        index = (
+            self._tab._programs.index(self) + 1
+            if self in self._tab._programs else 0
+        )
+        self._number_label.setText(f"№ {index}")
+        self._name_edit.setPlaceholderText(self._default_name())
 
     def read(self) -> dict[str, Any]:
         rule: dict[str, Any] = {
             "mode": self.mode,
             "active": self._active.isChecked(),
+            "title": self._name_edit.text().strip(),
             "direction": self.direction.direction(),
             "spec1": self.spec_left.read(),
             "spec2": self.spec_right.read(),
         }
         if self.mode == _MODE_SUBSTITUTE and self._curve_check.isChecked():
-            rule["curve"] = {
-                "enabled": True,
-                "points": self._curve_editor.points(),
+            rule["curves"] = {
+                "12": self._curve_12.read(),
+                "21": self._curve_21.read(),
             }
         return rule
 
     def write(self, rule: dict[str, Any]) -> None:
         self._active.setChecked(bool(rule.get("active", True)))
+        self._name_edit.setText(str(rule.get("title", "")))
         direction = rule.get("direction")
         self.direction.set_direction(
             int(direction) if direction is not None else None
         )
         self.spec_left.write(rule.get("spec1") or {})
         self.spec_right.write(rule.get("spec2") or {})
-        curve = rule.get("curve") or {}
         if self.mode == _MODE_SUBSTITUTE:
-            self._curve_editor.set_points(curve.get("points") or [(0, 0), (255, 255)])
-            self._curve_check.setChecked(bool(curve.get("enabled")))
+            curves = rule.get("curves") or {}
+            legacy = rule.get("curve") or {}
+            # Старый формат: одна кривая на программу — применялась
+            # в обе стороны; переносим в оба направления.
+            c12 = curves.get("12") or {
+                "from": 1, "to": 8,
+                "points": legacy.get("points") or [(0, 0), (255, 255)],
+            }
+            c21 = curves.get("21") or {
+                "from": 1, "to": 8,
+                "points": legacy.get("points") or [(0, 0), (255, 255)],
+            }
+            self._curve_12.write(c12)
+            self._curve_21.write(c21)
+            self._curve_check.setChecked(
+                bool(legacy.get("enabled")) or bool(curves)
+            )
+            self._refresh_curve_visibility()
 
 
 class CanGatewayTab(QWidget):
@@ -771,20 +1155,37 @@ class CanGatewayTab(QWidget):
                 out_id = frame_id
             payload = bytearray(data[:8].ljust(8, b"\x00"))
             tokens = str(out_spec.get("data", "")).split()
-            curve = rule.get("curve") or {}
-            curve_on = bool(curve.get("enabled"))
+            # Кривая по направлению: «12» — приём CAN1 → подмена
+            # CAN2, «21» — наоборот; старая общая «curve»
+            # применяется в выбранную сторону (миграция).
+            curves = rule.get("curves") or {}
+            curve = curves.get("12" if frame_channel == 1 else "21") or {}
+            if not curve:
+                legacy = rule.get("curve") or {}
+                if legacy.get("enabled"):
+                    curve = {
+                        "from": 1, "to": 8,
+                        "points": legacy.get("points") or [],
+                    }
+            byte_from = int(curve.get("from", 1) or 1)
+            byte_to = int(curve.get("to", 8) or 8)
+            curve_on = bool(curve.get("points"))
             for i in range(8):
                 token = tokens[i].strip().upper() if i < len(tokens) else ""
                 value = hex_to_int(token) if token and token != "X" else None
                 if value is not None:
                     payload[i] = value & 0xFF
-                elif curve_on and i < len(data):
-                    # Графическая подмена: незаданный байт проходит
-                    # через кривую от входящего значения.
+                elif (
+                    curve_on and i < len(data)
+                    and byte_from <= i + 1 <= byte_to
+                ):
+                    # Графическая подмена: байт из диапазона ОТ–ДО
+                    # проходит через кривую от входящего значения.
                     payload[i] = _curve_map(curve, data[i]) & 0xFF
+            dlc = int(out_spec.get("dlc", 8) or 8)
             target = 2 if frame_channel == 1 else 1
             self._serial_manager.send_data(
-                pack_can_frame(target, out_id, bytes(payload))
+                pack_can_frame(target, out_id, bytes(payload[:dlc]))
             )
             logger.debug(
                 "Шлюз: подмена ID=0x%X -> 0x%X в CAN%d",

@@ -593,8 +593,9 @@ class CanTriggerTab(QWidget):
         rtr.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         rtr.setCheckable(True)
         rtr.setToolTip(tr("Remote Transmission Request"))
+        # Серые буквы, как у кнопки RTR в «Приёме» (отчёт мастера).
         rtr.setStyleSheet(
-            "QToolButton { background-color: #3A3A5A; color: #FFFFFF; border: none; border-radius: 4px; padding: 0px; }"
+            "QToolButton { background-color: #3A3A5A; color: #9A9AA5; border: none; border-radius: 4px; padding: 0px; }"
             "QToolButton:hover { background-color: #4A4A6A; }"
             "QToolButton:checked { background-color: #FF9800; color: #FFFFFF; }"
         )
@@ -634,10 +635,13 @@ class CanTriggerTab(QWidget):
         row_layout.addWidget(QLabel(tr("DLC")))
         row_layout.addWidget(dlc)
         row_layout.addWidget(data_widget)
-        row_layout.addWidget(rtr)
+        # Отступ DATA→RTR как в строке «Приём» — одна байт-клетка
+        # (отчёт мастера).
+        row_layout.addSpacing(38)
+        row_layout.addWidget(rtr, 0, Qt.AlignmentFlag.AlignVCenter)
 
         copy_paste = create_clipboard_buttons(self, can_id, dlc, data, bit)
-        row_layout.addWidget(copy_paste)
+        row_layout.addWidget(copy_paste, 0, Qt.AlignmentFlag.AlignVCenter)
 
         row_layout.addStretch()
         row_layout.addWidget(delay_before_label)
@@ -1275,11 +1279,12 @@ class CanTriggerTab(QWidget):
                 "border: none; border-radius: 6px; }"
             )
         else:
+            # Только голубой кант без заливки (отчёт мастера).
             button.setStyleSheet(
-                "QToolButton { background-color: #1565C0; color: #FFFFFF; "
-                "border: none; border-radius: 6px; }"
-                "QToolButton:hover { background-color: #1E88E5; }"
-                "QToolButton:pressed { background-color: #0D47A1; }"
+                "QToolButton { background-color: transparent; color: #4A8BE5; "
+                "border: 2px solid #3A7BD5; border-radius: 6px; }"
+                "QToolButton:hover { background-color: rgba(58,123,213,0.15); }"
+                "QToolButton:pressed { background-color: rgba(58,123,213,0.30); }"
             )
 
     def _flash_test_button(self, index: int) -> None:
@@ -1373,6 +1378,10 @@ class CanTriggerTab(QWidget):
         # AlignTop|AlignRight — иначе holder растянется на весь
         # блок и перехватит все клики по полям триггера.
         holder = QWidget()
+        # Тема красит все QWidget в цвет окна — без прозрачности
+        # оверлей затирал рамку группы в правом верхнем углу
+        # (отчёт мастера: «рамка прерывается»).
+        holder.setStyleSheet("background: transparent;")
         holder_layout = QHBoxLayout(holder)
         # Кнопки внутри рамки (top/right ≥ бордюра группы): при старом
         # отступе 4 px они ложились на рамку и визуально «прерывали»

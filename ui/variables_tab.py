@@ -33,11 +33,19 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
+from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QRegularExpression, Qt, QTimer
+from PySide6.QtCore import (
+    QEasingCurve,
+    QPropertyAnimation,
+    QRegularExpression,
+    Qt,
+    QTimer,
+)
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -46,6 +54,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -62,7 +71,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from models.config import Config
+from models.config import CONFIG_FILE_MAGIC, Config
 from models.id_notes import IdNotes
 from models.translations import _ as tr
 from models.utils import hex_to_int
@@ -73,11 +82,13 @@ from ui.id_edit import IdPasteEdit
 _TYPE_STATIC = "static"
 _TYPE_DYNAMIC = "dynamic"
 
-# Метка и версия файла «Конфиг Инфо»: чужой формат или другая версия
-# отвергаются сообщением, без падения приложения.
+# Метка и версия файла переменных: чужой формат или другая версия
+# отвергаются сообщением, без падения приложения. Имя файла —
+# «Config Variable» (отчёт мастера); вид конфига и устройство хранятся
+# ВНУТРИ файла, имя свободное.
 _CONFIG_INFO_KIND = "codemaster_config_info"
-_CONFIG_INFO_VERSION = 1
-_CONFIG_INFO_NAME = "Конфиг Инфо.json"
+_CONFIG_INFO_VERSION = 2
+_CONFIG_INFO_NAME = "Config Variable.json"
 
 
 def _config_info_dir() -> str:
@@ -194,20 +205,36 @@ def _selectable(label: QLabel) -> QLabel:
 
 
 def _map_points(points: list[tuple[float, float]], raw: float) -> float:
-    """Значение по «таблице привязки»: ломаная линейная интерполяция,
-    за крайними точками — зажим на краевое значение."""
+    """Значение по «таблице привязки»: ломаная линейная интерполяция.
+    За крайними точками прямая ПРОДОЛЖАЕТСЯ по наклону краевого
+    сегмента — график обязан доходить до DATA «от»/«до»
+    (отчёт мастера)."""
     pts = sorted(points)
     if len(pts) < 2:
         return 0.0
-    if raw <= pts[0][0]:
-        return pts[0][1]
-    if raw >= pts[-1][0]:
-        return pts[-1][1]
     for i in range(len(pts) - 1):
         a, b = pts[i], pts[i + 1]
         if a[0] <= raw <= b[0] and b[0] != a[0]:
             return a[1] + (b[1] - a[1]) * (raw - a[0]) / (b[0] - a[0])
-    return pts[-1][1]
+    # Экстраполяция краевых сегментов.
+    a, b = (pts[0], pts[1]) if raw < pts[0][0] else (pts[-2], pts[-1])
+    if b[0] == a[0]:
+        return b[1]
+    return a[1] + (b[1] - a[1]) * (raw - a[0]) / (b[0] - a[0])
+
+
+def _parse_data_hex(text: str) -> float | None:
+    """Сырое значение DATA из «таблицы привязки» — всегда HEX:
+    оператор вводит байты как в поле DATA, «100» = 0x100
+    (отчёт мастера: hex не пересчитывать в десятичную)."""
+    t = text.strip().lower()
+    if t.startswith("0x"):
+        t = t[2:]
+    if t.endswith("h"):
+        t = t[:-1]
+    if not t or not all(ch in "0123456789abcdef" for ch in t):
+        return None
+    return float(int(t, 16))
 
 
 def _parse_axis_value(text: str) -> float | None:
@@ -237,12 +264,59 @@ def _parse_axis_value(text: str) -> float | None:
     return None
 
 
+class _HoverTip(QLabel):
+    """Плавно появляющаяся закруглённая табличка-подсказка над
+    графиком (отчёт мастера: не «выскакивает резко»)."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setStyleSheet(
+            "QLabel { background: rgba(30,32,44,235); color: #E8E8EF;"
+            " border: 1px solid #3A7BD5; border-radius: 8px;"
+            " padding: 4px 10px; }"
+        )
+        self.setFont(QFont("Segoe UI", 9))
+        self._effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._effect)
+        self._effect.setOpacity(0.0)
+        self._anim = QPropertyAnimation(self._effect, b"opacity", self)
+        self._anim.setDuration(180)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.hide()
+
+    def show_smooth(self) -> None:
+        self._anim.stop()
+        if not self.isVisible():
+            self._effect.setOpacity(0.0)
+            self.show()
+        self._anim.setStartValue(self._effect.opacity())
+        self._anim.setEndValue(1.0)
+        self._anim.start()
+
+    def hide_smooth(self) -> None:
+        self._anim.stop()
+        if not self.isVisible():
+            return
+        self._anim.setStartValue(self._effect.opacity())
+        self._anim.setEndValue(0.0)
+        self._anim.finished.connect(self._on_faded)
+        self._anim.start()
+
+    def _on_faded(self) -> None:
+        with contextlib.suppress(RuntimeError, TypeError):
+            self._anim.finished.disconnect(self._on_faded)
+        if self._effect.opacity() <= 0.01:
+            self.hide()
+
+
 class _GraphPreview(QWidget):
-    """График «сырое значение → величина»: ломаная по точкам таблицы
-    правок. Ось X — сырое значение DATA в HEX, ось Y — величина; у
-    обеих осей разметка. Наведение курсора на линию/точку показывает
-    табличку «0xXXX = величина» (отчёт мастера). Точки правятся
-    в таблице рядом."""
+    """График «сырое значение → величина»: прямая по точкам таблицы
+    правок, ПРОДОЛЖЕННАЯ от значения DATA «от» до «до» (крайние точки
+    линии — не точки таблицы, а границы диапазона — отчёт мастера).
+    Ось X — сырое значение DATA в HEX, ось Y — величина; у обеих осей
+    разметка. Наведение курсора на линию протягивает пунктиры к осям
+    и плавно показывает закруглённую табличку «0xXXX = величина».
+    Точки правятся в таблице рядом."""
 
     # Отступы под подписи осей: слева — Y, снизу — X.
     _MARGIN_LEFT = 52
@@ -256,8 +330,11 @@ class _GraphPreview(QWidget):
         # Ось X от полей DATA «от»/«до»: начало оси = значение «от»,
         # конец = значение «до» (отчёт мастера).
         self._axis_x: tuple[float, float] | None = None
+        # Точка курсора на линии — пунктирные проекции к осям.
+        self._hover: tuple[float, float] | None = None
         self.setMinimumHeight(160)
         self.setMouseTracking(True)
+        self._tip = _HoverTip(self)
 
     def set_points(self, points: list[tuple[float, float]]) -> None:
         self._points = sorted(points)
@@ -374,10 +451,14 @@ class _GraphPreview(QWidget):
                 self._fmt_y(_y),
             )
 
+        # Линия идёт от значения DATA «от» до «до»: крайние точки —
+        # границы диапазона с экстраполяцией по краевым сегментам,
+        # точки таблицы лежат на линии между ними (отчёт мастера).
         painter.setPen(QPen(QColor(108, 140, 255), 2))
+        line_xs = [x0, *(p[0] for p in self._points if x0 < p[0] < x1), x1]
         prev = None
-        for x, y in self._points:
-            px, py = self._to_screen(rect, x, y)
+        for x in line_xs:
+            px, py = self._to_screen(rect, x, _map_points(self._points, x))
             if prev is not None:
                 painter.drawLine(int(prev[0]), int(prev[1]), int(px), int(py))
             prev = (px, py)
@@ -386,33 +467,55 @@ class _GraphPreview(QWidget):
         for x, y in self._points:
             px, py = self._to_screen(rect, x, y)
             painter.drawEllipse(int(px) - 3, int(py) - 3, 6, 6)
+        # Пунктирные проекции от точки курсора на линии к осям
+        # (отчёт мастера).
+        if self._hover is not None:
+            hx, hy = self._hover
+            px, py = self._to_screen(rect, hx, hy)
+            _, py_axis = self._to_screen(rect, hx, y0)
+            px_axis, _ = self._to_screen(rect, x0, hy)
+            painter.setPen(QPen(QColor(124, 158, 255), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(px), int(py), int(px), int(py_axis))
+            painter.drawLine(int(px_axis), int(py), int(px), int(py))
+            painter.setBrush(QColor(124, 158, 255))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(int(px) - 4, int(py) - 4, 8, 8)
         painter.end()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        """Табличка под курсором: X в HEX и величина на линии графика."""
+        """Курсор на линии: пунктир к осям + плавная табличка
+        «0xXXX = величина» (отчёт мастера)."""
         if len(self._points) < 2:
-            self.setToolTip("")
+            self._hover = None
+            self._tip.hide_smooth()
+            self.update()
             return super().mouseMoveEvent(event)
         rect = self._plot_rect()
         x_raw, _y = self._from_screen(rect, event.position().x(), event.position().y())
         x0, x1, _y0, _y1 = self._range()
         x_clamped = min(max(x_raw, x0), x1)
-        # Ближайшая точка ломаной — показываем её пару «X = Y».
-        nearest = min(
-            self._points, key=lambda p: abs(p[0] - x_clamped)
-        )
-        # Если курсор на сегменте — интерполированное значение.
-        value = nearest[1]
-        pts = self._points
-        for i in range(len(pts) - 1):
-            a, b = pts[i], pts[i + 1]
-            if a[0] <= x_clamped <= b[0] and b[0] != a[0]:
-                value = a[1] + (b[1] - a[1]) * (x_clamped - a[0]) / (b[0] - a[0])
-                break
-        self.setToolTip(
+        value = _map_points(self._points, x_clamped)
+        self._hover = (x_clamped, value)
+        # Табличка рядом с курсором: появление — плавное, углы
+        # закруглены (отчёт мастера).
+        self._tip.setText(
             tr("{0} → {1}").format(self._fmt_x(x_clamped), f"{value:g}")
         )
+        self._tip.adjustSize()
+        tip_x = int(event.position().x()) + 14
+        tip_y = int(event.position().y()) - self._tip.height() - 10
+        tip_x = max(0, min(tip_x, self.width() - self._tip.width()))
+        tip_y = max(0, tip_y)
+        self._tip.move(tip_x, tip_y)
+        self._tip.show_smooth()
+        self.update()
         super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hover = None
+        self._tip.hide_smooth()
+        self.update()
+        super().leaveEvent(event)
 
 
 class _FrameRow(QWidget):
@@ -441,7 +544,8 @@ class _FrameRow(QWidget):
         self.bit.setFont(font)
         self.bit.addItem(tr("11 бит"), False)
         self.bit.addItem(tr("29 бит"), True)
-        self.bit.setFixedWidth(70)
+        # Шире — слово «бит» должно влезать целиком (отчёт мастера).
+        self.bit.setFixedWidth(92)
         self.bit.setToolTip(tr("Разрядность CAN-идентификатора"))
         row.addWidget(self.bit)
 
@@ -682,7 +786,8 @@ class VariableDialog(QDialog):
         self._graph_bit.setFont(font)
         self._graph_bit.addItem(tr("11 бит"), False)
         self._graph_bit.addItem(tr("29 бит"), True)
-        self._graph_bit.setFixedWidth(74)
+        # Шире — слово «бит» должно влезать целиком (отчёт мастера).
+        self._graph_bit.setFixedWidth(92)
         self._graph_bit.setToolTip(tr("Разрядность CAN-идентификатора"))
         line1.addWidget(self._graph_bit)
         line1.addWidget(QLabel("DLC:"))
@@ -742,6 +847,7 @@ class VariableDialog(QDialog):
         # привязка не задана (меньше 2 точек) или кадр ещё не пришёл
         # (отчёт мастера). Дублируется в строке переменной.
         live_row = QHBoxLayout()
+        live_row.setSpacing(8)
         self._live_label = QLabel("0.00")
         self._live_label.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
         self._live_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -750,8 +856,19 @@ class VariableDialog(QDialog):
             " border-radius: 6px; padding: 2px 10px;"
         )
         _selectable(self._live_label)
+        # Сырое HEX-значение DATA — рядом с десятичным, обновляется
+        # онлайн от приходящих кадров (отчёт мастера).
+        self._live_hex_label = QLabel("0x—")
+        self._live_hex_label.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
+        self._live_hex_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._live_hex_label.setStyleSheet(
+            "color: #9A9AA5; border: 1px solid #45455A;"
+            " border-radius: 6px; padding: 2px 10px;"
+        )
+        _selectable(self._live_hex_label)
         live_row.addStretch()
         live_row.addWidget(self._live_label)
+        live_row.addWidget(self._live_hex_label)
         live_row.addStretch()
         layout.addLayout(live_row)
         self._live_timer = QTimer(self)
@@ -772,7 +889,7 @@ class VariableDialog(QDialog):
         )
         self._points_table.horizontalHeader().setStretchLastSection(True)
         self._points_table.setFixedWidth(300)
-        self._points_table.itemChanged.connect(lambda _i: self._refresh_graph())
+        self._points_table.itemChanged.connect(self._on_point_item_changed)
         left.addWidget(self._points_table, 1)
         buttons = QHBoxLayout()
         add_btn = QPushButton(tr("+ точка"))
@@ -822,12 +939,30 @@ class VariableDialog(QDialog):
             y_item = self._points_table.item(row, 1)
             if x_item is None or y_item is None:
                 continue
-            x = _parse_axis_value(x_item.text())
+            # Колонка «Значение DATA» — сырое значение байтов, всегда
+            # HEX (отчёт мастера: «как записали — так и остаётся»).
+            x = _parse_data_hex(x_item.text())
             y = _parse_axis_value(y_item.text())
             if x is None or y is None:
                 continue
             points.append((x, y))
         return points
+
+    _HEX_CELL_RE = re.compile(r"^(0[xX])?[0-9A-Fa-f]+[hH]?$")
+
+    def _on_point_item_changed(self, item: QTableWidgetItem) -> None:
+        """Проверка записи в «Таблице привязки»: колонка DATA принимает
+        только HEX, колонка величины — число. Невалидная ячейка
+        подсвечивается красным (отчёт мастера: проверка не работала)."""
+        if item.column() == 0:
+            ok = bool(self._HEX_CELL_RE.match(item.text().strip()))
+        else:
+            ok = _parse_axis_value(item.text()) is not None
+        item.setForeground(
+            QColor("#E8E8EF") if ok or not item.text().strip()
+            else QColor("#F44336")
+        )
+        self._refresh_graph()
 
     def _on_dlc_changed(self, value: int) -> None:
         _set_data_enabled(self._graph_from, value)
@@ -848,8 +983,13 @@ class VariableDialog(QDialog):
 
     def _update_live_label(self) -> None:
         """Онлайн-значение из CAN над графиком: «0.00», пока привязки
-        нет (меньше 2 точек) или кадр по ID ещё не приходил."""
+        нет (меньше 2 точек) или кадр по ID ещё не приходил. Рядом —
+        сырое HEX-значение DATA (отчёт мастера)."""
         row = self._row
+        raw = getattr(row, "live_raw", None) if row is not None else None
+        self._live_hex_label.setText(
+            "0x—" if raw is None else f"0x{raw:X}"
+        )
         if row is None or len(self._read_points()) < 2:
             self._live_label.setText("0.00")
             return
@@ -1013,6 +1153,9 @@ class _VariableRow(QFrame):
         # Онлайн-значение из CAN — обновляется вкладкой при приходе
         # кадра с ID переменной; None — кадр ещё не приходил.
         self.live_value: float | None = None
+        # Сырое HEX-значение DATA того же кадра — показываем рядом
+        # с десятичным над графиком привязки (отчёт мастера).
+        self.live_raw: int | None = None
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setProperty("varRow", True)
         self.setStyleSheet(
@@ -1050,10 +1193,11 @@ class _VariableRow(QFrame):
 
         self._refresh_labels()
 
-    def set_live_value(self, value: float) -> None:
+    def set_live_value(self, value: float, raw: int | None = None) -> None:
         """Онлайн-значение переменной из CAN — дублируется в строке
         рядом с названием (отчёт мастера)."""
         self.live_value = value
+        self.live_raw = raw
         self._state_label.setText(f"{value:.2f}")
 
     def _refresh_labels(self) -> None:
@@ -1184,6 +1328,26 @@ class VariablesTab(QWidget):
         self._title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         self._title.setProperty("title", True)
         title_col.addWidget(self._title)
+        top.addLayout(title_col, 1)
+        layout.addLayout(top)
+
+        # Кнопки файловых операций — горизонтально сверху над
+        # таблицами (отчёт мастера).
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        self._load_btn = QPushButton(tr("Загрузить переменные"))
+        self._save_btn = QPushButton(tr("Сохранить переменные"))
+        self._clear_btn = QPushButton(tr("Очистить"))
+        for btn in (self._load_btn, self._save_btn, self._clear_btn):
+            btn.setFont(self._font)
+            btn.setFixedHeight(30)
+            btn_row.addWidget(btn)
+        btn_row.addStretch()
+        self._load_btn.clicked.connect(self._load_file)
+        self._save_btn.clicked.connect(self._save_file)
+        self._clear_btn.clicked.connect(self._clear_all)
+        layout.addLayout(btn_row)
+
         self._hint = QLabel(tr(
             "Переменные — именованные состояния и величины, которые "
             "Гибкая логика опрашивает в условиях «Если» и использует в "
@@ -1191,22 +1355,7 @@ class VariablesTab(QWidget):
         ))
         self._hint.setFont(self._font)
         self._hint.setWordWrap(True)
-        title_col.addWidget(self._hint)
-        top.addLayout(title_col, 1)
-
-        btn_col = QVBoxLayout()
-        self._load_btn = QPushButton(tr("Загрузить переменные"))
-        self._save_btn = QPushButton(tr("Сохранить переменные"))
-        self._clear_btn = QPushButton(tr("Очистить"))
-        for btn in (self._load_btn, self._save_btn, self._clear_btn):
-            btn.setFont(self._font)
-            btn.setFixedHeight(30)
-            btn_col.addWidget(btn)
-        self._load_btn.clicked.connect(self._load_file)
-        self._save_btn.clicked.connect(self._save_file)
-        self._clear_btn.clicked.connect(self._clear_all)
-        top.addLayout(btn_col)
-        layout.addLayout(top)
+        layout.addWidget(self._hint)
 
         columns = QHBoxLayout()
         columns.setSpacing(12)
@@ -1215,29 +1364,15 @@ class VariablesTab(QWidget):
             tr("Управление"), self, "control", self._font
         )
         # Три равные колонки: Чтение / Управление / Дополнительные
-        # каналы входа и выхода (отчёт мастера).
+        # каналы входа и выхода — у третьей та же таблица переменных
+        # и кнопка «Добавить переменную» внизу (отчёт мастера).
         columns.addWidget(self._read_col, 1)
         columns.addWidget(self._ctrl_col, 1)
-        # Третья колонка — «Дополнительные каналы входа и выхода»:
-        # пока заглушка, позже сюда присвоим ноги МК (отчёт мастера).
-        aux_frame = QFrame()
-        aux_frame.setStyleSheet(
-            "QFrame { border: 1px solid #454552; border-radius: 10px; }"
+        self._aux_col = _VarColumn(
+            tr("Дополнительные каналы входа и выхода"),
+            self, "aux", self._font,
         )
-        aux_box = QVBoxLayout(aux_frame)
-        self._aux_title = QLabel(tr("Дополнительные каналы входа и выхода"))
-        self._aux_title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        self._aux_title.setWordWrap(True)
-        aux_box.addWidget(self._aux_title)
-        self._aux_hint = QLabel(tr(
-            "Здесь будут привязаны дополнительные каналы к выводам МК"
-        ))
-        self._aux_hint.setFont(self._font)
-        self._aux_hint.setWordWrap(True)
-        self._aux_hint.setStyleSheet("color: #9A9AA5;")
-        aux_box.addWidget(self._aux_hint)
-        aux_box.addStretch()
-        columns.addWidget(aux_frame, 1)
+        columns.addWidget(self._aux_col, 1)
         layout.addLayout(columns, 1)
 
         # Онлайн-значения переменных из CAN (отчёт мастера: раньше
@@ -1254,7 +1389,7 @@ class VariablesTab(QWidget):
         кадрам: ID (+ битность) совпал → сырое значение из заполненных
         байтов «DATA от» → величина по «таблице привязки». Результат
         виден в строке переменной и над графиком в её настройке."""
-        for col in (self._read_col, self._ctrl_col):
+        for col in (self._read_col, self._ctrl_col, self._aux_col):
             for row in list(col._rows):
                 cfg = row.config
                 if cfg.get("type") != _TYPE_DYNAMIC:
@@ -1278,7 +1413,7 @@ class VariablesTab(QWidget):
                             raw = (raw << 8) | data[i]
                             seen = True
                     if seen:
-                        row.set_live_value(_map_points(points, raw))
+                        row.set_live_value(_map_points(points, raw), raw)
 
     # ---- списки переменных для Гибкой логики -------------------------
 
@@ -1299,31 +1434,104 @@ class VariablesTab(QWidget):
         return {
             "read": self._read_col.configs(),
             "control": self._ctrl_col.configs(),
+            "aux": self._aux_col.configs(),
         }
 
     def persist(self) -> None:
-        """Переменные — часть общего конфига (отдельная ветка ключа)."""
-        self._config.set("variables", self.export_config())
+        """Без авто-кэша: переменные живут в сессии и сохраняются
+        только кнопкой «Сохранить переменные» — иначе после перепрошивки
+        МК из config.json воскресали старые переменные (отчёт мастера).
+        В состав общего файла конфигурации («Config Program») они
+        попадают через import_variables/export_config при записи."""
+
+    def import_config(self, data: dict[str, Any]) -> None:
+        """Прогружает переменные из словаря конфигурации (файл)."""
+        self._read_col.clear()
+        self._ctrl_col.clear()
+        self._aux_col.clear()
+        for cfg in data.get("read") or []:
+            if isinstance(cfg, dict):
+                self._read_col.add_row(cfg)
+        for cfg in data.get("control") or []:
+            if isinstance(cfg, dict):
+                self._ctrl_col.add_row(cfg)
+        for cfg in data.get("aux") or []:
+            if isinstance(cfg, dict):
+                self._aux_col.add_row(cfg)
 
     def _restore(self) -> None:
-        saved = self._config.get("variables") or {}
-        for cfg in saved.get("read") or []:
-            self._read_col.add_row(cfg)
-        for cfg in saved.get("control") or []:
-            self._ctrl_col.add_row(cfg)
+        """Столбцы стартуют пустыми — кэша переменных в config.json
+        больше нет (отчёт мастера)."""
 
     def _clear_all(self) -> None:
         self._read_col.clear()
         self._ctrl_col.clear()
+        self._aux_col.clear()
 
-    # ---- файл «Конфиг Инфо» -------------------------------------------
+    # ---- файл «Config Variable» ----------------------------------------
+
+    # Ключи, по которым JSON распознаётся как общий конфиг программы
+    # (триггеры/ГЛ/шлюз/скорости) — имя файла значения не имеет,
+    # оператор сохраняет под любым (отчёт мастера).
+    _PROGRAM_KEYS = (
+        "triggers", "flexible_rules", "gateway_rules", "gateway_ignore",
+        "can1_speed", "can2_speed",
+    )
+
+    def _device_fields(self) -> dict[str, Any]:
+        """Идентичность устройства внутри файла: по ней загрузка
+        сверяет, подходит ли конфиг подключённому МК."""
+        return {
+            "device_name": self._config.get("device_name", ""),
+            "device_type_name": self._config.get("device_type_name", ""),
+            "device_serial": self._config.get("device_serial", "")
+            or self._config.get("serial_number", ""),
+            "device_type": self._config.get("device_type", 0),
+        }
+
+    def _device_matches(self, payload: dict[str, Any]) -> bool:
+        """Сверка файла с подключённым устройством. Без подключения —
+        всегда подходит (офлайн-редактирование); у файла без полей
+        устройства (старый формат) — тоже."""
+        file_name = payload.get("device_name") or payload.get(
+            "device_type_name"
+        )
+        file_serial = payload.get("device_serial")
+        if not file_name and not file_serial:
+            return True
+        if not self._serial_manager or not self._serial_manager.is_open():
+            return True
+        dev_name = self._config.get("device_name", "") or self._config.get(
+            "device_type_name", ""
+        )
+        dev_serial = self._config.get("device_serial", "") or self._config.get(
+            "serial_number", ""
+        )
+        return (not file_name or file_name == dev_name) and (
+            not file_serial or file_serial == dev_serial
+        )
+
+    def _route_program_file(self, path: str) -> None:
+        """В руках оператора оказался общий конфиг программы —
+        отдаём его стандартной загрузке окна настроек (та сама
+        сверяет устройство и прогружает нужные области)."""
+        window = self.window()
+        loader = getattr(window, "load_config_from_path", None)
+        if callable(loader):
+            loader(path)
+        else:
+            QMessageBox.information(
+                self, tr("Конфигурация"),
+                tr("Это файл общей конфигурации — загрузите его кнопкой "
+                   "«Загрузить конфигурацию»."),
+            )
 
     def _save_file(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self,
             tr("Сохранить переменные"),
             f"{_config_info_dir()}/{_CONFIG_INFO_NAME}",
-            tr("Конфиг Инфо (*.json)"),
+            "Config Variable (*.json)",
         )
         if not path:
             return
@@ -1331,6 +1539,7 @@ class VariablesTab(QWidget):
             "kind": _CONFIG_INFO_KIND,
             "format": _CONFIG_INFO_VERSION,
             "app_version": VERSION,
+            **self._device_fields(),
             "variables": self.export_config(),
             "id_notes": IdNotes().export_all(),
         }
@@ -1348,40 +1557,61 @@ class VariablesTab(QWidget):
             self,
             tr("Загрузить переменные"),
             _config_info_dir(),
-            tr("Конфиг Инфо (*.json);;Все файлы (*)"),
+            "Config Variable (*.json);;" + tr("Все файлы (*)"),
         )
         if not path:
             return
         try:
-            with open(path, encoding="utf-8") as f:
-                payload: Any = json.load(f)
-        except (OSError, json.JSONDecodeError):
+            raw = Path(path).read_bytes()
+        except OSError as exc:
+            QMessageBox.warning(
+                self, tr("Ошибка"), tr("Не удалось открыть файл: {0}")
+                .format(exc)
+            )
+            return
+        # Верификация вида конфига по СОДЕРЖИМОМУ, не по имени файла:
+        # бинарный .kmc или JSON с ключами программы → это «Config
+        # Program», отдаём общей загрузке (отчёт мастера).
+        if raw.startswith(CONFIG_FILE_MAGIC):
+            self._route_program_file(path)
+            return
+        try:
+            payload: Any = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
             payload = None
+        if (
+            isinstance(payload, dict)
+            and payload.get("kind") != _CONFIG_INFO_KIND
+            and any(key in payload for key in self._PROGRAM_KEYS)
+        ):
+            self._route_program_file(path)
+            return
         # Чужой формат / битый файл / несовместимая версия — только
         # предупреждение, приложение продолжает работать.
         if (
             not isinstance(payload, dict)
             or payload.get("kind") != _CONFIG_INFO_KIND
-            or payload.get("format") != _CONFIG_INFO_VERSION
+            or payload.get("format") not in (1, _CONFIG_INFO_VERSION)
         ):
             QMessageBox.warning(
                 self,
-                tr("Конфиг Инфо"),
-                tr("Конфиг инфо не соответствует действующей "
-                   "версии приложения"),
+                tr("Config Variable"),
+                tr("Файл не является конфигурацией переменных или "
+                   "несовместим с версией приложения"),
+            )
+            return
+        # Верификация устройства: конфиг чужого МК не прогружаем.
+        if not self._device_matches(payload):
+            QMessageBox.warning(
+                self,
+                tr("Config Variable"),
+                tr("Файл записан для другого устройства — "
+                   "загрузка отменена"),
             )
             return
         variables = payload.get("variables") or {}
         if isinstance(variables, dict):
-            self._read_col.clear()
-            self._ctrl_col.clear()
-            for cfg in variables.get("read") or []:
-                if isinstance(cfg, dict):
-                    self._read_col.add_row(cfg)
-            for cfg in variables.get("control") or []:
-                if isinstance(cfg, dict):
-                    self._ctrl_col.add_row(cfg)
-            self.persist()
+            self.import_config(variables)
         notes = payload.get("id_notes")
         if isinstance(notes, dict):
             IdNotes().import_all(notes)
@@ -1393,11 +1623,10 @@ class VariablesTab(QWidget):
         self._clear_btn.setText(tr("Очистить"))
         self._read_col._title.setText(tr("Чтение"))
         self._ctrl_col._title.setText(tr("Управление"))
-        self._aux_title.setText(tr("Дополнительные каналы входа и выхода"))
-        self._aux_hint.setText(tr(
-            "Здесь будут привязаны дополнительные каналы к выводам МК"
-        ))
-        for col in (self._read_col, self._ctrl_col):
+        self._aux_col._title.setText(
+            tr("Дополнительные каналы входа и выхода")
+        )
+        for col in (self._read_col, self._ctrl_col, self._aux_col):
             col._add_btn.setText(tr("＋ Добавить переменную"))
             for row in col._rows:
                 row._refresh_labels()

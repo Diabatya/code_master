@@ -86,6 +86,25 @@ def _up_arrow_icon(color: QColor, size: int = 96) -> QIcon:
     return QIcon(pm)
 
 
+def _plus_icon(color: QColor, size: int = 96) -> QIcon:
+    """Белый «+» той же толщины, что стрелка кнопки обновления —
+    значок «загрузить/создать конфигурацию» (отчёт мастера)."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(color)
+    pen.setWidthF(size * 0.12)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    c = size / 2
+    span = size * 0.30
+    p.drawLine(int(c - span), int(c), int(c + span), int(c))
+    p.drawLine(int(c), int(c - span), int(c), int(c + span))
+    p.end()
+    return QIcon(pm)
+
+
 def _car_icon(color: QColor, size: int = 96) -> QIcon:
     """Векторный силуэт Porsche 911 (вид сбоку) вместо молотка
     и ключа (отчёт мастера)."""
@@ -215,6 +234,9 @@ class _ConfigMenuPopup(QWidget):
             " background: #26262F; border: 1px solid #3A7BD5;"
             " border-radius: 14px; }"
         )
+        # Шире — вся фраза должна помещаться в строку-карточку
+        # (отчёт мастера).
+        frame.setMinimumWidth(430)
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
@@ -258,8 +280,10 @@ class _ConfigMenuPopup(QWidget):
             text_col.setSpacing(1)
             title_label = QLabel(title)
             title_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            title_label.setWordWrap(True)
             sub_label = QLabel(sub)
             sub_label.setFont(QFont("Segoe UI", 8))
+            sub_label.setWordWrap(True)
             sub_label.setStyleSheet("color: #9A9AA5;")
             for lbl in (title_label, sub_label):
                 lbl.setStyleSheet(
@@ -362,7 +386,8 @@ class _DeviceCard(QWidget):
         head.addWidget(icon)
         head.addSpacing(10)
         text_col = QVBoxLayout()
-        text_col.setSpacing(2)
+        # Строки информации плотно друг к другу (отчёт мастера).
+        text_col.setSpacing(0)
         name_label = QLabel(name)
         name_label.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
         text_col.addWidget(name_label)
@@ -384,10 +409,11 @@ class _DeviceCard(QWidget):
             text_col.addWidget(label)
         head.addLayout(text_col, 1)
 
-        # Кнопки — напротив основной информации, вертикально
-        # по центру справа (отчёт мастера: «подними выше»).
-        buttons = QVBoxLayout()
-        buttons.setSpacing(6)
+        # Кнопки — горизонтально друг за другом, напротив строк
+        # информации (вертикально по центру) — как в ранней версии
+        # (отчёт мастера).
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         if selecting:
             select_btn = QPushButton(tr("Выбрать это устройство"))
             select_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
@@ -398,9 +424,7 @@ class _DeviceCard(QWidget):
                 "QPushButton:hover { background: #4A8BE5; }"
             )
             select_btn.clicked.connect(self._on_select)
-            buttons.addStretch()
             buttons.addWidget(select_btn)
-            buttons.addStretch()
         else:
             update_btn = QPushButton(tr("Обновить"))
             update_btn.setFont(font)
@@ -422,10 +446,8 @@ class _DeviceCard(QWidget):
                 "QPushButton:hover { background: #4A8BE5; }"
             )
             configure_btn.clicked.connect(self._on_configure)
-            buttons.addStretch()
             buttons.addWidget(update_btn)
             buttons.addWidget(configure_btn)
-            buttons.addStretch()
         head.addLayout(buttons)
         root.addLayout(head)
 
@@ -551,12 +573,14 @@ class MainWindow(QMainWindow):
         self._update_check_button.setToolTip(tr("Проверка обновлений"))
         self._update_check_button.clicked.connect(self._on_check_updates_clicked)
 
-        # Левая колонка значков: «папка» — загрузка конфигурации из
+        # Левая колонка значков: белый «+» — загрузка конфигурации из
         # файла или создание новой конфигурации устройства. Колонку
         # будем пополнять. Меню — кастомная анимированная выпадашка
         # в стиле iOS (отчёт мастера).
-        self._fake_button = QPushButton("\U0001F4C2")
+        self._fake_button = QPushButton()
         self._fake_button.setFixedSize(34, 34)
+        self._fake_button.setIcon(_plus_icon(QColor("#DCE4FF")))
+        self._fake_button.setIconSize(QSize(20, 20))
         self._fake_button.setFont(QFont("Segoe UI", 12))
         self._fake_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._fake_button.setToolTip(
@@ -621,9 +645,34 @@ class MainWindow(QMainWindow):
 
     def _build_layout(self) -> None:
         """Собирает компоновку главного окна."""
-        root = QVBoxLayout(self.centralWidget())
+        # Левая полоса-значки тянется от самого верха окна до самого
+        # низа: корень окна — горизонтальный, полоса слева, всё
+        # остальное (верхняя панель, страницы, статус-бар) — справа
+        # (отчёт мастера).
+        outer = QHBoxLayout(self.centralWidget())
+        outer.setSpacing(0)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        icon_col = QVBoxLayout()
+        icon_col.setSpacing(14)
+        icon_col.setContentsMargins(8, 14, 8, 14)
+        icon_col.addWidget(self._fake_button)
+        icon_col.addWidget(self._update_check_button)
+        icon_col.addStretch()
+        self._icon_wrap = QWidget()
+        self._icon_wrap.setLayout(icon_col)
+        self._icon_wrap.setFixedWidth(50)
+        self._icon_wrap.setStyleSheet(
+            "background: palette(window);"
+            " border: 3px solid #3A7BD5; border-radius: 10px;"
+        )
+        outer.addWidget(self._icon_wrap)
+
+        right_box = QWidget()
+        root = QVBoxLayout(right_box)
         root.setSpacing(0)
         root.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(right_box, 1)
 
         top_layout = QHBoxLayout(self._top_panel)
         top_layout.setContentsMargins(12, 0, 20, 0)
@@ -651,22 +700,9 @@ class MainWindow(QMainWindow):
 
         body = QHBoxLayout()
         body.setSpacing(0)
-        # Левая полоса-значки во всю высоту окна: голубой КОНТУР,
-        # заливка — серый фон как у окна (отчёт мастера).
-        icon_col = QVBoxLayout()
-        icon_col.setSpacing(14)
-        icon_col.setContentsMargins(8, 14, 8, 14)
-        icon_col.addWidget(self._fake_button)
-        icon_col.addWidget(self._update_check_button)
-        icon_col.addStretch()
-        self._icon_wrap = QWidget()
-        self._icon_wrap.setLayout(icon_col)
-        self._icon_wrap.setFixedWidth(50)
-        self._icon_wrap.setStyleSheet(
-            "background: palette(window);"
-            " border: 3px solid #3A7BD5; border-radius: 10px;"
-        )
-        body.addWidget(self._icon_wrap)
+        body.setContentsMargins(0, 0, 0, 0)
+        # Левая полоса-значки вынесена в корень окна — тянется от
+        # верхнего края до нижнего (см. начало _build_layout).
 
         # Правая часть стартового экрана: логотип + карточки +
         # нижние кнопки.

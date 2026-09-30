@@ -45,7 +45,7 @@ from core.can_protocol import (
 )
 
 from core.serial_manager import SerialManager
-from models.config import CONFIG_FILE_FILTER, Config, unpack_config_file
+from models.config import CONFIG_FILE_FILTER, Config, pack_config_file, unpack_config_file
 from models.logger import get_logger
 from models.translations import _ as tr, get_all_translations
 from ui.ui_utils import setup_button
@@ -364,6 +364,15 @@ class SettingsWindow(QMainWindow):
         self._conn_status_label = QLabel()
         self._conn_status_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
 
+        # Версия прошивки МК — между видом устройства и серийным
+        # номером (отчёт мастера).
+        self._fw_label = QLabel(tr("Версия ПО"))
+        self._fw_label.setFont(font)
+        self._fw_value = QLabel()
+        self._fw_value.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._fw_value.setMinimumWidth(60)
+        self._fw_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
         self._serial_label = QLabel(tr("Серийный номер"))
         self._serial_label.setFont(font)
         self._serial_value = QLabel()
@@ -376,6 +385,8 @@ class SettingsWindow(QMainWindow):
         device_layout.addWidget(self._device_label)
         device_layout.addWidget(self._device_name_label)
         device_layout.addWidget(self._conn_status_label)
+        device_layout.addWidget(self._fw_label)
+        device_layout.addWidget(self._fw_value)
         device_layout.addWidget(self._serial_label)
         device_layout.addWidget(self._serial_value)
         device_layout.addStretch()
@@ -1182,6 +1193,10 @@ class SettingsWindow(QMainWindow):
             or self._DEVICE_TYPE_NAMES.get(device_type, tr("Без имени"))
         )
         self._device_name_label.setText(name)
+        fw = self._config.get("device_fw_version", "") or self._config.get(
+            "device_version", ""
+        )
+        self._fw_value.setText(str(fw) if fw else tr("Неизвестно"))
         self._serial_value.setText(serial or tr("Неизвестно"))
         try:
             if (
@@ -1208,6 +1223,7 @@ class SettingsWindow(QMainWindow):
         """Обновляет статические строки окна настроек и всех вкладок."""
         self.setWindowTitle(tr("Настройки — Код Мастер"))
         self._device_label.setText(tr("Устройство"))
+        self._fw_label.setText(tr("Версия ПО"))
         self._serial_label.setText(tr("Серийный номер"))
         self._search_edit.setPlaceholderText(tr("Поиск по разделам..."))
         titles = {
@@ -1589,9 +1605,10 @@ class SettingsWindow(QMainWindow):
 
     def _save_config(self) -> None:
         start_dir = self._config.get("last_config_dir", "") or ""
-        default_name = os.path.join(
-            start_dir, f"{self._device_name_for_filename()}_config.kmc"
-        )
+        # Общий конфиг (триггеры/ГЛ/шлюз/скорости/терминаторы) при
+        # сохранении предлагается как «Config Program» — устройство
+        # хранится внутри файла, имя свободное (отчёт мастера).
+        default_name = os.path.join(start_dir, "Config Program.kmc")
         path, _ = QFileDialog.getSaveFileName(
             self,
             tr("Сохранить конфигурацию"),
@@ -1608,7 +1625,14 @@ class SettingsWindow(QMainWindow):
             self._flexible_tab._save_config()
             if hasattr(self._gateway_tab, "_save_config"):
                 self._gateway_tab._save_config()
-            self._config.save_to_file(path)
+            # Переменные в config.json не кэшируются — в файл общего
+            # конфига их добавляем вручную, только на запись
+            # (отчёт мастера).
+            data = self._config.all()
+            data["variables"] = self._variables_tab.export_config()
+            name = data.get("device_name") or data.get("device_type_name") or ""
+            serial = data.get("device_serial") or data.get("serial_number") or ""
+            Path(path).write_bytes(pack_config_file(data, name, serial))
             self._config.set("last_config_dir", os.path.dirname(path))
             show_toast(self, tr("Конфигурация сохранена"))
         except Exception as exc:  # noqa: BLE001
@@ -1663,6 +1687,10 @@ class SettingsWindow(QMainWindow):
                 )
                 if answer != QMessageBox.StandardButton.Yes:
                     return
+        # Секцию переменных вынимаем до импорта — в config.json она не
+        # кэшируется (отчёт мастера: старые переменные всплывали после
+        # перепрошивки); прогружаем прямо на страницу «Переменные».
+        file_vars = payload.pop("variables", None)
         try:
             self._config.import_data(payload)
             self._config.set("last_config_dir", os.path.dirname(path))
@@ -1680,6 +1708,11 @@ class SettingsWindow(QMainWindow):
             self._trigger_tab.set_config(
                 self._config.get("triggers", []), suspend_execution=True
             )
+            # Если файл несёт секцию переменных — прогружаем и её:
+            # вид конфига определяется содержимым, а не именем файла
+            # (отчёт мастера).
+            if isinstance(file_vars, dict):
+                self._variables_tab.import_config(file_vars)
             self._flexible_tab.set_config(self._config.get("flexible_rules", []))
             if hasattr(self._gateway_tab, "set_config"):
                 self._gateway_tab.set_config(
