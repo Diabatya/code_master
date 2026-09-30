@@ -40,6 +40,7 @@ CMD_EVENT_LOG = 0xCF  # Постраничное чтение Flash-журнал
 CMD_TRIGGER_NAME_READ = 0xD0    # [index] → [len][имя] — из config-страницы МК
 CMD_TRIGGER_NAME_WRITE = 0xD1   # [index][len][имя] — в RAM, фиксация по CMD_TRIGGER_NAME_COMMIT
 CMD_TRIGGER_NAME_COMMIT = 0xD2  # Записать таблицу имён триггеров во Flash (перезапись config-страницы)
+CMD_AUX_SET = 0xD3  # Доп. канал OUT1-4: [ch][mode][on u16][off u16][count u16][freq u16][duty][time u32]
 
 # Типы событий CMD_EVENT_LOG (event_log_type_t в прошивке).
 EVLOG_BOOT = 1

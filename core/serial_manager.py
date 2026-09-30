@@ -17,6 +17,7 @@ from core.can_protocol import (
     CMD_CAN_STATS,
     CMD_TRIGGER_COMMIT,
     CMD_TRIGGER_ENABLE,
+    CMD_AUX_SET,
     CMD_TRIGGER_NAME_COMMIT,
     CMD_TRIGGER_NAME_WRITE,
     CMD_TRIGGER_STAGE,
@@ -131,9 +132,13 @@ class _ControlSession:
                 manager._closing = False
 
 
-def _parse_cfg_read_payload(data: bytes) -> "tuple[str, str]":
-    """Разбирает payload ответа CMD_CFG_READ → (device_name, serial)."""
-    name, serial = "", ""
+def _parse_cfg_read_payload(data: bytes) -> "tuple[str, str, str]":
+    """Разбирает payload ответа CMD_CFG_READ → (device_name, serial, fw_version).
+
+    Хвост [ver_len][версия] появился в новых прошивках (запись VER1
+    config-страницы): старая прошивка его не отдаёт — тогда версия
+    остаётся пустой и карточка берёт кэшированную при прошивке."""
+    name, serial, fw_version = "", "", ""
     try:
         p = 0
         name_len = data[p]
@@ -143,9 +148,16 @@ def _parse_cfg_read_payload(data: bytes) -> "tuple[str, str]":
         serial_len = data[p]
         p += 1
         serial = data[p : p + serial_len].decode("utf-8", errors="ignore").strip()
+        p += serial_len + 4  # VID/PID
+        if p < len(data):
+            ver_len = data[p]
+            p += 1
+            fw_version = data[p : p + ver_len].decode(
+                "utf-8", errors="ignore"
+            ).strip()
     except (IndexError, UnicodeError):
         pass
-    return name, serial
+    return name, serial, fw_version
 
 
 def _rx_frame_wire_len(buf: bytes | bytearray) -> int | None:
@@ -888,6 +900,36 @@ class SerialManager(QObject):
                 time.sleep(0.005)
         raise TimeoutError(f"Таймаут ответа на команду 0x{command:02X}")
 
+    def send_aux(
+        self,
+        channel: int,
+        mode: int,
+        pulse_on_ms: int = 0,
+        pulse_off_ms: int = 0,
+        pulse_count: int = 0,
+        pwm_freq_hz: int = 0,
+        pwm_duty_pct: int = 0,
+        pwm_time_ms: int = 0,
+    ) -> bool:
+        """CMD_AUX_SET: доп. канал OUT1-4 — вкл/выкл/импульсы/ШИМ.
+
+        Пакет [0xD3][15][payload] уходит fire-and-forget через send_data:
+        ack ответа не нужен действию ГЛ, а само переключение GPIO дальше
+        делает МК автономно (aux_out.c), без связи с ПК. Пауза до начала
+        действия отрабатывается на стороне ПК через QTimer — сюда команда
+        приходит уже «в момент»."""
+        payload = (
+            channel.to_bytes(1, "little")
+            + mode.to_bytes(1, "little")
+            + int(pulse_on_ms).to_bytes(2, "little")
+            + int(pulse_off_ms).to_bytes(2, "little")
+            + int(pulse_count).to_bytes(2, "little")
+            + int(pwm_freq_hz).to_bytes(2, "little")
+            + int(pwm_duty_pct).to_bytes(1, "little")
+            + int(pwm_time_ms).to_bytes(4, "little")
+        )
+        return self.send_data(bytes((CMD_AUX_SET, len(payload))) + payload)
+
     def read_can_stats(self, channel: int) -> dict[str, int]:
         """Возвращает накопительные RX/TX/lost-счётчики CAN-канала.
 
@@ -1208,6 +1250,7 @@ class SerialManager(QObject):
                 # независимо от iProduct — поэтому имя берём с самого МК и
                 # запоминаем в карте серийник→имя для списка портов.
                 device_name = ""
+                cfg_fw_ver = ""
                 cfg_marker = (CMD_CFG_READ | 0x10) & 0xFF
                 # После power cycle/рестарта приложению нужно время на
                 # инициализацию до ответа — одна повторная попытка спасает
@@ -1236,7 +1279,9 @@ class SerialManager(QObject):
                                     continue
                                 if len(buffer) >= 3 + length:
                                     data = bytes(buffer[3 : 3 + length])
-                                    device_name, cfg_serial = _parse_cfg_read_payload(data)
+                                    device_name, cfg_serial, cfg_fw_ver = (
+                                        _parse_cfg_read_payload(data)
+                                    )
                                     if cfg_serial:
                                         device_serial = cfg_serial
                                     break
@@ -1269,7 +1314,7 @@ class SerialManager(QObject):
                     device_name = self._config.get("device_name", "") or self._config.get(
                         "device_type_name", ""
                     )
-                self._config.set_bulk({
+                bulk = {
                     "device_type": device_type,
                     "device_version": device_version,
                     "device_serial": device_serial,
@@ -1277,7 +1322,13 @@ class SerialManager(QObject):
                     "device_name": device_name,
                     "port_names": port_names,
                     "total_memory": total_memory,
-                })
+                }
+                # Версия ПО из VER1 (хвост CMD_CFG_READ) — только когда
+                # прошивка её реально отдала: пустое значение не должно
+                # затирать кэш, записанный при программировании с ПК.
+                if cfg_fw_ver:
+                    bulk["device_fw_version"] = cfg_fw_ver
+                self._config.set_bulk(bulk)
                 self.device_identified.emit(device_type, device_version)
                 logger.info(
                     "Устройство идентифицировано: type=0x%02X version=%d serial=%s mem=%d",

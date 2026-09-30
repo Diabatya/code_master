@@ -11,6 +11,7 @@
 #include "device_config.h"
 #include "trigger.h"
 #include "event_log.h"
+#include "aux_out.h"
 
 /* Markers, see firmware/PROTOCOL.md 1.1 (must match core/can_protocol.py) */
 #define MARKER_RX_STD        0xAAU /* device -> PC, standard ID */
@@ -48,6 +49,7 @@
 #define CMD_TRIGGER_NAME_READ    0xD0U /* [index] → [len][имя]: имя из config-страницы */
 #define CMD_TRIGGER_NAME_WRITE   0xD1U /* [index][len][имя]: RAM-зеркало, Flash по COMMIT */
 #define CMD_TRIGGER_NAME_COMMIT  0xD2U /* запись таблицы имён во Flash (страница конфига) */
+#define CMD_AUX_SET              0xD3U /* доп. канал OUT1-4: вкл/выкл/импульсы/ШИМ (aux_out.h) */
 
 /* Защита деструктивных команд от фантомного срабатывания при рассинхроне
  * CDC-потока: парсер после битого кадра пересматривает следующие байты
@@ -243,7 +245,12 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
   switch (cmd) {
     case CMD_CFG_READ: {
       const device_config_t *cfg = DeviceConfig_Get();
-      uint8_t out[1 + DEVICE_CONFIG_NAME_MAX + 1 + DEVICE_CONFIG_SERIAL_MAX + 4];
+      /* Хвост [ver_len][версия] — версия ПО, зашитая конфигуратором
+       * (запись VER1): карточка устройства на ПК показывает её в строке
+       * «Версия ПО». Старые хосты читают len и останавливаются — хвост
+       * обратно-совместим; старая прошивка хвоста не отдаёт. */
+      uint8_t out[1 + DEVICE_CONFIG_NAME_MAX + 1 + DEVICE_CONFIG_SERIAL_MAX
+                  + 4 + 1 + DEVICE_CONFIG_VERSION_MAX];
       uint32_t n = 0;
       out[n++] = cfg->device_name_len;
       memcpy(&out[n], cfg->device_name, cfg->device_name_len); n += cfg->device_name_len;
@@ -253,6 +260,14 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       out[n++] = (uint8_t)((cfg->vid >> 8) & 0xFFU);
       out[n++] = (uint8_t)(cfg->pid & 0xFFU);
       out[n++] = (uint8_t)((cfg->pid >> 8) & 0xFFU);
+      {
+        uint8_t ver_len = 0U;
+        const uint8_t *ver = DeviceConfig_GetFwVersion(&ver_len);
+        out[n++] = ver_len;
+        if (ver != NULL && ver_len > 0U) {
+          memcpy(&out[n], ver, ver_len); n += ver_len;
+        }
+      }
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)n);
       break;
     }
@@ -707,6 +722,29 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       break;
     }
 
+    case CMD_AUX_SET: {
+      /* [channel 1..4][mode 0..3][on u16][off u16][count u16]
+       * [pwm_freq u16][duty u8][pwm_time u32] — 15 байт. Само действие
+       * дальше крутит AuxOut_Poll() — команда только ставит программу. */
+      if (payload_len < 15U) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      uint32_t pwm_time = (uint32_t)payload[11]
+          | ((uint32_t)payload[12] << 8)
+          | ((uint32_t)payload[13] << 16)
+          | ((uint32_t)payload[14] << 24);
+      uint8_t ok = AuxOut_Set(
+          payload[0], payload[1],
+          (uint16_t)(payload[2] | ((uint16_t)payload[3] << 8)),
+          (uint16_t)(payload[4] | ((uint16_t)payload[5] << 8)),
+          (uint16_t)(payload[6] | ((uint16_t)payload[7] << 8)),
+          (uint16_t)(payload[8] | ((uint16_t)payload[9] << 8)),
+          payload[10], pwm_time);
+      send_new_cmd_response(cmd, ok ? 0x00U : 0x01U, NULL, 0U);
+      break;
+    }
+
     default:
       send_new_cmd_response(cmd, 0x03U, NULL, 0U);
       break;
@@ -883,8 +921,8 @@ static uint16_t try_parse_one(void)
     return 1U;
   }
 
-  /* --- New commands (0xC0-0xD2), see PROTOCOL.md Part 2 --- */
-  if (marker >= 0xC0U && marker <= 0xD2U) {
+  /* --- New commands (0xC0-0xD3), see PROTOCOL.md Part 2 --- */
+  if (marker >= 0xC0U && marker <= 0xD3U) {
     if (avail < 2U) {
       return wait_more_or_resync();
     }

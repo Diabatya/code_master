@@ -37,7 +37,7 @@ import json
 import re
 from typing import Any
 
-from PySide6.QtCore import QRegularExpression, Qt
+from PySide6.QtCore import QRegularExpression, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -157,6 +157,59 @@ def _data_bytes_used(edits: list[QLineEdit]) -> list[int]:
     ]
 
 
+def _edits_raw_value(edits: list[QLineEdit]) -> int | None:
+    """Сырое значение поля DATA: заполненные байты склеиваются
+    старшим вперёд (порядок байтов во фрейме). None — поле пустое."""
+    tokens = _data_tokens(edits)
+    value = 0
+    used = False
+    for t in tokens:
+        if not t or t == "X":
+            continue
+        try:
+            value = (value << 8) | int(t, 16)
+            used = True
+        except ValueError:
+            continue
+    return value if used else None
+
+
+def _set_data_enabled(edits: list[QLineEdit], count: int) -> None:
+    """DLC ограничивает поля DATA: за пределами DLC поля пустые
+    и неактивные — как в триггерах (отчёт мастера)."""
+    for i, edit in enumerate(edits):
+        if i >= count:
+            edit.setText("")
+            edit.setEnabled(False)
+        else:
+            edit.setEnabled(True)
+
+
+def _selectable(label: QLabel) -> QLabel:
+    """Любая строка выделяется курсором и копируется (отчёт мастера)."""
+    label.setTextInteractionFlags(
+        Qt.TextInteractionFlag.TextSelectableByMouse
+    )
+    return label
+
+
+def _map_points(points: list[tuple[float, float]], raw: float) -> float:
+    """Значение по «таблице привязки»: ломаная линейная интерполяция,
+    за крайними точками — зажим на краевое значение."""
+    pts = sorted(points)
+    if len(pts) < 2:
+        return 0.0
+    if raw <= pts[0][0]:
+        return pts[0][1]
+    if raw >= pts[-1][0]:
+        return pts[-1][1]
+    for i in range(len(pts) - 1):
+        a, b = pts[i], pts[i + 1]
+        if a[0] <= raw <= b[0] and b[0] != a[0]:
+            return a[1] + (b[1] - a[1]) * (raw - a[0]) / (b[0] - a[0])
+    return pts[-1][1]
+
+
 def _parse_axis_value(text: str) -> float | None:
     """Значение точки графика: привычное десятичное число или HEX —
     «FF», «0xFF», «FFh». Чистые цифры читаются как десятичные
@@ -200,11 +253,22 @@ class _GraphPreview(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._points: list[tuple[float, float]] = []
+        # Ось X от полей DATA «от»/«до»: начало оси = значение «от»,
+        # конец = значение «до» (отчёт мастера).
+        self._axis_x: tuple[float, float] | None = None
         self.setMinimumHeight(160)
         self.setMouseTracking(True)
 
     def set_points(self, points: list[tuple[float, float]]) -> None:
         self._points = sorted(points)
+        self.update()
+
+    def set_axis_x(self, x0: float | None, x1: float | None) -> None:
+        """Границы оси X из полей DATA «от»/«до»; None — авто по точкам."""
+        if x0 is None or x1 is None or x0 == x1:
+            self._axis_x = None
+        else:
+            self._axis_x = (min(x0, x1), max(x0, x1))
         self.update()
 
     def _plot_rect(self):
@@ -216,7 +280,14 @@ class _GraphPreview(QWidget):
     def _range(self) -> tuple[float, float, float, float]:
         xs = [p[0] for p in self._points]
         ys = [p[1] for p in self._points]
-        x0, x1 = (min(xs), max(xs)) if xs else (0.0, 1.0)
+        if self._axis_x is not None:
+            x0, x1 = self._axis_x
+        else:
+            x0, x1 = (min(xs), max(xs)) if xs else (0.0, 1.0)
+        # Точки могут выходить за ось — раздвигаем, чтобы ломаная
+        # не обрезалась по краям.
+        if xs:
+            x0, x1 = min(x0, min(xs)), max(x1, max(xs))
         y0, y1 = (min(ys), max(ys)) if ys else (0.0, 1.0)
         if x1 == x0:
             x1 = x0 + 1
@@ -260,22 +331,26 @@ class _GraphPreview(QWidget):
             painter.end()
             return
 
-        # Разметка осей: X — сырое значение в HEX, Y — величина.
-        # Сначала сетка через тики (отчёт мастера: «расчерти график»).
+        # Разметка осей: X — сырое значение в HEX (0 = «DATA от»,
+        # конец = «DATA до»), Y — величина. От каждой точки —
+        # пунктирные проекции на обе оси с фактическими значениями
+        # в местах пересечения (отчёт мастера).
         x0, x1, y0, y1 = self._range()
         tick_pen = QPen(QColor(150, 150, 165), 1)
         text_pen = QPen(QColor(170, 170, 185), 1)
-        grid_pen = QPen(QColor(70, 70, 86), 1)
+        grid_pen = QPen(QColor(70, 70, 86), 1, Qt.PenStyle.DashLine)
         font = painter.font()
         font.setPointSize(7)
         painter.setFont(font)
+        # Пунктирные проекции точек на оси X и Y.
         painter.setPen(grid_pen)
-        for _x in sorted({x0, x1, *(p[0] for p in self._points)}):
-            px, _ = self._to_screen(rect, _x, y0)
-            painter.drawLine(int(px), rect.top(), int(px), rect.bottom())
-        for _y in sorted({y0, y1, *(p[1] for p in self._points)}):
-            _, py = self._to_screen(rect, x0, _y)
-            painter.drawLine(rect.left(), int(py), rect.right(), int(py))
+        for px_raw, py_raw in self._points:
+            px, py = self._to_screen(rect, px_raw, py_raw)
+            _, py_axis = self._to_screen(rect, px_raw, y0)
+            px_axis, _ = self._to_screen(rect, x0, py_raw)
+            painter.drawLine(int(px), int(py), int(px), int(py_axis))
+            painter.drawLine(int(px_axis), int(py), int(px), int(py))
+        # Тики на границах осей и под точками.
         painter.setPen(tick_pen)
         for _x in sorted({x0, x1, *(p[0] for p in self._points)}):
             px, _ = self._to_screen(rect, _x, y0)
@@ -283,6 +358,7 @@ class _GraphPreview(QWidget):
         for _y in sorted({y0, y1, *(p[1] for p in self._points)}):
             _, py = self._to_screen(rect, x0, _y)
             painter.drawLine(rect.left() - 4, int(py), rect.left(), int(py))
+        # Значения на осях — под каждой точкой и на границах.
         painter.setPen(text_pen)
         for _x in sorted({x0, x1, *(p[0] for p in self._points)}):
             px, _ = self._to_screen(rect, _x, y0)
@@ -360,6 +436,15 @@ class _FrameRow(QWidget):
         self.can_id = _HexIdEdit(font)
         row.addWidget(self.can_id)
 
+        # 11/29 бит — выбор разрядности ID фрейма (отчёт мастера).
+        self.bit = QComboBox()
+        self.bit.setFont(font)
+        self.bit.addItem(tr("11 бит"), False)
+        self.bit.addItem(tr("29 бит"), True)
+        self.bit.setFixedWidth(70)
+        self.bit.setToolTip(tr("Разрядность CAN-идентификатора"))
+        row.addWidget(self.bit)
+
         self.dlc = QSpinBox()
         self.dlc.setFont(font)
         self.dlc.setRange(0, 8)
@@ -371,6 +456,12 @@ class _FrameRow(QWidget):
             font, 8, edit_width=34, allow_x=True
         )
         row.addWidget(data_widget)
+        # DLC ограничивает количество доступных полей DATA
+        # (отчёт мастера) — как в триггерах.
+        self.dlc.valueChanged.connect(
+            lambda v: _set_data_enabled(self.data, v)
+        )
+        _set_data_enabled(self.data, self.dlc.value())
 
         # Выбор записываемого значения — справа от фрейма (по ТЗ).
         self.value = QComboBox()
@@ -393,6 +484,7 @@ class _FrameRow(QWidget):
     def read(self) -> dict[str, Any]:
         return {
             "id": self.can_id.text(),
+            "extended": bool(self.bit.currentData()),
             "dlc": self.dlc.value(),
             "data": _data_to_text(self.data),
             "value": self.value.currentData(),
@@ -400,7 +492,9 @@ class _FrameRow(QWidget):
 
     def write(self, data: dict[str, Any]) -> None:
         self.can_id.setText(str(data.get("id", "")))
+        self.bit.setCurrentIndex(1 if data.get("extended") else 0)
         self.dlc.setValue(int(data.get("dlc", 8)))
+        _set_data_enabled(self.data, self.dlc.value())
         _text_to_data(self.data, data.get("data"))
         idx = self.value.findData(int(data.get("value", 1)))
         self.value.setCurrentIndex(idx if idx >= 0 else 0)
@@ -408,12 +502,19 @@ class _FrameRow(QWidget):
 
 class VariableDialog(QDialog):
     """Настройка одной переменной: выбор вида, имени, носителя
-    (ОЗУ/ПЗУ — при записи) и параметров."""
+    (ОЗУ/ПЗУ — при записи) и параметров.
+
+    ``row`` — строка переменной в таблице: по ней диалог показывает
+    live-значение из CAN над графиком привязки. ``for_control`` —
+    переменная из колонки «Управление»: подсказка статической
+    страницы другая (отчёт мастера)."""
 
     def __init__(
         self,
         parent: QWidget | None = None,
         config: dict[str, Any] | None = None,
+        row: _VariableRow | None = None,
+        for_control: bool = False,
     ) -> None:
         super().__init__(parent)
         font = QFont("Segoe UI", 9)
@@ -421,6 +522,8 @@ class VariableDialog(QDialog):
         self.setMinimumWidth(760)
         self.setFont(font)
         config = config or {}
+        self._row = row
+        self._for_control = for_control
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -443,9 +546,9 @@ class VariableDialog(QDialog):
         # Носитель задаётся здесь — при записи переменной; из строки
         # таблицы убран по отчёту мастера.
         head.addWidget(QLabel(tr("Хранить:")))
-        # Галочка кэширования настройки в бит — рядом с «Хранить»
-        # (отчёт мастера). Включённая — выбор ОЗУ/ПЗУ запоминается
-        # в присвоенном бите состояния переменной.
+        # Галочка кэширования настройки — «в бит» у статических, «в байт»
+        # у динамических (переменная считается на байтах — отчёт
+        # мастера). Включённая — выбор ОЗУ/ПЗУ запоминается.
         self._cache_bit_check = QCheckBox(tr("в бит"))
         self._cache_bit_check.setFont(font)
         self._cache_bit_check.setChecked(bool(config.get("cache_bit", True)))
@@ -459,7 +562,7 @@ class VariableDialog(QDialog):
             radio.setFont(font)
         self._ram_radio.setChecked(config.get("storage", "ram") != "rom")
         self._rom_radio.setChecked(config.get("storage") == "rom")
-        # Без галочки «в бит» выбор носителя не кликабелен
+        # Без галочки «в бит»/«в байт» выбор носителя не кликабелен
         # (отчёт мастера).
         self._cache_bit_check.toggled.connect(self._ram_radio.setEnabled)
         self._cache_bit_check.toggled.connect(self._rom_radio.setEnabled)
@@ -467,6 +570,13 @@ class VariableDialog(QDialog):
         self._rom_radio.setEnabled(self._cache_bit_check.isChecked())
         head.addWidget(self._ram_radio)
         head.addWidget(self._rom_radio)
+        # Под байтовую переменную память выделяется в байтах: показываем,
+        # сколько байт займёт значение по заполненным полям DATA.
+        self._storage_size_label = QLabel("")
+        self._storage_size_label.setFont(font)
+        self._storage_size_label.setStyleSheet("color: #9A9AA5;")
+        _selectable(self._storage_size_label)
+        head.addWidget(self._storage_size_label)
         head.addStretch()
         layout.addLayout(head)
 
@@ -495,16 +605,28 @@ class VariableDialog(QDialog):
         layout = QVBoxLayout(page)
         layout.setSpacing(6)
 
-        hint = QLabel(tr(
-            "Фреймов может быть сколько угодно: приход любого из них "
-            "пишет «→ 1» или «→ 0» в один и тот же бит ОЗУ функции — "
-            "разные фреймы могут включать и выключать её. X в DATA — "
-            "любой байт, пустое поле не участвует в сравнении. "
-            "Пример: фрейм «дверь открыта» → 1, «дверь закрыта» → 0. "
-            "Канал фрейма задаётся в Гибкой логике."
-        ))
+        # У колонки «Управление» другая подсказка (отчёт мастера).
+        hint_text = (
+            tr(
+                "Разные фреймы могут отвечать за выполнение одной и той "
+                "же функции. И они же будут записывать и переписывать "
+                "1 бит. X в DATA — любой байт, пустое поле не участвует "
+                "в сравнении."
+            )
+            if self._for_control
+            else tr(
+                "Фреймов может быть сколько угодно: приход любого из них "
+                "пишет «→ 1» или «→ 0» в один и тот же бит ОЗУ функции — "
+                "разные фреймы могут включать и выключать её. X в DATA — "
+                "любой байт, пустое поле не участвует в сравнении. "
+                "Пример: фрейм «дверь открыта» → 1, «дверь закрыта» → 0. "
+                "Канал фрейма задаётся в Гибкой логике."
+            )
+        )
+        hint = QLabel(hint_text)
         hint.setFont(font)
         hint.setWordWrap(True)
+        _selectable(hint)
         layout.addWidget(hint)
 
         container = QWidget()
@@ -555,6 +677,14 @@ class VariableDialog(QDialog):
         line1.addWidget(QLabel("ID:"))
         self._graph_id = _HexIdEdit(font, "0C0")
         line1.addWidget(self._graph_id)
+        # 11/29 бит — разрядность ID фрейма переменной (отчёт мастера).
+        self._graph_bit = QComboBox()
+        self._graph_bit.setFont(font)
+        self._graph_bit.addItem(tr("11 бит"), False)
+        self._graph_bit.addItem(tr("29 бит"), True)
+        self._graph_bit.setFixedWidth(74)
+        self._graph_bit.setToolTip(tr("Разрядность CAN-идентификатора"))
+        line1.addWidget(self._graph_bit)
         line1.addWidget(QLabel("DLC:"))
         self._graph_dlc = QSpinBox()
         self._graph_dlc.setFont(font)
@@ -591,18 +721,50 @@ class VariableDialog(QDialog):
         line3.addStretch()
         layout.addLayout(line3)
 
+        # DLC ограничивает поля DATA в «от»/«до» — лишние байты за
+        # DLC недоступны, как в триггерах (отчёт мастера).
+        self._graph_dlc.valueChanged.connect(self._on_dlc_changed)
+        for edit in (*self._graph_from, *self._graph_to):
+            edit.textChanged.connect(lambda _t: self._refresh_graph())
+
         hint = QLabel(tr(
             "В расчёт идут только заполненные байты без «X». "
-            "График перевода: слева сырое значение этих байт "
-            "(десятичное или HEX), справа — величина. Точки правятся "
-            "в таблице, линия между ними — интерполяция."
+            "Таблица привязки: слева сырое значение этих байт (HEX — "
+            "как записали, так и остаётся), справа — величина. Точки "
+            "правятся в таблице, линия между ними — интерполяция."
         ))
         hint.setFont(font)
         hint.setWordWrap(True)
+        _selectable(hint)
         layout.addWidget(hint)
+
+        # Live-значение переменной из CAN над графиком: «0.00», пока
+        # привязка не задана (меньше 2 точек) или кадр ещё не пришёл
+        # (отчёт мастера). Дублируется в строке переменной.
+        live_row = QHBoxLayout()
+        self._live_label = QLabel("0.00")
+        self._live_label.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
+        self._live_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._live_label.setStyleSheet(
+            "color: #7C9EFF; border: 1px solid #3A7BD5;"
+            " border-radius: 6px; padding: 2px 10px;"
+        )
+        _selectable(self._live_label)
+        live_row.addStretch()
+        live_row.addWidget(self._live_label)
+        live_row.addStretch()
+        layout.addLayout(live_row)
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(250)
+        self._live_timer.timeout.connect(self._update_live_label)
+        self._live_timer.start()
 
         body = QHBoxLayout()
         left = QVBoxLayout()
+        binding_title = QLabel(tr("Таблица привязки"))
+        binding_title.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        _selectable(binding_title)
+        left.addWidget(binding_title)
         self._points_table = QTableWidget(0, 2)
         self._points_table.setFont(font)
         self._points_table.setHorizontalHeaderLabels(
@@ -634,7 +796,11 @@ class VariableDialog(QDialog):
         row = self._points_table.rowCount()
         self._points_table.blockSignals(True)
         self._points_table.insertRow(row)
-        self._points_table.setItem(row, 0, QTableWidgetItem(str(row * 100)))
+        # Сырое значение — в HEX, как записано так и остаётся
+        # (отчёт мастера: без пересчёта в десятичную).
+        self._points_table.setItem(
+            row, 0, QTableWidgetItem(f"{row * 100:X}")
+        )
         self._points_table.setItem(row, 1, QTableWidgetItem(str(row * 500)))
         self._points_table.blockSignals(False)
         self._refresh_graph()
@@ -663,7 +829,42 @@ class VariableDialog(QDialog):
             points.append((x, y))
         return points
 
+    def _on_dlc_changed(self, value: int) -> None:
+        _set_data_enabled(self._graph_from, value)
+        _set_data_enabled(self._graph_to, value)
+        self._refresh_graph()
+        self._refresh_storage_size()
+
+    def _refresh_storage_size(self) -> None:
+        """Размер хранения — в байтах: сколько заполненных байт DATA,
+        столько и нужно под значение в ОЗУ/ПЗУ (отчёт мастера)."""
+        if self._type_combo.currentData() != _TYPE_DYNAMIC:
+            self._storage_size_label.setText("")
+            return
+        count = max(1, len(_data_bytes_used(self._graph_from)))
+        self._storage_size_label.setText(
+            tr("байт: {0}").format(count)
+        )
+
+    def _update_live_label(self) -> None:
+        """Онлайн-значение из CAN над графиком: «0.00», пока привязки
+        нет (меньше 2 точек) или кадр по ID ещё не приходил."""
+        row = self._row
+        if row is None or len(self._read_points()) < 2:
+            self._live_label.setText("0.00")
+            return
+        live = getattr(row, "live_value", None)
+        self._live_label.setText(
+            "0.00" if live is None else f"{live:.2f}"
+        )
+
     def _refresh_graph(self) -> None:
+        # Ось X: начало = значение поля DATA «от», конец = «до»
+        # (отчёт мастера).
+        self._graph_preview.set_axis_x(
+            _edits_raw_value(self._graph_from),
+            _edits_raw_value(self._graph_to),
+        )
         self._graph_preview.set_points(self._read_points())
 
     # ---- общее --------------------------------------------------------
@@ -683,6 +884,16 @@ class VariableDialog(QDialog):
         if index == 1 and self._points_table.rowCount() == 0:
             self._add_point_row()
             self._add_point_row()
+        # «в бит» — статические (бит состояния), «в байт» —
+        # динамические (байты значения) — отчёт мастера.
+        self._cache_bit_check.setText(
+            tr("в байт") if index == 1 else tr("в бит")
+        )
+        if index == 1:
+            _set_data_enabled(self._graph_from, self._graph_dlc.value())
+            _set_data_enabled(self._graph_to, self._graph_dlc.value())
+        self._refresh_storage_size()
+        self._refresh_graph()
 
     def _apply_config(self, config: dict[str, Any]) -> None:
         var_type = config.get("type", _TYPE_STATIC)
@@ -702,7 +913,10 @@ class VariableDialog(QDialog):
                 self._add_frame_row(None)
         else:
             self._graph_id.setText(str(config.get("id", "")))
+            self._graph_bit.setCurrentIndex(1 if config.get("extended") else 0)
             self._graph_dlc.setValue(int(config.get("dlc", 8)))
+            _set_data_enabled(self._graph_from, self._graph_dlc.value())
+            _set_data_enabled(self._graph_to, self._graph_dlc.value())
             _text_to_data(self._graph_from, config.get("from"))
             _text_to_data(self._graph_to, config.get("to"))
             self._points_table.setRowCount(0)
@@ -713,7 +927,13 @@ class VariableDialog(QDialog):
                     continue
                 row = self._points_table.rowCount()
                 self._points_table.insertRow(row)
-                self._points_table.setItem(row, 0, QTableWidgetItem(str(x)))
+                # X — сырое значение DATA: показываем в HEX, как его
+                # записали — без пересчёта в десятичную (отчёт мастера).
+                x_text = (
+                    f"{int(round(x)):X}"
+                    if isinstance(x, (int, float)) else str(x)
+                )
+                self._points_table.setItem(row, 0, QTableWidgetItem(x_text))
                 self._points_table.setItem(row, 1, QTableWidgetItem(str(y)))
             if self._points_table.rowCount() == 0:
                 for _ in range(4):
@@ -760,6 +980,7 @@ class VariableDialog(QDialog):
             base.update({
                 "type": _TYPE_DYNAMIC,
                 "id": self._graph_id.text().strip(),
+                "extended": bool(self._graph_bit.currentData()),
                 "dlc": self._graph_dlc.value(),
                 "from": _data_to_text(self._graph_from),
                 "to": _data_to_text(self._graph_to),
@@ -789,6 +1010,9 @@ class _VariableRow(QFrame):
         self._column = column
         self._font = font
         self.config: dict[str, Any] = config or {}
+        # Онлайн-значение из CAN — обновляется вкладкой при приходе
+        # кадра с ID переменной; None — кадр ещё не приходил.
+        self.live_value: float | None = None
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setProperty("varRow", True)
         self.setStyleSheet(
@@ -826,10 +1050,16 @@ class _VariableRow(QFrame):
 
         self._refresh_labels()
 
+    def set_live_value(self, value: float) -> None:
+        """Онлайн-значение переменной из CAN — дублируется в строке
+        рядом с названием (отчёт мастера)."""
+        self.live_value = value
+        self._state_label.setText(f"{value:.2f}")
+
     def _refresh_labels(self) -> None:
         name = self.config.get("name", "").strip()
         self._name_label.setText(name or tr("— (без имени)"))
-        self._state_label.setText("0")
+        self._state_label.setText("0.00" if self.config.get("type") == _TYPE_DYNAMIC else "0")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         # Клик по свободному месту строки — редактор; по кнопке
@@ -901,7 +1131,10 @@ class _VarColumn(QWidget):
         self.persist()
 
     def edit_row(self, row: _VariableRow) -> None:
-        dialog = VariableDialog(self._tab, row.config)
+        dialog = VariableDialog(
+            self._tab, row.config, row=row,
+            for_control=(self.key == "control"),
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         row.config.update(dialog.config)
@@ -935,10 +1168,11 @@ class VariablesTab(QWidget):
     """Вкладка «Переменные»: колонки «Чтение»/«Управление»,
     сохранение/загрузка «Конфиг Инфо»."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, serial_manager=None) -> None:
         super().__init__(parent)
         self._font = QFont("Segoe UI", 9)
         self._config = Config()
+        self._serial_manager = serial_manager
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -980,8 +1214,10 @@ class VariablesTab(QWidget):
         self._ctrl_col = _VarColumn(
             tr("Управление"), self, "control", self._font
         )
-        columns.addWidget(self._read_col)
-        columns.addWidget(self._ctrl_col)
+        # Три равные колонки: Чтение / Управление / Дополнительные
+        # каналы входа и выхода (отчёт мастера).
+        columns.addWidget(self._read_col, 1)
+        columns.addWidget(self._ctrl_col, 1)
         # Третья колонка — «Дополнительные каналы входа и выхода»:
         # пока заглушка, позже сюда присвоим ноги МК (отчёт мастера).
         aux_frame = QFrame()
@@ -1001,10 +1237,48 @@ class VariablesTab(QWidget):
         self._aux_hint.setStyleSheet("color: #9A9AA5;")
         aux_box.addWidget(self._aux_hint)
         aux_box.addStretch()
-        columns.addWidget(aux_frame)
+        columns.addWidget(aux_frame, 1)
         layout.addLayout(columns, 1)
 
+        # Онлайн-значения переменных из CAN (отчёт мастера: раньше
+        # поле «значение» не обновлялось).
+        if self._serial_manager is not None:
+            self._serial_manager.new_can_frames.connect(self._on_can_frames)
+
         self._restore()
+
+    # ---- онлайн-значения из CAN ----------------------------------------
+
+    def _on_can_frames(self, frames: list[dict[str, Any]]) -> None:
+        """Пересчитывает значения динамических переменных по приходящим
+        кадрам: ID (+ битность) совпал → сырое значение из заполненных
+        байтов «DATA от» → величина по «таблице привязки». Результат
+        виден в строке переменной и над графиком в её настройке."""
+        for col in (self._read_col, self._ctrl_col):
+            for row in list(col._rows):
+                cfg = row.config
+                if cfg.get("type") != _TYPE_DYNAMIC:
+                    continue
+                fid = hex_to_int(str(cfg.get("id", "")))
+                points = cfg.get("points") or []
+                used = cfg.get("bytes") or []
+                if fid is None or len(points) < 2 or not used:
+                    continue
+                want_ext = bool(cfg.get("extended", False))
+                for frame in frames:
+                    if int(frame.get("id", -1)) != fid:
+                        continue
+                    if bool(frame.get("extended", False)) != want_ext:
+                        continue
+                    data = bytes(frame.get("data", b""))
+                    raw = 0
+                    seen = False
+                    for i in used:
+                        if i < len(data):
+                            raw = (raw << 8) | data[i]
+                            seen = True
+                    if seen:
+                        row.set_live_value(_map_points(points, raw))
 
     # ---- списки переменных для Гибкой логики -------------------------
 

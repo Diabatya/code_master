@@ -90,6 +90,27 @@ typedef struct __attribute__((packed)) {
   uint8_t  crc8;
 } trigger_names_t; /* 4+1+4+504+1 = 514 bytes, чётный размер */
 
+/* Запись версии ПО («VER1»), которую конфигуратор шьёт при
+ * программировании МК — её номер показывает карточка устройства.
+ * Лежит в той же config-странице и дописывается при КАЖДОМ обновлении
+ * страницы из RAM-зеркала: стирание страницы иначе её сносило бы.
+ * Смещение 1024 — свободная область за таблицей имён; старая раскладка
+ * (offset 32) конфликтовала с ext-записью CEX0 и перетиралась ей.
+ * Legacy-совместимость: при загрузке проверяется и старый offset 32
+ * (если там VER1, а не CEX0 — читаем его). */
+#define DEVICE_CONFIG_VER_OFFSET   1024U
+#define DEVICE_CONFIG_VER_OFFSET_LEGACY 32U
+#define DEVICE_CONFIG_VER_MAGIC    0x56455231U /* "VER1" */
+#define DEVICE_CONFIG_VERSION_MAX  16U
+
+typedef struct __attribute__((packed)) {
+  uint32_t magic;   /* DEVICE_CONFIG_VER_MAGIC */
+  uint8_t  len;     /* <= DEVICE_CONFIG_VERSION_MAX */
+  char     version[DEVICE_CONFIG_VERSION_MAX];
+  uint8_t  reserved[10];
+  uint8_t  crc8;
+} device_fw_ver_t; /* 32 bytes — половинками пишется в конец страницы */
+
 /* Loads the config from Flash into the RAM mirror (call once at boot, before
  * MX_USB_DEVICE_Init() so the USB descriptors already see the right
  * name/serial on first enumeration). Falls back to defaults if the page is
@@ -127,6 +148,12 @@ uint8_t DeviceConfig_SetCanBaud(uint8_t channel, uint32_t baud_kbps);
  * возвращает указатель на len байт в RAM-зеркале (не терминировано
  * нулём при len==TRIGGER_NAME_LEN) или NULL/len=0 для пустого слота. */
 const uint8_t *DeviceConfig_GetTriggerName(uint8_t index, uint8_t *len_out);
+
+/* Версия ПО, зашитая конфигуратором (запись VER1). Возвращает указатель
+ * на len байт в RAM-зеркале или NULL/len=0, если запись отсутствует
+ * или битая. Версия НЕ стирается заводскими настройками и не меняется
+ * конфигурацией — это свойство прошитого образа. */
+const uint8_t *DeviceConfig_GetFwVersion(uint8_t *len_out);
 
 /* Складывает имя в RAM-зеркало таблицы (Flash не трогает — фиксация
  * только через DeviceConfig_CommitTriggerNames). Пустое len стирает

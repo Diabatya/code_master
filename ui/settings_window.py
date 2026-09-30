@@ -384,10 +384,12 @@ class SettingsWindow(QMainWindow):
         self._tabs = QTabWidget()
         self._tabs.setFont(QFont("Segoe UI", 11))
         self._tabs.setIconSize(QSize(24, 24))
-        # Крупные скруглённые «пилюли» вкладок (отчёт мастера).
+        # Крупные скруглённые «пилюли» вкладок с толстой голубой
+        # обводкой (отчёт мастера).
         self._tabs.tabBar().setStyleSheet(
             "QTabBar::tab { padding: 10px 18px; margin: 4px 3px;"
-            " border-radius: 12px; font-size: 11pt; }"
+            " border-radius: 12px; font-size: 11pt;"
+            " border: 2px solid #3A7BD5; }"
             "QTabBar::tab:selected { background: #3A7BD5; color: white; }"
             "QTabBar::tab:hover:!selected { background: palette(midlight); }"
         )
@@ -399,7 +401,7 @@ class SettingsWindow(QMainWindow):
         self._monitor_tab = CanMonitorTab(self._serial_manager, self)
         self._gateway_tab = CanGatewayTab(self._serial_manager, self)
         self._flexible_tab = FlexibleLogicTab(self._serial_manager, self)
-        self._variables_tab = VariablesTab(self)
+        self._variables_tab = VariablesTab(self, self._serial_manager)
         # Списки переменных для событий/условий/действий ГЛ.
         self._flexible_tab.set_variables_tab(self._variables_tab)
         self._library_tab = LibraryBrowser(self._trigger_tab, self._flexible_tab, self)

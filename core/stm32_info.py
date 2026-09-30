@@ -36,10 +36,13 @@ DEVICE_CONFIG_FORMAT_VERSION = 1
 DEVICE_CONFIG_RECORD_SIZE = 32
 DEVICE_CONFIG_DEFAULT_VID = 0x0483
 DEVICE_CONFIG_DEFAULT_PID = 0x5740
-# Версия ПО хранится рядом с основной записью — вторым 32-байтным
-# блоком страницы (магия "VER1"). МК может читать её без разбора
-# первой записи; старая прошивка байты 32..63 игнорирует.
-DEVICE_CONFIG_VER_OFFSET = 32
+# Версия ПО хранится отдельным 32-байтным блоком config-страницы
+# (магия "VER1"). Смещение 1024 — свободная область за таблицей имён
+# триггеров: старая раскладка (offset 32) конфликтовала с ext-записью
+# CEX0 и перетиралась ею при первом же сохранении конфигурации.
+# Прошивка читает VER1 в RAM при старте и отдаёт хвостом CMD_CFG_READ.
+DEVICE_CONFIG_VER_OFFSET = 1024
+DEVICE_CONFIG_VER_OFFSET_LEGACY = 32
 DEVICE_CONFIG_VER_MAGIC = 0x56455231
 DEVICE_CONFIG_VERSION_MAX = 16
 
@@ -105,18 +108,22 @@ def build_device_config_page(
 
 
 def parse_device_fw_version(page: bytes) -> str | None:
-    """Читает версионную запись «VER1» со страницы конфигурации."""
-    off = DEVICE_CONFIG_VER_OFFSET
-    if len(page) < off + 32:
-        return None
-    if int.from_bytes(page[off : off + 4], "little") != DEVICE_CONFIG_VER_MAGIC:
-        return None
-    ver_len = page[off + 4]
-    if ver_len > DEVICE_CONFIG_VERSION_MAX:
-        return None
-    if device_config_crc8(page[off : off + 31]) != page[off + 31]:
-        return None
-    return page[off + 5 : off + 5 + ver_len].decode("ascii", errors="ignore")
+    """Читает версионную запись «VER1» со страницы конфигурации.
+
+    Проверяет новое смещение (1024), затем legacy (32) — образы до
+    переноса шили VER1 туда."""
+    for off in (DEVICE_CONFIG_VER_OFFSET, DEVICE_CONFIG_VER_OFFSET_LEGACY):
+        if len(page) < off + 32:
+            continue
+        if int.from_bytes(page[off : off + 4], "little") != DEVICE_CONFIG_VER_MAGIC:
+            continue
+        ver_len = page[off + 4]
+        if ver_len > DEVICE_CONFIG_VERSION_MAX:
+            continue
+        if device_config_crc8(page[off : off + 31]) != page[off + 31]:
+            continue
+        return page[off + 5 : off + 5 + ver_len].decode("ascii", errors="ignore")
+    return None
 
 
 def parse_device_config(page: bytes) -> tuple[str, str, int, int] | None:

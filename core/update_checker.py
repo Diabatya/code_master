@@ -11,7 +11,7 @@ from models.version import VERSION
 logger = get_logger(__name__)
 
 CURRENT_VERSION = VERSION
-RELEASES_URL = "https://api.github.com/repos/GrafKD/code_master/releases/latest"
+RELEASES_URL = "https://api.github.com/repos/Diabatya/code_master/releases/latest"
 
 
 def _create_ssl_context() -> ssl.SSLContext:
@@ -60,11 +60,13 @@ def check_for_updates() -> tuple[bool, str]:
             return True, f"Доступна новая версия {latest}.\nТекущая версия: {CURRENT_VERSION}.\n{url}"
         return False, f"Используется последняя версия ({CURRENT_VERSION})"
     except urllib.error.HTTPError as exc:
+        # Отчёт мастера: голый код ошибки (404) не показываем —
+        # для оператора это «нет связи с сервером».
         logger.error("HTTP ошибка при проверке обновлений: %s", exc)
-        return False, f"Ошибка проверки обновлений: {exc.code}"
+        return False, "Нет связи с сервером"
     except urllib.error.URLError as exc:
         logger.error("Ошибка сети при проверке обновлений: %s", exc)
-        return False, "Нет подключения к интернету"
+        return False, "Нет связи с сервером"
     except Exception as exc:  # noqa: BLE001
         logger.exception("Ошибка при проверке обновлений")
         return False, f"Ошибка проверки обновлений: {exc}"

@@ -9,6 +9,7 @@
 static device_config_t s_config;
 static device_ext_config_t s_ext_config;
 static trigger_names_t s_trigger_names;
+static device_fw_ver_t s_fw_ver;
 static uint8_t s_config_valid;
 
 static uint8_t crc8(const uint8_t *data, uint32_t len)
@@ -62,6 +63,16 @@ static void load_names_defaults(trigger_names_t *names)
   names->crc8 = crc8((const uint8_t *)names, offsetof(trigger_names_t, crc8));
 }
 
+/* Версионная запись VER1: magic + CRC + разумная длина. Пустая
+ * (стёртая Flash = 0xFF) или битая запись означает «версии нет» —
+ * остальную конфигурацию это не трогает. */
+static uint8_t fw_ver_valid(const device_fw_ver_t *ver)
+{
+  return ver->magic == DEVICE_CONFIG_VER_MAGIC
+         && ver->len <= DEVICE_CONFIG_VERSION_MAX
+         && crc8((const uint8_t *)ver, offsetof(device_fw_ver_t, crc8)) == ver->crc8;
+}
+
 void DeviceConfig_Init(void)
 {
   const device_config_t *flash_cfg = (const device_config_t *)DEVICE_CONFIG_PAGE_ADDR;
@@ -111,6 +122,23 @@ void DeviceConfig_Init(void)
     memcpy(&s_trigger_names, names, sizeof(s_trigger_names));
   } else {
     load_names_defaults(&s_trigger_names);
+  }
+
+  /* Версия ПО (VER1) — читается из нового смещения; при его отсутствии
+   * пробуем legacy-offset 32: образы до переноса шили VER1 туда
+   * (перетиралась ext-записью при первом же сохранении конфигурации,
+   * поэтому попадётся редко — но безвредно проверить). */
+  memset(&s_fw_ver, 0, sizeof(s_fw_ver));
+  const device_fw_ver_t *ver =
+      (const device_fw_ver_t *)(DEVICE_CONFIG_PAGE_ADDR + DEVICE_CONFIG_VER_OFFSET);
+  if (fw_ver_valid(ver)) {
+    memcpy(&s_fw_ver, ver, sizeof(s_fw_ver));
+  } else {
+    ver = (const device_fw_ver_t *)(DEVICE_CONFIG_PAGE_ADDR
+                                    + DEVICE_CONFIG_VER_OFFSET_LEGACY);
+    if (fw_ver_valid(ver)) {
+      memcpy(&s_fw_ver, ver, sizeof(s_fw_ver));
+    }
   }
 }
 
@@ -180,6 +208,21 @@ static uint8_t flash_write_config(const device_config_t *cfg,
     addr += 2U;
   }
 
+  /* Версионная запись VER1 живёт на этой же странице — стирание её
+   * сносит, поэтому валидное зеркало дописываем обратно каждый раз
+   * (отчёт мастера: «Версия ПО» должна показывать прошитую версию). */
+  if (fw_ver_valid(&s_fw_ver)) {
+    src = (const uint16_t *)&s_fw_ver;
+    addr = DEVICE_CONFIG_PAGE_ADDR + DEVICE_CONFIG_VER_OFFSET;
+    for (uint32_t i = 0; i < (sizeof(device_fw_ver_t) / 2U); i++) {
+      if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, src[i]) != HAL_OK) {
+        HAL_FLASH_Lock();
+        return 0U;
+      }
+      addr += 2U;
+    }
+  }
+
   HAL_FLASH_Lock();
   /* Сверяем реальное содержимое страницы: частично прошитая запись
    * (brown-out во время программирования) иначе всплывала бы только
@@ -189,7 +232,11 @@ static uint8_t flash_write_config(const device_config_t *cfg,
           && memcmp((const void *)(DEVICE_CONFIG_PAGE_ADDR + DEVICE_EXT_CONFIG_OFFSET),
                     ext, sizeof(device_ext_config_t)) == 0
           && memcmp((const void *)(DEVICE_CONFIG_PAGE_ADDR + TRIGGER_NAMES_OFFSET),
-                    names, sizeof(trigger_names_t)) == 0)
+                    names, sizeof(trigger_names_t)) == 0
+          && (!fw_ver_valid(&s_fw_ver)
+              || memcmp((const void *)(DEVICE_CONFIG_PAGE_ADDR
+                                       + DEVICE_CONFIG_VER_OFFSET),
+                        &s_fw_ver, sizeof(device_fw_ver_t)) == 0))
              ? 1U
              : 0U;
 }
@@ -335,6 +382,20 @@ uint8_t DeviceConfig_StageTriggerName(uint8_t index, const uint8_t *name,
     memcpy(s_trigger_names.names[index], name, len);
   }
   return 1U;
+}
+
+const uint8_t *DeviceConfig_GetFwVersion(uint8_t *len_out)
+{
+  if (!fw_ver_valid(&s_fw_ver)) {
+    if (len_out != NULL) {
+      *len_out = 0U;
+    }
+    return NULL;
+  }
+  if (len_out != NULL) {
+    *len_out = s_fw_ver.len;
+  }
+  return (const uint8_t *)s_fw_ver.version;
 }
 
 uint8_t DeviceConfig_CommitTriggerNames(void)

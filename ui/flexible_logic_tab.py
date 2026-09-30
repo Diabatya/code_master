@@ -12,20 +12,27 @@
 * «Статическая переменная» — выбор из статических переменных;
   отрабатывает и на пакет включения, и на пакет выключения
   (фильтр фронта «Изменилась / Включилась / Выключилась»);
-* «Доп канал» — заглушка (функция будет описана позже);
+* «Доп канал» — фронт состояния OUT1-4 («Активен»/«Не активен»);
+  состояние каналов зеркалируется ПК из отправленных команд CMD_AUX_SET;
 * «Фрейм» — ручной ввод CAN-пакета (канал, битность, ID, DLC,
   DATA по байтам с «X», «Сработок на DATA») — приход такого кадра
   запускает программу.
 
+Настроенное событие/условие сворачивается до одной строки-сводки
+(«Спорт вкл», «Обороты ДВС стали больше 1500», «Доп канал №1 активен»);
+клик по строке разворачивает редактор с анимацией — отчёт мастера.
+
 Условие — необязательная проверка текущего состояния перед действием:
-статическая переменная (включена/выключена), динамическая
-(больше/меньше/равно порогу), доп. канал (заглушка).
+статическая переменная (активна/не активна), динамическая
+(больше/меньше/равно порогу), доп. канал (активен/не активен).
 
 Действие — установка переменной из раздела «Управление», ручной
-CAN-фрейм (байт «X» подставляется из кадра-события) и/или
-«Автоматическая запись DATA в кэш» — по образцу триггеров: приходящий
-кадр, подходящий под спецификацию источника, кэшируется, а при
-срабатывании программы отправляется последний сохранённый кадр.
+CAN-фрейм (байт «X» подставляется из кадра-события), доп. канал
+OUT1-4 («Вкл»/«Выкл»/«Подать импульсы»/«Вкл ШИМ» с паузой до начала
+и графиком импульсов — исполняет МК по CMD_AUX_SET, см. aux_out.h)
+и/или «Автоматическая запись DATA в кэш» — по образцу триггеров:
+приходящий кадр, подходящий под спецификацию источника, кэшируется,
+а при срабатывании программы отправляется последний сохранённый кадр.
 
 Сохранение — в общий конфиг приложения (ключ flexible_rules). Старый
 формат правил (id/mask/condition_data → resp_*) автоматически
@@ -34,10 +41,11 @@ CAN-фрейм (байт «X» подставляется из кадра-соб
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
-from PySide6.QtCore import Qt, QTimer, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, Slot
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -194,6 +202,101 @@ def _connector(text: str) -> QLabel:
     return label
 
 
+def _close_button(font: QFont, tooltip: str) -> QPushButton:
+    """Голубой крестик закрытия события/условия (отчёт мастера)."""
+    button = QPushButton("✕")
+    button.setFont(QFont(font.family(), font.pointSize(), QFont.Weight.Bold))
+    button.setFixedSize(20, 20)
+    button.setToolTip(tooltip)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setStyleSheet(
+        "QPushButton { color: #7C9EFF; border: none;"
+        " background: transparent; padding: 0; }"
+        "QPushButton:hover { color: #AEC6FF; }"
+        "QPushButton:pressed { color: #5A7FD5; }"
+    )
+    return button
+
+
+class _ClickableSummary(QLabel):
+    """Строка-сводка события/условия: клик разворачивает редактор."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self.setStyleSheet("color: #7C9EFF;")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            p = self.parent()
+            toggle = getattr(p, "_toggle_editor", None)
+            if callable(toggle):
+                toggle()
+        super().mousePressEvent(event)
+
+
+class _PulsePreview(QWidget):
+    """Мини-график импульсов доп. канала: меандр с длительностью
+    импульса и паузой из полей настройки (отчёт мастера)."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._on_ms = 100
+        self._off_ms = 100
+        self._count = 3
+        self.setMinimumHeight(56)
+        self.setMaximumHeight(64)
+
+    def set_params(self, on_ms: int, off_ms: int, count: int) -> None:
+        self._on_ms = max(1, on_ms)
+        self._off_ms = max(0, off_ms)
+        self._count = max(1, min(20, count))
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        top, bottom = 8, h - 14
+        mid_hi, mid_lo = top, bottom
+        # Ось времени.
+        painter.setPen(QPen(Qt.GlobalColor.gray, 1, Qt.PenStyle.DashLine))
+        painter.drawLine(0, mid_lo, w, mid_lo)
+        # Меандр: on_ms/high, off_ms/low, count периодов.
+        pen = QPen(QColor("#7C9EFF"), 2)
+        painter.setPen(pen)
+        total = self._count * (self._on_ms + max(1, self._off_ms))
+        scale = (w - 8) / total if total else 1.0
+        x = 4.0
+        y = mid_lo
+        path = QPainterPath()
+        path.moveTo(x, y)
+        for _i in range(self._count):
+            on_w = self._on_ms * scale
+            off_w = max(1, self._off_ms) * scale
+            path.lineTo(x, mid_hi)          # фронт вверх
+            path.lineTo(x + on_w, mid_hi)   # импульс
+            path.lineTo(x + on_w, mid_lo)   # спад вниз
+            x += on_w + off_w
+            y = mid_lo
+            path.lineTo(x, mid_lo)          # пауза (низкий уровень)
+        painter.drawPath(path)
+        # Подписи первого импульса и паузы.
+        painter.setPen(QPen(QColor("#9A9AA5")))
+        painter.setFont(QFont("Segoe UI", 7))
+        on_w = self._on_ms * scale
+        painter.drawText(
+            4, mid_hi - 3, int(max(40, on_w)), 10,
+            Qt.AlignmentFlag.AlignLeft, f"{self._on_ms} мс",
+        )
+        painter.drawText(
+            int(4 + on_w), mid_lo - 10, 80, 10,
+            Qt.AlignmentFlag.AlignLeft, f"пауза {self._off_ms} мс",
+        )
+
+
 class _VarCombo(QComboBox):
     """Комбобокс выбора переменной из вкладки «Переменные».
 
@@ -303,9 +406,9 @@ class _StaticEventPage(QWidget):
         layout.addWidget(_small_label(tr("Отрабатывает:"), font))
         self.edge = QComboBox()
         self.edge.setFont(font)
-        self.edge.addItem(tr("Включилась и выключилась"), "both")
-        self.edge.addItem(tr("Включилась (→1)"), "on")
-        self.edge.addItem(tr("Выключилась (→0)"), "off")
+        self.edge.addItem(tr("Вкл (1)"), "on")
+        self.edge.addItem(tr("Выкл (0)"), "off")
+        self.edge.addItem(tr("Вкл и выкл"), "both")
         layout.addWidget(self.edge)
         layout.addStretch()
 
@@ -326,24 +429,46 @@ class _StaticEventPage(QWidget):
 
 
 class _AuxEventPage(QWidget):
-    """Событие «Доп канал» — заглушка: функция будет описана позже."""
+    """Событие «Доп канал»: номер канала и состояние
+    «Активен»/«Не активен» (отчёт мастера)."""
 
-    def __init__(self, font: QFont, parent=None) -> None:
+    def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
+        layout.setSpacing(4)
         layout.setContentsMargins(0, 0, 0, 0)
-        label = QLabel(tr("Доп канал — скоро"))
-        label.setFont(font)
-        label.setStyleSheet("color: #9A9AA5;")
-        label.setWordWrap(True)
-        layout.addWidget(label)
+
+        row = QHBoxLayout()
+        row.addWidget(_small_label(tr("Доп канал №"), font))
+        self.channel = QSpinBox()
+        self.channel.setFont(font)
+        self.channel.setRange(1, 8)
+        self.channel.setValue(1)
+        self.channel.setFixedWidth(64)
+        row.addWidget(self.channel)
+        self.state = QComboBox()
+        self.state.setFont(font)
+        self.state.addItem(tr("Активен"), 1)
+        self.state.addItem(tr("Не активен"), 0)
+        row.addWidget(self.state)
+        row.addStretch()
+        layout.addLayout(row)
         layout.addStretch()
 
+        self.channel.valueChanged.connect(mark_dirty)
+        self.state.currentIndexChanged.connect(mark_dirty)
+
     def read(self) -> dict[str, Any]:
-        return {"type": _EVENT_AUX}
+        return {
+            "type": _EVENT_AUX,
+            "channel": self.channel.value(),
+            "state": self.state.currentData(),
+        }
 
     def write(self, event: dict[str, Any]) -> None:
-        pass
+        self.channel.setValue(int(event.get("channel", 1) or 1))
+        sidx = self.state.findData(int(event.get("state", 1) or 0))
+        self.state.setCurrentIndex(sidx if sidx >= 0 else 0)
 
 
 class _FrameEventPage(QWidget):
@@ -474,20 +599,23 @@ class _EventItem(QWidget):
         layout.setSpacing(4)
         layout.setContentsMargins(6, 4, 6, 6)
 
-        # Компактная строка: «Обороты · Стало больше» и т.п.
+        # Компактная строка: «Обороты ДВС стали больше 1500» — клик
+        # разворачивает редактор с анимацией (отчёт мастера).
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
-        self._summary = QLabel()
-        self._summary.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        self._summary.setStyleSheet("color: #7C9EFF;")
+        self._summary = _ClickableSummary(self)
         head.addWidget(self._summary, 1)
-        self._remove = QPushButton("✕")
-        self._remove.setFont(font)
-        self._remove.setFixedSize(20, 20)
-        self._remove.setToolTip(tr("Удалить событие"))
+        self._remove = _close_button(font, tr("Удалить событие"))
         self._remove.clicked.connect(lambda: row._remove_event(self))
         head.addWidget(self._remove)
         layout.addLayout(head)
+
+        # Редактор события — скрывается целиком после настройки,
+        # программа остаётся одной строкой (отчёт мастера).
+        self._editor = QWidget()
+        editor_layout = QVBoxLayout(self._editor)
+        editor_layout.setSpacing(4)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
 
         self._type = QComboBox()
         self._type.setFont(font)
@@ -496,19 +624,25 @@ class _EventItem(QWidget):
         self._type.addItem(tr("Доп канал"), _EVENT_AUX)
         self._type.addItem(tr("Фрейм"), _EVENT_FRAME)
         self._type.currentIndexChanged.connect(self._on_type)
-        layout.addWidget(self._type)
+        editor_layout.addWidget(self._type)
 
         self._stack = QStackedWidget()
         self._dyn = _DynEventPage(font, row._mark_dirty)
         self._static = _StaticEventPage(font, row._mark_dirty)
-        self._aux = _AuxEventPage(font)
+        self._aux = _AuxEventPage(font, row._mark_dirty)
         self._frame = _FrameEventPage(font, row._mark_dirty)
         for page in (self._dyn, self._static, self._aux, self._frame):
             self._stack.addWidget(page)
-        layout.addWidget(self._stack)
+        editor_layout.addWidget(self._stack)
+        layout.addWidget(self._editor)
+        self._editor_anim = QPropertyAnimation(
+            self._editor, b"maximumHeight", self
+        )
+        self._editor_anim.setDuration(160)
+        self._editor_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         # Сводка обновляется при любом изменении полей события.
-        for page in (self._dyn, self._static, self._frame):
+        for page in (self._dyn, self._static, self._aux, self._frame):
             for child in page.findChildren(QWidget):
                 if isinstance(child, QComboBox):
                     child.currentIndexChanged.connect(self._update_summary)
@@ -518,7 +652,26 @@ class _EventItem(QWidget):
                     child.valueChanged.connect(self._update_summary)
         if event is not None:
             self.write(event)
+            # Запрограммированное событие — свёрнуто до одной строки
+            # (отчёт мастера); клик по сводке разворачивает редактор.
+            self._editor.setMaximumHeight(0)
         self._update_summary()
+
+    def _toggle_editor(self) -> None:
+        """Клик по строке-сводке: развернуть/свернуть редактор
+        с анимацией высоты (отчёт мастера)."""
+        expanded = self._editor.maximumHeight() != 0
+        end = 0 if expanded else max(1, self._editor.sizeHint().height())
+        final = 0 if expanded else 16777215
+        with contextlib.suppress(RuntimeError, TypeError):
+            self._editor_anim.finished.disconnect()
+        self._editor_anim.finished.connect(
+            lambda v=final: self._editor.setMaximumHeight(v)
+        )
+        self._editor_anim.stop()
+        self._editor_anim.setStartValue(self._editor.maximumHeight())
+        self._editor_anim.setEndValue(end)
+        self._editor_anim.start()
 
     def _on_type(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
@@ -555,17 +708,31 @@ class _EventItem(QWidget):
         etype = self._type.currentData()
         if etype == _EVENT_DYN:
             name = self._dyn.var.get_name() or "—"
-            func = tr("Стало больше") if self._dyn.direction.currentData() == "gt" else tr("Стало меньше")
-            text = f"{name} · {func} {self._dyn.value.text().strip()}".rstrip()
+            func = (
+                tr("стали больше")
+                if self._dyn.direction.currentData() == "gt"
+                else tr("стали меньше")
+            )
+            text = f"{name} {func} {self._dyn.value.text().strip()}".rstrip()
         elif etype == _EVENT_STATIC:
             name = self._static.var.get_name() or "—"
-            func = self._static.edge.currentText()
-            text = f"{name} · {func}"
+            func = {
+                "on": tr("вкл"),
+                "off": tr("выкл"),
+                "both": tr("вкл и выкл"),
+            }.get(self._static.edge.currentData(), "")
+            text = f"{name} {func}".rstrip()
         elif etype == _EVENT_FRAME:
             can_id = self._frame.can_id.text().strip()
             text = f"ID {can_id}" if can_id else tr("Фрейм")
         else:
-            text = tr("Доп канал")
+            state = (
+                tr("активен") if self._aux.state.currentData() == 1
+                else tr("не активен")
+            )
+            text = tr("Доп канал №{0} {1}").format(
+                self._aux.channel.value(), state
+            )
         self._summary.setText(text)
 
 
@@ -587,17 +754,18 @@ class _CondItem(QWidget):
 
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
-        self._summary = QLabel()
-        self._summary.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        self._summary.setStyleSheet("color: #7C9EFF;")
+        self._summary = _ClickableSummary(self)
         head.addWidget(self._summary, 1)
-        self._remove = QPushButton("✕")
-        self._remove.setFont(font)
-        self._remove.setFixedSize(20, 20)
-        self._remove.setToolTip(tr("Удалить условие"))
+        self._remove = _close_button(font, tr("Удалить условие"))
         self._remove.clicked.connect(lambda: row._remove_cond(self))
         head.addWidget(self._remove)
         layout.addLayout(head)
+
+        # Редактор условия сворачивается до строки-сводки (отчёт мастера).
+        self._editor = QWidget()
+        editor_layout = QVBoxLayout(self._editor)
+        editor_layout.setSpacing(4)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
 
         self._type = QComboBox()
         self._type.setFont(font)
@@ -606,7 +774,7 @@ class _CondItem(QWidget):
         self._type.addItem(tr("Динамическая переменная"), _COND_DYN)
         self._type.addItem(tr("Доп канал"), _COND_AUX)
         self._type.currentIndexChanged.connect(self._on_type)
-        layout.addWidget(self._type)
+        editor_layout.addWidget(self._type)
 
         self._stack = QStackedWidget()
         none_page = QWidget()
@@ -628,8 +796,8 @@ class _CondItem(QWidget):
         st_layout.addWidget(_small_label(tr("Состояние:"), font))
         self.st_state = QComboBox()
         self.st_state.setFont(font)
-        self.st_state.addItem(tr("Включена (1)"), 1)
-        self.st_state.addItem(tr("Выключена (0)"), 0)
+        self.st_state.addItem(tr("Активна (1)"), 1)
+        self.st_state.addItem(tr("Не активна (0)"), 0)
         st_layout.addWidget(self.st_state)
         st_layout.addStretch()
 
@@ -658,31 +826,69 @@ class _CondItem(QWidget):
 
         aux_page = QWidget()
         aux_layout = QVBoxLayout(aux_page)
+        aux_layout.setSpacing(4)
         aux_layout.setContentsMargins(0, 0, 0, 0)
-        aux_label = QLabel(tr("Доп канал — скоро"))
-        aux_label.setFont(font)
-        aux_label.setStyleSheet("color: #9A9AA5;")
-        aux_layout.addWidget(aux_label)
+        aux_row = QHBoxLayout()
+        aux_row.addWidget(_small_label(tr("Доп канал №"), font))
+        self.aux_channel = QSpinBox()
+        self.aux_channel.setFont(font)
+        self.aux_channel.setRange(1, 8)
+        self.aux_channel.setValue(1)
+        self.aux_channel.setFixedWidth(64)
+        aux_row.addWidget(self.aux_channel)
+        self.aux_state = QComboBox()
+        self.aux_state.setFont(font)
+        self.aux_state.addItem(tr("Активен"), 1)
+        self.aux_state.addItem(tr("Не активен"), 0)
+        aux_row.addWidget(self.aux_state)
+        aux_row.addStretch()
+        aux_layout.addLayout(aux_row)
         aux_layout.addStretch()
 
         for page in (none_page, static_page, dyn_page, aux_page):
             self._stack.addWidget(page)
-        layout.addWidget(self._stack)
+        editor_layout.addWidget(self._stack)
+        layout.addWidget(self._editor)
+        self._editor_anim = QPropertyAnimation(
+            self._editor, b"maximumHeight", self
+        )
+        self._editor_anim.setDuration(160)
+        self._editor_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         self.st_var.currentIndexChanged.connect(self._update_summary)
         self.st_state.currentIndexChanged.connect(self._update_summary)
         self.dyn_var.currentIndexChanged.connect(self._update_summary)
         self.dyn_op.currentIndexChanged.connect(self._update_summary)
         self.dyn_value.textChanged.connect(self._update_summary)
+        self.aux_channel.valueChanged.connect(self._update_summary)
+        self.aux_state.currentIndexChanged.connect(self._update_summary)
         self.st_var.currentIndexChanged.connect(row._mark_dirty)
         self.st_state.currentIndexChanged.connect(row._mark_dirty)
         self.dyn_var.currentIndexChanged.connect(row._mark_dirty)
         self.dyn_op.currentIndexChanged.connect(row._mark_dirty)
         self.dyn_value.textChanged.connect(row._mark_dirty)
+        self.aux_channel.valueChanged.connect(row._mark_dirty)
+        self.aux_state.currentIndexChanged.connect(row._mark_dirty)
 
         if cond is not None:
             self.write(cond)
+            self._editor.setMaximumHeight(0)
         self._update_summary()
+
+    def _toggle_editor(self) -> None:
+        """Клик по строке-сводке разворачивает/сворачивает редактор."""
+        expanded = self._editor.maximumHeight() != 0
+        end = 0 if expanded else max(1, self._editor.sizeHint().height())
+        final = 0 if expanded else 16777215
+        with contextlib.suppress(RuntimeError, TypeError):
+            self._editor_anim.finished.disconnect()
+        self._editor_anim.finished.connect(
+            lambda v=final: self._editor.setMaximumHeight(v)
+        )
+        self._editor_anim.stop()
+        self._editor_anim.setStartValue(self._editor.maximumHeight())
+        self._editor_anim.setEndValue(end)
+        self._editor_anim.start()
 
     def _on_type(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
@@ -705,7 +911,11 @@ class _CondItem(QWidget):
                 "value": self.dyn_value.text().strip(),
             }
         if ctype == _COND_AUX:
-            return {"type": _COND_AUX}
+            return {
+                "type": _COND_AUX,
+                "channel": self.aux_channel.value(),
+                "state": self.aux_state.currentData(),
+            }
         return {"type": _COND_NONE}
 
     def write(self, cond: dict[str, Any]) -> None:
@@ -722,6 +932,10 @@ class _CondItem(QWidget):
             oidx = self.dyn_op.findData(cond.get("op", "gt"))
             self.dyn_op.setCurrentIndex(oidx if oidx >= 0 else 0)
             self.dyn_value.setText(str(cond.get("value", "")))
+        elif ctype == _COND_AUX:
+            self.aux_channel.setValue(int(cond.get("channel", 1) or 1))
+            sidx = self.aux_state.findData(int(cond.get("state", 1) or 0))
+            self.aux_state.setCurrentIndex(sidx if sidx >= 0 else 0)
 
     def refresh_variables(self) -> None:
         tab = self._row._tab._variables_tab
@@ -733,14 +947,26 @@ class _CondItem(QWidget):
     def _update_summary(self, *_args) -> None:
         ctype = self._type.currentData()
         if ctype == _COND_STATIC:
-            text = f"{self.st_var.get_name() or '—'} · {self.st_state.currentText()}"
+            # «Дверь открыта (1)» — имя + состояние (отчёт мастера).
+            text = f"{self.st_var.get_name() or '—'} ({self.st_state.currentData()})"
         elif ctype == _COND_DYN:
+            # «Обороты ДВС меньше 1500».
+            op = {
+                "gt": tr("больше"), "lt": tr("меньше"), "eq": tr("равно"),
+            }.get(self.dyn_op.currentData(), "")
             text = (
-                f"{self.dyn_var.get_name() or '—'} · {self.dyn_op.currentText()} "
+                f"{self.dyn_var.get_name() or '—'} {op} "
                 f"{self.dyn_value.text().strip()}"
             ).rstrip()
         elif ctype == _COND_AUX:
-            text = tr("Доп канал")
+            # «Доп канал 1 активен».
+            state = (
+                tr("активен") if self.aux_state.currentData() == 1
+                else tr("не активен")
+            )
+            text = tr("Доп канал {0} {1}").format(
+                self.aux_channel.value(), state
+            )
         else:
             text = tr("Нет")
         self._summary.setText(text)
@@ -924,6 +1150,82 @@ class RuleRowWidget(QWidget):
         self._act_between.setFixedWidth(86)
         self._act_between.valueChanged.connect(self._mark_dirty)
 
+        # ---- Доп канал: Вкл / Выкл / Подать импульсы / Вкл ШИМ -------
+        self._act_aux_box = QGroupBox(tr("Доп канал"))
+        self._act_aux_box.setFont(font)
+        self._act_aux_box.setCheckable(True)
+        self._act_aux_box.setChecked(False)
+        self._act_aux_box.toggled.connect(self._mark_dirty)
+        self._aux_channel = QSpinBox()
+        self._aux_channel.setFont(font)
+        self._aux_channel.setRange(1, 4)
+        self._aux_channel.setValue(1)
+        self._aux_channel.setFixedWidth(64)
+        self._aux_channel.setToolTip(tr("OUT1…OUT4"))
+        self._aux_channel.valueChanged.connect(self._mark_dirty)
+        self._aux_mode = QComboBox()
+        self._aux_mode.setFont(font)
+        self._aux_mode.addItem(tr("Вкл"), "on")
+        self._aux_mode.addItem(tr("Выкл"), "off")
+        self._aux_mode.addItem(tr("Подать импульсы"), "pulse")
+        self._aux_mode.addItem(tr("Вкл ШИМ"), "pwm")
+        self._aux_mode.currentIndexChanged.connect(self._on_aux_mode)
+        self._aux_delay = QSpinBox()
+        self._aux_delay.setFont(font)
+        self._aux_delay.setRange(0, 999999)
+        self._aux_delay.setSuffix(tr(" мс"))
+        self._aux_delay.setFixedWidth(96)
+        self._aux_delay.setToolTip(tr("Пауза до начала действия"))
+        self._aux_delay.valueChanged.connect(self._mark_dirty)
+        # Импульсы: длина/пауза/кол-во + график меандра.
+        self._aux_pulse_on = QSpinBox()
+        self._aux_pulse_on.setFont(font)
+        self._aux_pulse_on.setRange(1, 999999)
+        self._aux_pulse_on.setValue(100)
+        self._aux_pulse_on.setSuffix(tr(" мс"))
+        self._aux_pulse_on.setFixedWidth(96)
+        self._aux_pulse_off = QSpinBox()
+        self._aux_pulse_off.setFont(font)
+        self._aux_pulse_off.setRange(1, 999999)
+        self._aux_pulse_off.setValue(100)
+        self._aux_pulse_off.setSuffix(tr(" мс"))
+        self._aux_pulse_off.setFixedWidth(96)
+        self._aux_pulse_count = QSpinBox()
+        self._aux_pulse_count.setFont(font)
+        self._aux_pulse_count.setRange(1, 1000)
+        self._aux_pulse_count.setValue(3)
+        self._aux_pulse_count.setFixedWidth(64)
+        self._aux_pulse_graph = _PulsePreview()
+        for spin in (
+            self._aux_pulse_on, self._aux_pulse_off, self._aux_pulse_count,
+        ):
+            spin.valueChanged.connect(self._mark_dirty)
+            spin.valueChanged.connect(self._refresh_pulse_graph)
+        # ШИМ: частота, заполнение, время работы (0 — до «Выкл»).
+        self._aux_pwm_freq = QSpinBox()
+        self._aux_pwm_freq.setFont(font)
+        self._aux_pwm_freq.setRange(1, 20000)
+        self._aux_pwm_freq.setValue(1000)
+        self._aux_pwm_freq.setSuffix(tr(" Гц"))
+        self._aux_pwm_freq.setFixedWidth(96)
+        self._aux_pwm_duty = QSpinBox()
+        self._aux_pwm_duty.setFont(font)
+        self._aux_pwm_duty.setRange(1, 100)
+        self._aux_pwm_duty.setValue(50)
+        self._aux_pwm_duty.setSuffix(" %")
+        self._aux_pwm_duty.setFixedWidth(80)
+        self._aux_pwm_time = QSpinBox()
+        self._aux_pwm_time.setFont(font)
+        self._aux_pwm_time.setRange(0, 999999)
+        self._aux_pwm_time.setValue(0)
+        self._aux_pwm_time.setSuffix(tr(" мс"))
+        self._aux_pwm_time.setFixedWidth(96)
+        self._aux_pwm_time.setToolTip(
+            tr("Время работы ШИМ, 0 — до команды «Выкл»")
+        )
+        for spin in (self._aux_pwm_freq, self._aux_pwm_duty, self._aux_pwm_time):
+            spin.valueChanged.connect(self._mark_dirty)
+
         # Автоматическая запись DATA в кэш — по образцу триггеров.
         self._act_cache_box = QGroupBox(tr("Автоматическая запись DATA в кэш"))
         self._act_cache_box.setFont(font)
@@ -1074,6 +1376,73 @@ class RuleRowWidget(QWidget):
         frame_layout.addLayout(fr2)
         act_layout.addWidget(self._act_frame_box)
 
+        # Доп канал: строка № + режим + пауза до действия, ниже —
+        # страница настроек импульсов или ШИМ (отчёт мастера).
+        aux_layout = QVBoxLayout(self._act_aux_box)
+        aux_layout.setSpacing(4)
+        aux_top = QHBoxLayout()
+        aux_top.addWidget(_small_label(tr("Канал №"), font))
+        aux_top.addWidget(self._aux_channel)
+        aux_top.addWidget(self._aux_mode)
+        aux_top.addWidget(_small_label(tr("Пауза до действия"), font))
+        aux_top.addWidget(self._aux_delay)
+        aux_top.addStretch()
+        aux_layout.addLayout(aux_top)
+
+        self._aux_stack = QStackedWidget()
+        # Вкл/Выкл — без доп. настроек.
+        plain_page = QWidget()
+        plain_layout = QVBoxLayout(plain_page)
+        plain_layout.setContentsMargins(0, 0, 0, 0)
+        plain_hint = QLabel(
+            tr("«Вкл» — до команды «Выкл» или до снятия питания МК")
+        )
+        plain_hint.setFont(font)
+        plain_hint.setStyleSheet("color: #9A9AA5;")
+        plain_hint.setWordWrap(True)
+        plain_layout.addWidget(plain_hint)
+        plain_layout.addStretch()
+
+        pulse_page = QWidget()
+        pulse_layout = QVBoxLayout(pulse_page)
+        pulse_layout.setSpacing(4)
+        pulse_layout.setContentsMargins(0, 0, 0, 0)
+        pulse_row = QHBoxLayout()
+        pulse_row.addWidget(_small_label(tr("Импульс"), font))
+        pulse_row.addWidget(self._aux_pulse_on)
+        pulse_row.addWidget(_small_label(tr("Пауза"), font))
+        pulse_row.addWidget(self._aux_pulse_off)
+        pulse_row.addWidget(_small_label(tr("Кол-во"), font))
+        pulse_row.addWidget(self._aux_pulse_count)
+        pulse_row.addStretch()
+        pulse_layout.addLayout(pulse_row)
+        pulse_layout.addWidget(self._aux_pulse_graph)
+
+        pwm_page = QWidget()
+        pwm_layout = QVBoxLayout(pwm_page)
+        pwm_layout.setSpacing(4)
+        pwm_layout.setContentsMargins(0, 0, 0, 0)
+        pwm_row = QHBoxLayout()
+        pwm_row.addWidget(_small_label(tr("Частота"), font))
+        pwm_row.addWidget(self._aux_pwm_freq)
+        pwm_row.addWidget(_small_label(tr("Заполнение"), font))
+        pwm_row.addWidget(self._aux_pwm_duty)
+        pwm_row.addWidget(_small_label(tr("Время"), font))
+        pwm_row.addWidget(self._aux_pwm_time)
+        pwm_row.addStretch()
+        pwm_layout.addLayout(pwm_row)
+        pwm_hint = QLabel(tr("0 мс — ШИМ работает до команды «Выкл»"))
+        pwm_hint.setFont(font)
+        pwm_hint.setStyleSheet("color: #9A9AA5;")
+        pwm_layout.addWidget(pwm_hint)
+
+        for page in (plain_page, pulse_page, pwm_page):
+            self._aux_stack.addWidget(page)
+        aux_layout.addWidget(self._aux_stack)
+        self._on_aux_mode()
+        self._refresh_pulse_graph()
+        act_layout.addWidget(self._act_aux_box)
+
         cache_layout = QVBoxLayout(self._act_cache_box)
         cache_layout.setSpacing(4)
         cr1 = QHBoxLayout()
@@ -1207,6 +1576,21 @@ class RuleRowWidget(QWidget):
         self._act_var_num.setVisible(is_dynamic)
         self._mark_dirty()
 
+    def _on_aux_mode(self, *_args) -> None:
+        """Под-страница настроек доп. канала: импульсы или ШИМ
+        (Вкл/Выкл — без страницы)."""
+        mode = self._aux_mode.currentData()
+        index = {"on": 0, "off": 0, "pulse": 1, "pwm": 2}.get(mode, 0)
+        self._aux_stack.setCurrentIndex(index)
+        self._mark_dirty()
+
+    def _refresh_pulse_graph(self, *_args) -> None:
+        self._aux_pulse_graph.set_params(
+            self._aux_pulse_on.value(),
+            self._aux_pulse_off.value(),
+            self._aux_pulse_count.value(),
+        )
+
     # ---- правило ---------------------------------------------------------
 
     def _migrate_legacy(self, rule: dict[str, Any]) -> dict[str, Any]:
@@ -1293,6 +1677,25 @@ class RuleRowWidget(QWidget):
         self._act_delay.setValue(int(action.get("delay", 0) or 0))
         self._act_count.setValue(int(action.get("count", 1) or 1))
         self._act_between.setValue(int(action.get("between", 0) or 0))
+        # Доп канал.
+        self._act_aux_box.setChecked(bool(action.get("aux_enabled", False)))
+        self._aux_channel.setValue(int(action.get("aux_channel", 1) or 1))
+        midx = self._aux_mode.findData(action.get("aux_mode", "on"))
+        self._aux_mode.setCurrentIndex(midx if midx >= 0 else 0)
+        self._aux_delay.setValue(int(action.get("aux_delay", 0) or 0))
+        self._aux_pulse_on.setValue(int(action.get("aux_pulse_on", 100) or 100))
+        self._aux_pulse_off.setValue(
+            int(action.get("aux_pulse_off", 100) or 100)
+        )
+        self._aux_pulse_count.setValue(
+            int(action.get("aux_pulse_count", 3) or 3)
+        )
+        self._aux_pwm_freq.setValue(int(action.get("aux_pwm_freq", 1000) or 1000))
+        self._aux_pwm_duty.setValue(int(action.get("aux_pwm_duty", 50) or 50))
+        self._aux_pwm_time.setValue(int(action.get("aux_pwm_time", 0) or 0))
+        self._on_aux_mode()
+        self._refresh_pulse_graph()
+
         self._act_cache_box.setChecked(bool(action.get("cache_enabled", False)))
         ch = int(action.get("cache_channel", 2) or 0)
         cidx2 = self._cache_channel.findData(ch)
@@ -1326,15 +1729,37 @@ class RuleRowWidget(QWidget):
         )
         if collapsed:
             # Сводка: компактные строки событий через «ИЛИ» (имя +
-            # функция), затем «→ действие».
+            # функция), затем «→ действие» короткой строкой
+            # («Вкл доп канал №1», «ВКЛ ШИМ», «Фрейм» — отчёт мастера).
             parts = [item._summary.text() for item in self._event_items]
             src = " / ".join(p for p in parts if p) or "—"
-            action = self.get_rule().get("action") or {}
-            dst = action.get("var") or action.get("id") or "—"
             self._summary_label.setText(
-                tr("{0} → {1}").format(src, dst or "—")
+                tr("{0} → {1}").format(src, self._action_summary() or "—")
             )
         self._mark_dirty()
+
+    def _action_summary(self) -> str:
+        """Короткая строка действия для свёрнутой программы."""
+        action = self.get_rule().get("action") or {}
+        parts: list[str] = []
+        if action.get("aux_enabled"):
+            ch = action.get("aux_channel", 1)
+            mode = action.get("aux_mode", "on")
+            if mode == "off":
+                parts.append(tr("Выкл доп канал №{0}").format(ch))
+            elif mode == "pulse":
+                parts.append(tr("Вкл импульсы доп канал №{0}").format(ch))
+            elif mode == "pwm":
+                parts.append(tr("ВКЛ ШИМ №{0}").format(ch))
+            else:
+                parts.append(tr("Вкл доп канал №{0}").format(ch))
+        if action.get("var"):
+            parts.append(str(action["var"]))
+        if action.get("frame_enabled"):
+            parts.append(tr("Фрейм"))
+        if action.get("cache_enabled"):
+            parts.append(tr("Кэш"))
+        return ", ".join(parts)
 
     def get_rule(self) -> dict[str, Any]:
         """Собирает программу из полей строки."""
@@ -1356,6 +1781,16 @@ class RuleRowWidget(QWidget):
             "delay": self._act_delay.value(),
             "count": self._act_count.value(),
             "between": self._act_between.value(),
+            "aux_enabled": self._act_aux_box.isChecked(),
+            "aux_channel": self._aux_channel.value(),
+            "aux_mode": self._aux_mode.currentData(),
+            "aux_delay": self._aux_delay.value(),
+            "aux_pulse_on": self._aux_pulse_on.value(),
+            "aux_pulse_off": self._aux_pulse_off.value(),
+            "aux_pulse_count": self._aux_pulse_count.value(),
+            "aux_pwm_freq": self._aux_pwm_freq.value(),
+            "aux_pwm_duty": self._aux_pwm_duty.value(),
+            "aux_pwm_time": self._aux_pwm_time.value(),
             "cache_enabled": self._act_cache_box.isChecked(),
             "cache_channel": self._cache_channel.currentData(),
             "cache_extended": self._cache_bit.currentIndex() == 1,
@@ -1390,6 +1825,7 @@ class RuleRowWidget(QWidget):
         self._add_event_button.setText(tr("＋ событие"))
         self._add_cond_button.setText(tr("＋ условие"))
         self._act_frame_box.setTitle(tr("Фрейм"))
+        self._act_aux_box.setTitle(tr("Доп канал"))
         self._act_cache_box.setTitle(tr("Автоматическая запись DATA в кэш"))
         self._name_edit.setPlaceholderText(tr("Программа"))
         self._collapse_button.setToolTip(
@@ -1422,6 +1858,10 @@ class FlexibleLogicTab(QWidget):
         self._variables_tab = None
         self._static_states: dict[str, int] = {}
         self._dyn_values: dict[str, float] = {}
+        # Состояние доп. каналов OUT1-4 (ПК-зеркало команд CMD_AUX_SET):
+        # канал → 0/1. События/условия «Доп канал» опираются на него.
+        self._aux_states: dict[int, int] = {}
+        self._aux_flags: dict[tuple[int, int, int], bool] = {}
         # Признак «условие дин. события уже истинно» — событие «Стало
         # больше/меньше» — фронт булева состояния, а не каждый кадр.
         # Ключ: (программа, событие, имя переменной).
@@ -1659,7 +2099,12 @@ class FlexibleLogicTab(QWidget):
             if op == "eq":
                 return value == threshold
             return value > threshold
-        return True  # «Нет» и «Доп канал» (заглушка) — не блокируют.
+        if ctype == _COND_AUX:
+            # «Доп канал N активен» — ПК-зеркало команд CMD_AUX_SET.
+            ch = int(cond.get("channel", 1) or 1)
+            state = self._aux_states.get(ch, 0)
+            return state == int(cond.get("state", 1))
+        return True  # «Нет» — не блокирует.
 
     def _update_cache(self, rule_index: int, action: dict[str, Any], frame: dict[str, Any]) -> None:
         """«Автоматическая запись DATA в кэш»: входящий кадр, подходящий
@@ -1802,7 +2247,46 @@ class FlexibleLogicTab(QWidget):
                         base_delay + n * between,
                     )
 
-        # 3. Кэш: уходит последний сохранённый кадр (как в триггерах —
+        # 3. Доп канал OUT1-4: «Вкл» держится до «Выкл»/питания,
+        #    импульсы и ШИМ крутит сам МК (aux_out.c). «Пауза до
+        #    действия» — PC-таймер, как у фреймов.
+        if action.get("aux_enabled"):
+            aux_delay = int(action.get("aux_delay", 0) or 0)
+            channel = int(action.get("aux_channel", 1) or 1)
+            mode_name = str(action.get("aux_mode", "on"))
+            mode = {"off": 0, "on": 1, "pulse": 2, "pwm": 3}.get(
+                mode_name, 1
+            )
+            kwargs = {
+                "pulse_on_ms": int(action.get("aux_pulse_on", 0) or 0),
+                "pulse_off_ms": int(action.get("aux_pulse_off", 0) or 0),
+                "pulse_count": int(action.get("aux_pulse_count", 0) or 0),
+                "pwm_freq_hz": int(action.get("aux_pwm_freq", 0) or 0),
+                "pwm_duty_pct": int(action.get("aux_pwm_duty", 0) or 0),
+                "pwm_time_ms": int(action.get("aux_pwm_time", 0) or 0),
+            }
+
+            def fire_aux(
+                ch=channel, m=mode, kw=kwargs, mn=mode_name,
+            ) -> None:
+                # ПК-зеркало состояния — для условий «Доп канал N
+                # активен» (уровень на ноге следует за mode).
+                self._aux_states[ch] = 0 if m == 0 else 1
+                self._serial_manager.send_aux(ch, m, **kw)
+                logger.info(
+                    "ГЛ: доп канал №%d → %s", ch, mn,
+                )
+                # Смена состояния канала — это событие само по себе:
+                # программы, подписанные на «Доп канал N …», должны
+                # сработать сразу, а не на следующем CAN-кадре.
+                self._fire_aux_events()
+
+            if aux_delay > 0:
+                QTimer.singleShot(aux_delay, fire_aux)
+            else:
+                fire_aux()
+
+        # 4. Кэш: уходит последний сохранённый кадр (как в триггерах —
         #    строка без заполненного кэша пропускается).
         if action.get("cache_enabled"):
             cached = self._fl_cache.get(rule_index)
@@ -1814,6 +2298,54 @@ class FlexibleLogicTab(QWidget):
                     self._send_frame(
                         channel, cached["id"], cached["data"], delay * (n + 1)
                     )
+
+    def _fire_aux_events(self) -> None:
+        """Смена состояния доп. канала — проход по программам с
+        событиями «Доп канал»: условия И → действия (ИЛИ по событиям).
+        Реентерабельность ограничена: действие может само щёлкать
+        каналом — глубже одного уровня не идём, чтобы кольцевая
+        программа («канал 1 → канал 1») не зациклила ПК."""
+        if getattr(self, "_aux_events_busy", False):
+            return
+        self._aux_events_busy = True
+        try:
+            self._fire_aux_events_inner()
+        finally:
+            self._aux_events_busy = False
+
+    def _fire_aux_events_inner(self) -> None:
+        if self._rules_dirty:
+            self._build_internal_rules()
+            self._rules_dirty = False
+        dummy_frame = {"id": 0, "channel": 0, "data": b"", "extended": False}
+        for internal in self._internal_rules:
+            rule_index = internal["index"]
+            rule = internal["rule"]
+            events = rule.get("events")
+            if not isinstance(events, list) or not events:
+                events = [rule.get("event") or {}]
+            conditions = rule.get("conditions")
+            if not isinstance(conditions, list) or not conditions:
+                conditions = [rule.get("condition") or {}]
+            fired = False
+            for sub_index, event in enumerate(events):
+                if event.get("type") == _EVENT_AUX and self._event_fired(
+                    rule_index, sub_index, event, dummy_frame,
+                    b"", {},
+                ):
+                    fired = True
+                    break
+            if not fired:
+                continue
+            if not all(
+                self._condition_passed(cond) for cond in conditions
+            ):
+                continue
+            self._rule_counters[rule_index] += 1
+            self._row_widgets[rule_index].set_counter(
+                self._rule_counters[rule_index]
+            )
+            self._run_actions(rule_index, rule.get("action") or {}, dummy_frame)
 
     def set_dbc(self, dbc_manager) -> None:
         """Обновляет логику при смене DBC (заглушка)."""
@@ -1876,7 +2408,17 @@ class FlexibleLogicTab(QWidget):
             fired = flag and not self._dyn_flags.get(key, False)
             self._dyn_flags[key] = flag
             return fired
-        return False  # _EVENT_AUX — заглушка, не срабатывает.
+        if etype == _EVENT_AUX:
+            # Фронт состояния доп. канала по ПК-зеркалу CMD_AUX_SET:
+            # «активен»/«не активен» стреляет на переходе уровня.
+            ch = int(event.get("channel", 1) or 1)
+            want = int(event.get("state", 1) or 0)
+            flag = self._aux_states.get(ch, 0) == want
+            key = (rule_index, sub_index, ch)
+            fired = flag and not self._aux_flags.get(key, False)
+            self._aux_flags[key] = flag
+            return fired
+        return False
 
     def process_frame(self, frame: dict[str, Any]) -> None:
         """Проверяет входящий кадр: обновляет переменные, кэши действий,

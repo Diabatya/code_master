@@ -204,7 +204,7 @@ class CanTriggerTab(QWidget):
 
     def _make_id_edit(self, font: QFont, bit_combo: QComboBox) -> IdPasteEdit:
         edit = IdPasteEdit()
-        edit.setFixedWidth(90)
+        edit.setFixedWidth(76)
         edit.setFont(font)
         edit.setPlaceholderText("ID")
         edit._id_validator = _IdValidator(edit, bit_combo)
@@ -213,20 +213,20 @@ class CanTriggerTab(QWidget):
     def _make_data_edits(
         self, font: QFont, allow_x: bool = False
     ) -> tuple[list[QLineEdit], QWidget]:
-        return create_data_field_widget(font, 8, edit_width=42, allow_x=allow_x)
+        return create_data_field_widget(font, 8, edit_width=36, allow_x=allow_x)
 
     def _make_channel_combo(self, font: QFont) -> QComboBox:
         combo = QComboBox()
         combo.setFont(font)
         combo.addItems(CHANNELS)
-        combo.setFixedWidth(110)
+        combo.setFixedWidth(92)
         return combo
 
     def _make_bit_combo(self, font: QFont) -> QComboBox:
         combo = QComboBox()
         combo.setFont(font)
         combo.addItems(BIT_RATES)
-        combo.setFixedWidth(90)
+        combo.setFixedWidth(78)
         return combo
 
     def _make_dlc_spin(self, font: QFont) -> QSpinBox:
@@ -234,7 +234,7 @@ class CanTriggerTab(QWidget):
         spin.setRange(1, 8)
         spin.setValue(8)
         spin.setFont(font)
-        spin.setFixedWidth(50)
+        spin.setFixedWidth(44)
         return spin
 
     def _make_count_spin(self, font: QFont, max_value: int = 100) -> QSpinBox:
@@ -242,7 +242,7 @@ class CanTriggerTab(QWidget):
         spin.setRange(1, max_value)
         spin.setValue(1)
         spin.setFont(font)
-        spin.setFixedWidth(70)
+        spin.setFixedWidth(62)
         return spin
 
     def _make_delay_spin(self, font: QFont) -> QSpinBox:
@@ -251,7 +251,7 @@ class CanTriggerTab(QWidget):
         spin.setValue(0)
         spin.setSuffix(tr(" мс"))
         spin.setFont(font)
-        spin.setFixedWidth(90)
+        spin.setFixedWidth(78)
         return spin
 
     def _create_cond_row(self, font: QFont, label: str | None) -> dict[str, Any]:
@@ -290,10 +290,17 @@ class CanTriggerTab(QWidget):
         # Приёмная маска поддерживает «X» — байт не участвует в
         # сравнении (rx_data_mask=0 на этой позиции).
         data, data_widget = self._make_data_edits(font, allow_x=True)
+        # Фиксированная ширина: внутри контейнера лежит addStretch,
+        # без Fixed он растягивался и отодвигал RTR/копи/пасту далеко
+        # вправо (отчёт мастера — подвинуть к DATA).
+        data_widget.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
         layout.addWidget(data_widget)
-        # RTR — справа от DATA, перед кнопками копировать/вставить
-        # (отчёт мастера). Выравнивание по центру — чтобы кнопки
-        # копи/пасты и RTR стояли на одной горизонтали во всех строках.
+        # RTR — справа от DATA на расстоянии одной байт-клетки, перед
+        # кнопками копировать/вставить (отчёт мастера). Выравнивание по
+        # центру — чтобы копи/паста и RTR стояли на одной горизонтали.
+        layout.addSpacing(38)
         layout.addWidget(rtr, 0, Qt.AlignmentFlag.AlignVCenter)
 
         copy_paste = create_clipboard_buttons(self, can_id, dlc, data, bit)
@@ -574,6 +581,9 @@ class CanTriggerTab(QWidget):
         can_id = self._make_id_edit(font, bit)
         dlc = self._make_dlc_spin(font)
         data, data_widget = self._make_data_edits(font)
+        data_widget.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
 
         # RTR — на каждый фрейм ответа свой, над колонкой «Бит». При
         # включении поле Data этой строки блокируется и бледнеет, активны
@@ -839,11 +849,17 @@ class CanTriggerTab(QWidget):
         line1.addWidget(dlc)
         line1.addWidget(QLabel(tr("От")))
         from_data, from_data_widget = self._make_data_edits(font, allow_x=True)
+        from_data_widget.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
         line1.addWidget(from_data_widget)
         from_copy_paste = create_clipboard_buttons(self, can_id, dlc, from_data, bit)
         line1.addWidget(from_copy_paste)
         line1.addWidget(QLabel(tr("До")))
         to_data, to_data_widget = self._make_data_edits(font, allow_x=True)
+        to_data_widget.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
         line1.addWidget(to_data_widget)
         to_copy_paste = create_clipboard_buttons(self, can_id, dlc, to_data, bit)
         line1.addWidget(to_copy_paste)
@@ -1165,10 +1181,13 @@ class CanTriggerTab(QWidget):
         status.setStyleSheet("color: #9E9E9E;")
 
         name_edit = QLineEdit()
-        name_edit.setFont(font)
+        # Поле имени — в 2 раза крупнее (отчёт мастера: шрифт и поле
+        # x2, дизайн тот же). Стоит по центру, между блоками триггеров.
+        name_edit.setFont(QFont("Segoe UI", 18))
         name_edit.setPlaceholderText(tr("Имя триггера"))
         name_edit.setMaxLength(TRIGGER_NAME_MAX_LEN)
-        name_edit.setFixedWidth(160)
+        name_edit.setFixedSize(360, 44)
+        name_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         name_edit.setToolTip(
             tr("Имя хранится в МК — появится на пустом устройстве "
                "после применения конфигурации (первые {0} триггеров)")
@@ -1305,15 +1324,12 @@ class CanTriggerTab(QWidget):
         self._set_cache_enabled(block, False)
         block["cache"]["cache_check"].setEnabled(True)
 
-        # Шапка блока: галка «включён», статус слева, имя триггера
-        # справа от него. Содержимое не прячется при выключении — поля
-        # должны оставаться редактируемыми.
+        # Шапка блока: галка «включён» и статус. Имя триггера живёт
+        # снаружи — по центру, между блоками (отчёт мастера).
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.addWidget(block["enabled_check"])
         header_row.addWidget(block["status"])
-        header_row.addSpacing(10)
-        header_row.addWidget(block["name"])
         header_row.addStretch()
         group_layout.addLayout(header_row)
         group_layout.addWidget(content)
@@ -1333,9 +1349,23 @@ class CanTriggerTab(QWidget):
         )
 
         wrapper = QWidget()
-        grid = QGridLayout(wrapper)
+        vbox = QVBoxLayout(wrapper)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(6)
+        # Имя триггера — по центру, над блоком: визуально разделяет
+        # триггеры между собой (отчёт мастера).
+        name_row = QHBoxLayout()
+        name_row.setContentsMargins(0, 0, 0, 0)
+        name_row.addStretch()
+        name_row.addWidget(block["name"])
+        name_row.addStretch()
+        vbox.addLayout(name_row)
+
+        inner = QWidget()
+        grid = QGridLayout(inner)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.addWidget(block["group"], 0, 0)
+        vbox.addWidget(inner)
         # Крестик — по горизонтали ровно над «+» добавления ответа,
         # по вертикали — напротив поля Data строки «Приём»: обе
         # позиции известны только после компоновки, поэтому отступы
@@ -1344,7 +1374,10 @@ class CanTriggerTab(QWidget):
         # блок и перехватит все клики по полям триггера.
         holder = QWidget()
         holder_layout = QHBoxLayout(holder)
-        holder_layout.setContentsMargins(0, 4, 22, 0)
+        # Кнопки внутри рамки (top/right ≥ бордюра группы): при старом
+        # отступе 4 px они ложились на рамку и визуально «прерывали»
+        # её в правом верхнем углу (отчёт мастера).
+        holder_layout.setContentsMargins(0, 24, 14, 0)
         holder_layout.setSpacing(4)
         holder_layout.addStretch()
         holder_layout.addWidget(block["test_button"])
@@ -1356,6 +1389,7 @@ class CanTriggerTab(QWidget):
         )
         delete_button.raise_()
         block["wrapper"] = wrapper
+        block["inner"] = inner
         block["delete_holder_layout"] = holder_layout
         wrapper.installEventFilter(self)
         self._blocks_layout.addWidget(wrapper)
@@ -1378,17 +1412,17 @@ class CanTriggerTab(QWidget):
         горизонтали — ровно над «+» добавления фрейма ответа."""
         data_widget = block["recv"]["conds"][0]["data_widget"]
         add_button = block["response"]["add_button"]
-        wrapper = block.get("wrapper")
+        inner = block.get("inner")
         layout = block.get("delete_holder_layout")
-        if wrapper is None or layout is None:
+        if inner is None or layout is None:
             return
         try:
             center_y = (
-                data_widget.mapTo(wrapper, QPoint(0, 0)).y()
+                data_widget.mapTo(inner, QPoint(0, 0)).y()
                 + data_widget.height() // 2
             )
             add_center_x = (
-                add_button.mapTo(wrapper, QPoint(0, 0)).x()
+                add_button.mapTo(inner, QPoint(0, 0)).x()
                 + add_button.width() // 2
             )
         except RuntimeError:
@@ -1397,10 +1431,12 @@ class CanTriggerTab(QWidget):
         # от центра «+» до правого края минус половина крестика (12 px).
         # «+» всегда у правого края — отложенная карта при скрытом блоке
         # даёт x≈0, такие значения отбрасываем и держим прежний отступ.
+        # Минимумы top/right (24/14) — кнопки не должны лезть на рамку
+        # блока, иначе она «прерывается» в правом верхнем углу.
         right = layout.contentsMargins().right()
-        if add_center_x > wrapper.width() // 2:
-            right = max(0, wrapper.width() - add_center_x - 12)
-        layout.setContentsMargins(0, max(0, center_y - 12), right, 0)
+        if add_center_x > inner.width() // 2:
+            right = max(14, inner.width() - add_center_x - 12)
+        layout.setContentsMargins(0, max(24, center_y - 12), right, 0)
 
     def _remove_block_at(self, index: int) -> None:
         """Внутреннее удаление блока по позиции (крестик/синхронизация)."""

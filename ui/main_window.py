@@ -5,7 +5,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -86,6 +86,62 @@ def _up_arrow_icon(color: QColor, size: int = 96) -> QIcon:
     return QIcon(pm)
 
 
+def _car_icon(color: QColor, size: int = 96) -> QIcon:
+    """Векторный силуэт Porsche 911 (вид сбоку) вместо молотка
+    и ключа (отчёт мастера)."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(color)
+    s = size / 96.0
+
+    def pt(x: float, y: float) -> tuple[float, float]:
+        return x * s, y * s
+
+    # Кузов: низкий силуэт с покатой крышей 911.
+    body = QPainterPath()
+    x, y = pt(6, 66)
+    body.moveTo(x, y)
+    x, y = pt(10, 60)
+    body.lineTo(x, y)                      # нос
+    x, y = pt(30, 56)
+    body.lineTo(x, y)                      # капот
+    x, y = pt(38, 42)
+    body.cubicTo(x, y, *pt(44, 38), *pt(50, 38))   # лобовое → крыша
+    x, y = pt(62, 40)
+    body.cubicTo(x, y, *pt(68, 46), *pt(72, 52))   # задок
+    x, y = pt(88, 56)
+    body.lineTo(x, y)                      # хвост
+    x, y = pt(91, 62)
+    body.lineTo(x, y)
+    x, y = pt(90, 68)
+    body.lineTo(x, y)
+    x, y = pt(84, 68)
+    body.lineTo(x, y)
+    # арка заднего колеса
+    x, y = pt(78, 68)
+    body.lineTo(x, y)
+    x, y = pt(72, 60)
+    body.cubicTo(x, y, *pt(60, 60), *pt(56, 68))
+    x, y = pt(38, 68)
+    body.lineTo(x, y)
+    # арка переднего колеса
+    x, y = pt(32, 60)
+    body.cubicTo(x, y, *pt(20, 60), *pt(16, 68))
+    x, y = pt(6, 68)
+    body.lineTo(x, y)
+    body.closeSubpath()
+    p.drawPath(body)
+    # Колёса.
+    for cx in (24.0, 64.0):
+        x, y = pt(cx, 68)
+        p.drawEllipse(int(x - 9 * s), int(y - 9 * s), int(18 * s), int(18 * s))
+    p.end()
+    return QIcon(pm)
+
+
 def _usb_icon(color: QColor, size: int = 96) -> QIcon:
     """Векторный значок USB-трезубца в стилистике карточки
     (отчёт мастера: вместо «планеты»)."""
@@ -134,6 +190,126 @@ _USB_PID_APP = 0x5740
 _USB_PID_BOOT = 0x5741
 
 
+class _ConfigMenuPopup(QWidget):
+    """Анимированная выпадашка выбора конфигурации в стиле iOS:
+    две строки-карточки в закруглённых «табличках», плавно выезжают
+    вниз с fade-in (отчёт мастера)."""
+
+    def __init__(
+        self,
+        anchor: QWidget,
+        on_load_file,
+        on_create,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(
+            parent,
+            Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        frame = QFrame(self)
+        frame.setObjectName("menuFrame")
+        frame.setStyleSheet(
+            "QFrame#menuFrame {"
+            " background: #26262F; border: 1px solid #3A7BD5;"
+            " border-radius: 14px; }"
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        items = (
+            (
+                "📂", tr("Загрузить конфигурацию из файла"),
+                tr("Открыть сохранённую конфигурацию и выбрать устройство"),
+                on_load_file,
+            ),
+            (
+                "🛠", tr("Создать конфигурацию устройства"),
+                tr("Новая конфигурация под выбранный тип устройства"),
+                on_create,
+            ),
+        )
+        for icon_text, title, sub, handler in items:
+            card = QPushButton()
+            card.setCursor(Qt.CursorShape.PointingHandCursor)
+            card.setStyleSheet(
+                "QPushButton {"
+                " background: rgba(58,123,213,0.10);"
+                " border: 1px solid #45455A; border-radius: 10px;"
+                " text-align: left; padding: 10px 12px; color: #E8E8EF; }"
+                "QPushButton:hover {"
+                " background: rgba(58,123,213,0.28);"
+                " border-color: #3A7BD5; }"
+                "QPushButton:pressed { background: rgba(58,123,213,0.45); }"
+            )
+            inner = QHBoxLayout(card)
+            inner.setContentsMargins(2, 2, 2, 2)
+            inner.setSpacing(10)
+            icon_label = QLabel(icon_text)
+            icon_label.setFont(QFont("Segoe UI", 16))
+            icon_label.setStyleSheet("background: transparent; border: none;")
+            icon_label.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents
+            )
+            inner.addWidget(icon_label)
+            text_col = QVBoxLayout()
+            text_col.setSpacing(1)
+            title_label = QLabel(title)
+            title_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            sub_label = QLabel(sub)
+            sub_label.setFont(QFont("Segoe UI", 8))
+            sub_label.setStyleSheet("color: #9A9AA5;")
+            for lbl in (title_label, sub_label):
+                lbl.setStyleSheet(
+                    lbl.styleSheet() + " background: transparent; border: none;"
+                )
+                lbl.setAttribute(
+                    Qt.WidgetAttribute.WA_TransparentForMouseEvents
+                )
+                text_col.addWidget(lbl)
+            inner.addLayout(text_col, 1)
+            card.clicked.connect(lambda h=handler: (self.close(), h()))
+            layout.addWidget(card)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(frame)
+        self._frame = frame
+        self._anchor = anchor
+
+    def show_animated(self) -> None:
+        """Выезжает из-под кнопки вниз с затухающим скольжением
+        и fade-in — плавность «как у айфонов» (отчёт мастера)."""
+        self.adjustSize()
+        pos = self._anchor.mapToGlobal(self._anchor.rect().bottomLeft())
+        final_y = pos.y() + 6
+        self.move(pos.x(), final_y - 18)
+        self.show()
+        self.raise_()
+
+        self._pos_anim = QPropertyAnimation(self, b"pos", self)
+        self._pos_anim.setDuration(220)
+        self._pos_anim.setStartValue(self.pos())
+        self._pos_anim.setEndValue(self.pos().__class__(pos.x(), final_y))
+        self._pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._fade = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._fade)
+        self._fade_anim = QPropertyAnimation(self._fade, b"opacity", self)
+        self._fade_anim.setDuration(220)
+        self._fade_anim.setStartValue(0.0)
+        self._fade_anim.setEndValue(1.0)
+        self._fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._pos_anim.finished.connect(
+            lambda: self.setGraphicsEffect(None)
+        )
+        self._pos_anim.start()
+        self._fade_anim.start()
+
+
 class _DeviceCard(QWidget):
     """Карточка устройства на стартовом экране (рамка, как в ранних
     версиях — отчёт мастера):
@@ -164,13 +340,11 @@ class _DeviceCard(QWidget):
             self.setCursor(Qt.CursorShape.PointingHandCursor)
         font = QFont("Segoe UI", 10)
 
+        # Общая голубая рамка с закруглением вокруг информации
+        # и кнопок (отчёт мастера).
         self.setStyleSheet(
-            "_DeviceCard { border: 1px solid #454552; border-radius: 12px;"
+            "_DeviceCard { border: 2px solid #3A7BD5; border-radius: 12px;"
             " background: rgba(255,255,255,0.03); }"
-            + (
-                "_DeviceCard { border-color: #3A7BD5; }"
-                if selecting else ""
-            )
         )
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 12)
@@ -202,12 +376,18 @@ class _DeviceCard(QWidget):
             label = QLabel(line)
             label.setFont(info_font)
             label.setStyleSheet("color: #9A9AA5;")
+            # Любая строка выделяется курсором и копируется
+            # (отчёт мастера).
+            label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
             text_col.addWidget(label)
         head.addLayout(text_col, 1)
-        root.addLayout(head)
 
-        buttons = QHBoxLayout()
-        buttons.addStretch()
+        # Кнопки — напротив основной информации, вертикально
+        # по центру справа (отчёт мастера: «подними выше»).
+        buttons = QVBoxLayout()
+        buttons.setSpacing(6)
         if selecting:
             select_btn = QPushButton(tr("Выбрать это устройство"))
             select_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
@@ -218,7 +398,9 @@ class _DeviceCard(QWidget):
                 "QPushButton:hover { background: #4A8BE5; }"
             )
             select_btn.clicked.connect(self._on_select)
+            buttons.addStretch()
             buttons.addWidget(select_btn)
+            buttons.addStretch()
         else:
             update_btn = QPushButton(tr("Обновить"))
             update_btn.setFont(font)
@@ -240,9 +422,12 @@ class _DeviceCard(QWidget):
                 "QPushButton:hover { background: #4A8BE5; }"
             )
             configure_btn.clicked.connect(self._on_configure)
+            buttons.addStretch()
             buttons.addWidget(update_btn)
             buttons.addWidget(configure_btn)
-        root.addLayout(buttons)
+            buttons.addStretch()
+        head.addLayout(buttons)
+        root.addLayout(head)
 
     def _on_update(self) -> None:
         self._window._card_action(self._port, flash=True)
@@ -305,9 +490,21 @@ class MainWindow(QMainWindow):
         self._top_panel.setObjectName("topPanel")
         self._top_panel.setFixedHeight(60)
 
-        self._logo_label = QLabel("🛠️ " + tr("Код Мастер"))
-        self._logo_label.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        # Логотип: силуэт Porsche 911 вместо «молоток и ключ»
+        # (отчёт мастера), текст «Код Мастер» рядом.
+        self._logo_icon_label = QLabel()
+        self._logo_icon_label.setFixedSize(56, 40)
+        self._logo_icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._logo_icon_label.setPixmap(
+            _car_icon(QColor("#7C9EFF"), 96).pixmap(56, 40)
+        )
+        self._logo_label = QLabel(tr("Код Мастер"))
+        # Название в 2 раза крупнее прежнего (отчёт мастера).
+        self._logo_label.setFont(QFont("Segoe UI", 24, QFont.Weight.Bold))
         self._logo_label.setProperty("title", True)
+        self._logo_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
 
         # Цветная точка подключения убрана: флаг связи — сами данные
         # устройства на экране (отчёт мастера).
@@ -356,7 +553,8 @@ class MainWindow(QMainWindow):
 
         # Левая колонка значков: «папка» — загрузка конфигурации из
         # файла или создание новой конфигурации устройства. Колонку
-        # будем пополнять.
+        # будем пополнять. Меню — кастомная анимированная выпадашка
+        # в стиле iOS (отчёт мастера).
         self._fake_button = QPushButton("\U0001F4C2")
         self._fake_button.setFixedSize(34, 34)
         self._fake_button.setFont(QFont("Segoe UI", 12))
@@ -364,14 +562,8 @@ class MainWindow(QMainWindow):
         self._fake_button.setToolTip(
             tr("Загрузить или создать конфигурацию")
         )
-        self._fake_menu = QMenu(self._fake_button)
-        self._load_config_action = self._fake_menu.addAction(
-            tr("Загрузить конфигурацию из файла…"), self._on_load_config_file
-        )
-        self._fake_settings_action = self._fake_menu.addAction(
-            tr("Создать конфигурацию устройства"), self._on_create_config_clicked
-        )
-        self._fake_button.setMenu(self._fake_menu)
+        self._fake_button.clicked.connect(self._toggle_config_menu)
+        self._config_menu: _ConfigMenuPopup | None = None
 
         # Список карточек обнаруженных устройств.
         self._cards_box = QWidget()
@@ -437,14 +629,10 @@ class MainWindow(QMainWindow):
         top_layout.setContentsMargins(12, 0, 20, 0)
         top_layout.setSpacing(10)
 
-        self._brand_widget = QWidget()
-        brand_layout = QHBoxLayout(self._brand_widget)
-        brand_layout.setContentsMargins(0, 0, 0, 0)
-        brand_layout.setSpacing(8)
-        brand_layout.addWidget(self._logo_label)
-        # Версия приложения — в заголовке окна рядом с кнопками
-        # свернуть/закрыть (setWindowTitle, отчёт мастера).
-        top_layout.addWidget(self._brand_widget)
+        # Логотип «Код Мастер» переехал со стартовой панели в тело
+        # окна — правее голубой полосы и ниже (отчёт мастера). Версия
+        # приложения — в заголовке окна рядом с кнопками
+        # свернуть/закрыть (setWindowTitle).
 
         top_layout.addStretch()
         top_layout.addSpacing(10)
@@ -456,26 +644,18 @@ class MainWindow(QMainWindow):
         root.addWidget(self._top_panel)
 
         startup_layout = QVBoxLayout(self._startup_page)
-        startup_layout.setContentsMargins(24, 16, 24, 16)
-        startup_layout.setSpacing(12)
-        self._startup_title = QLabel(tr("Устройства"))
-        self._startup_title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
-        self._startup_title.setProperty("title", True)
-        startup_layout.addWidget(self._startup_title)
-        self._startup_subtitle = QLabel(tr(
-            "Подключенные адаптеры — выберите действие"
-        ))
-        self._startup_subtitle.setFont(QFont("Segoe UI", 10))
-        self._startup_subtitle.setStyleSheet("color: #9A9AA5;")
-        startup_layout.addWidget(self._startup_subtitle)
+        startup_layout.setContentsMargins(0, 0, 0, 0)
+        startup_layout.setSpacing(0)
+        # Заголовки «Устройства / Подключенные адаптеры» убраны
+        # полностью (отчёт мастера).
 
         body = QHBoxLayout()
-        body.setSpacing(12)
-        # Левая колонка значков (расширяемая): конфигурация, обновление
-        # приложения. Голубой фон — в тон «Обновить», разделитель —
-        # заметно толще (отчёт мастера).
+        body.setSpacing(0)
+        # Левая полоса-значки во всю высоту окна: голубой КОНТУР,
+        # заливка — серый фон как у окна (отчёт мастера).
         icon_col = QVBoxLayout()
-        icon_col.setSpacing(8)
+        icon_col.setSpacing(14)
+        icon_col.setContentsMargins(8, 14, 8, 14)
         icon_col.addWidget(self._fake_button)
         icon_col.addWidget(self._update_check_button)
         icon_col.addStretch()
@@ -483,15 +663,29 @@ class MainWindow(QMainWindow):
         self._icon_wrap.setLayout(icon_col)
         self._icon_wrap.setFixedWidth(50)
         self._icon_wrap.setStyleSheet(
-            "background: #3A7BD5; border-radius: 8px;"
+            "background: palette(window);"
+            " border: 3px solid #3A7BD5; border-radius: 10px;"
         )
         body.addWidget(self._icon_wrap)
-        self._icon_line = QFrame()
-        self._icon_line.setFrameShape(QFrame.Shape.VLine)
-        self._icon_line.setFrameShadow(QFrame.Shadow.Plain)
-        self._icon_line.setFixedWidth(4)
-        self._icon_line.setStyleSheet("color: #5A5A68;")
-        body.addWidget(self._icon_line)
+
+        # Правая часть стартового экрана: логотип + карточки +
+        # нижние кнопки.
+        right = QVBoxLayout()
+        right.setContentsMargins(24, 20, 24, 16)
+        right.setSpacing(12)
+        # Логотип x2: иконка Porsche 911 + «Код Мастер» крупно,
+        # с отступом от голубой линии и ниже верхнего края.
+        logo_row = QHBoxLayout()
+        logo_row.setSpacing(14)
+        logo_row.addSpacing(18)
+        logo_row.addWidget(self._logo_icon_label)
+        logo_row.addWidget(
+            self._logo_label, 0, Qt.AlignmentFlag.AlignVCenter
+        )
+        logo_row.addStretch()
+        right.addSpacing(26)
+        right.addLayout(logo_row)
+        right.addSpacing(18)
 
         # Подсказка режима выбора цели конфигурации + отмена.
         self._select_hint = QWidget()
@@ -514,12 +708,8 @@ class MainWindow(QMainWindow):
             " border-radius: 8px;"
         )
         self._select_hint.setVisible(False)
-        cards_side = QVBoxLayout()
-        cards_side.setSpacing(8)
-        cards_side.addWidget(self._select_hint)
-        cards_side.addWidget(self._cards_scroll, 1)
-        body.addLayout(cards_side, 1)
-        startup_layout.addLayout(body, 1)
+        right.addWidget(self._select_hint)
+        right.addWidget(self._cards_scroll, 1)
 
         bottom = QHBoxLayout()
         bottom.setSpacing(16)
@@ -529,7 +719,10 @@ class MainWindow(QMainWindow):
         bottom.addStretch()
         self._bottom_widget = QWidget()
         self._bottom_widget.setLayout(bottom)
-        startup_layout.addWidget(self._bottom_widget)
+        right.addWidget(self._bottom_widget)
+
+        body.addLayout(right, 1)
+        startup_layout.addLayout(body, 1)
 
         firmware_container = QWidget()
         firmware_layout = QVBoxLayout(firmware_container)
@@ -780,6 +973,7 @@ class MainWindow(QMainWindow):
                 self._config.get("device_serial", ""),
                 self._config.get("device_type_name", ""),
                 self._config.get("device_version", 0),
+                self._config.get("device_fw_version", ""),
             )
         )
         if signature == self._cards_signature:
@@ -821,10 +1015,7 @@ class MainWindow(QMainWindow):
                 self._cards_layout.count() - 1, card
             )
         # Без подключённого камня центральная область пустая:
-        # ни карточек, ни подсказок, ни заголовков (отчёт мастера).
-        has_devices = bool(devices)
-        self._startup_title.setVisible(has_devices)
-        self._startup_subtitle.setVisible(has_devices)
+        # ни карточек, ни подсказок (отчёт мастера).
 
     def _ensure_port_selected(self) -> bool:
         """Единственное видимое устройство подключается само — без
@@ -936,7 +1127,7 @@ class MainWindow(QMainWindow):
     def retranslate_ui(self) -> None:
         """Обновляет все статические строки главного окна."""
         self.setWindowTitle(tr("Код Мастер") + f"  v{VERSION}")
-        self._logo_label.setText("🛠️ " + tr("Код Мастер"))
+        self._logo_label.setText(tr("Код Мастер"))
         self._theme_button.setText(tr("Тема"))
         self._theme_button.setToolTip(tr("Выбор темы оформления"))
         self._dark_theme_action.setText(tr("Тёмный"))
@@ -949,18 +1140,8 @@ class MainWindow(QMainWindow):
         self._com_logger_button.setText(tr("COM-логгер"))
         self._com_logger_button.setToolTip(tr("Открыть COM-логгер"))
         self._firmware_page_back_button.setText(tr("← Назад"))
-        self._startup_title.setText(tr("Устройства"))
-        self._startup_subtitle.setText(
-            tr("Подключенные адаптеры — выберите действие")
-        )
         self._fake_button.setToolTip(
             tr("Загрузить или создать конфигурацию")
-        )
-        self._load_config_action.setText(
-            tr("Загрузить конфигурацию из файла…")
-        )
-        self._fake_settings_action.setText(
-            tr("Создать конфигурацию устройства")
         )
         self._select_hint_label.setText(tr(
             "Куда загрузить конфигурацию? Кликните по устройству"
@@ -1000,6 +1181,21 @@ class MainWindow(QMainWindow):
     def _on_help_clicked(self) -> None:
         """Открывает встроенную справку."""
         show_help(self)
+
+    def _toggle_config_menu(self) -> None:
+        """Показывает анимированную выпадашку «папки» (iOS-стиль):
+        две строки-карточки — загрузить из файла / создать новую."""
+        if self._config_menu is not None and self._config_menu.isVisible():
+            self._config_menu.close()
+            self._config_menu = None
+            return
+        self._config_menu = _ConfigMenuPopup(
+            self._fake_button,
+            self._on_load_config_file,
+            self._on_create_config_clicked,
+            self,
+        )
+        self._config_menu.show_animated()
 
     def _on_load_config_file(self) -> None:
         """«Загрузить конфигурацию из файла…»: выбор файла, затем —
@@ -1097,7 +1293,8 @@ class MainWindow(QMainWindow):
         for widget in (
             self._top_panel,
             self._icon_wrap,
-            self._icon_line,
+            self._logo_icon_label,
+            self._logo_label,
             self._bottom_widget,
             self._status_bar,
         ):

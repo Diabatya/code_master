@@ -43,6 +43,7 @@ C_SOURCES = \
   Src/trigger.c \
   Src/event_log.c \
   Src/device_config.c \
+  Src/aux_out.c \
   Src/usbd_cdc_if.c \
   Src/usbd_conf.c \
   Src/usbd_desc.c \

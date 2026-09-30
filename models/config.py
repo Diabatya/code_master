@@ -349,6 +349,7 @@ class Config:
         "serial_number",
         "device_type",
         "device_version",
+        "device_fw_version",
         "port_names",
         "total_memory",
         "port",

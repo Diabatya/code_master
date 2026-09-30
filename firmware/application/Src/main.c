@@ -24,6 +24,7 @@
 #include "device_config.h"
 #include "trigger.h"
 #include "event_log.h"
+#include "aux_out.h"
 #include "protocol.h"
 
 #define APP_DEVICE_TYPE     0x00U /* DEVICE_TYPE_BASIC, see PROTOCOL.md 1.2 */
@@ -208,6 +209,7 @@ int main(void)
   DeviceConfig_Init();
   App_NoteStage(2U);
   Trigger_Init();
+  AuxOut_Init();
   App_NoteStage(3U);
 
   /* CAN + triggers must run standalone even with USB deactivated (ТЗ
@@ -310,6 +312,7 @@ int main(void)
      * (ТЗ 12.3). */
     CanBridge_PollHealth();
     Trigger_Poll();
+    AuxOut_Poll(); /* фронты импульсов/ШИМ доп. каналов (CMD_AUX_SET) */
     if (usb_active) {
       Protocol_Poll();
       /* Дозабор TX-кольца CAN-кадров: CDC_QueueTx() сам пинает pump, но
