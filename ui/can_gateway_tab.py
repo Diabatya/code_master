@@ -29,19 +29,15 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
-    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -141,6 +137,180 @@ class _FrameSpec(QWidget):
         tokens = str(spec.get("data", "")).split()
         for i, edit in enumerate(self.data):
             edit.setText(tokens[i] if i < len(tokens) else "")
+
+
+class _CurveEditor(QWidget):
+    """Интерактивный график подмены DATA: входной байт (ось X,
+    0x00–0xFF) → выходной байт (ось Y). Клик по полю — новая точка,
+    перетаскивание точки — правка, двойной клик по точке — удаление.
+    Ломаная между точками — интерполяция: так оператор наклоняет
+    прямую, сдвигает её вверх/вниз и строит кривую (отчёт мастера)."""
+
+    _RADIUS = 5
+    _MARGIN = 14
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._points: list[tuple[int, int]] = []
+        self._drag_index: int | None = None
+        self.setMinimumHeight(170)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def points(self) -> list[list[int]]:
+        return [[x, y] for x, y in sorted(self._points)]
+
+    def set_points(self, points: Any) -> None:
+        self._points = []
+        for p in points or []:
+            try:
+                x, y = int(p[0]), int(p[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            self._points.append((min(max(x, 0), 255), min(max(y, 0), 255)))
+        self.update()
+
+    def _rect(self):
+        return self.rect().adjusted(
+            self._MARGIN, 8, -self._MARGIN, -self._MARGIN
+        )
+
+    def _to_screen(self, x: int, y: int) -> tuple[float, float]:
+        r = self._rect()
+        return (
+            r.left() + x / 255.0 * r.width(),
+            r.bottom() - y / 255.0 * r.height(),
+        )
+
+    def _from_screen(self, px: float, py: float) -> tuple[int, int]:
+        r = self._rect()
+        x = round((px - r.left()) / max(1, r.width()) * 255)
+        y = round((r.bottom() - py) / max(1, r.height()) * 255)
+        return min(max(x, 0), 255), min(max(y, 0), 255)
+
+    def _point_at(self, px: float, py: float) -> int | None:
+        for i, (x, y) in enumerate(self._points):
+            sx, sy = self._to_screen(x, y)
+            if (sx - px) ** 2 + (sy - py) ** 2 <= (self._RADIUS * 2) ** 2:
+                return i
+        return None
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        from PySide6.QtGui import QColor, QPainter, QPen
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = self._rect()
+        painter.fillRect(r, QColor(38, 38, 48))
+        painter.setPen(QPen(QColor(90, 90, 110), 1))
+        painter.drawRect(r)
+        # Сетка: по 4 линии на ось (0x00/0x40/0x80/0xC0/0xFF).
+        grid_pen = QPen(QColor(70, 70, 86), 1)
+        text_pen = QPen(QColor(170, 170, 185), 1)
+        font = painter.font()
+        font.setPointSize(7)
+        painter.setFont(font)
+        for step in range(5):
+            v = step * 64 if step < 4 else 255
+            sx, sy = self._to_screen(v, v)
+            painter.setPen(grid_pen)
+            painter.drawLine(int(sx), r.top(), int(sx), r.bottom())
+            painter.drawLine(r.left(), int(sy), r.right(), int(sy))
+            painter.setPen(text_pen)
+            painter.drawText(
+                int(sx) - 20, r.bottom() + 2, 40, 12,
+                Qt.AlignmentFlag.AlignHCenter, f"0x{v:02X}",
+            )
+            painter.drawText(
+                0, int(sy) - 6, r.left() - 4, 12,
+                Qt.AlignmentFlag.AlignRight, f"0x{v:02X}",
+            )
+        # Диагональ «без подмены» — тонкая пунктирная ориентира.
+        painter.setPen(QPen(QColor(120, 120, 140), 1, Qt.PenStyle.DashLine))
+        x0, y0 = self._to_screen(0, 0)
+        x1, y1 = self._to_screen(255, 255)
+        painter.drawLine(int(x0), int(y0), int(x1), int(y1))
+        # Кривая подмены.
+        painter.setPen(QPen(QColor(255, 170, 80), 2))
+        prev = None
+        for x, y in sorted(self._points):
+            sx, sy = self._to_screen(x, y)
+            if prev is not None:
+                painter.drawLine(
+                    int(prev[0]), int(prev[1]), int(sx), int(sy)
+                )
+            prev = (sx, sy)
+        painter.setBrush(QColor(255, 170, 80))
+        for x, y in self._points:
+            sx, sy = self._to_screen(x, y)
+            painter.drawEllipse(
+                int(sx) - self._RADIUS, int(sy) - self._RADIUS,
+                self._RADIUS * 2, self._RADIUS * 2,
+            )
+        painter.end()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        pos = event.position()
+        if event.button() == Qt.MouseButton.LeftButton:
+            hit = self._point_at(pos.x(), pos.y())
+            if hit is not None:
+                self._drag_index = hit
+            else:
+                x, y = self._from_screen(pos.x(), pos.y())
+                self._points.append((x, y))
+                self._points.sort()
+                self._drag_index = self._points.index((x, y))
+                self.update()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag_index is not None:
+            x, y = self._from_screen(event.position().x(), event.position().y())
+            self._points[self._drag_index] = (x, y)
+            self._points.sort()
+            self._drag_index = self._points.index((x, y))
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._drag_index = None
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        pos = event.position()
+        hit = self._point_at(pos.x(), pos.y())
+        if hit is not None and len(self._points) > 0:
+            del self._points[hit]
+            self._drag_index = None
+            self.update()
+        super().mouseDoubleClickEvent(event)
+
+
+def _curve_map(curve: Any, value: int) -> int:
+    """Значение байта по кривой подмены (кусочно-линейная, края
+    продолжаются горизонтально). Кривая хранится списком точек
+    0..255 → 0..255."""
+    points: list[tuple[int, int]] = []
+    for p in (curve or {}).get("points") or []:
+        try:
+            x, y = int(p[0]), int(p[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        points.append((min(max(x, 0), 255), min(max(y, 0), 255)))
+    if not points:
+        return value
+    points.sort()
+    if value <= points[0][0]:
+        return points[0][1]
+    if value >= points[-1][0]:
+        return points[-1][1]
+    for i in range(len(points) - 1):
+        a, b = points[i], points[i + 1]
+        if a[0] <= value <= b[0]:
+            if b[0] == a[0]:
+                return b[1]
+            return round(a[1] + (b[1] - a[1]) * (value - a[0]) / (b[0] - a[0]))
+    return value
 
 
 class _DirectionButtons(QWidget):
@@ -273,6 +443,26 @@ class _GatewayProgram(QGroupBox):
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
+        # Графическая подмена DATA — только для программ «Подмена»:
+        # кликом ставятся точки, ломаная задаёт перевод входящего
+        # байта в исходящий (наклон/сдвиг/кривая — отчёт мастера).
+        self._curve_check = QCheckBox(tr("Подмена DATA по графику"))
+        self._curve_check.setFont(font)
+        self._curve_check.setToolTip(tr(
+            "Клик — новая точка, перетаскивание — правка, "
+            "двойной клик по точке — удаление. Байты с «X» в половине "
+            "подмены берутся из входящего кадра через кривую."
+        ))
+        layout.addWidget(self._curve_check)
+        self._curve_editor = _CurveEditor()
+        self._curve_editor.setVisible(False)
+        layout.addWidget(self._curve_editor)
+        self._curve_check.toggled.connect(self._curve_editor.setVisible)
+        self._curve_check.toggled.connect(lambda _c: tab.mark_dirty())
+        if self.mode != _MODE_SUBSTITUTE:
+            self._curve_check.setVisible(False)
+            self._curve_editor.setVisible(False)
+
         self.refresh_title()
         if rule is not None:
             self.write(rule)
@@ -287,13 +477,19 @@ class _GatewayProgram(QGroupBox):
         self._title_label.setText(f"№ {index} · {name}")
 
     def read(self) -> dict[str, Any]:
-        return {
+        rule: dict[str, Any] = {
             "mode": self.mode,
             "active": self._active.isChecked(),
             "direction": self.direction.direction(),
             "spec1": self.spec_left.read(),
             "spec2": self.spec_right.read(),
         }
+        if self.mode == _MODE_SUBSTITUTE and self._curve_check.isChecked():
+            rule["curve"] = {
+                "enabled": True,
+                "points": self._curve_editor.points(),
+            }
+        return rule
 
     def write(self, rule: dict[str, Any]) -> None:
         self._active.setChecked(bool(rule.get("active", True)))
@@ -303,6 +499,10 @@ class _GatewayProgram(QGroupBox):
         )
         self.spec_left.write(rule.get("spec1") or {})
         self.spec_right.write(rule.get("spec2") or {})
+        curve = rule.get("curve") or {}
+        if self.mode == _MODE_SUBSTITUTE:
+            self._curve_editor.set_points(curve.get("points") or [(0, 0), (255, 255)])
+            self._curve_check.setChecked(bool(curve.get("enabled")))
 
 
 class CanGatewayTab(QWidget):
@@ -317,7 +517,9 @@ class CanGatewayTab(QWidget):
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._config = Config()
-        self._running = False
+        # Кнопок запуска/остановки больше нет: программы действуют
+        # всегда, пока открыт порт (отчёт мастера).
+        self._running = True
         self._programs: list[_GatewayProgram] = []
         self._internal_rules: list[dict[str, Any]] = []
         self._save_timer = QTimer(self)
@@ -366,22 +568,9 @@ class CanGatewayTab(QWidget):
             "QScrollArea { border: none; background: transparent; }"
         )
 
-        self._start_button = QPushButton(tr("Запустить шлюз"))
-        setup_button(self._start_button, bold=True, height=34)
-        self._start_button.clicked.connect(self._start)
-
-        self._stop_button = QPushButton(tr("Остановить"))
-        setup_button(self._stop_button, height=34)
-        self._stop_button.clicked.connect(self._stop)
-
-        self._save_button = QPushButton(tr("Сохранить правила"))
-        setup_button(self._save_button, height=28)
-        self._save_button.clicked.connect(self._save_rules)
-
-        self._load_button = QPushButton(tr("Загрузить правила"))
-        setup_button(self._load_button, height=28)
-        self._load_button.clicked.connect(self._load_rules)
-
+        # Кнопки «Запустить/Остановить/Сохранить/Загрузить правила»
+        # убраны (отчёт мастера): программы действуют всегда,
+        # сохранение — общей кнопкой «Сохранить» окна настроек.
         self._font = font
 
     def _build_layout(self) -> None:
@@ -402,15 +591,6 @@ class CanGatewayTab(QWidget):
         layout.addLayout(top)
 
         layout.addWidget(self._scroll, 1)
-
-        buttons = QHBoxLayout()
-        buttons.setSpacing(8)
-        buttons.addWidget(self._start_button)
-        buttons.addWidget(self._stop_button)
-        buttons.addStretch()
-        buttons.addWidget(self._save_button)
-        buttons.addWidget(self._load_button)
-        layout.addLayout(buttons)
         layout.addWidget(self._memory_indicator)
 
     # ---- программы -----------------------------------------------------
@@ -514,6 +694,7 @@ class CanGatewayTab(QWidget):
                 continue
             self.add_program(mode, rule)
         self._save_timer.stop()
+        self._internal_rules = self._build_internal_rules()
 
     def set_config(
         self,
@@ -528,6 +709,8 @@ class CanGatewayTab(QWidget):
         self._config.set("gateway_rules", rules)
         # Старый ключ больше не используется — всё в программах.
         self._config.set("gateway_ignore", [])
+        # Изменения применяются сразу — кнопки запуска нет.
+        self._internal_rules = self._build_internal_rules()
         self._memory_indicator.update_usage(
             self._memory_indicator.estimate_rules(rules)
         )
@@ -544,20 +727,6 @@ class CanGatewayTab(QWidget):
                 continue
             rules.append(rule)
         return rules
-
-    def _start(self) -> None:
-        self._save_config()
-        self._internal_rules = self._build_internal_rules()
-        self._running = True
-        logger.info(
-            "CAN-шлюз запущен: %d программ", len(self._internal_rules)
-        )
-        QMessageBox.information(self, tr("CAN-шлюз"), tr("Шлюз запущен"))
-
-    def _stop(self) -> None:
-        self._running = False
-        logger.info("CAN-шлюз остановлен")
-        QMessageBox.information(self, tr("CAN-шлюз"), tr("Шлюз остановлен"))
 
     def process_frame(self, frame: dict[str, Any]) -> None:
         if not self._running:
@@ -602,13 +771,17 @@ class CanGatewayTab(QWidget):
                 out_id = frame_id
             payload = bytearray(data[:8].ljust(8, b"\x00"))
             tokens = str(out_spec.get("data", "")).split()
-            for i, token in enumerate(tokens[:8]):
-                token = token.strip().upper()
-                if not token or token == "X":
-                    continue
-                value = hex_to_int(token)
+            curve = rule.get("curve") or {}
+            curve_on = bool(curve.get("enabled"))
+            for i in range(8):
+                token = tokens[i].strip().upper() if i < len(tokens) else ""
+                value = hex_to_int(token) if token and token != "X" else None
                 if value is not None:
                     payload[i] = value & 0xFF
+                elif curve_on and i < len(data):
+                    # Графическая подмена: незаданный байт проходит
+                    # через кривую от входящего значения.
+                    payload[i] = _curve_map(curve, data[i]) & 0xFF
             target = 2 if frame_channel == 1 else 1
             self._serial_manager.send_data(
                 pack_can_frame(target, out_id, bytes(payload))
@@ -629,50 +802,3 @@ class CanGatewayTab(QWidget):
             "Шлюз: ретрансляция ID=0x%X из CAN%d в CAN%d",
             frame_id, frame_channel, target_channel,
         )
-
-    # ---- файлы правил ----------------------------------------------------
-
-    def _save_rules(self) -> None:
-        self._save_config()
-        path, _ = QFileDialog.getSaveFileName(
-            self, tr("Сохранить правила"), "", "JSON files (*.json)"
-        )
-        if not path:
-            return
-        try:
-            Path(path).write_text(
-                json.dumps(
-                    self._config.get("gateway_rules", []),
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-            logger.info("Правила шлюза сохранены в %s", path)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Ошибка сохранения правил шлюза: %s", exc)
-            QMessageBox.critical(
-                self, tr("Ошибка"),
-                tr("Не удалось сохранить правила: {0}").format(exc),
-            )
-
-    def _load_rules(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, tr("Загрузить правила"), "", "JSON files (*.json)"
-        )
-        if not path:
-            return
-        try:
-            rules = json.loads(Path(path).read_text(encoding="utf-8"))
-            if not isinstance(rules, list):
-                raise ValueError(tr("Файл должен содержать список правил"))
-            self._config.set("gateway_rules", rules)
-            self._config.set("gateway_ignore", [])
-            self._load_config()
-            logger.info("Правила шлюза загружены из %s", path)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Ошибка загрузки правил шлюза: %s", exc)
-            QMessageBox.critical(
-                self, tr("Ошибка"),
-                tr("Не удалось загрузить правила: {0}").format(exc),
-            )

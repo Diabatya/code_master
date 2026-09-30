@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal, QPropertyAnimation, QEasingCurve, QEvent
+from PySide6.QtCore import Qt, QSize, QTimer, Signal, QPropertyAnimation, QEasingCurve, QEvent
 from shiboken6 import isValid
 from PySide6.QtGui import (
     QFont,
@@ -382,7 +382,18 @@ class SettingsWindow(QMainWindow):
         self._device_layout = device_layout
 
         self._tabs = QTabWidget()
-        self._tabs.setFont(QFont("Segoe UI", 10))
+        self._tabs.setFont(QFont("Segoe UI", 11))
+        self._tabs.setIconSize(QSize(24, 24))
+        # Крупные скруглённые «пилюли» вкладок (отчёт мастера).
+        self._tabs.tabBar().setStyleSheet(
+            "QTabBar::tab { padding: 10px 18px; margin: 4px 3px;"
+            " border-radius: 12px; font-size: 11pt; }"
+            "QTabBar::tab:selected { background: #3A7BD5; color: white; }"
+            "QTabBar::tab:hover:!selected { background: palette(midlight); }"
+        )
+        # Плавный переход при переключении вкладок — fade-in новой
+        # страницы (отчёт мастера: анимированные переходы).
+        self._tabs.currentChanged.connect(self._animate_tab_change)
 
         self._trigger_tab = CanTriggerTab(self._serial_manager, self)
         self._monitor_tab = CanMonitorTab(self._serial_manager, self)
@@ -739,6 +750,25 @@ class SettingsWindow(QMainWindow):
         # делает снимок инвариантным к порядку: реакция только на
         # реальные изменения значений.
         return tuple(sorted(sig))
+
+    def _animate_tab_change(self, index: int) -> None:
+        """Плавный fade-in страницы при переключении вкладки.
+
+        QTabWidget сам не анимирует смену страниц — вешаем короткую
+        анимацию прозрачности на виджет новой вкладки (отчёт мастера:
+        «плавный анимированный переход»)."""
+        widget = self._tabs.widget(index)
+        if widget is None:
+            return
+        effect = QGraphicsOpacityEffect(widget)
+        widget.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(180)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.finished.connect(lambda: widget.setGraphicsEffect(None))
+        anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def _mark_dirty(self, *_args: object) -> None:
         """Планирует пересчёт состояния кнопки «Сохранить».

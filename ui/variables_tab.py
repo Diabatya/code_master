@@ -261,12 +261,21 @@ class _GraphPreview(QWidget):
             return
 
         # Разметка осей: X — сырое значение в HEX, Y — величина.
+        # Сначала сетка через тики (отчёт мастера: «расчерти график»).
         x0, x1, y0, y1 = self._range()
         tick_pen = QPen(QColor(150, 150, 165), 1)
         text_pen = QPen(QColor(170, 170, 185), 1)
+        grid_pen = QPen(QColor(70, 70, 86), 1)
         font = painter.font()
         font.setPointSize(7)
         painter.setFont(font)
+        painter.setPen(grid_pen)
+        for _x in sorted({x0, x1, *(p[0] for p in self._points)}):
+            px, _ = self._to_screen(rect, _x, y0)
+            painter.drawLine(int(px), rect.top(), int(px), rect.bottom())
+        for _y in sorted({y0, y1, *(p[1] for p in self._points)}):
+            _, py = self._to_screen(rect, x0, _y)
+            painter.drawLine(rect.left(), int(py), rect.right(), int(py))
         painter.setPen(tick_pen)
         for _x in sorted({x0, x1, *(p[0] for p in self._points)}):
             px, _ = self._to_screen(rect, _x, y0)
@@ -450,6 +459,12 @@ class VariableDialog(QDialog):
             radio.setFont(font)
         self._ram_radio.setChecked(config.get("storage", "ram") != "rom")
         self._rom_radio.setChecked(config.get("storage") == "rom")
+        # Без галочки «в бит» выбор носителя не кликабелен
+        # (отчёт мастера).
+        self._cache_bit_check.toggled.connect(self._ram_radio.setEnabled)
+        self._cache_bit_check.toggled.connect(self._rom_radio.setEnabled)
+        self._ram_radio.setEnabled(self._cache_bit_check.isChecked())
+        self._rom_radio.setEnabled(self._cache_bit_check.isChecked())
         head.addWidget(self._ram_radio)
         head.addWidget(self._rom_radio)
         head.addStretch()
@@ -466,7 +481,7 @@ class VariableDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
@@ -550,8 +565,16 @@ class VariableDialog(QDialog):
         line1.addStretch()
         layout.addLayout(line1)
 
+        # Подписи «от»/«до» одной ширины — поля DATA стоят друг
+        # напротив друга по вертикали (отчёт мастера).
+        from_label = QLabel(tr("DATA от:"))
+        to_label = QLabel(tr("DATA до:"))
+        for lbl in (from_label, to_label):
+            lbl.setFont(font)
+            lbl.setFixedWidth(56)
+
         line2 = QHBoxLayout()
-        line2.addWidget(QLabel(tr("DATA от:")))
+        line2.addWidget(from_label)
         self._graph_from, from_widget = create_data_field_widget(
             font, 8, edit_width=34, allow_x=True
         )
@@ -560,7 +583,7 @@ class VariableDialog(QDialog):
         layout.addLayout(line2)
 
         line3 = QHBoxLayout()
-        line3.addWidget(QLabel(tr("    до:")))
+        line3.addWidget(to_label)
         self._graph_to, to_widget = create_data_field_widget(
             font, 8, edit_width=34, allow_x=True
         )
@@ -696,6 +719,29 @@ class VariableDialog(QDialog):
                 for _ in range(4):
                     self._add_point_row()
             self._refresh_graph()
+
+    def _on_accept(self) -> None:
+        """Проверка DATA при записи динамической переменной
+        (отчёт мастера): валидный ID, хотя бы один байт в «от»,
+        минимум две точки графика."""
+        if self._type_combo.currentData() == _TYPE_DYNAMIC:
+            errors: list[str] = []
+            if hex_to_int(self._graph_id.text()) is None:
+                errors.append(tr("ID — шестнадцатеричное число"))
+            if not _data_bytes_used(self._graph_from):
+                errors.append(tr("DATA от — заполните хотя бы один байт"))
+            if len(self._read_points()) < 2:
+                errors.append(
+                    tr("график — минимум 2 точки с корректными значениями")
+                )
+            if errors:
+                QMessageBox.warning(
+                    self,
+                    tr("Проверка переменной"),
+                    tr("Исправьте поля: {0}").format(", ".join(errors)),
+                )
+                return
+        self.accept()
 
     @property
     def config(self) -> dict[str, Any]:
@@ -936,6 +982,26 @@ class VariablesTab(QWidget):
         )
         columns.addWidget(self._read_col)
         columns.addWidget(self._ctrl_col)
+        # Третья колонка — «Дополнительные каналы входа и выхода»:
+        # пока заглушка, позже сюда присвоим ноги МК (отчёт мастера).
+        aux_frame = QFrame()
+        aux_frame.setStyleSheet(
+            "QFrame { border: 1px solid #454552; border-radius: 10px; }"
+        )
+        aux_box = QVBoxLayout(aux_frame)
+        self._aux_title = QLabel(tr("Дополнительные каналы входа и выхода"))
+        self._aux_title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self._aux_title.setWordWrap(True)
+        aux_box.addWidget(self._aux_title)
+        self._aux_hint = QLabel(tr(
+            "Здесь будут привязаны дополнительные каналы к выводам МК"
+        ))
+        self._aux_hint.setFont(self._font)
+        self._aux_hint.setWordWrap(True)
+        self._aux_hint.setStyleSheet("color: #9A9AA5;")
+        aux_box.addWidget(self._aux_hint)
+        aux_box.addStretch()
+        columns.addWidget(aux_frame)
         layout.addLayout(columns, 1)
 
         self._restore()
@@ -1053,6 +1119,10 @@ class VariablesTab(QWidget):
         self._clear_btn.setText(tr("Очистить"))
         self._read_col._title.setText(tr("Чтение"))
         self._ctrl_col._title.setText(tr("Управление"))
+        self._aux_title.setText(tr("Дополнительные каналы входа и выхода"))
+        self._aux_hint.setText(tr(
+            "Здесь будут привязаны дополнительные каналы к выводам МК"
+        ))
         for col in (self._read_col, self._ctrl_col):
             col._add_btn.setText(tr("＋ Добавить переменную"))
             for row in col._rows:

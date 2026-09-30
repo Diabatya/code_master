@@ -5,7 +5,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -134,11 +135,15 @@ _USB_PID_BOOT = 0x5741
 
 
 class _DeviceCard(QWidget):
-    """Карточка устройства на стартовом экране (по ТЗ мастера):
+    """Карточка устройства на стартовом экране (рамка, как в ранних
+    версиях — отчёт мастера):
 
-    [USB] [рамка: Имя / ID / серийник / fw]  [ОБНОВИТЬ] [НАСТРОИТЬ]
+    [USB]  Имя (bold)              [ОБНОВИТЬ] [НАСТРОИТЬ]
+           ID / серийник / тип / fw
 
-    Кнопки — напротив данных справа, данные — в серой рамке."""
+    В режиме выбора цели конфигурации обычные кнопки прячутся,
+    появляется кнопка «Выбрать» — клик назначает устройство целью
+    загружаемой конфигурации."""
 
     def __init__(
         self,
@@ -146,79 +151,97 @@ class _DeviceCard(QWidget):
         port: str | None,
         name: str,
         serial: str,
+        dev_type: str,
         version: str,
         connected: bool,
+        selecting: bool = False,
     ) -> None:
         super().__init__(window)
         self._window = window
         self._port = port
+        self._selecting = selecting
+        if selecting:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
         font = QFont("Segoe UI", 10)
 
-        root = QHBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(12)
+        self.setStyleSheet(
+            "_DeviceCard { border: 1px solid #454552; border-radius: 12px;"
+            " background: rgba(255,255,255,0.03); }"
+            + (
+                "_DeviceCard { border-color: #3A7BD5; }"
+                if selecting else ""
+            )
+        )
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(8)
 
-        # USB-значок в той же круглой стилистике, что была у «планеты».
+        head = QHBoxLayout()
         icon = QLabel()
-        icon.setFixedSize(44, 44)
+        icon.setFixedSize(40, 40)
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon.setPixmap(_usb_icon(QColor("#3A7BD5"), 40).pixmap(40, 40))
+        icon.setPixmap(_usb_icon(QColor("#3A7BD5"), 36).pixmap(36, 36))
         icon.setStyleSheet(
-            "border: 2px solid #3A7BD5; border-radius: 22px;"
+            "border: 2px solid #3A7BD5; border-radius: 20px;"
             " background: rgba(58,123,213,0.12);"
         )
-        root.addWidget(icon)
-
-        # Данные устройства в серой рамке — напротив кнопок справа.
-        info_frame = QWidget()
-        info_frame.setStyleSheet(
-            "border: 1px solid #6A6A75; border-radius: 10px;"
-            " background: rgba(255,255,255,0.03);"
-        )
-        info_col = QVBoxLayout(info_frame)
-        info_col.setContentsMargins(12, 8, 12, 8)
-        info_col.setSpacing(2)
+        head.addWidget(icon)
+        head.addSpacing(10)
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
         name_label = QLabel(name)
         name_label.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        info_col.addWidget(name_label)
+        text_col.addWidget(name_label)
         info_font = QFont("Segoe UI", 9)
         for line in (
             tr("ID: {0}").format(port or "—"),
             tr("Серийный номер: {0}").format(serial or "—"),
+            tr("Тип устройства: {0}").format(dev_type or "—"),
             tr("Версия ПО: {0}").format(version or "—"),
         ):
             label = QLabel(line)
             label.setFont(info_font)
             label.setStyleSheet("color: #9A9AA5;")
-            info_col.addWidget(label)
-        root.addWidget(info_frame, 1)
+            text_col.addWidget(label)
+        head.addLayout(text_col, 1)
+        root.addLayout(head)
 
-        buttons = QVBoxLayout()
-        buttons.setSpacing(8)
-        update_btn = QPushButton(tr("Обновить"))
-        update_btn.setFont(font)
-        update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        update_btn.setStyleSheet(
-            "QPushButton { border: 1px solid #3A7BD5; border-radius: 6px;"
-            " color: #7C9EFF; padding: 6px 22px; background: transparent; }"
-            "QPushButton:hover { background: rgba(58,123,213,0.15); }"
-            "QPushButton:disabled { color: #666; border-color: #555; }"
-        )
-        update_btn.setEnabled(port is not None)
-        update_btn.clicked.connect(self._on_update)
-        configure_btn = QPushButton(tr("Настроить"))
-        configure_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        configure_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        configure_btn.setStyleSheet(
-            "QPushButton { border: none; border-radius: 6px;"
-            " color: white; padding: 6px 22px; background: #3A7BD5; }"
-            "QPushButton:hover { background: #4A8BE5; }"
-        )
-        configure_btn.clicked.connect(self._on_configure)
+        buttons = QHBoxLayout()
         buttons.addStretch()
-        buttons.addWidget(update_btn)
-        buttons.addWidget(configure_btn)
-        buttons.addStretch()
+        if selecting:
+            select_btn = QPushButton(tr("Выбрать это устройство"))
+            select_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            select_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            select_btn.setStyleSheet(
+                "QPushButton { border: none; border-radius: 6px;"
+                " color: white; padding: 8px 26px; background: #3A7BD5; }"
+                "QPushButton:hover { background: #4A8BE5; }"
+            )
+            select_btn.clicked.connect(self._on_select)
+            buttons.addWidget(select_btn)
+        else:
+            update_btn = QPushButton(tr("Обновить"))
+            update_btn.setFont(font)
+            update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            update_btn.setStyleSheet(
+                "QPushButton { border: 1px solid #3A7BD5; border-radius: 6px;"
+                " color: #7C9EFF; padding: 6px 22px; background: transparent; }"
+                "QPushButton:hover { background: rgba(58,123,213,0.15); }"
+                "QPushButton:disabled { color: #666; border-color: #555; }"
+            )
+            update_btn.setEnabled(port is not None)
+            update_btn.clicked.connect(self._on_update)
+            configure_btn = QPushButton(tr("Настроить"))
+            configure_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            configure_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            configure_btn.setStyleSheet(
+                "QPushButton { border: none; border-radius: 6px;"
+                " color: white; padding: 6px 22px; background: #3A7BD5; }"
+                "QPushButton:hover { background: #4A8BE5; }"
+            )
+            configure_btn.clicked.connect(self._on_configure)
+            buttons.addWidget(update_btn)
+            buttons.addWidget(configure_btn)
         root.addLayout(buttons)
 
     def _on_update(self) -> None:
@@ -226,6 +249,17 @@ class _DeviceCard(QWidget):
 
     def _on_configure(self) -> None:
         self._window._card_action(self._port, flash=False)
+
+    def _on_select(self) -> None:
+        self._window._select_config_target(self._port)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        # В режиме выбора цели клик по любому месту карточки назначает
+        # устройство получателем конфигурации (отчёт мастера).
+        if self._selecting and self._port is not None:
+            self._window._select_config_target(self._port)
+            return
+        super().mouseReleaseEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -239,7 +273,7 @@ class MainWindow(QMainWindow):
         self._config = Config()
         set_language(self._config.get("language", "ru"))
 
-        self.setWindowTitle(tr("Код Мастер"))
+        self.setWindowTitle(tr("Код Мастер") + f"  v{VERSION}")
         self.resize(800, 600)
         self.setMinimumSize(640, 480)
         self.setWindowFlags(
@@ -252,13 +286,14 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self._settings_window: SettingsWindow | None = None
+        # Путь конфигурации, ждущей выбора устройства-цели.
+        self._pending_config_path: str | None = None
         self._create_widgets()
         self._build_layout()
         self._connect_signals()
         self._setup_shortcuts()
         self._set_theme_button_icon()
         self._set_language_combo()
-        self._update_port_indicator()
         self._refresh_device_cards()
 
     def _create_widgets(self) -> None:
@@ -274,17 +309,8 @@ class MainWindow(QMainWindow):
         self._logo_label.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         self._logo_label.setProperty("title", True)
 
-        # Версия приложения рядом с «Код Мастер» — соответствует
-        # номеру релиза на хабе (models/version.py).
-        self._version_label = QLabel(f"v{VERSION}")
-        self._version_label.setFont(QFont("Segoe UI", 10))
-        self._version_label.setStyleSheet("color: #9A9AA5;")
-
-        self._port_indicator = QLabel("●")
-        self._port_indicator.setFixedSize(20, 20)
-        self._port_indicator.setStyleSheet("color: #666666; font-size: 14px; background: transparent;")
-        self._port_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._port_indicator.setToolTip(tr("Индикатор подключения COM-порта"))
+        # Цветная точка подключения убрана: флаг связи — сами данные
+        # устройства на экране (отчёт мастера).
 
         self._theme_button = QPushButton(tr("Тема"))
         self._theme_button.setFixedSize(70, 28)
@@ -320,32 +346,30 @@ class MainWindow(QMainWindow):
         # колонке значков под кнопкой загрузки конфигурации
         # (отчёт мастера: вместо круговой стрелки справа вверху).
         self._update_check_button = QPushButton()
-        self._update_check_button.setFixedSize(48, 48)
+        self._update_check_button.setFixedSize(34, 34)
         self._update_check_button.setFont(font)
         self._update_check_button.setIcon(_up_arrow_icon(QColor("#DCE4FF")))
-        self._update_check_button.setIconSize(
-            self._update_check_button.size() * 0.62
-        )
+        self._update_check_button.setIconSize(QSize(20, 20))
         self._update_check_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._update_check_button.setToolTip(tr("Проверка обновлений"))
         self._update_check_button.clicked.connect(self._on_check_updates_clicked)
 
         # Левая колонка значков: «папка» — загрузка конфигурации из
-        # файла и FAKE-настройки (эмулятор без устройства). Колонку
+        # файла или создание новой конфигурации устройства. Колонку
         # будем пополнять.
         self._fake_button = QPushButton("\U0001F4C2")
-        self._fake_button.setFixedSize(48, 48)
-        self._fake_button.setFont(QFont("Segoe UI", 16))
+        self._fake_button.setFixedSize(34, 34)
+        self._fake_button.setFont(QFont("Segoe UI", 12))
         self._fake_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._fake_button.setToolTip(
-            tr("Загрузить конфигурацию / FAKE-настройки")
+            tr("Загрузить или создать конфигурацию")
         )
         self._fake_menu = QMenu(self._fake_button)
         self._load_config_action = self._fake_menu.addAction(
             tr("Загрузить конфигурацию из файла…"), self._on_load_config_file
         )
         self._fake_settings_action = self._fake_menu.addAction(
-            tr("FAKE-настройки (эмулятор устройства)"), self._on_fake_clicked
+            tr("Создать конфигурацию устройства"), self._on_create_config_clicked
         )
         self._fake_button.setMenu(self._fake_menu)
 
@@ -397,7 +421,6 @@ class MainWindow(QMainWindow):
 
         # Таймер heartbeat
         self._heartbeat_timer = QTimer(self)
-        self._heartbeat_timer.timeout.connect(self._reset_port_indicator)
         self._heartbeat_timer.timeout.connect(self._refresh_device_cards)
         self._heartbeat_timer.start(1500)
         # closeEvent выставляет True — дочерние окна по нему понимают,
@@ -419,13 +442,11 @@ class MainWindow(QMainWindow):
         brand_layout.setContentsMargins(0, 0, 0, 0)
         brand_layout.setSpacing(8)
         brand_layout.addWidget(self._logo_label)
-        brand_layout.addWidget(
-            self._version_label, 0, Qt.AlignmentFlag.AlignBottom
-        )
+        # Версия приложения — в заголовке окна рядом с кнопками
+        # свернуть/закрыть (setWindowTitle, отчёт мастера).
         top_layout.addWidget(self._brand_widget)
 
         top_layout.addStretch()
-        top_layout.addWidget(self._port_indicator)
         top_layout.addSpacing(10)
         top_layout.addWidget(self._theme_button)
         top_layout.addWidget(self._logs_button)
@@ -451,22 +472,53 @@ class MainWindow(QMainWindow):
         body = QHBoxLayout()
         body.setSpacing(12)
         # Левая колонка значков (расширяемая): конфигурация, обновление
-        # приложения. Отделяется вертикальной линией (отчёт мастера).
+        # приложения. Голубой фон — в тон «Обновить», разделитель —
+        # заметно толще (отчёт мастера).
         icon_col = QVBoxLayout()
         icon_col.setSpacing(8)
         icon_col.addWidget(self._fake_button)
         icon_col.addWidget(self._update_check_button)
         icon_col.addStretch()
-        icon_wrap = QWidget()
-        icon_wrap.setLayout(icon_col)
-        icon_wrap.setFixedWidth(64)
-        body.addWidget(icon_wrap)
-        icon_line = QFrame()
-        icon_line.setFrameShape(QFrame.Shape.VLine)
-        icon_line.setFrameShadow(QFrame.Shadow.Plain)
-        icon_line.setStyleSheet("color: #454552;")
-        body.addWidget(icon_line)
-        body.addWidget(self._cards_scroll, 1)
+        self._icon_wrap = QWidget()
+        self._icon_wrap.setLayout(icon_col)
+        self._icon_wrap.setFixedWidth(50)
+        self._icon_wrap.setStyleSheet(
+            "background: #3A7BD5; border-radius: 8px;"
+        )
+        body.addWidget(self._icon_wrap)
+        self._icon_line = QFrame()
+        self._icon_line.setFrameShape(QFrame.Shape.VLine)
+        self._icon_line.setFrameShadow(QFrame.Shadow.Plain)
+        self._icon_line.setFixedWidth(4)
+        self._icon_line.setStyleSheet("color: #5A5A68;")
+        body.addWidget(self._icon_line)
+
+        # Подсказка режима выбора цели конфигурации + отмена.
+        self._select_hint = QWidget()
+        select_hint_layout = QHBoxLayout(self._select_hint)
+        select_hint_layout.setContentsMargins(8, 6, 8, 6)
+        select_hint_layout.setSpacing(12)
+        self._select_hint_label = QLabel(tr(
+            "Куда загрузить конфигурацию? Кликните по устройству"
+        ))
+        self._select_hint_label.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        select_hint_layout.addWidget(self._select_hint_label)
+        select_hint_layout.addStretch()
+        self._select_cancel = QPushButton(tr("Отмена"))
+        self._select_cancel.setFixedSize(90, 28)
+        self._select_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._select_cancel.clicked.connect(self._cancel_config_target)
+        select_hint_layout.addWidget(self._select_cancel)
+        self._select_hint.setStyleSheet(
+            "background: rgba(58,123,213,0.16); border: 1px solid #3A7BD5;"
+            " border-radius: 8px;"
+        )
+        self._select_hint.setVisible(False)
+        cards_side = QVBoxLayout()
+        cards_side.setSpacing(8)
+        cards_side.addWidget(self._select_hint)
+        cards_side.addWidget(self._cards_scroll, 1)
+        body.addLayout(cards_side, 1)
         startup_layout.addLayout(body, 1)
 
         bottom = QHBoxLayout()
@@ -475,7 +527,9 @@ class MainWindow(QMainWindow):
         bottom.addWidget(self._flash_button)
         bottom.addWidget(self._com_logger_button)
         bottom.addStretch()
-        startup_layout.addLayout(bottom)
+        self._bottom_widget = QWidget()
+        self._bottom_widget.setLayout(bottom)
+        startup_layout.addWidget(self._bottom_widget)
 
         firmware_container = QWidget()
         firmware_layout = QVBoxLayout(firmware_container)
@@ -494,14 +548,18 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         """Подключает сигналы SerialManager к UI."""
-        self._serial_manager.connection_changed.connect(self._update_port_indicator)
-        # Имя устройства приходит после опроса — обновить индикатор.
+        self._serial_manager.connection_changed.connect(
+            lambda *_a: self._refresh_device_cards()
+        )
+        # Имя устройства приходит после опроса — обновить карточки.
         self._serial_manager.device_identified.connect(
-            lambda _info: self._update_port_indicator()
+            lambda _info: self._refresh_device_cards()
         )
         self._serial_manager.error_occurred.connect(self._on_serial_error)
         self._serial_manager.critical_error.connect(self._on_critical_error)
-        self._serial_manager.heartbeat.connect(self._on_heartbeat)
+        self._serial_manager.heartbeat.connect(
+            lambda: self._refresh_device_cards()
+        )
 
     def _setup_shortcuts(self) -> None:
         """Настраивает горячие клавиши с учётом платформы."""
@@ -703,20 +761,6 @@ class MainWindow(QMainWindow):
         elif result["message"]:
             QMessageBox.information(self, tr("Обновление"), result["message"])
 
-    def _on_fake_clicked(self) -> None:
-        """Значок «папки»: FAKE-настройки на эмуляторе устройства."""
-        baud = int(self._config.get("baudrate", 115200) or 115200)
-        self._config.set_bulk({"port": "FAKE", "emulation": True})
-        if self._serial_manager.open_port(
-            "FAKE", baud, emulation=True, auto_reconnect=True
-        ):
-            self._open_settings_window()
-        else:
-            QMessageBox.warning(
-                self, tr("Эмулятор"),
-                tr("Не удалось запустить эмулятор устройства"),
-            )
-
     def _refresh_device_cards(self) -> None:
         """Перестраивает карточки устройств при смене набора портов."""
         if not isValid(self) or self._central_stack.currentIndex() != 0:
@@ -726,12 +770,15 @@ class MainWindow(QMainWindow):
             self._serial_manager.current_port_name()
             if self._serial_manager.is_open() else None
         )
+        selecting = self._pending_config_path is not None
         signature = (
             tuple((d["port"], d["serial"], d["bootloader"]) for d in devices)
             + (
                 connected_port,
+                selecting,
                 self._config.get("device_name", ""),
                 self._config.get("device_serial", ""),
+                self._config.get("device_type_name", ""),
                 self._config.get("device_version", 0),
             )
         )
@@ -757,12 +804,18 @@ class MainWindow(QMainWindow):
             serial = (
                 self._config.get("device_serial", "") if connected else ""
             ) or str(d["serial"])
+            dev_type = (
+                self._config.get("device_type_name", "")
+                or self._config.get("device_name", "")
+            ) if connected else ""
             version = (
-                str(self._config.get("device_version") or "—")
+                str(self._config.get("device_fw_version")
+                    or self._config.get("device_version") or "—")
                 if connected else "—"
             )
             card = _DeviceCard(
-                self, str(d["port"]), name, serial, version, connected
+                self, str(d["port"]), name, serial, dev_type, version,
+                connected, selecting=selecting,
             )
             self._cards_layout.insertWidget(
                 self._cards_layout.count() - 1, card
@@ -882,10 +935,8 @@ class MainWindow(QMainWindow):
 
     def retranslate_ui(self) -> None:
         """Обновляет все статические строки главного окна."""
-        self.setWindowTitle(tr("Код Мастер"))
+        self.setWindowTitle(tr("Код Мастер") + f"  v{VERSION}")
         self._logo_label.setText("🛠️ " + tr("Код Мастер"))
-        self._version_label.setText(f"v{VERSION}")
-        self._port_indicator.setToolTip(tr("Индикатор подключения COM-порта"))
         self._theme_button.setText(tr("Тема"))
         self._theme_button.setToolTip(tr("Выбор темы оформления"))
         self._dark_theme_action.setText(tr("Тёмный"))
@@ -903,14 +954,18 @@ class MainWindow(QMainWindow):
             tr("Подключенные адаптеры — выберите действие")
         )
         self._fake_button.setToolTip(
-            tr("Загрузить конфигурацию / FAKE-настройки")
+            tr("Загрузить или создать конфигурацию")
         )
         self._load_config_action.setText(
             tr("Загрузить конфигурацию из файла…")
         )
         self._fake_settings_action.setText(
-            tr("FAKE-настройки (эмулятор устройства)")
+            tr("Создать конфигурацию устройства")
         )
+        self._select_hint_label.setText(tr(
+            "Куда загрузить конфигурацию? Кликните по устройству"
+        ))
+        self._select_cancel.setText(tr("Отмена"))
         self._cards_signature = ()
         self._refresh_device_cards()
         self._status_bar.clearMessage()
@@ -946,27 +1001,11 @@ class MainWindow(QMainWindow):
         """Открывает встроенную справку."""
         show_help(self)
 
-    def _on_heartbeat(self) -> None:
-        """Пульс активности — обновляет индикатор по состоянию соединения."""
-        self._update_port_indicator()
-
-    def _reset_port_indicator(self) -> None:
-        """Сбрасывает индикатор порта в базовое состояние."""
-        self._update_port_indicator()
-
-    def _update_port_indicator(self) -> None:
-        """Обновляет индикатор порта (без строки имени устройства)."""
-        base_style = "font-size: 14px; background: transparent;"
-        if self._serial_manager.is_open():
-            self._port_indicator.setStyleSheet(f"color: #4CAF50; {base_style}")
-        elif self._config.get("port"):
-            self._port_indicator.setStyleSheet(f"color: #F44336; {base_style}")
-        else:
-            self._port_indicator.setStyleSheet(f"color: #666666; {base_style}")
-
     def _on_load_config_file(self) -> None:
-        """Открывает диалог выбора файла и передаёт путь загрузчику
-        окна настроек (кнопка «папка» на главном экране)."""
+        """«Загрузить конфигурацию из файла…»: выбор файла, затем —
+        выбор устройства-цели (приложение затемняется, карточки
+        остаются обычными). Запись в МК — только по «Сохранить» в окне
+        настроек (отчёт мастера)."""
         path, _ = QFileDialog.getOpenFileName(
             self,
             tr("Загрузить конфигурацию"),
@@ -974,6 +1013,117 @@ class MainWindow(QMainWindow):
             CONFIG_FILE_FILTER,
         )
         if not path:
+            return
+        self._config.set("last_config_dir", str(Path(path).parent))
+        if not self._detect_devices():
+            # Устройств нет — конфигурацию можно просмотреть и
+            # поправить офлайн, но записать в МК всё равно не выйдет.
+            self._open_settings_window()
+            self._settings_window.load_config_from_path(path)
+            return
+        self._pending_config_path = path
+        self._set_target_selection(True)
+
+    def _on_create_config_clicked(self) -> None:
+        """«Создать конфигурацию устройства»: таблица типов устройств
+        (сейчас только «2 CAN», дальше будет больше — отчёт мастера).
+        После выбора типа открывается окно настроек в офлайн-режиме
+        (эмулятор) для сборки новой конфигурации."""
+        from PySide6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QTableWidget,
+            QTableWidgetItem,
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("Создать конфигурацию устройства"))
+        layout = QVBoxLayout(dialog)
+        hint = QLabel(tr("Выберите тип устройства:"))
+        hint.setFont(QFont("Segoe UI", 10))
+        layout.addWidget(hint)
+        table = QTableWidget(0, 1, dialog)
+        table.setHorizontalHeaderLabels([tr("Тип устройства")])
+        table.horizontalHeader().setStretchLastSection(True)
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setFixedHeight(120)
+        for name in ("2 CAN",):
+            row = table.rowCount()
+            table.insertRow(row)
+            item = QTableWidgetItem(name)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.setItem(row, 0, item)
+        table.setCurrentCell(0, 0)
+        layout.addWidget(table)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        table.itemDoubleClicked.connect(lambda _i: dialog.accept())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        current = table.currentItem()
+        device_type = current.text() if current is not None else "2 CAN"
+        # Офлайн-редактор: порт-эмулятор, тип устройства — выбранный.
+        baud = int(self._config.get("baudrate", 115200) or 115200)
+        self._config.set_bulk({
+            "port": "FAKE",
+            "emulation": True,
+            "device_type_name": device_type,
+        })
+        if self._serial_manager.open_port(
+            "FAKE", baud, emulation=True, auto_reconnect=True
+        ):
+            self._open_settings_window()
+        else:
+            QMessageBox.warning(
+                self, tr("Эмулятор"),
+                tr("Не удалось запустить эмулятор устройства"),
+            )
+
+    def _set_target_selection(self, active: bool) -> None:
+        """Затемняет приложение при выборе цели конфигурации —
+        карточки устройств остаются обычными (отчёт мастера)."""
+        self._top_panel.setEnabled(not active)
+        self._icon_wrap.setEnabled(not active)
+        self._bottom_widget.setEnabled(not active)
+        for widget in (
+            self._top_panel,
+            self._icon_wrap,
+            self._icon_line,
+            self._bottom_widget,
+            self._status_bar,
+        ):
+            widget.setGraphicsEffect(
+                QGraphicsOpacityEffect(widget, opacity=0.35) if active else None
+            )
+        self._select_hint.setVisible(active)
+        self._cards_signature = ()
+        self._refresh_device_cards()
+
+    def _cancel_config_target(self) -> None:
+        """Отмена выбора цели — возвращаем обычный вид."""
+        self._pending_config_path = None
+        self._set_target_selection(False)
+
+    def _select_config_target(self, port: str | None) -> None:
+        """Клик по устройству в режиме выбора: подключить порт,
+        открыть настройки, загрузить файл конфигурации."""
+        path = self._pending_config_path
+        self._pending_config_path = None
+        self._set_target_selection(False)
+        if port is not None and not self._connect_port(port):
+            QMessageBox.warning(
+                self, tr("Подключение"),
+                tr("Не удалось подключиться к {0}").format(port),
+            )
             return
         self._open_settings_window()
         self._settings_window.load_config_from_path(path)

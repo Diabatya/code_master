@@ -1561,7 +1561,7 @@ class FlashDialog(QDialog):
         self._device_name_edit = QLineEdit()
         self._device_name_edit.setFont(font)
         self._device_name_edit.setMaxLength(DEVICE_CONFIG_NAME_MAX)
-        self._device_name_edit.setPlaceholderText("2CAN")
+        self._device_name_edit.setPlaceholderText("2 CAN")
 
         self._serial_label = QLabel(tr("Серийный номер"))
         self._serial_label.setFont(font)
@@ -1803,7 +1803,11 @@ class FlashDialog(QDialog):
         if total_kb > 0:
             self._read_size_edit.setCurrentText(str(total_kb))
         self._device_name_edit.setText(
-            self._config.get("device_name", "") or self._config.get("device_type_name", "")
+            self._config.get("device_name", "")
+            or self._config.get("device_type_name", "")
+            # Первичное программирование: предлагаем тип «2 CAN»
+            # (пока единственное устройство линейки, отчёт мастера).
+            or "2 CAN"
         )
         # Версия ПО по умолчанию — номер релиза приложения.
         self._fw_version_edit.setText(

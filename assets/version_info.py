@@ -1,7 +1,7 @@
 VSVersionInfo(
     ffi=FixedFileInfo(
-        filevers=(1, 1, 52, 0),
-        prodvers=(1, 1, 52, 0),
+        filevers=(1, 1, 53, 0),
+        prodvers=(1, 1, 53, 0),
         mask=0x3F,
         flags=0x0,
         OS=0x40004,
@@ -20,8 +20,8 @@ VSVersionInfo(
                         StringStruct(u'FileDescription', u'Code Master - STM32 flashing and CAN tool'),
                         StringStruct(u'InternalName', u'CodeMaster'),
                         StringStruct(u'OriginalFilename', u'CodeMaster.exe'),
-                        StringStruct(u'FileVersion', u'1.1.52.0'),
-                        StringStruct(u'ProductVersion', u'1.1.52.0'),
+                        StringStruct(u'FileVersion', '1.1.53'),
+                        StringStruct(u'ProductVersion', '1.1.53'),
                         StringStruct(u'LegalCopyright', u'Copyright (C) 2026 KOD MASTER'),
                     ],
                 )
