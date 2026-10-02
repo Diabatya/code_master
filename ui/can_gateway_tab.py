@@ -719,24 +719,28 @@ class _GatewayProgram(QGroupBox):
         layout.setSpacing(6)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        # Шапка: № слева, имя программы по центру крупно (как в
-        # триггерах — отчёт мастера), активность, голубой крестик.
+        # Шапка: № + вид программы слева («ПОДМЕНА»/«Игнорирование»),
+        # имя программы по центру крупно в поле ввода как в триггерах
+        # (отчёт мастера), активность, голубой крестик.
         header = QHBoxLayout()
         self._number_label = QLabel()
         self._number_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         self._number_label.setStyleSheet("color: #9A9AA5;")
         header.addWidget(self._number_label)
+        self._mode_label = QLabel(self._default_name().upper())
+        self._mode_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._mode_label.setStyleSheet("color: #9A9AA5;")
+        header.addWidget(self._mode_label)
+        header.addStretch()
         self._name_edit = QLineEdit()
-        name_font = QFont("Segoe UI", 13, QFont.Weight.Bold)
-        self._name_edit.setFont(name_font)
+        self._name_edit.setFont(QFont("Segoe UI", 16))
+        self._name_edit.setFixedSize(340, 40)
         self._name_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._name_edit.setPlaceholderText(self._default_name())
-        self._name_edit.setStyleSheet(
-            "QLineEdit { background: transparent; border: none; }"
-        )
         self._name_edit.setMaxLength(40)
         self._name_edit.textChanged.connect(tab.mark_dirty)
-        header.addWidget(self._name_edit, 1)
+        header.addWidget(self._name_edit)
+        header.addStretch()
         self._active = QCheckBox(tr("Активна"))
         self._active.setFont(font)
         self._active.toggled.connect(tab.mark_dirty)
@@ -873,15 +877,18 @@ class _GatewayProgram(QGroupBox):
         self._tab.mark_dirty()
 
     def _refresh_curve_visibility(self) -> None:
-        """Видимость блоков подмены по выбранной стрелке."""
+        """Видимость блоков подмены по выбранной стрелке.
+        Пока направление не выбрано (None — новая программа),
+        показываем оба блока: иначе «Подмена по графику»
+        выглядела пустой (отчёт мастера)."""
         if self.mode != _MODE_SUBSTITUTE:
             return
         direction = self.direction.direction()
         self._curve_12.setVisible(
-            direction in (_DIR_RIGHT, _DIR_BOTH)
+            direction is None or direction in (_DIR_RIGHT, _DIR_BOTH)
         )
         self._curve_21.setVisible(
-            direction in (_DIR_LEFT, _DIR_BOTH)
+            direction is None or direction in (_DIR_LEFT, _DIR_BOTH)
         )
 
     def refresh_title(self) -> None:

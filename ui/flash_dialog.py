@@ -1555,18 +1555,20 @@ class FlashDialog(QDialog):
     def _create_widgets(self) -> None:
         font = QFont("Segoe UI", 10)
 
-        # Устройство и программатор
-        self._device_name_label = QLabel(tr("Устройство"))
+        # Тип устройства и программатор
+        self._device_name_label = QLabel(tr("Тип"))
         self._device_name_label.setFont(font)
         self._device_name_edit = QLineEdit()
         self._device_name_edit.setFont(font)
         self._device_name_edit.setMaxLength(DEVICE_CONFIG_NAME_MAX)
         self._device_name_edit.setPlaceholderText("2 CAN")
+        self._device_name_edit.setMinimumWidth(200)
 
-        self._serial_label = QLabel(tr("Серийный номер"))
+        self._serial_label = QLabel(tr("s/n"))
         self._serial_label.setFont(font)
         self._serial_edit = QLineEdit()
         self._serial_edit.setFont(font)
+        self._serial_edit.setMinimumWidth(180)
 
         # Версия ПО — грузится вместе с именем и серийником в
         # конфиг-страницу (запись «VER1» рядом с основной). По
@@ -1685,7 +1687,7 @@ class FlashDialog(QDialog):
         top_grid.addWidget(self._device_name_label)
         top_grid.addWidget(self._device_name_edit, 1)
         top_grid.addWidget(self._serial_label)
-        top_grid.addWidget(self._serial_edit)
+        top_grid.addWidget(self._serial_edit, 1)
         top_grid.addWidget(self._fw_version_label)
         top_grid.addWidget(self._fw_version_edit)
         top_grid.addWidget(self._method_label)
@@ -1873,10 +1875,10 @@ class FlashDialog(QDialog):
         """Создаёт HEX только с реальной страницей конфигурации firmware."""
         name = self._device_name_edit.text().strip()
         if not name:
-            raise ValueError(tr("Заполните поле «Устройство»"))
+            raise ValueError(tr("Заполните поле «Тип»"))
         serial = self._serial_edit.text().strip()
         if not serial:
-            raise ValueError(tr("Введите серийный номер"))
+            raise ValueError(tr("Введите s/n"))
 
         page = build_device_config_page(
             name, serial, fw_version=self._fw_version_edit.text().strip() or None
@@ -1899,7 +1901,7 @@ class FlashDialog(QDialog):
     def _on_config_toggled(self, checked: bool) -> None:
         """Переключает режим встраивания конфигурации в прошивку.
 
-        При активации проверяются поля «Устройство» и «Серийный номер».
+        При активации проверяются поля «Тип» и «s/n».
         Сама запись начинается только по кнопке «Прошить».
         """
         if not checked:
@@ -1913,7 +1915,7 @@ class FlashDialog(QDialog):
             QMessageBox.warning(
                 self,
                 tr("Внимание"),
-                tr("Заполните поля «Устройство» и «Серийный номер» для записи конфигурации"),
+                tr("Заполните поля «Тип» и «s/n» для записи конфигурации"),
             )
             return
         try:
@@ -2068,10 +2070,10 @@ class FlashDialog(QDialog):
 
         name = self._device_name_edit.text().strip()
         if not name:
-            raise ValueError(tr("Заполните поле «Устройство»"))
+            raise ValueError(tr("Заполните поле «Тип»"))
         serial = self._serial_edit.text().strip()
         if not serial:
-            raise ValueError(tr("Введите серийный номер"))
+            raise ValueError(tr("Введите s/n"))
         flash_size_kb = self._get_flash_size_kb()
 
         data, base = load_firmware_bytes(file_path)
@@ -2235,6 +2237,10 @@ class FlashDialog(QDialog):
         self._port_was_open = True
         logger.info("Закрываю SerialManager перед операцией через %s", method)
         self._serial_manager.close_port()
+        # Даём ОС вернуть handle — иначе на Windows Bootloader.open()
+        # сразу после закрытия падает с PermissionError(13)/
+        # ERROR_GEN_FAILURE (отчёт мастера).
+        time.sleep(0.3)
 
     def _restore_serial_port(self) -> None:
         """Возвращает COM-порт приложению, если он был закрыт перед операцией."""

@@ -186,6 +186,25 @@ def _edits_raw_value(edits: list[QLineEdit]) -> int | None:
     return value if used else None
 
 
+def _edits_bytes_sum(edits: list[QLineEdit]) -> int | None:
+    """Сумма значений заполненных байтов DATA (без «X» и пустых).
+
+    «Численная переменная» при нескольких выбранных байтах считает
+    сырое значение как сумму байтов (отчёт мастера: «не наблюдаю
+    сложение сумм байтов на графике, если их больше одного»)."""
+    total = 0
+    used = False
+    for t in _data_tokens(edits):
+        if not t or t == "X":
+            continue
+        try:
+            total += int(t, 16)
+            used = True
+        except ValueError:
+            continue
+    return total if used else None
+
+
 def _set_data_enabled(edits: list[QLineEdit], count: int) -> None:
     """DLC ограничивает поля DATA: за пределами DLC поля пустые
     и неактивные — как в триггерах (отчёт мастера)."""
@@ -688,17 +707,20 @@ class _ValuePage(QWidget):
             edit.textChanged.connect(lambda _t: self._on_edits_changed())
 
         hint_text = tr(
-            "В расчёт идут только заполненные байты без «X». "
-            "Таблица привязки: слева сырое значение этих байт (HEX — "
-            "как записали, так и остаётся), справа — величина. Точки "
-            "правятся в таблице, линия между ними — интерполяция."
+            "В расчёт идут только заполненные байты без «X»; при "
+            "нескольких байтах сырое значение — их сумма. Таблица "
+            "привязки: слева сырое значение этих байт (HEX — как "
+            "записали, так и остаётся), справа — величина. Точки "
+            "правятся в таблице и должны лежать на линии графика в "
+            "пределах «ОТ»–«ДО»."
         ) if kind == "numeric" else tr(
             "МК анализирует приходящие пакеты: у кадра с этим ID "
             "указанные байты DATA перезаписывают прежние значения в "
             "кэше переменной — каждый новый пакет замещает старые "
             "байты. В перезапись идут только заполненные поля «от»/"
-            "«до» без «X». Таблица привязки переводит кэшированное "
-            "значение в величину."
+            "«до» без «X». Таблица привязки задаёт символьное имя "
+            "значению кэша: одинаковые имена у разных DATA объединяют "
+            "состояния — такие строки раскрашиваются одним цветом."
         )
         hint = QLabel(hint_text)
         hint.setFont(font)
@@ -742,8 +764,12 @@ class _ValuePage(QWidget):
         left.addWidget(binding_title)
         self.points_table = QTableWidget(0, 2)
         self.points_table.setFont(font)
+        # «Динамическая переменная»: вторая колонка — символьное имя
+        # состояния (не число) — отчёт мастера.
         self.points_table.setHorizontalHeaderLabels(
             [tr("Значение DATA"), tr("Величина")]
+            if kind == "numeric"
+            else [tr("Значение DATA"), tr("Имя")]
         )
         self.points_table.horizontalHeader().setStretchLastSection(True)
         self.points_table.setFixedWidth(300)
@@ -761,10 +787,32 @@ class _ValuePage(QWidget):
         buttons.addWidget(del_btn)
         buttons.addStretch()
         left.addLayout(buttons)
+        # Предупреждение о точках вне диапазона «ОТ»/«ДО»
+        # (только «Численная переменная» — отчёт мастера).
+        self._range_warn = QLabel(tr(
+            'Значение в не допустимых пределах настройки "ОТ и ДО"'
+        ))
+        self._range_warn.setFont(font)
+        self._range_warn.setWordWrap(True)
+        self._range_warn.setStyleSheet("color: #F44336;")
+        self._range_warn.setVisible(False)
+        left.addWidget(self._range_warn)
         body.addLayout(left)
         self.graph = _GraphPreview()
         body.addWidget(self.graph, 1)
+        # График — только у «Численной переменной» (отчёт мастера).
+        if kind != "numeric":
+            self.graph.setVisible(False)
         layout.addLayout(body, 1)
+
+        # Палитра групп символьных имён «Динамической переменной»:
+        # строки с одинаковым именем красятся одним цветом.
+        self._name_colors: dict[str, QColor] = {}
+        _NAME_PALETTE = (
+            "#7C9EFF", "#4CAF50", "#FFB74D", "#BA68C8",
+            "#4DD0E1", "#F06292", "#AED581", "#FFD54F",
+        )
+        self._name_palette = _NAME_PALETTE
 
     # ---- внутреннее -----------------------------------------------------
 
@@ -789,7 +837,11 @@ class _ValuePage(QWidget):
         self.points_table.setItem(
             row, 0, QTableWidgetItem(f"{row * 100:X}")
         )
-        self.points_table.setItem(row, 1, QTableWidgetItem(str(row * 500)))
+        # У «Динамической» вторая колонка — символьное имя состояния.
+        second = (
+            str(row * 500) if self._kind == "numeric" else ""
+        )
+        self.points_table.setItem(row, 1, QTableWidgetItem(second))
         self.points_table.blockSignals(False)
         self._refresh_graph()
         self._emit_changed()
@@ -806,6 +858,7 @@ class _ValuePage(QWidget):
             self._emit_changed()
 
     def read_points(self) -> list[tuple[float, float]]:
+        """Численные точки графика (только «Численная переменная»)."""
         points: list[tuple[float, float]] = []
         for row in range(self.points_table.rowCount()):
             x_item = self.points_table.item(row, 0)
@@ -819,19 +872,63 @@ class _ValuePage(QWidget):
             points.append((x, y))
         return points
 
+    def read_bindings(self) -> list[tuple[int, str]]:
+        """Привязки «Динамической переменной»: (сырое значение DATA,
+        символьное имя состояния). Одинаковые имена у разных значений
+        объединяют состояния (отчёт мастера)."""
+        bindings: list[tuple[int, str]] = []
+        for row in range(self.points_table.rowCount()):
+            x_item = self.points_table.item(row, 0)
+            name_item = self.points_table.item(row, 1)
+            if x_item is None:
+                continue
+            x = _parse_data_hex(x_item.text())
+            name = (name_item.text().strip() if name_item is not None else "")
+            if x is None or not name:
+                continue
+            bindings.append((int(x), name))
+        return bindings
+
     _HEX_CELL_RE = re.compile(r"^(0[xX])?[0-9A-Fa-f]+[hH]?$")
 
+    def _name_color(self, name: str) -> QColor:
+        """Цвет группы символьного имени: одинаковые имена у разных
+        строк таблицы привязки красятся одним цветом (отчёт мастера)."""
+        key = name.strip()
+        if key not in self._name_colors:
+            idx = len(self._name_colors) % len(self._name_palette)
+            self._name_colors[key] = QColor(self._name_palette[idx])
+        return self._name_colors[key]
+
     def _on_point_item_changed(self, item: QTableWidgetItem) -> None:
-        """Колонка DATA принимает только HEX, величина — число;
-        невалидная ячейка подсвечивается красным."""
+        """Колонка DATA принимает только HEX; у «Численной» величина —
+        число, у «Динамической» — символьное имя. Невалидная ячейка и
+        HEX-значение вне диапазона «ОТ»/«ДО» подсвечиваются красным
+        (отчёт мастера)."""
+        text = item.text().strip()
         if item.column() == 0:
-            ok = bool(self._HEX_CELL_RE.match(item.text().strip()))
+            ok = bool(self._HEX_CELL_RE.match(text))
+            if ok and self._kind == "numeric" and text:
+                value = _parse_data_hex(text)
+                lo = _edits_bytes_sum(self.data_from)
+                hi = _edits_bytes_sum(self.data_to)
+                if value is not None and (
+                    (lo is not None and value < lo)
+                    or (hi is not None and value > hi)
+                ):
+                    ok = False  # вне пределов «ОТ»/«ДО» — красный
         else:
-            ok = _parse_axis_value(item.text()) is not None
-        item.setForeground(
-            QColor("#E8E8EF") if ok or not item.text().strip()
-            else QColor("#F44336")
-        )
+            ok = (
+                _parse_axis_value(text) is not None
+                if self._kind == "numeric"
+                else True  # символьное имя — любой текст
+            )
+        if self._kind != "numeric" and item.column() == 1 and ok and text:
+            item.setForeground(self._name_color(text))
+        else:
+            item.setForeground(
+                QColor("#E8E8EF") if ok or not text else QColor("#F44336")
+            )
         self._refresh_graph()
         self._emit_changed()
 
@@ -839,13 +936,52 @@ class _ValuePage(QWidget):
         return _data_bytes_used(self.data_from)
 
     def _refresh_graph(self) -> None:
-        # Ось X: начало = значение поля DATA «от», конец = «до»
-        # (отчёт мастера).
-        self.graph.set_axis_x(
-            _edits_raw_value(self.data_from),
-            _edits_raw_value(self.data_to),
-        )
+        if self._kind != "numeric":
+            # Без графика: перекраска групп имён и гашение
+            # предупреждения (оно только для численной).
+            self._recolor_names()
+            self._range_warn.setVisible(False)
+            return
+        # Ось X: начало = СУММА байт поля DATA «от», конец = «до»
+        # (отчёт мастера: при нескольких байтах значения складываются).
+        lo = _edits_bytes_sum(self.data_from)
+        hi = _edits_bytes_sum(self.data_to)
+        self.graph.set_axis_x(lo, hi)
         self.graph.set_points(self.read_points())
+        # Точки привязки вне диапазона «ОТ»/«ДО» — красные символы и
+        # строка предупреждения под таблицей.
+        out_of_range = False
+        for row in range(self.points_table.rowCount()):
+            item = self.points_table.item(row, 0)
+            if item is None or not item.text().strip():
+                continue
+            value = _parse_data_hex(item.text())
+            if value is None:
+                continue
+            if (lo is not None and value < lo) or (
+                hi is not None and value > hi
+            ):
+                out_of_range = True
+                item.setForeground(QColor("#F44336"))
+        self._range_warn.setVisible(out_of_range)
+
+    def _recolor_names(self) -> None:
+        """Групповая раскраска имён «Динамической переменной»."""
+        for row in range(self.points_table.rowCount()):
+            item = self.points_table.item(row, 1)
+            if item is None:
+                continue
+            name = item.text().strip()
+            item.setForeground(
+                self._name_color(name) if name else QColor("#E8E8EF")
+            )
+
+    def _binding_name(self, raw: int) -> str:
+        """Имя состояния «Динамической переменной» по сырому значению."""
+        for x, name in self.read_bindings():
+            if x == raw:
+                return name
+        return ""
 
     def _update_live_label(self) -> None:
         row = self._get_row() if self._get_row is not None else None
@@ -853,6 +989,12 @@ class _ValuePage(QWidget):
         self.live_hex_label.setText(
             "0x—" if raw is None else f"0x{raw:X}"
         )
+        if self._kind != "numeric":
+            # «Динамическая»: рядом с сырым значением — имя из таблицы
+            # привязки, если значение совпало (отчёт мастера).
+            name = self._binding_name(raw) if raw is not None else ""
+            self.live_label.setText(name or "—")
+            return
         if row is None or len(self.read_points()) < 2:
             self.live_label.setText("0.00")
             return
@@ -888,18 +1030,25 @@ class _ValuePage(QWidget):
         if self.points_table.rowCount() == 0:
             for _ in range(4):
                 self.add_point_row()
+        if self._kind != "numeric":
+            self._recolor_names()
         self._refresh_graph()
 
     def read(self) -> dict[str, Any]:
-        return {
+        cfg: dict[str, Any] = {
             "id": self.can_id.text().strip(),
             "extended": bool(self.bit.currentData()),
             "dlc": self.dlc.value(),
             "from": _data_to_text(self.data_from),
             "to": _data_to_text(self.data_to),
             "bytes": _data_bytes_used(self.data_from),
-            "points": self.read_points(),
         }
+        if self._kind == "numeric":
+            cfg["points"] = self.read_points()
+        else:
+            # «Динамическая переменная»: пары (сырое значение, имя).
+            cfg["points"] = [[x, name] for x, name in self.read_bindings()]
+        return cfg
 
 
 class VariableDialog(QDialog):
@@ -1106,10 +1255,12 @@ class VariableDialog(QDialog):
 
     def _on_type_changed(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
-        # Пример имени зависит от вида переменной (по ТЗ):
-        # байтовые → «Обороты ДВС», статическая → «Дверь водителя».
+        # Пример имени зависит от вида переменной (отчёт мастера):
+        # численная → «Обороты ДВС», динамическая → «Состояние АКПП»,
+        # статическая → «Дверь водителя».
         example = (
-            tr("например, «Обороты ДВС»") if index in (1, 2)
+            tr("например, «Обороты ДВС»") if index == 1
+            else tr("например, «Состояние АКПП»") if index == 2
             else tr("например, «Дверь водителя»")
         )
         self._name_edit.setPlaceholderText(example)
@@ -1164,9 +1315,15 @@ class VariableDialog(QDialog):
                 errors.append(tr("ID — шестнадцатеричное число"))
             if not page.bytes_used():
                 errors.append(tr("DATA от — заполните хотя бы один байт"))
-            if len(page.read_points()) < 2:
+            if page._kind == "numeric":
+                if len(page.read_points()) < 2:
+                    errors.append(
+                        tr("график — минимум 2 точки с корректными значениями")
+                    )
+            elif not page.read_bindings():
                 errors.append(
-                    tr("график — минимум 2 точки с корректными значениями")
+                    tr("таблица привязки — хотя бы одна строка "
+                       "«значение DATA + имя»")
                 )
             if errors:
                 QMessageBox.warning(
@@ -1197,6 +1354,94 @@ class VariableDialog(QDialog):
                 **self._active_value_page().read(),
             )
         return base
+
+
+# Функции доп. канала входа/выхода (отчёт мастера: в таблице
+# «Входы и выходы» настраивается только конкретный канал — без
+# информации о фреймах).
+_AUX_FUNCTIONS = (
+    ("analog_out", "Аналоговый выход"),
+    ("pwm", "ШИМ"),
+    ("discrete_in", "Дискретный вход"),
+    ("discrete_out", "Дискретный выход"),
+)
+
+
+class _AuxDialog(QDialog):
+    """Настройка доп. канала входа/выхода: имя, номер пина/канала и
+    функция канала. Никаких полей фреймов — каналы программируются
+    в МК отдельно, а здесь задаётся только его роль (отчёт мастера)."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        font = QFont("Segoe UI", 9)
+        self.setWindowTitle(tr("Настройка доп. канала"))
+        self.setMinimumWidth(420)
+        self.setFont(font)
+        config = config or {}
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        head = QHBoxLayout()
+        head.addWidget(QLabel(tr("Название:")))
+        self._name_edit = QLineEdit(config.get("name", ""))
+        self._name_edit.setFont(font)
+        self._name_edit.setPlaceholderText(
+            tr("например, «Управление заслонками»")
+        )
+        self._name_edit.setMinimumWidth(220)
+        head.addWidget(self._name_edit, 1)
+        layout.addLayout(head)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel(tr("Пин (канал):")))
+        self._channel = QSpinBox()
+        self._channel.setFont(font)
+        self._channel.setRange(1, 8)
+        self._channel.setValue(int(config.get("channel", 1) or 1))
+        self._channel.setFixedWidth(64)
+        row.addWidget(self._channel)
+        row.addWidget(QLabel(tr("Функция канала:")))
+        self._function = QComboBox()
+        self._function.setFont(font)
+        for code, title in _AUX_FUNCTIONS:
+            self._function.addItem(tr(title), code)
+        fidx = self._function.findData(config.get("function", "analog_out"))
+        self._function.setCurrentIndex(fidx if fidx >= 0 else 0)
+        row.addWidget(self._function, 1)
+        layout.addLayout(row)
+
+        hint = QLabel(tr(
+            "Количество пинов и их названия появятся после "
+            "программирования каналов в МК. Здесь настраивается "
+            "только роль конкретного канала."
+        ))
+        hint.setFont(font)
+        hint.setWordWrap(True)
+        _selectable(hint)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @property
+    def config(self) -> dict[str, Any]:
+        return {
+            "type": "aux",
+            "name": self._name_edit.text().strip(),
+            "channel": self._channel.value(),
+            "function": self._function.currentData(),
+        }
 
 
 class _VariableRow(QFrame):
@@ -1262,16 +1507,35 @@ class _VariableRow(QFrame):
 
         self._refresh_labels()
 
-    def set_live_value(self, value: float, raw: int | None = None) -> None:
+    def set_live_value(
+        self,
+        value: float,
+        raw: int | None = None,
+        text: str | None = None,
+    ) -> None:
         """Онлайн-значение переменной из CAN — дублируется в строке
-        рядом с названием (отчёт мастера)."""
+        рядом с названием (отчёт мастера). ``text`` — готовая подпись
+        (имя привязки «Динамической переменной»); без неё — число."""
         self.live_value = value
         self.live_raw = raw
-        self._state_label.setText(f"{value:.2f}")
+        self._state_label.setText(
+            text if text is not None else f"{value:.2f}"
+        )
 
     def _refresh_labels(self) -> None:
         name = self.config.get("name", "").strip()
         self._name_label.setText(name or tr("— (без имени)"))
+        if self.config.get("type") == "aux":
+            # Доп. канал: вместо «0» показываем пин и функцию канала.
+            func = dict(_AUX_FUNCTIONS).get(
+                self.config.get("function", ""), ""
+            )
+            self._state_label.setText(
+                tr("Пин {0} · {1}").format(
+                    int(self.config.get("channel", 1) or 1), tr(func)
+                ).rstrip(" ·")
+            )
+            return
         self._state_label.setText(
             "0.00"
             if self.config.get("type") in (_TYPE_DYNAMIC, _TYPE_DYNCACHE)
@@ -1348,9 +1612,15 @@ class _VarColumn(QWidget):
         self.persist()
 
     def edit_row(self, row: _VariableRow) -> None:
-        dialog = VariableDialog(
-            self._tab, row.config, row=row,
-            for_control=(self.key == "control"),
+        # Доп. каналы — компактный диалог без фреймов: только имя,
+        # пин и функция канала (отчёт мастера).
+        dialog = (
+            _AuxDialog(self._tab, row.config)
+            if self.key == "aux" or row.config.get("type") == "aux"
+            else VariableDialog(
+                self._tab, row.config, row=row,
+                for_control=(self.key == "control"),
+            )
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1478,7 +1748,7 @@ class VariablesTab(QWidget):
                 fid = hex_to_int(str(cfg.get("id", "")))
                 points = cfg.get("points") or []
                 used = cfg.get("bytes") or []
-                if fid is None or len(points) < 2 or not used:
+                if fid is None or not points or not used:
                     continue
                 want_ext = bool(cfg.get("extended", False))
                 for frame in frames:
@@ -1491,7 +1761,9 @@ class VariablesTab(QWidget):
                     seen = False
                     if var_type == _TYPE_DYNCACHE:
                         # Перезапись кэша только указанными байтами —
-                        # чужие позиции кэша не трогаем.
+                        # чужие позиции кэша не трогаем. Сырое значение
+                        # — конкатенация кэшированных байтов: совпадение
+                        # с таблицей привязки должно быть точным.
                         cache = getattr(row, "_dyn_cache", {})
                         for i in used:
                             if i < len(data):
@@ -1501,13 +1773,28 @@ class VariablesTab(QWidget):
                             if i in cache:
                                 raw = (raw << 8) | cache[i]
                                 seen = True
+                        if seen:
+                            name = ""
+                            for point in points:
+                                try:
+                                    if int(point[0]) == raw:
+                                        name = str(point[1])
+                                        break
+                                except (TypeError, ValueError, IndexError):
+                                    continue
+                            row.set_live_value(
+                                float(raw), raw,
+                                text=name or f"0x{raw:X}",
+                            )
                     else:
+                        # «Численная переменная»: сырое значение —
+                        # СУММА выбранных байтов кадра (отчёт мастера).
                         for i in used:
                             if i < len(data):
-                                raw = (raw << 8) | data[i]
+                                raw += data[i]
                                 seen = True
-                    if seen:
-                        row.set_live_value(_map_points(points, raw), raw)
+                        if seen:
+                            row.set_live_value(_map_points(points, raw), raw)
 
     # ---- списки переменных для Гибкой логики -------------------------
 

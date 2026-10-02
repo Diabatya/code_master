@@ -2,11 +2,13 @@
  *
  * Flash layout (see firmware/PROTOCOL.md, Part 3):
  *   0x08000000 - 0x08007FFF (32 KB)  bootloader (not part of this project)
- *   0x08008000 - 0x0803AFFF (204 KB) application code  <-- this .ld's FLASH region
- *   0x0803B000 - 0x0803CFFF (8 KB)   event log ring (see Inc/event_log.h)
- *   0x0803D000 - 0x0803D7FF (2 KB)   application integrity metadata
- *   0x0803D800 - 0x0803DFFF (2 KB)   device config page ("page A" per ТЗ 11.2)
- *   0x0803E000 - 0x0803FFFF (8 KB)   trigger storage (10 slots)
+ *   0x08008000 - 0x080087FF (2 KB)   device info page: имя/s/n/версия ПО
+ *                                    (идентификация — в начале Flash)
+ *   0x08008800 - 0x08008FFF (2 KB)   application integrity metadata (APP1)
+ *   0x08009000 - 0x0803BFFF (204 KB) application code  <-- this .ld's FLASH region
+ *   0x0803C000 - 0x0803DFFF (8 KB)   event log ring (see Inc/event_log.h)
+ *   0x0803E000 - 0x0803FFFF (8 KB)   хранилище у конца Flash: [ГЛ][триггеры]
+ *                                    [переменные — верхние адреса, растут вниз]
  *
  * The metadata page is intentionally excluded from the linker FLASH region.
  * It is generated after linking by firmware/tools/add_app_metadata.py and
@@ -24,7 +26,7 @@
 MEMORY
 {
   RAM    (xrw) : ORIGIN = 0x20000000, LENGTH = 64K
-  FLASH  (rx)  : ORIGIN = 0x08008000, LENGTH = 204K
+  FLASH  (rx)  : ORIGIN = 0x08009000, LENGTH = 204K
 }
 
 /* Highest address of the stack. End of 64 KB RAM. */
@@ -38,8 +40,8 @@ _Min_Stack_Size = 0x800;
  * event_log.c / device_config.c / trigger.c. Kept here (rather than only in
  * a header) so the memory map is visible in one place next to the FLASH
  * region definition above. */
-_eventlog_pool_addr = 0x0803B000;
-_config_page_addr  = 0x0803D800;
+_eventlog_pool_addr = 0x0803C000;
+_config_page_addr  = 0x08008000;
 _trigger_page_addr = 0x0803E000;
 
 SECTIONS

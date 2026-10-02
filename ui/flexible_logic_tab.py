@@ -45,6 +45,7 @@ import contextlib
 from typing import Any
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, Slot
+from shiboken6 import isValid
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -76,6 +77,7 @@ logger = get_logger(__name__)
 
 _EVENT_NONE = "none"
 _EVENT_DYN = "dyn"
+_EVENT_NUM = "num"   # «Численная переменная» — отдельный вид (отчёт мастера)
 _EVENT_STATIC = "static"
 _EVENT_AUX = "aux"
 _EVENT_FRAME = "frame"
@@ -83,6 +85,7 @@ _EVENT_FRAME = "frame"
 _COND_NONE = "none"
 _COND_STATIC = "static"
 _COND_DYN = "dyn"
+_COND_NUM = "num"    # «Численная переменная» (отчёт мастера)
 _COND_AUX = "aux"
 
 _ACT_NONE = "none"
@@ -367,11 +370,20 @@ class _VarCombo(QComboBox):
 
 
 class _DynEventPage(QWidget):
-    """Событие «Динамическая переменная»: выбор переменной,
-    «Стало больше/меньше», порог из графика переменной."""
+    """Событие «Динамическая/Численная переменная»: выбор переменной,
+    «Стало больше/меньше», порог из графика переменной.
+    ``event_type`` — сохраняемый тип события («dyn»/«num»): оба вида
+    числовых переменных — отдельные пункты меню (отчёт мастера)."""
 
-    def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
+    def __init__(
+        self,
+        font: QFont,
+        mark_dirty,
+        event_type: str = _EVENT_DYN,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
+        self._event_type = event_type
         layout = QVBoxLayout(self)
         layout.setSpacing(4)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -401,7 +413,7 @@ class _DynEventPage(QWidget):
 
     def read(self) -> dict[str, Any]:
         return {
-            "type": _EVENT_DYN,
+            "type": self._event_type,
             "var": self.var.get_name(),
             "dir": self.direction.currentData(),
             "value": self.value.text().strip(),
@@ -452,6 +464,41 @@ class _StaticEventPage(QWidget):
         self.var.set_name(str(event.get("var", "")))
         eidx = self.edge.findData(event.get("edge", "both"))
         self.edge.setCurrentIndex(eidx if eidx >= 0 else 0)
+
+
+class _CondVarPage(QWidget):
+    """Страница условия по числовой переменной: имя переменной +
+    «Больше/Меньше/Равно» + порог. Одинакова для «Динамической»
+    (МК-кэш) и «Численной» переменной — это разные пункты меню,
+    фильтрующие список имён по виду переменной (отчёт мастера)."""
+
+    def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(_small_label(tr("Переменная:"), font))
+        self.var = _VarCombo(font)
+        layout.addWidget(self.var)
+        row = QHBoxLayout()
+        self.op = QComboBox()
+        self.op.setFont(font)
+        self.op.addItem(tr("Больше"), "gt")
+        self.op.addItem(tr("Меньше"), "lt")
+        self.op.addItem(tr("Равно"), "eq")
+        row.addWidget(self.op)
+        self.value = QLineEdit()
+        self.value.setFont(font)
+        self.value.setPlaceholderText(tr("значение"))
+        self.value.setFixedWidth(80)
+        row.addWidget(self.value)
+        row.addStretch()
+        layout.addLayout(row)
+        layout.addStretch()
+
+        self.var.currentIndexChanged.connect(mark_dirty)
+        self.op.currentIndexChanged.connect(mark_dirty)
+        self.value.textChanged.connect(mark_dirty)
 
 
 class _AuxEventPage(QWidget):
@@ -635,13 +682,43 @@ class _FrameEventPage(QWidget):
         self.fire_limit.setValue(max(1, limit))
 
 
+def _animate_editor_toggle(item) -> None:
+    """Сворачивает/разворачивает редактор пункта анимацией высоты.
+
+    Обработчик finished() хранится в атрибуте, чтобы disconnect()
+    реально снимал старую лямбду: иначе они копятся и выстреливают по
+    уже удалённому редактору (падение приложения при закрытии условия).
+    """
+    editor = item._editor
+    anim = item._editor_anim
+    expanded = editor.maximumHeight() != 0
+    end = 0 if expanded else max(1, editor.sizeHint().height())
+    final = 0 if expanded else 16777215
+    old = getattr(item, "_anim_finished_cb", None)
+    if old is not None:
+        with contextlib.suppress(RuntimeError, TypeError):
+            anim.finished.disconnect(old)
+        item._anim_finished_cb = None
+
+    def _apply_final(v: int = final) -> None:
+        if isValid(editor):
+            editor.setMaximumHeight(v)
+
+    item._anim_finished_cb = _apply_final
+    anim.finished.connect(_apply_final)
+    anim.stop()
+    anim.setStartValue(editor.maximumHeight())
+    anim.setEndValue(end)
+    anim.start()
+
+
 class _EventItem(QWidget):
     """Одно событие программы: компактная строка «имя · функция»,
     выбор типа события, страница настроек и крестик удаления
     (в программе событий может быть несколько — ИЛИ, отчёт мастера)."""
 
-    _PAGES = (_EVENT_NONE, _EVENT_DYN, _EVENT_STATIC, _EVENT_AUX,
-              _EVENT_FRAME)
+    _PAGES = (_EVENT_NONE, _EVENT_STATIC, _EVENT_DYN, _EVENT_NUM,
+              _EVENT_AUX, _EVENT_FRAME)
 
     def __init__(self, row: RuleRowWidget, font: QFont, event: dict | None = None) -> None:
         super().__init__(row)
@@ -674,8 +751,9 @@ class _EventItem(QWidget):
         # Новая программа стартует с «Не выбрано» — оператор сам
         # задаёт тип события (отчёт мастера).
         self._type.addItem(tr("Не выбрано"), _EVENT_NONE)
-        self._type.addItem(tr("Динамическая переменная"), _EVENT_DYN)
         self._type.addItem(tr("Статическая переменная"), _EVENT_STATIC)
+        self._type.addItem(tr("Динамическая переменная"), _EVENT_DYN)
+        self._type.addItem(tr("Численная переменная"), _EVENT_NUM)
         self._type.addItem(tr("Доп канал"), _EVENT_AUX)
         self._type.addItem(tr("Фрейм"), _EVENT_FRAME)
         self._type.currentIndexChanged.connect(self._on_type)
@@ -685,12 +763,14 @@ class _EventItem(QWidget):
         none_label = _small_label(tr("— не выбрано —"), font)
         self._none = QWidget()
         QVBoxLayout(self._none).addWidget(none_label)
-        self._dyn = _DynEventPage(font, row._mark_dirty)
         self._static = _StaticEventPage(font, row._mark_dirty)
+        self._dyn = _DynEventPage(font, row._mark_dirty, _EVENT_DYN)
+        self._num = _DynEventPage(font, row._mark_dirty, _EVENT_NUM)
         self._aux = _AuxEventPage(font, row._mark_dirty)
         self._frame = _FrameEventPage(font, row._mark_dirty)
         for page in (
-            self._none, self._dyn, self._static, self._aux, self._frame
+            self._none, self._static, self._dyn, self._num,
+            self._aux, self._frame
         ):
             self._stack.addWidget(page)
         editor_layout.addWidget(self._stack)
@@ -702,7 +782,9 @@ class _EventItem(QWidget):
         self._editor_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         # Сводка обновляется при любом изменении полей события.
-        for page in (self._dyn, self._static, self._aux, self._frame):
+        for page in (
+            self._dyn, self._num, self._static, self._aux, self._frame
+        ):
             for child in page.findChildren(QWidget):
                 if isinstance(child, QComboBox):
                     child.currentIndexChanged.connect(self._update_summary)
@@ -722,18 +804,7 @@ class _EventItem(QWidget):
     def _toggle_editor(self) -> None:
         """Клик по строке-сводке: развернуть/свернуть редактор
         с анимацией высоты (отчёт мастера)."""
-        expanded = self._editor.maximumHeight() != 0
-        end = 0 if expanded else max(1, self._editor.sizeHint().height())
-        final = 0 if expanded else 16777215
-        with contextlib.suppress(RuntimeError, TypeError):
-            self._editor_anim.finished.disconnect()
-        self._editor_anim.finished.connect(
-            lambda v=final: self._editor.setMaximumHeight(v)
-        )
-        self._editor_anim.stop()
-        self._editor_anim.setStartValue(self._editor.maximumHeight())
-        self._editor_anim.setEndValue(end)
-        self._editor_anim.start()
+        _animate_editor_toggle(self)
 
     def _on_type(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
@@ -747,6 +818,7 @@ class _EventItem(QWidget):
             return {"type": _EVENT_NONE}
         pages = {
             _EVENT_DYN: self._dyn,
+            _EVENT_NUM: self._num,
             _EVENT_STATIC: self._static,
             _EVENT_AUX: self._aux,
             _EVENT_FRAME: self._frame,
@@ -760,6 +832,7 @@ class _EventItem(QWidget):
         self._stack.setCurrentIndex(self._type.currentIndex())
         page = {
             _EVENT_DYN: self._dyn,
+            _EVENT_NUM: self._num,
             _EVENT_STATIC: self._static,
             _EVENT_AUX: self._aux,
             _EVENT_FRAME: self._frame,
@@ -770,14 +843,14 @@ class _EventItem(QWidget):
     def refresh_variables(self) -> None:
         """Обновляет списки переменных в комбобоксах события."""
         tab = self._row._tab._variables_tab
-        # Числовые переменные обоих видов («Численная» и «Динамическая»
-        # с МК-кэшем) доступны в условиях ГЛ (отчёт мастера).
-        dyn = (
-            tab.variable_names("read", ("dynamic", "dyn_cache"))
-            if tab else []
-        )
+        # «Динамическая переменная» — вид с МК-кэшем байтов;
+        # «Численная переменная» — вид с графиком интерполяции;
+        # в событиях/условиях это отдельные пункты (отчёт мастера).
+        dyn = tab.variable_names("read", "dyn_cache") if tab else []
+        num = tab.variable_names("read", "dynamic") if tab else []
         st = tab.variable_names("read", "static") if tab else []
         self._dyn.var.set_names(dyn, tr("— не выбрано —"))
+        self._num.var.set_names(num, tr("— не выбрано —"))
         self._static.var.set_names(st, tr("— не выбрано —"))
 
     def _update_summary(self, *_args) -> None:
@@ -785,14 +858,15 @@ class _EventItem(QWidget):
         etype = self._type.currentData()
         if etype == _EVENT_NONE:
             text = tr("Не выбрано")
-        elif etype == _EVENT_DYN:
-            name = self._dyn.var.get_name() or "—"
+        elif etype in (_EVENT_DYN, _EVENT_NUM):
+            page = self._dyn if etype == _EVENT_DYN else self._num
+            name = page.var.get_name() or "—"
             func = (
                 tr("стали больше")
-                if self._dyn.direction.currentData() == "gt"
+                if page.direction.currentData() == "gt"
                 else tr("стали меньше")
             )
-            text = f"{name} {func} {self._dyn.value.text().strip()}".rstrip()
+            text = f"{name} {func} {page.value.text().strip()}".rstrip()
         elif etype == _EVENT_STATIC:
             name = self._static.var.get_name() or "—"
             func = {
@@ -822,7 +896,7 @@ class _CondItem(QWidget):
     """Одно условие программы: компактная строка + тип + настройки.
     Условий может быть несколько — все должны выполняться (И)."""
 
-    _PAGES = (_COND_NONE, _COND_STATIC, _COND_DYN, _COND_AUX)
+    _PAGES = (_COND_NONE, _COND_STATIC, _COND_DYN, _COND_NUM, _COND_AUX)
 
     def __init__(self, row: RuleRowWidget, font: QFont, cond: dict | None = None) -> None:
         super().__init__(row)
@@ -854,6 +928,7 @@ class _CondItem(QWidget):
         self._type.addItem(tr("Не выбрано"), _COND_NONE)
         self._type.addItem(tr("Статическая переменная"), _COND_STATIC)
         self._type.addItem(tr("Динамическая переменная"), _COND_DYN)
+        self._type.addItem(tr("Численная переменная"), _COND_NUM)
         self._type.addItem(tr("Доп канал"), _COND_AUX)
         self._type.currentIndexChanged.connect(self._on_type)
         editor_layout.addWidget(self._type)
@@ -883,28 +958,14 @@ class _CondItem(QWidget):
         st_layout.addWidget(self.st_state)
         st_layout.addStretch()
 
-        dyn_page = QWidget()
-        dyn_layout = QVBoxLayout(dyn_page)
-        dyn_layout.setSpacing(4)
-        dyn_layout.setContentsMargins(0, 0, 0, 0)
-        dyn_layout.addWidget(_small_label(tr("Переменная:"), font))
-        self.dyn_var = _VarCombo(font)
-        dyn_layout.addWidget(self.dyn_var)
-        dyn_row = QHBoxLayout()
-        self.dyn_op = QComboBox()
-        self.dyn_op.setFont(font)
-        self.dyn_op.addItem(tr("Больше"), "gt")
-        self.dyn_op.addItem(tr("Меньше"), "lt")
-        self.dyn_op.addItem(tr("Равно"), "eq")
-        dyn_row.addWidget(self.dyn_op)
-        self.dyn_value = QLineEdit()
-        self.dyn_value.setFont(font)
-        self.dyn_value.setPlaceholderText(tr("значение"))
-        self.dyn_value.setFixedWidth(80)
-        dyn_row.addWidget(self.dyn_value)
-        dyn_row.addStretch()
-        dyn_layout.addLayout(dyn_row)
-        dyn_layout.addStretch()
+        dyn_page = _CondVarPage(font, row._mark_dirty)
+        num_page = _CondVarPage(font, row._mark_dirty)
+        self.dyn_var = dyn_page.var
+        self.dyn_op = dyn_page.op
+        self.dyn_value = dyn_page.value
+        self.num_var = num_page.var
+        self.num_op = num_page.op
+        self.num_value = num_page.value
 
         aux_page = QWidget()
         aux_layout = QVBoxLayout(aux_page)
@@ -927,7 +988,7 @@ class _CondItem(QWidget):
         aux_layout.addLayout(aux_row)
         aux_layout.addStretch()
 
-        for page in (none_page, static_page, dyn_page, aux_page):
+        for page in (none_page, static_page, dyn_page, num_page, aux_page):
             self._stack.addWidget(page)
         editor_layout.addWidget(self._stack)
         layout.addWidget(self._editor)
@@ -942,6 +1003,9 @@ class _CondItem(QWidget):
         self.dyn_var.currentIndexChanged.connect(self._update_summary)
         self.dyn_op.currentIndexChanged.connect(self._update_summary)
         self.dyn_value.textChanged.connect(self._update_summary)
+        self.num_var.currentIndexChanged.connect(self._update_summary)
+        self.num_op.currentIndexChanged.connect(self._update_summary)
+        self.num_value.textChanged.connect(self._update_summary)
         self.aux_channel.valueChanged.connect(self._update_summary)
         self.aux_state.currentIndexChanged.connect(self._update_summary)
         self.st_var.currentIndexChanged.connect(row._mark_dirty)
@@ -959,18 +1023,7 @@ class _CondItem(QWidget):
 
     def _toggle_editor(self) -> None:
         """Клик по строке-сводке разворачивает/сворачивает редактор."""
-        expanded = self._editor.maximumHeight() != 0
-        end = 0 if expanded else max(1, self._editor.sizeHint().height())
-        final = 0 if expanded else 16777215
-        with contextlib.suppress(RuntimeError, TypeError):
-            self._editor_anim.finished.disconnect()
-        self._editor_anim.finished.connect(
-            lambda v=final: self._editor.setMaximumHeight(v)
-        )
-        self._editor_anim.stop()
-        self._editor_anim.setStartValue(self._editor.maximumHeight())
-        self._editor_anim.setEndValue(end)
-        self._editor_anim.start()
+        _animate_editor_toggle(self)
 
     def _on_type(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
@@ -985,12 +1038,15 @@ class _CondItem(QWidget):
                 "var": self.st_var.get_name(),
                 "state": self.st_state.currentData(),
             }
-        if ctype == _COND_DYN:
+        if ctype in (_COND_DYN, _COND_NUM):
+            var = self.dyn_var if ctype == _COND_DYN else self.num_var
+            op = self.dyn_op if ctype == _COND_DYN else self.num_op
+            val = self.dyn_value if ctype == _COND_DYN else self.num_value
             return {
-                "type": _COND_DYN,
-                "var": self.dyn_var.get_name(),
-                "op": self.dyn_op.currentData(),
-                "value": self.dyn_value.text().strip(),
+                "type": ctype,
+                "var": var.get_name(),
+                "op": op.currentData(),
+                "value": val.text().strip(),
             }
         if ctype == _COND_AUX:
             return {
@@ -1009,11 +1065,14 @@ class _CondItem(QWidget):
             self.st_var.set_name(str(cond.get("var", "")))
             sidx = self.st_state.findData(int(cond.get("state", 1)))
             self.st_state.setCurrentIndex(sidx if sidx >= 0 else 0)
-        elif ctype == _COND_DYN:
-            self.dyn_var.set_name(str(cond.get("var", "")))
-            oidx = self.dyn_op.findData(cond.get("op", "gt"))
-            self.dyn_op.setCurrentIndex(oidx if oidx >= 0 else 0)
-            self.dyn_value.setText(str(cond.get("value", "")))
+        elif ctype in (_COND_DYN, _COND_NUM):
+            var = self.dyn_var if ctype == _COND_DYN else self.num_var
+            op = self.dyn_op if ctype == _COND_DYN else self.num_op
+            val = self.dyn_value if ctype == _COND_DYN else self.num_value
+            var.set_name(str(cond.get("var", "")))
+            oidx = op.findData(cond.get("op", "gt"))
+            op.setCurrentIndex(oidx if oidx >= 0 else 0)
+            val.setText(str(cond.get("value", "")))
         elif ctype == _COND_AUX:
             self.aux_channel.setValue(int(cond.get("channel", 1) or 1))
             sidx = self.aux_state.findData(int(cond.get("state", 1) or 0))
@@ -1021,29 +1080,32 @@ class _CondItem(QWidget):
 
     def refresh_variables(self) -> None:
         tab = self._row._tab._variables_tab
-        # Числовые переменные обоих видов («Численная» и «Динамическая»
-        # с МК-кэшем) доступны в условиях ГЛ (отчёт мастера).
-        dyn = (
-            tab.variable_names("read", ("dynamic", "dyn_cache"))
-            if tab else []
-        )
+        # Отдельные пункты: «Динамическая» (МК-кэш байтов),
+        # «Численная» (график интерполяции), «Статическая»
+        # (отчёт мастера).
+        dyn = tab.variable_names("read", "dyn_cache") if tab else []
+        num = tab.variable_names("read", "dynamic") if tab else []
         st = tab.variable_names("read", "static") if tab else []
         self.st_var.set_names(st, tr("— не выбрано —"))
         self.dyn_var.set_names(dyn, tr("— не выбрано —"))
+        self.num_var.set_names(num, tr("— не выбрано —"))
 
     def _update_summary(self, *_args) -> None:
         ctype = self._type.currentData()
         if ctype == _COND_STATIC:
             # «Дверь открыта (1)» — имя + состояние (отчёт мастера).
             text = f"{self.st_var.get_name() or '—'} ({self.st_state.currentData()})"
-        elif ctype == _COND_DYN:
+        elif ctype in (_COND_DYN, _COND_NUM):
             # «Обороты ДВС меньше 1500».
+            var = self.dyn_var if ctype == _COND_DYN else self.num_var
+            op_c = self.dyn_op if ctype == _COND_DYN else self.num_op
+            val = self.dyn_value if ctype == _COND_DYN else self.num_value
             op = {
                 "gt": tr("больше"), "lt": tr("меньше"), "eq": tr("равно"),
-            }.get(self.dyn_op.currentData(), "")
+            }.get(op_c.currentData(), "")
             text = (
-                f"{self.dyn_var.get_name() or '—'} {op} "
-                f"{self.dyn_value.text().strip()}"
+                f"{var.get_name() or '—'} {op} "
+                f"{val.text().strip()}"
             ).rstrip()
         elif ctype == _COND_AUX:
             # «Доп канал 1 активен».
@@ -1491,18 +1553,7 @@ class _ActionItem(QWidget):
 
     def _toggle_editor(self) -> None:
         """Клик по строке-сводке разворачивает/сворачивает редактор."""
-        expanded = self._editor.maximumHeight() != 0
-        end = 0 if expanded else max(1, self._editor.sizeHint().height())
-        final = 0 if expanded else 16777215
-        with contextlib.suppress(RuntimeError, TypeError):
-            self._editor_anim.finished.disconnect()
-        self._editor_anim.finished.connect(
-            lambda v=final: self._editor.setMaximumHeight(v)
-        )
-        self._editor_anim.stop()
-        self._editor_anim.setStartValue(self._editor.maximumHeight())
-        self._editor_anim.setEndValue(end)
-        self._editor_anim.start()
+        _animate_editor_toggle(self)
 
     def _on_type(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
@@ -2224,6 +2275,10 @@ class FlexibleLogicTab(QWidget):
         self._variables_tab = None
         self._static_states: dict[str, int] = {}
         self._dyn_values: dict[str, float] = {}
+        # Кэши байтов «Динамических переменных» (имя → {позиция: байт}):
+        # каждый подошедший кадр перезаписывает только указанные
+        # оператором позиции DATA (отчёт мастера).
+        self._dyn_cache_bytes: dict[str, dict[int, int]] = {}
         # Состояние доп. каналов OUT1-4 (ПК-зеркало команд CMD_AUX_SET):
         # канал → 0/1. События/условия «Доп канал» опираются на него.
         self._aux_states: dict[int, int] = {}
@@ -2401,6 +2456,33 @@ class FlexibleLogicTab(QWidget):
                     if self._static_states.get(name) != value:
                         self._static_states[name] = value
                         changed[name] = value
+            elif var.get("type") == "dyn_cache":
+                # «Динамическая переменная»: МК-кэш байтов — каждый
+                # подошедший кадр перезаписывает указанные позиции,
+                # значение переменной — имя привязки из таблицы
+                # (символьное), либо None до совпадения (отчёт мастера).
+                fid = hex_to_int(str(var.get("id", "")))
+                if fid is None or fid != frame_id:
+                    continue
+                used = var.get("bytes") or []
+                if not used:
+                    continue
+                cache = self._dyn_cache_bytes.setdefault(name, {})
+                for pos in used:
+                    if 0 <= pos < len(data):
+                        cache[pos] = data[pos]
+                raw = 0
+                complete = True
+                for pos in used:
+                    if pos in cache:
+                        raw = (raw << 8) | cache[pos]
+                    else:
+                        complete = False
+                if not complete:
+                    continue
+                self._dyn_values[name] = self._dyn_binding_name(
+                    var.get("points"), raw
+                )
             else:
                 fid = hex_to_int(str(var.get("id", "")))
                 if fid is None or fid != frame_id:
@@ -2409,14 +2491,29 @@ class FlexibleLogicTab(QWidget):
                 hi = str(var.get("to", "")).split()
                 if not _tokens_range_match(lo, hi, data):
                     continue
+                # «Численная переменная»: сырое значение — СУММА
+                # выбранных байтов кадра (отчёт мастера).
                 raw = 0
                 for pos in var.get("bytes") or []:
                     if 0 <= pos < len(data):
-                        raw = (raw << 8) | data[pos]
+                        raw += data[pos]
                 self._dyn_values[name] = _interpolate(
                     var.get("points"), raw
                 )
         return changed
+
+    @staticmethod
+    def _dyn_binding_name(points: Any, raw: int) -> str:
+        """Имя привязки «Динамической переменной» по сырому значению
+        кэша: таблица points хранит пары [значение DATA, имя] — одно имя
+        может быть у нескольких значений (отчёт мастера)."""
+        for point in points or []:
+            try:
+                if int(point[0]) == raw:
+                    return str(point[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+        return ""
 
     def _build_internal_rules(self) -> None:
         """Формирует внутренний список активных программ."""
@@ -2456,13 +2553,19 @@ class FlexibleLogicTab(QWidget):
         if ctype == _COND_STATIC:
             state = self._static_states.get(str(cond.get("var", "")), 0)
             return state == int(cond.get("state", 1))
-        if ctype == _COND_DYN:
+        if ctype in (_COND_DYN, _COND_NUM):
             value = self._dyn_values.get(str(cond.get("var", "")))
             if value is None:
                 return False
             try:
                 threshold = float(str(cond.get("value", "")).replace(",", "."))
             except ValueError:
+                # Символьное имя привязки «Динамической переменной»:
+                # «равно» — совпадение состояния с именем.
+                return cond.get("op", "eq") == "eq" and str(value) == str(
+                    cond.get("value", "")
+                ).strip()
+            if not isinstance(value, (int, float)):
                 return False
             op = cond.get("op", "gt")
             if op == "lt":
@@ -2766,21 +2869,27 @@ class FlexibleLogicTab(QWidget):
                 or (edge == "on" and changed_static[name] == 1)
                 or (edge == "off" and changed_static[name] == 0)
             )
-        if etype == _EVENT_DYN:
+        if etype in (_EVENT_DYN, _EVENT_NUM):
             name = str(event.get("var", "")).strip()
             if name not in self._dyn_values:
                 return False
+            current = self._dyn_values[name]
             try:
                 threshold = float(
                     str(event.get("value", "")).replace(",", ".")
                 )
             except ValueError:
-                return False
-            flag = (
-                self._dyn_values[name] > threshold
-                if event.get("dir", "gt") == "gt"
-                else self._dyn_values[name] < threshold
-            )
+                # Символьное состояние «Динамической переменной»:
+                # срабатывание на совпадение имени привязки.
+                flag = str(current) == str(event.get("value", "")).strip()
+            else:
+                if not isinstance(current, (int, float)):
+                    return False
+                flag = (
+                    current > threshold
+                    if event.get("dir", "gt") == "gt"
+                    else current < threshold
+                )
             key = (rule_index, sub_index, name)
             # Фронт истинности: «стало больше/меньше» стреляет
             # один раз на переход через порог.

@@ -1,7 +1,7 @@
 /* Device configuration storage ("страница А" per ТЗ 11.2 — Device Name,
  * Serial Number, VID/PID) persisted in the dedicated configuration page
  * before the trigger pages. See firmware/PROTOCOL.md Part 3 for the exact
- * byte layout and the memory map (0x0803D800..0x0803DFFF).
+ * byte layout and the memory map (0x08008000..0x080087FF).
  *
  * This is a *different* "page A" concept than the bootloader/application
  * Flash split (0x08000000/0x08008000) — do not confuse the two; see the
@@ -20,7 +20,13 @@ extern "C" {
 #define DEVICE_CONFIG_NAME_MAX     9U   /* ТЗ 11.2: Device Name <= 9 chars */
 #define DEVICE_CONFIG_SERIAL_MAX   10U  /* ТЗ 11.2: Serial Number <= 10 chars */
 
-#define DEVICE_CONFIG_PAGE_ADDR    0x0803D800U
+/* Страница идентификации устройства перенесена в НАЧАЛО Flash за
+ * bootloader'ом (отчёт мастера): 0x08008000..0x080087FF. Формат записей
+ * не менялся — CFG0/CEX0/TNM0/VER1 те же, что на старой странице.
+ * При пустой/битой новой странице содержимое один раз переносится со
+ * старого адреса (миграция устройств, прошитых до переезда). */
+#define DEVICE_CONFIG_PAGE_ADDR    0x08008000U
+#define DEVICE_CONFIG_PAGE_ADDR_LEGACY 0x0803D800U
 #define DEVICE_CONFIG_PAGE_SIZE    2048U
 #define DEVICE_CONFIG_MAGIC        0x43464730U /* "CFG0" */
 #define DEVICE_CONFIG_FORMAT_VERSION 1U

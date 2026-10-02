@@ -141,52 +141,71 @@ def guess_firmware_base(data: bytes) -> int:
     У .bin нет адресной информации. Единственный надёжный признак —
     reset-вектор (data[4:8], Thumb): у объединённого образа там точка
     входа bootloader'а (< 0x08008000), у образа приложения — его
-    собственные векторы (>= 0x08008000). Раньше любой .bin считался
-    application-образом: при прошивке codemaster_full.bin через
-    UART/USB CDC весь блоб писался со смещением +0x8000, векторы
-    приложения оказывались кодом bootloader'а и МК не запускался.
+    собственные векторы (>= 0x08009000, см. новую карту памяти).
+    Раньше любой .bin считался application-образом: при прошивке
+    codemaster_full.bin через UART/USB CDC весь блоб писался со
+    смещением, векторы приложения оказывались кодом bootloader'а
+    и МК не запускался.
     """
-    from core.stm32_info import APPLICATION_BASE_ADDR, BOOTLOADER_BASE_ADDR
+    from core.stm32_info import (
+        APPLICATION_BASE_ADDR,
+        APP_METADATA_MAGIC,
+        APP_METADATA_PAGE_ADDR,
+        BOOTLOADER_BASE_ADDR,
+        BOOTLOADER_SIZE,
+    )
 
     if len(data) >= 8:
+        # BIN, выписанный add_app_metadata.py, начинается со страницы
+        # метаданных: первое слово — магик "APP1" (значение SP векторов
+        # таким быть не может — SP всегда 0x2001xxxx).
+        if int.from_bytes(data[0:4], "little") == APP_METADATA_MAGIC:
+            return APP_METADATA_PAGE_ADDR
         reset = int.from_bytes(data[4:8], "little") & ~1
-        if BOOTLOADER_BASE_ADDR <= reset < APPLICATION_BASE_ADDR:
+        if BOOTLOADER_BASE_ADDR <= reset < BOOTLOADER_BASE_ADDR + BOOTLOADER_SIZE:
             return BOOTLOADER_BASE_ADDR
     return APPLICATION_BASE_ADDR
 
 
 def trim_to_application_region(data: bytes, base: int) -> tuple[bytes, int]:
-    """Отрезает часть образа ниже 0x08008000 для записи через AN3155.
+    """Отрезает область bootloader'а (ниже 0x08008000) для записи через AN3155.
 
     Объединённый образ (bootloader + application) через UART/USB-CDC
     загрузчик прошить целиком нельзя: область bootloader защищена от
-    записи (работающий загрузчик не может перезаписать сам себя). Для
-    ROM DFU / ST-Link / J-Link обрезка не нужна — там пишется всё.
+    записи (работающий загрузчик не может перезаписать сам себя).
+    Страница идентификации устройства (0x08008000) — уже перезаписываемая,
+    она в образе сохраняется. Для ROM DFU / ST-Link / J-Link обрезка
+    не нужна — там пишется всё.
 
-    Возвращает (данные, base) с base >= APPLICATION_BASE_ADDR; если в
-    образе нет application-части — (b"", base)."""
-    from core.stm32_info import APPLICATION_BASE_ADDR
+    Возвращает (данные, base) с base >= DEVICE_INFO_PAGE_ADDR; если в
+    образе нет записываемой части — (b"", base)."""
+    from core.stm32_info import DEVICE_INFO_PAGE_ADDR
 
-    if base >= APPLICATION_BASE_ADDR:
+    if base >= DEVICE_INFO_PAGE_ADDR:
         return data, base
-    cut = APPLICATION_BASE_ADDR - base
+    cut = DEVICE_INFO_PAGE_ADDR - base
     if len(data) <= cut:
         return b"", base
-    return data[cut:], APPLICATION_BASE_ADDR
+    return data[cut:], DEVICE_INFO_PAGE_ADDR
 
 
 def validate_application_vector(data: bytes, base_address: int) -> tuple[bool, str]:
     """Проверяет MSP/reset vector application до начала Flash erase."""
-    from core.stm32_info import APPLICATION_BASE_ADDR, BOOTLOADER_BASE_ADDR
+    from core.stm32_info import (
+        APPLICATION_BASE_ADDR,
+        EVENT_LOG_ADDR,
+    )
 
-    if base_address == APPLICATION_BASE_ADDR:
-        offset = 0
-    elif base_address == BOOTLOADER_BASE_ADDR and len(data) >= APPLICATION_BASE_ADDR - BOOTLOADER_BASE_ADDR + 8:
-        offset = APPLICATION_BASE_ADDR - BOOTLOADER_BASE_ADDR
-    else:
+    # Векторы приложения лежат по APPLICATION_BASE_ADDR независимо от
+    # того, с какого адреса начинается файл (полный образ — 0x08000000,
+    # образ с info-страницей — 0x08008000, application-only — 0x08009000).
+    if base_address > APPLICATION_BASE_ADDR:
         return True, ""
+    offset = APPLICATION_BASE_ADDR - base_address
     if len(data) < offset + 8:
-        return False, "Файл application короче таблицы векторов"
+        # Application в образе нет (config-only прошивка) — нечего
+        # валидировать.
+        return True, ""
     vector = data[offset : offset + 8]
     if vector == b"\xFF" * 8:
         # Образ не содержит application (например, bootloader + config-
@@ -200,7 +219,7 @@ def validate_application_vector(data: bytes, base_address: int) -> tuple[bool, s
     if (reset & 1) == 0:
         return False, f"Reset vector не является Thumb-адресом: 0x{reset:08X}"
     reset &= ~1
-    if not APPLICATION_BASE_ADDR <= reset < 0x0803D000:
+    if not APPLICATION_BASE_ADDR <= reset < EVENT_LOG_ADDR:
         return False, f"Reset vector вне application: 0x{reset:08X}"
     return True, ""
 
@@ -208,36 +227,34 @@ def validate_application_vector(data: bytes, base_address: int) -> tuple[bool, s
 def validate_write_region(base: int, size: int) -> tuple[bool, str]:
     """Проверяет, что область записи [base, base+size) допустима для AN3155.
 
-    Bootloader разрешает запись только в application + metadata + config
-    page (0x08008000–0x0803DFFF). Trigger-страницы (0x0803E000–0x0803FFFF)
-    через AN3155 не пишутся — они обновляются командами CMD_TRIGGER_*.
+    Новая карта Flash (отчёт мастера): через bootloader разрешена запись
+    страницы идентификации устройства, метаданных приложения и кода —
+    непрерывный диапазон 0x08008000–0x0803BFFF. Журнал событий
+    (0x0803C000+) и хранилище триггеров/переменных у конца Flash через
+    AN3155 не пишутся — они обновляются командами приложения.
     """
     from core.stm32_info import (
-        APPLICATION_BASE_ADDR,
-        DEVICE_CONFIG_PAGE_ADDR,
+        DEVICE_INFO_PAGE_ADDR,
+        EVENT_LOG_ADDR,
         FLASH_END_ADDR,
         TRIGGER_REGION_ADDR,
     )
 
     end = base + size
-    if base < APPLICATION_BASE_ADDR:
-        return False, f"Адрес 0x{base:08X} ниже области application (0x{APPLICATION_BASE_ADDR:08X})"
-    if base >= TRIGGER_REGION_ADDR:
+    if base < DEVICE_INFO_PAGE_ADDR:
         return False, (
-            f"Адрес 0x{base:08X} попадает в область триггеров "
-            f"(0x{TRIGGER_REGION_ADDR:08X}–0x{FLASH_END_ADDR:08X}) — запись запрещена"
+            f"Адрес 0x{base:08X} ниже страницы идентификации "
+            f"(0x{DEVICE_INFO_PAGE_ADDR:08X})"
         )
-    if end > TRIGGER_REGION_ADDR:
+    if base >= EVENT_LOG_ADDR:
         return False, (
-            f"Образ выходит за 0x{TRIGGER_REGION_ADDR:08X} в область триггеров — запись запрещена"
+            f"Адрес 0x{base:08X} попадает в область журнала/хранилища "
+            f"(0x{EVENT_LOG_ADDR:08X}–0x{FLASH_END_ADDR:08X}) — запись запрещена"
         )
-    # Образ application не должен пересекать config-страницу частично:
-    # либо он заканчивается на metadata (<= 0x0803D800), либо это явная
-    # запись всей config-страницы (base == DEVICE_CONFIG_PAGE_ADDR).
-    if base < DEVICE_CONFIG_PAGE_ADDR < end:
+    if end > EVENT_LOG_ADDR:
         return False, (
-            f"Образ application пересекает config-страницу 0x{DEVICE_CONFIG_PAGE_ADDR:08X} — "
-            "запрещено, чтобы не затереть имя/serial устройства"
+            f"Образ выходит за 0x{EVENT_LOG_ADDR:08X} в область журнала и "
+            f"хранилища (до 0x{TRIGGER_REGION_ADDR:08X} включительно) — запись запрещена"
         )
     return True, ""
 

@@ -9,8 +9,8 @@ from pathlib import Path
 
 from intelhex import IntelHex
 
-APP_START = 0x08008000
-APP_METADATA_ADDR = 0x0803D000
+APP_START = 0x08009000
+APP_METADATA_ADDR = 0x08008800
 APP_METADATA_SIZE = 2048
 APP_METADATA_MAGIC = 0x41505031  # "APP1"
 APP_METADATA_VERSION = 1
@@ -28,9 +28,15 @@ def main() -> int:
     if min(start for start, _ in segments) < APP_START:
         raise SystemExit("application HEX contains data before APP_START")
 
+    # Новая карта: страница метаданных (0x08008800) лежит НИЖЕ кода
+    # приложения (0x08009000+) — проверяем, что ни один сегмент её не
+    # пересекает, а не «app_end <= meta_addr» как при старой раскладке.
+    meta_end_page = APP_METADATA_ADDR + APP_METADATA_SIZE
+    for start, end in segments:
+        if start < meta_end_page and end > APP_METADATA_ADDR:
+            raise SystemExit("application overlaps the metadata page")
+
     image_end = max(end for _, end in segments)
-    if image_end > APP_METADATA_ADDR:
-        raise SystemExit("application overlaps the metadata page")
     image_size = image_end - APP_START
     image = bytes(source.tobinarray(start=APP_START, end=image_end - 1))
     crc32 = binascii.crc32(image) & 0xFFFFFFFF
@@ -44,9 +50,12 @@ def main() -> int:
     source.puts(APP_METADATA_ADDR, bytes(metadata).decode("latin1"))
     source.write_hex_file(sys.argv[2])
     if len(sys.argv) == 4:
-        binary_end = APP_METADATA_ADDR + APP_METADATA_SIZE
+        # BIN покрывает [meta_page .. app_end]: страница идентификации
+        # (0x08008000) в файл не входит — прошивка через SWD/AN3155 не
+        # должна затирать записанные тип/serial устройства. База BIN
+        # распознаётся по магику APP1 в первых байтах (guess_firmware_base).
         Path(sys.argv[3]).write_bytes(
-            bytes(source.tobinarray(start=APP_START, end=binary_end - 1))
+            bytes(source.tobinarray(start=APP_METADATA_ADDR, end=image_end - 1))
         )
 
     print(

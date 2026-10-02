@@ -9,7 +9,7 @@ extern "C" {
 
 #include "stm32f1xx_hal.h"
 
-#define APP_START_ADDRESS   0x08008000U
+#define APP_START_ADDRESS   0x08009000U
 #define APP_VECTOR_TABLE    APP_START_ADDRESS
 
 #define BOOTLOADER_FLAG_ADDRESS 0x20004FF0U

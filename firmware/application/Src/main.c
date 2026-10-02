@@ -131,6 +131,42 @@ uint32_t App_GetStackFreeBytes(void)
   return (uint32_t)((const uint8_t *)p - (const uint8_t *)&_ebss);
 }
 
+/* Телеметрия нагрузки (отчёт мастера: «индекс загрузки проца и ОЗУ
+ * должен показывать данные онлайн»). На свободном МК главный цикл
+ * крутится с максимальным темпом; каждая итерация под нагрузкой длиннее
+ * (CAN IRQ, триггеры, USB-протокол) — отношение текущего темпа к
+ * историческому максимуму даёт занятость CPU без RTOS-счётчиков. */
+static uint32_t s_loop_count;
+static uint32_t s_loop_rate;        /* итераций/с за последнее окно */
+static uint32_t s_loop_rate_max;    /* эталон «100% свободно» */
+static uint32_t s_loop_window_start;
+
+uint32_t App_GetLoopRate(void)
+{
+  return s_loop_rate;
+}
+
+uint8_t App_GetCpuLoadPct(void)
+{
+  uint32_t max_rate = s_loop_rate_max;
+  if (max_rate == 0U || s_loop_rate >= max_rate) {
+    return 0U;
+  }
+  return (uint8_t)(100U - (s_loop_rate * 100U) / max_rate);
+}
+
+uint8_t App_GetRamUsedPct(void)
+{
+  /* Пиковое потребление RAM = весь объём (от 0x20000000 до _estack)
+   * минус нетронутая канарейкой полоса [_ebss..low-watermark]. */
+  const uint32_t total = (uint32_t)&_estack - 0x20000000UL;
+  uint32_t free_b = App_GetStackFreeBytes();
+  if (free_b >= total) {
+    return 0U;
+  }
+  return (uint8_t)(((total - free_b) * 100U) / total);
+}
+
 int main(void)
 {
   HAL_Init();
@@ -259,8 +295,23 @@ int main(void)
   uint32_t last_rx_overflow_bytes = CDC_GetRxOverflowCount();
 
   App_NoteStage(8U); /* главный цикл — дальнейший крах уже не init-этап */
+  s_loop_window_start = HAL_GetTick();
   while (1) {
     HAL_IWDG_Refresh(&hiwdg);
+
+    /* Секундное окно темпа главного цикла — см. s_loop_rate. */
+    s_loop_count++;
+    {
+      uint32_t now_ms = HAL_GetTick();
+      if ((now_ms - s_loop_window_start) >= 1000U) {
+        s_loop_rate = s_loop_count;
+        if (s_loop_rate > s_loop_rate_max) {
+          s_loop_rate_max = s_loop_rate;
+        }
+        s_loop_count = 0U;
+        s_loop_window_start = now_ms;
+      }
+    }
 
     /* USB reset/disconnect считаются из IRQ (HAL_PCD_Reset/DisconnectCallback
      * в usbd_conf.c, см. CDC_NoteUsbEvent) — Flash-запись только отсюда,

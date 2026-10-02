@@ -611,9 +611,9 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * [64..67]: худший зафиксированный запас стека в байтах (аудит —
        * два CAN-кольца съедают большую часть RAM, см. main.c). Старые
        * версии ПК читают только первые 16 байт. */
-      uint8_t out[76] = {
+      uint8_t out[84] = {
         s_device_version,
-        8U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
+        9U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
              * деструктивных команд; 4 = записи триггеров v3 (90 Б —
              * fire_limit + флаги эха), старым прошивкам хост шлёт 82 Б;
              * 5 = имена триггеров (CMD_TRIGGER_NAME_*) в config-странице;
@@ -623,7 +623,9 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
              * МК до сработки FIRE_ON_BOOT, 0..9999 мс);
              * 8 = src_flags бит CACHE_ONLY — запись только наполняет
              * кэш, ответ не вооружается: связка «автозапись в кэш +
-             * обычный ответ» одного триггера */
+             * обычный ответ» одного триггера;
+             * 9 = онлайн-телеметрия нагрузки в хвосте [76..83]:
+             * темп главного цикла, %CPU, %RAM (отчёт мастера) */
         0U,
         1U,
         cfg->reserved[0],
@@ -674,6 +676,15 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
         uint32_t fault_cfsr = App_GetFaultCfsr();
         memcpy(&out[68], &fault_pc, 4U);
         memcpy(&out[72], &fault_cfsr, 4U);
+      }
+      /* [76:80]=темп главного цикла за последнюю секунду (итераций),
+       * [80]=оценка занятости CPU %, [81]=пиковая занятость RAM % —
+       * «загрузка проца/ОЗУ онлайн» для индикатора ПК. */
+      {
+        uint32_t loop_rate = App_GetLoopRate();
+        memcpy(&out[76], &loop_rate, 4U);
+        out[80] = App_GetCpuLoadPct();
+        out[81] = App_GetRamUsedPct();
       }
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;

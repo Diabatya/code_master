@@ -1090,6 +1090,13 @@ class SerialManager(QObject):
         if len(payload) >= 76:
             info["fault_pc"] = int.from_bytes(payload[68:72], "little")
             info["fault_cfsr"] = int.from_bytes(payload[72:76], "little")
+        # [76..81] — онлайн-телеметрия нагрузки (протокол 9): темп
+        # итераций главного цикла за секунду, оценка занятости CPU и
+        # пиковая занятость RAM в процентах (см. s_loop_rate в main.c).
+        if len(payload) >= 82:
+            info["loop_rate_hz"] = int.from_bytes(payload[76:80], "little")
+            info["cpu_load_pct"] = payload[80]
+            info["ram_used_pct"] = payload[81]
         return info
 
     def read_event_log(self, after_seq: int = 0, max_count: int = 23) -> list[dict[str, int]]:

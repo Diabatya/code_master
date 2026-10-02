@@ -27,9 +27,11 @@ from core.firmware_utils import (
 from core.stm32_info import (
     APPLICATION_BASE_ADDR,
     APP_METADATA_PAGE_ADDR,
+    APP_METADATA_PAGE_SIZE,
     BOOTLOADER_BASE_ADDR,
-    DEVICE_CONFIG_PAGE_ADDR,
+    DEVICE_CONFIG_PAGE_ADDR_LEGACY,
     DEVICE_CONFIG_PAGE_SIZE,
+    DEVICE_INFO_PAGE_ADDR,
     build_app_metadata,
     merge_device_config_page,
 )
@@ -348,6 +350,30 @@ class Bootloader:
                 time.sleep(0.2)
         raise BootloaderError("Не удалось синхронизироваться с бутлоадером")
 
+    def _wait_erase_ack(self, timeout: float) -> None:
+        """Ждёт ACK на команду стирания, переживая отвал USB CDC.
+
+        Во время массового стирания STM32F1 глушит USB на несколько
+        секунд — Windows отвечает ERROR_GEN_FAILURE и порт уходит в
+        пере-энумерацию. Само стирание в МК при этом продолжается
+        автономно. Ловим падение порта, ждём возвращения устройства,
+        открываем порт заново и синхронизируемся — повторный 0x7F
+        безопасен, а стирание к этому моменту уже завершилось.
+        """
+        try:
+            response = self._read_byte(timeout)
+        except (serial.SerialException, OSError) as exc:
+            logger.warning(
+                "Порт отвалился во время стирания (%s) — жду пере-энумерацию устройства",
+                exc,
+            )
+            self.wait_for_bootloader_port(timeout=15.0)
+            self.sync(retries=5)
+            logger.info("Связь восстановлена после стирания")
+            return
+        if response != ACK:
+            raise BootloaderError(f"Ошибка стирания (ответ 0x{response:02X})")
+
     def erase(self, extended: bool = True) -> None:
         """Выполняет массовое стирание памяти (осторожно — сносит bootloader!)."""
         logger.warning("Выполняется массовое стирание памяти STM32 (bootloader будет стёрт)")
@@ -358,9 +384,7 @@ class Bootloader:
             self._send_command(0x43)
             self.port.write(bytes([0xFF, 0x00]))
 
-        response = self._read_byte(5.0)
-        if response != ACK:
-            raise BootloaderError(f"Ошибка стирания (ответ 0x{response:02X})")
+        self._wait_erase_ack(5.0)
         logger.info("Массовое стирание завершено")
 
     def erase_pages(
@@ -424,9 +448,7 @@ class Bootloader:
 
         self._send_command(0x44)
         self.port.write(bytes(payload))
-        response = self._read_byte(30.0)
-        if response != ACK:
-            raise BootloaderError(f"Ошибка стирания страниц (ответ 0x{response:02X})")
+        self._wait_erase_ack(30.0)
         logger.info("Стирание страниц завершено")
 
     def write_memory(self, address: int, data: bytes) -> None:
@@ -696,15 +718,15 @@ class Bootloader:
                 )
                 base_address = guessed
 
-        if base_address < APPLICATION_BASE_ADDR:
+        if base_address < DEVICE_INFO_PAGE_ADDR:
             # Объединённый образ (bootloader + application): область
             # bootloader через AN3155 незаписываема — работающий
             # загрузчик не может перезаписать сам себя. Отрезаем её и
-            # пишем только application + metadata + config.
+            # пишем только info-страницу + metadata + application.
             firmware, base_address = trim_to_application_region(firmware, base_address)
             if not firmware:
                 raise BootloaderError(
-                    "Образ не содержит application (0x08008000+) — "
+                    "Образ не содержит записываемой области (0x08008000+) — "
                     "через bootloader записать нечего"
                 )
             if status_callback:
@@ -713,19 +735,35 @@ class Bootloader:
                 )
             logger.info("Обрезана область bootloader: base=0x%08X, %d байт", base_address, len(firmware))
 
-        # Объединённый образ с config-страницей (*_конфиг.hex): хвост за
-        # DEVICE_CONFIG_PAGE_ADDR пишем отдельным регионом — прямое
-        # пересечение config-страницы validate_write_region запрещает,
-        # а здесь запись конфигурации явно запрошена оператором.
-        cfg_tail: bytes | None = None
-        cfg_rel = DEVICE_CONFIG_PAGE_ADDR - base_address
-        if 0 < cfg_rel < len(firmware):
-            cfg_tail = firmware[cfg_rel:]
-            firmware = firmware[:cfg_rel]
+        # Разреженный образ по новой карте памяти разбивается на
+        # служебные сегменты: страница идентификации устройства
+        # (0x08008000 — тип/s/n/версия), метаданные целостности APP1
+        # (0x08008800) и код приложения (0x08009000+).
+        info_seg: bytes | None = None
+        meta_seg: bytes | None = None
+        code = firmware
+        code_addr = base_address
+        if base_address == DEVICE_CONFIG_PAGE_ADDR_LEGACY:
+            # Образ config-страницы старой раскладки (0x0803D800):
+            # переносим на новую страницу идентификации.
+            info_seg = firmware[:DEVICE_CONFIG_PAGE_SIZE]
+            code = b""
+        else:
+            info_rel = DEVICE_INFO_PAGE_ADDR - base_address
+            if 0 <= info_rel < len(firmware):
+                info_seg = firmware[info_rel : info_rel + DEVICE_CONFIG_PAGE_SIZE]
+            meta_rel = APP_METADATA_PAGE_ADDR - base_address
+            if 0 <= meta_rel < len(firmware):
+                meta_seg = firmware[meta_rel : meta_rel + APP_METADATA_PAGE_SIZE]
+            if base_address < APPLICATION_BASE_ADDR:
+                cut = APPLICATION_BASE_ADDR - base_address
+                code_addr = APPLICATION_BASE_ADDR
+                code = firmware[cut:]
 
-        ok, reason = validate_write_region(base_address, len(firmware))
-        if not ok:
-            raise BootloaderError(f"Запрещённая область записи: {reason}")
+        if code:
+            ok, reason = validate_write_region(code_addr, len(code))
+            if not ok:
+                raise BootloaderError(f"Запрещённая область записи: {reason}")
 
         def status(text: str) -> None:
             logger.info("Этап: %s", text)
@@ -740,32 +778,28 @@ class Bootloader:
         self.reconfigure_for_bootloader()
         self.enter_bootloader()
         self.sync()
-        if base_address == DEVICE_CONFIG_PAGE_ADDR and len(firmware) >= DEVICE_CONFIG_PAGE_SIZE:
-            existing = self.read_memory(base_address, DEVICE_CONFIG_PAGE_SIZE)
-            firmware = merge_device_config_page(firmware, existing)
-            logger.info("Сохранены VID/PID и служебные поля существующей config-страницы")
 
-        # Метаданные — отдельным последним шагом, чтобы «флаг валидности»
-        # появлялся только после полной записи кода.
-        meta_rel = APP_METADATA_PAGE_ADDR - base_address
-        code, meta = firmware, None
-        if 0 <= meta_rel < len(firmware):
-            code, meta = firmware[:meta_rel], firmware[meta_rel:]
+        # Страница идентификации из образа объединяется с существующей:
+        # имя/serial/VID/PID устройства сохраняются, версионная запись
+        # VER1 берётся из нового образа (отчёт мастера).
+        if info_seg is not None and any(b != 0xFF for b in info_seg):
+            existing = self.read_memory(DEVICE_INFO_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE)
+            info_seg = merge_device_config_page(info_seg, existing)
+            logger.info("Страница идентификации объединена с существующей (VID/PID сохранены)")
+        elif info_seg is not None:
+            info_seg = None  # пустая прослойка разреженного образа — не пишем
 
-        # Разреженный образ может содержать страницу метаданных из одних
-        # 0xFF (config-only hex: padding от application до config-страницы).
-        # Такую «метаданные» считаем отсутствующими — иначе запись 0xFF не
-        # восстановит инвалидированный magic и приложение не загрузится.
-        if meta is not None and not any(b != 0xFF for b in meta):
-            meta = None
+        # Метаданные из одних 0xFF (padding разреженного образа)
+        # считаем отсутствующими — их сгенерирует ПК.
+        if meta_seg is not None and not any(b != 0xFF for b in meta_seg):
+            meta_seg = None
 
         # Обновление application — только когда в образе есть реальный код.
-        # Config-only образ (код целиком 0xFF) не должен трогать метаданные:
-        # инвалидация без последующей записи валидных метаданных убила бы
-        # загрузку приложения.
-        is_app_update = base_address == APPLICATION_BASE_ADDR and any(
-            b != 0xFF for b in code
-        )
+        # Config-only запись (код отсутствует/целиком 0xFF) не должна
+        # трогать метаданные: инвалидация без последующей записи валидных
+        # метаданных убила бы загрузку приложения.
+        is_app_update = bool(code) and any(b != 0xFF for b in code)
+        meta = meta_seg
         if is_app_update:
             status("Подготовка обновления")
             # UPDATE_STARTED: гасим magic метаданных. Запись нулей работает
@@ -775,43 +809,43 @@ class Bootloader:
             if meta is None:
                 meta = build_app_metadata(code)
 
-        if cfg_tail is not None:
-            existing = self.read_memory(DEVICE_CONFIG_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE)
-            cfg_tail = merge_device_config_page(cfg_tail, existing)
-            logger.info("Config-страница объединена с существующей (VID/PID сохранены)")
-
         status("Стирание Flash")
         # При обновлении application страницы кода стираем полностью:
         # пропущенная «пустая» (0xFF) страница сохранила бы старые данные,
         # а верификация и CRC метаданных покрывают весь диапазон — иначе
         # ложный провал верификации или невалидный образ после reboot.
-        # Config-only запись (is_app_update=False) стирать код нельзя.
-        self.erase_pages(
-            base_address,
-            code,
-            page_size=page_size,
-            skip_blank=skip_blank and not is_app_update,
-        )
+        if code:
+            self.erase_pages(
+                code_addr,
+                code,
+                page_size=page_size,
+                skip_blank=skip_blank and not is_app_update,
+            )
+        if info_seg is not None:
+            self.erase_pages(
+                DEVICE_INFO_PAGE_ADDR, info_seg, page_size=page_size, skip_blank=skip_blank
+            )
         if meta is not None:
             self.erase_pages(
                 APP_METADATA_PAGE_ADDR, meta, page_size=page_size, skip_blank=skip_blank
             )
-        if cfg_tail is not None:
-            self.erase_pages(
-                DEVICE_CONFIG_PAGE_ADDR, cfg_tail, page_size=page_size, skip_blank=skip_blank
-            )
 
-        status(f"Запись {len(code)} байт с 0x{base_address:08X}")
-        total = len(code) + (len(meta) if meta else 0) + (len(cfg_tail) if cfg_tail else 0)
-        written = self._write_region(base_address, code, 0, total, skip_blank)
-        regions: list[tuple[int, bytes]] = [(base_address, code)]
-        if cfg_tail is not None:
-            status(f"Запись config-страницы ({len(cfg_tail)} байт)")
+        regions: list[tuple[int, bytes]] = []
+        total = len(code) + (len(info_seg) if info_seg else 0) + (len(meta) if meta else 0)
+        written = 0
+        if code:
+            status(f"Запись {len(code)} байт с 0x{code_addr:08X}")
+            written = self._write_region(code_addr, code, 0, total, skip_blank)
+            regions.append((code_addr, code))
+        if info_seg is not None:
+            status(f"Запись страницы идентификации ({len(info_seg)} байт)")
             written = self._write_region(
-                DEVICE_CONFIG_PAGE_ADDR, cfg_tail, written, total, skip_blank
+                DEVICE_INFO_PAGE_ADDR, info_seg, written, total, skip_blank
             )
-            regions.append((DEVICE_CONFIG_PAGE_ADDR, cfg_tail))
+            regions.append((DEVICE_INFO_PAGE_ADDR, info_seg))
         if meta is not None:
+            # Метаданные — последним шагом: валидный APP1 служит «флагом
+            # завершённого обновления» (bl_metadata_is_valid).
             status(f"Запись метаданных ({len(meta)} байт)")
             self._write_region(APP_METADATA_PAGE_ADDR, meta, written, total, skip_blank)
             regions.append((APP_METADATA_PAGE_ADDR, meta))

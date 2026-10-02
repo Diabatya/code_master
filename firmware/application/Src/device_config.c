@@ -66,6 +66,10 @@ static void load_names_defaults(trigger_names_t *names)
 /* Версионная запись VER1: magic + CRC + разумная длина. Пустая
  * (стёртая Flash = 0xFF) или битая запись означает «версии нет» —
  * остальную конфигурацию это не трогает. */
+static uint8_t flash_write_config(const device_config_t *cfg,
+                                  const device_ext_config_t *ext,
+                                  const trigger_names_t *names);
+
 static uint8_t fw_ver_valid(const device_fw_ver_t *ver)
 {
   return ver->magic == DEVICE_CONFIG_VER_MAGIC
@@ -73,21 +77,38 @@ static uint8_t fw_ver_valid(const device_fw_ver_t *ver)
          && crc8((const uint8_t *)ver, offsetof(device_fw_ver_t, crc8)) == ver->crc8;
 }
 
+static uint8_t main_record_valid(const device_config_t *rec)
+{
+  return rec->magic == DEVICE_CONFIG_MAGIC
+         && crc8((const uint8_t *)rec, offsetof(device_config_t, crc8)) == rec->crc8
+         && rec->device_name_len <= DEVICE_CONFIG_NAME_MAX
+         && rec->serial_len <= DEVICE_CONFIG_SERIAL_MAX
+         && ((rec->reserved[0] == 0U && rec->reserved[1] == 0U)
+             || (rec->reserved[0] == DEVICE_CONFIG_FORMAT_VERSION
+                 && rec->reserved[1] == DEVICE_CONFIG_RECORD_SIZE));
+}
+
 void DeviceConfig_Init(void)
 {
   const device_config_t *flash_cfg = (const device_config_t *)DEVICE_CONFIG_PAGE_ADDR;
+  const device_config_t *legacy_cfg =
+      (const device_config_t *)DEVICE_CONFIG_PAGE_ADDR_LEGACY;
+  /* Активная страница: новая (в начале Flash) или старая раскладка —
+   * устройства, прошитые до переезда, держат конфиг на 0x0803D800. */
+  uint32_t page_addr = DEVICE_CONFIG_PAGE_ADDR;
+  uint8_t migrated = 0U;
 
-  if (flash_cfg->magic == DEVICE_CONFIG_MAGIC) {
-    uint8_t computed = crc8((const uint8_t *)flash_cfg, offsetof(device_config_t, crc8));
-    if (computed == flash_cfg->crc8
-        && flash_cfg->device_name_len <= DEVICE_CONFIG_NAME_MAX
-        && flash_cfg->serial_len <= DEVICE_CONFIG_SERIAL_MAX
-        && ((flash_cfg->reserved[0] == 0U && flash_cfg->reserved[1] == 0U)
-            || (flash_cfg->reserved[0] == DEVICE_CONFIG_FORMAT_VERSION
-                && flash_cfg->reserved[1] == DEVICE_CONFIG_RECORD_SIZE))) {
-      memcpy(&s_config, flash_cfg, sizeof(s_config));
-      s_config_valid = 1U;
-    }
+  if (main_record_valid(flash_cfg)) {
+    memcpy(&s_config, flash_cfg, sizeof(s_config));
+    s_config_valid = 1U;
+  } else if (main_record_valid(legacy_cfg)) {
+    /* Миграция со старой страницы: записи переносятся в новую область
+     * одной перезаписью в конце Init (отчёт мастера — идентификация
+     * хранится в начале Flash). */
+    memcpy(&s_config, legacy_cfg, sizeof(s_config));
+    s_config_valid = 1U;
+    page_addr = DEVICE_CONFIG_PAGE_ADDR_LEGACY;
+    migrated = 1U;
   } else {
     /* Blank/corrupt page: fall back to defaults without touching Flash (a
      * write only happens on an explicit CMD_CFG_WRITE/FACTORY_RESET). */
@@ -102,7 +123,7 @@ void DeviceConfig_Init(void)
    * записи — ранний return здесь оставлял s_ext_config в нулях,
    * GetCanBaud отдавал 0 и CAN вообще не стартовал после загрузки. */
   const device_ext_config_t *ext =
-      (const device_ext_config_t *)(DEVICE_CONFIG_PAGE_ADDR + DEVICE_EXT_CONFIG_OFFSET);
+      (const device_ext_config_t *)(page_addr + DEVICE_EXT_CONFIG_OFFSET);
   if (ext->magic == DEVICE_EXT_CONFIG_MAGIC
       && crc8((const uint8_t *)ext, offsetof(device_ext_config_t, crc8)) == ext->crc8
       && ext->can1_baud_kbps > 0U && ext->can2_baud_kbps > 0U) {
@@ -115,7 +136,7 @@ void DeviceConfig_Init(void)
    * устройств в поле: отсутствующая/битая запись означает «имён нет»,
    * но не трогает остальную конфигурацию. */
   const trigger_names_t *names =
-      (const trigger_names_t *)(DEVICE_CONFIG_PAGE_ADDR + TRIGGER_NAMES_OFFSET);
+      (const trigger_names_t *)(page_addr + TRIGGER_NAMES_OFFSET);
   if (names->magic == TRIGGER_NAMES_MAGIC
       && names->version == TRIGGER_NAMES_VERSION
       && crc8((const uint8_t *)names, offsetof(trigger_names_t, crc8)) == names->crc8) {
@@ -130,15 +151,21 @@ void DeviceConfig_Init(void)
    * поэтому попадётся редко — но безвредно проверить). */
   memset(&s_fw_ver, 0, sizeof(s_fw_ver));
   const device_fw_ver_t *ver =
-      (const device_fw_ver_t *)(DEVICE_CONFIG_PAGE_ADDR + DEVICE_CONFIG_VER_OFFSET);
+      (const device_fw_ver_t *)(page_addr + DEVICE_CONFIG_VER_OFFSET);
   if (fw_ver_valid(ver)) {
     memcpy(&s_fw_ver, ver, sizeof(s_fw_ver));
   } else {
-    ver = (const device_fw_ver_t *)(DEVICE_CONFIG_PAGE_ADDR
+    ver = (const device_fw_ver_t *)(page_addr
                                     + DEVICE_CONFIG_VER_OFFSET_LEGACY);
     if (fw_ver_valid(ver)) {
       memcpy(&s_fw_ver, ver, sizeof(s_fw_ver));
     }
+  }
+
+  if (migrated) {
+    /* Перенос всей страницы на новый адрес одной записью — дальше
+     * устройство живёт уже на новой карте памяти. */
+    (void)flash_write_config(&s_config, &s_ext_config, &s_trigger_names);
   }
 }
 

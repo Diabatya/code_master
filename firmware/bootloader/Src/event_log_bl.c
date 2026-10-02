@@ -1,7 +1,7 @@
 /* Минимальная append-only запись в кольцо журнала событий приложения.
  *
  * Пул и формат записи идентичны firmware/application/Src/event_log.c:
- * 4 страницы по 2048 Б с 0x0803B000, записи 16 Б, CRC8 poly 0x07 init 0x00.
+ * 4 страницы по 2048 Б с 0x0803C000, записи 16 Б, CRC8 poly 0x07 init 0x00.
  *
  * Жёсткое правило: бутлоадер НИКОГДА не стирает страницы журнала — если
  * следующий слот не чист, запись просто пропускается. Стиранием кольца
@@ -16,7 +16,7 @@
 #include "stm32f1xx_hal.h"
 #include "event_log_bl.h"
 
-#define EVLOG_POOL_BASE    0x0803B000UL
+#define EVLOG_POOL_BASE    0x0803C000UL
 #define EVLOG_PAGE_SIZE    2048U
 #define EVLOG_PAGES        4U
 #define EVLOG_RECORD_SIZE  16U

@@ -11,8 +11,9 @@ from intelhex import IntelHex
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_START = 0x08008000
-METADATA_ADDR = 0x0803D000
+# Новая карта памяти: страница метаданных лежит НИЖЕ кода приложения.
+APP_START = 0x08009000
+METADATA_ADDR = 0x08008800
 
 
 def test_metadata_script_adds_size_and_crc32(tmp_path: Path) -> None:

@@ -1,6 +1,7 @@
 """Страница «Прошивка» с тремя столбцами: ПО блока, Автомобиль, Конфигурация."""
 
 import contextlib
+import time
 from pathlib import Path
 from typing import Any
 
@@ -81,8 +82,6 @@ class BootloaderWorker(QThread):
 
     def _open_bootloader_port(self) -> Any:
         """Открывает COM-порт напрямую, освобождая его от SerialManager."""
-        import serial as serial_module
-
         self._port_name = self._serial_manager.current_port_name() or self._config.get("port", "")
         self._baudrate = self._config.get("baudrate", 115200)
         if not self._port_name:
@@ -92,15 +91,15 @@ class BootloaderWorker(QThread):
         self._was_open = self._serial_manager.is_open()
         if self._was_open:
             self._serial_manager.close_port()
+            # Даём ОС отдать handle — иначе на Windows сразу после
+            # close_port() CreateFile/SetCommState отвечает
+            # PermissionError(13)/ERROR_GEN_FAILURE (отчёт мастера).
+            time.sleep(0.3)
 
-        return serial_module.Serial(
-            self._port_name,
-            self._baudrate,
-            bytesize=serial_module.EIGHTBITS,
-            parity=serial_module.PARITY_EVEN,
-            stopbits=serial_module.STOPBITS_ONE,
-            timeout=1,
-        )
+        # Открытие через Bootloader.open — тот же путь с повторами,
+        # что у flash_dialog: порт USB CDC ещё недолго «не готов»
+        # после пере-энумерации устройства.
+        return Bootloader.open(self._port_name, self._baudrate, timeout=1.0).port
 
     def _close_and_restore(self) -> None:
         """Закрывает bootloader-порт и восстанавливает SerialManager."""
@@ -169,12 +168,12 @@ class FirmwarePage(QWidget):
         self._title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         self._title.setProperty("title", True)
 
-        self._device_type_label = QLabel(tr("Устройство"))
+        self._device_type_label = QLabel(tr("Тип"))
         self._device_type_label.setFont(font)
 
         self._device_type_combo = QComboBox()
         self._device_type_combo.setFont(font)
-        self._device_type_combo.setMinimumWidth(160)
+        self._device_type_combo.setMinimumWidth(220)
         self._device_type_combo.addItem(tr("2 CAN"), FIRMWARE_DEVICE_TYPE_2_CAN)
         self._device_type_combo.addItem(tr("2 CAN +"), FIRMWARE_DEVICE_TYPE_2_CAN_PLUS)
         self._device_type_combo.addItem(tr("2 CAN FD"), FIRMWARE_DEVICE_TYPE_2_CAN_FD)
@@ -220,7 +219,7 @@ class FirmwarePage(QWidget):
     def retranslate_ui(self) -> None:
         """Обновляет статические строки страницы."""
         self._title.setText(tr("Прошивка STM32"))
-        self._device_type_label.setText(tr("Устройство"))
+        self._device_type_label.setText(tr("Тип"))
         current_type = self._device_type_combo.currentData()
         self._device_type_combo.clear()
         self._device_type_combo.addItem(tr("2 CAN"), FIRMWARE_DEVICE_TYPE_2_CAN)

@@ -20,6 +20,7 @@ from models.version import VERSION, ENGINEERING_BUILD
 from ui.dark_theme import apply_dark_theme, apply_light_theme
 from ui.disclaimer_dialog import DisclaimerDialog
 from ui.main_window import MainWindow
+from ui.memory_indicator import MemoryIndicator
 
 
 def _parse_args() -> argparse.Namespace:
@@ -114,7 +115,12 @@ def main() -> int:
     main_window = MainWindow(serial_manager)
     main_window.show()
 
+    # Онлайн-телеметрия «Загрузка ЦП/ОЗУ» для индикаторов вкладок
+    # (MemoryIndicator делит один фоновый опрос CMD_SYSTEM_INFO).
+    MemoryIndicator.attach_serial_manager(serial_manager)
+
     result = app.exec()
+    MemoryIndicator.shutdown_poller()
     serial_manager.close_port()
     return result
 

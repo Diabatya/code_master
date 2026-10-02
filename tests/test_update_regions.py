@@ -4,6 +4,11 @@
 - validate_write_region() — границы writable-диапазона AN3155;
 - flash_firmware() — инвалидация метаданных до стирания и запись
   метаданных последними («флаг завершённого обновления»).
+
+Новая карта Flash (отчёт мастера): страница идентификации устройства
+(тип/s/n/версия) в начале области application — 0x08008000, метаданные
+APP1 — 0x08008800, код — 0x08009000+, журнал и пак хранилища у конца
+(0x0803C000+).
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from core.stm32_info import (
     APPLICATION_BASE_ADDR,
     DEVICE_CONFIG_PAGE_ADDR,
     DEVICE_CONFIG_PAGE_SIZE,
+    EVENT_LOG_ADDR,
     FLASH_END_ADDR,
     TRIGGER_REGION_ADDR,
     build_app_metadata,
@@ -41,7 +47,7 @@ from core.stm32_info import (
 def test_write_region_rejects_bootloader_addr() -> None:
     ok, reason = validate_write_region(0x08000000, 256)
     assert not ok
-    assert "application" in reason
+    assert "идентификац" in reason
 
 
 def test_write_region_allows_app_start() -> None:
@@ -54,29 +60,30 @@ def test_write_region_allows_config_page() -> None:
     assert ok
 
 
+def test_write_region_allows_meta_page() -> None:
+    ok, _ = validate_write_region(APP_METADATA_PAGE_ADDR, 2048)
+    assert ok
+
+
 def test_write_region_rejects_trigger_region() -> None:
     ok, reason = validate_write_region(TRIGGER_REGION_ADDR, 256)
     assert not ok
-    assert "триггер" in reason
+    assert "хранилищ" in reason or "журнал" in reason
 
 
-def test_write_region_rejects_image_overflowing_into_triggers() -> None:
-    ok, _ = validate_write_region(APPLICATION_BASE_ADDR, TRIGGER_REGION_ADDR - APPLICATION_BASE_ADDR + 1)
+def test_write_region_rejects_event_log_region() -> None:
+    ok, reason = validate_write_region(EVENT_LOG_ADDR, 256)
     assert not ok
 
 
-def test_write_region_rejects_app_image_crossing_config_page() -> None:
-    """Application-образ не должен частично перекрывать config-страницу —
-    иначе прошивка затрёт имя/serial устройства."""
-    size = DEVICE_CONFIG_PAGE_ADDR - APPLICATION_BASE_ADDR + 16
-    ok, reason = validate_write_region(APPLICATION_BASE_ADDR, size)
+def test_write_region_rejects_image_overflowing_into_storage() -> None:
+    ok, _ = validate_write_region(APPLICATION_BASE_ADDR, EVENT_LOG_ADDR - APPLICATION_BASE_ADDR + 1)
     assert not ok
-    assert "config" in reason
 
 
-def test_write_region_allows_full_app_with_metadata() -> None:
-    """Образ code+metadata, заканчивающийся ровно на границе config-страницы."""
-    size = DEVICE_CONFIG_PAGE_ADDR - APPLICATION_BASE_ADDR
+def test_write_region_allows_full_app_to_event_log_boundary() -> None:
+    """Образ кода, заканчивающийся ровно на границе журнала событий."""
+    size = EVENT_LOG_ADDR - APPLICATION_BASE_ADDR
     ok, _ = validate_write_region(APPLICATION_BASE_ADDR, size)
     assert ok
 
@@ -140,7 +147,7 @@ def test_flash_firmware_invalidates_metadata_before_erase() -> None:
     # Первой записью должна быть инвалидация metadata (UPDATE_STARTED).
     assert writes[0] == APP_METADATA_PAGE_ADDR
     # erase_pages вызван после инвалидации — проверяем через порядок моков
-    # косвенно: первый write ещё до любого блока кода (0x08008000).
+    # косвенно: первый write ещё до любого блока кода (0x08009000).
     assert writes[1] == APPLICATION_BASE_ADDR
 
 
@@ -150,7 +157,7 @@ def test_flash_firmware_writes_metadata_last_for_bare_image() -> None:
     writes = _flash_app(image)
 
     assert writes[-1] == APP_METADATA_PAGE_ADDR
-    code_writes = [a for a in writes if APPLICATION_BASE_ADDR <= a < APP_METADATA_PAGE_ADDR]
+    code_writes = [a for a in writes if a >= APPLICATION_BASE_ADDR]
     assert len(code_writes) == 4096 // Bootloader.BLOCK_SIZE
 
 
@@ -158,8 +165,9 @@ def test_flash_firmware_image_metadata_goes_last() -> None:
     """Образ, содержащий страницу метаданных, пишет её в самом конце."""
     code = b"\x11" * 2048
     meta = build_app_metadata(code)
-    image = code + b"\xFF" * (APP_METADATA_PAGE_ADDR - APPLICATION_BASE_ADDR - len(code)) + meta
-    writes = _flash_app(image)
+    meta_full = meta + b"\xFF" * (2048 - len(meta))
+    image = meta_full + b"\xFF" * (APPLICATION_BASE_ADDR - APP_METADATA_PAGE_ADDR - len(meta_full)) + code
+    writes = _flash_app(image, base_address=APP_METADATA_PAGE_ADDR)
 
     assert writes[0] == APP_METADATA_PAGE_ADDR  # invalidate
     assert writes[-1] == APP_METADATA_PAGE_ADDR  # финальная запись metadata
@@ -167,49 +175,48 @@ def test_flash_firmware_image_metadata_goes_last() -> None:
 
 def test_flash_firmware_trims_bootloader_region() -> None:
     """Объединённый образ (full): область bootloader через AN3155 не
-    пишется — запись начинается с 0x08008000."""
-    from core.stm32_info import BOOTLOADER_BASE_ADDR
+    пишется — запись начинается со страницы идентификации 0x08008000."""
+    from core.stm32_info import BOOTLOADER_BASE_ADDR, DEVICE_INFO_PAGE_ADDR
 
     image = b"\xBB" * (APPLICATION_BASE_ADDR - BOOTLOADER_BASE_ADDR + 512)
     writes = _flash_app(image, base_address=BOOTLOADER_BASE_ADDR)
 
     assert writes, "записей нет"
-    assert all(addr >= APPLICATION_BASE_ADDR for addr in writes)
+    assert all(addr >= DEVICE_INFO_PAGE_ADDR for addr in writes)
 
 
-def test_flash_firmware_splits_config_tail() -> None:
-    """Образ app + config-страница: хвост пишется в DEVICE_CONFIG_PAGE_ADDR
-    отдельным регионом (обход запрета пересечения config-страницы)."""
+def test_flash_firmware_writes_info_page_separately() -> None:
+    """Образ info+meta+code (как codemaster_full без bootloader):
+    страница идентификации пишется отдельным регионом в 0x08008000,
+    метаданные — последними."""
+    from core.stm32_info import DEVICE_INFO_PAGE_ADDR
+
+    info_page = build_device_config_page("GATE", "SN1")
     code = b"\x22" * 2048
     meta = build_app_metadata(code)
     image = (
-        code
-        + b"\xFF" * (APP_METADATA_PAGE_ADDR - APPLICATION_BASE_ADDR - len(code))
+        info_page
         + meta
-        + b"\xFF" * (DEVICE_CONFIG_PAGE_ADDR - APP_METADATA_PAGE_ADDR - len(meta))
-        + build_device_config_page("GATE", "SN1")
-        + b"\xFF" * (DEVICE_CONFIG_PAGE_SIZE - 32)
+        + b"\xFF" * (APPLICATION_BASE_ADDR - APP_METADATA_PAGE_ADDR - len(meta))
+        + code
     )
-    writes = _flash_app(image)
+    writes = _flash_app(image, base_address=DEVICE_INFO_PAGE_ADDR)
 
-    assert DEVICE_CONFIG_PAGE_ADDR in writes
+    assert DEVICE_INFO_PAGE_ADDR in writes
     # metadata всё равно последняя (пишется блоками по BLOCK_SIZE)
-    assert APP_METADATA_PAGE_ADDR <= writes[-1] < DEVICE_CONFIG_PAGE_ADDR
+    assert writes[-1] <= APP_METADATA_PAGE_ADDR
+    assert APP_METADATA_PAGE_ADDR in writes
 
 
 def test_flash_firmware_config_only_keeps_metadata() -> None:
-    """Разреженный config-only образ (padding 0xFF + config-страница):
-    метаданные приложения не инвалидируются и не перезаписываются —
-    иначе приложение перестало бы загружаться."""
-    image = (
-        b"\xFF" * (DEVICE_CONFIG_PAGE_ADDR - APPLICATION_BASE_ADDR)
-        + build_device_config_page("GATE", "SN1")
-        + b"\xFF" * (DEVICE_CONFIG_PAGE_SIZE - 32)
-    )
-    writes = _flash_app(image)
+    """Образ одной страницы идентификации: метаданные приложения не
+    инвалидируются и не перезаписываются — иначе приложение перестало
+    бы загружаться."""
+    image = build_device_config_page("GATE", "SN1") + b"\xFF" * (DEVICE_CONFIG_PAGE_SIZE - 32)
+    writes = _flash_app(image, base_address=DEVICE_CONFIG_PAGE_ADDR)
 
-    assert writes, "config-страница должна записываться"
-    assert all(addr >= DEVICE_CONFIG_PAGE_ADDR for addr in writes)
+    assert writes, "страница идентификации должна записываться"
+    assert all(addr == DEVICE_CONFIG_PAGE_ADDR for addr in writes)
 
 
 def test_flash_firmware_rejects_forbidden_region(tmp_path) -> None:
@@ -223,7 +230,7 @@ def test_flash_firmware_rejects_forbidden_region(tmp_path) -> None:
 
     path = tmp_path / "trigger.bin"
     path.write_bytes(b"\xAA" * 256)
-    with pytest.raises(Exception, match="триггер"):
+    with pytest.raises(Exception, match="журнал|хранилищ|Запрещ"):
         bl.flash_firmware(str(path), base_address=TRIGGER_REGION_ADDR)
     bl.write_memory.assert_not_called()
     bl.erase_pages.assert_not_called()

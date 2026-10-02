@@ -25,26 +25,35 @@
 
 #define FLASH_START        0x08000000U
 #define FLASH_END          (FLASH_START + 256U * 1024U)
-#define APP_START          0x08008000U
-#define APP_CODE_END       0x0803D000U
-#define APP_METADATA_ADDR  0x0803D000U
+#define APP_START          0x08009000U
+#define APP_CODE_END       0x0803C000U
+#define APP_METADATA_ADDR  0x08008800U
 #define APP_METADATA_MAGIC 0x41505031U
 #define APP_METADATA_VERSION 1U
-#define APP_PAGES_START    16U
-#define APP_PAGES_TOTAL    112U
 
-/* Memory map (firmware/PROTOCOL.md §2):
- *   0x0803D000-0x0803D7FF  app metadata page (page 122)
- *   0x0803D800-0x0803DFFF  device config page (page 123) — writable via
- *                          AN3155 for config-only updates
+/* Memory map (firmware/PROTOCOL.md §2) — идентификация устройства
+ * перенесена в начало Flash, хранилище упаковано у конца:
+ *   0x08008000-0x080087FF  device info page (page 16) — тип/s/n/версия,
+ *                          writable via AN3155 for config-only updates
+ *   0x08008800-0x08008FFF  app metadata page (page 17)
+ *   0x08009000-0x0803BFFF  application code (pages 18-119)
+ *   0x0803C000-0x0803DFFF  event log (pages 120-123) — owned by the
+ *                          application, not erasable via AN3155
  *   0x0803E000-0x0803FFFF  trigger storage (pages 124-127) — triggers are
  *                          written ONLY through the application protocol
  *                          (CMD_TRIGGER_*), never via raw AN3155 writes.
+ *                          При появлении конфигурации переменных она
+ *                          займёт верхние адреса, а этот пул сместится
+ *                          ниже неё (пак у конца Flash, см. PROTOCOL.md).
  */
-#define DEVICE_CFG_ADDR    0x0803D800U
+#define DEVICE_INFO_ADDR   0x08008000U
+#define DEVICE_CFG_ADDR    DEVICE_INFO_ADDR
+#define EVENT_LOG_ADDR     0x0803C000U
 #define TRIGGER_ADDR       0x0803E000U
-#define ERASABLE_PAGE_END  124U   /* pages 16..123 may be individually erased */
-#define WRITABLE_END       TRIGGER_ADDR
+#define APP_PAGES_START    16U    /* первая стираемая страница = info page */
+#define ERASABLE_PAGE_END  120U   /* pages 16..119: info+metadata+app code */
+#define APP_PAGES_TOTAL    (ERASABLE_PAGE_END - APP_PAGES_START)
+#define WRITABLE_END       EVENT_LOG_ADDR
 
 static const uint8_t ack = ACK_BYTE;
 static const uint8_t nack = NACK_BYTE;
@@ -83,7 +92,9 @@ static bool bl_read_bytes(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
 
 static bool bl_address_in_app(uint32_t address)
 {
-  if (address < APP_START) {
+  /* Читать можно от страницы идентификации (тип/s/n/версия) и до конца
+   * Flash — «read full flash» должен покрывать и хранилище у конца. */
+  if (address < DEVICE_INFO_ADDR) {
     return false;
   }
   if (address >= FLASH_END) {
@@ -105,14 +116,14 @@ static bool bl_address_readable(uint32_t address, uint16_t len)
   return true;
 }
 
-/* Write Memory is restricted to the application code + metadata + device
- * config page (…0x0803DFFF). The trigger region 0x0803E000–0x0803FFFF is
- * never writable through AN3155: triggers are stored only via the
- * application-level CMD_TRIGGER_STAGE/COMMIT commands, so a corrupted or
+/* Write Memory is restricted to the device info page + metadata +
+ * application code (0x08008000–0x0803BFFF). The event log and the
+ * storage pack at the end of Flash are never writable through AN3155:
+ * they are owned by the application protocol (CMD_*), so a corrupted or
  * malicious .hex cannot silently rewrite them. */
 static bool bl_address_writable(uint32_t address, uint16_t len)
 {
-  if (address < APP_START || address >= WRITABLE_END) {
+  if (address < DEVICE_INFO_ADDR || address >= WRITABLE_END) {
     return false;
   }
   if ((uint32_t)len > (WRITABLE_END - address)) {
@@ -156,7 +167,7 @@ static bool bl_metadata_is_valid(void)
 
   uint32_t image_size = *(const uint32_t *)&metadata[8];
   uint32_t expected_crc = *(const uint32_t *)&metadata[12];
-  if (image_size < 8U || image_size > (APP_METADATA_ADDR - APP_START)) {
+  if (image_size < 8U || image_size > (APP_CODE_END - APP_START)) {
     return false;
   }
   return bl_crc32(APP_START, image_size) == expected_crc;
@@ -296,7 +307,10 @@ static bool bl_flash_erase_app(void)
   uint32_t error = 0;
 
   erase.TypeErase = FLASH_TYPEERASE_PAGES;
-  erase.PageAddress = APP_START;
+  /* Массовое стирание покрывает страницу идентификации, метаданные и
+   * код приложения (страницы 16..119) — журнал и хранилище у конца
+   * Flash намеренно не трогаем. */
+  erase.PageAddress = FLASH_START + ((uint32_t)APP_PAGES_START * 2048U);
   erase.NbPages = APP_PAGES_TOTAL;
 
   /* Самая долгая блокирующая операция бутлоадера (~4.5 с на 112
@@ -408,7 +422,7 @@ static void bl_cmd_write_memory(void)
   uint32_t address = ((uint32_t)addr[0] << 24) | ((uint32_t)addr[1] << 16) |
                      ((uint32_t)addr[2] << 8) | (uint32_t)addr[3];
 
-  if (address < APP_START || address >= WRITABLE_END) { bl_send_nack(); return; }
+  if (address < DEVICE_INFO_ADDR || address >= WRITABLE_END) { bl_send_nack(); return; }
 
   bl_send_ack();
 
@@ -467,10 +481,10 @@ static bool bl_flash_erase_pages(const uint16_t *pages, uint16_t count)
 
   HAL_FLASH_Unlock();
   for (uint16_t i = 0U; i < count; i++) {
-    /* Individual page erase: app + metadata + config pages only
-     * (16..123). Trigger pages 124..127 are excluded — trigger storage is
-     * owned by the application's CMD_TRIGGER_* commit path. Mass erase
-     * (0xFFFF) still wipes the whole application region deliberately. */
+    /* Individual page erase: device info + metadata + app code pages
+     * only (16..119). Event log (120..123) and trigger pages 124..127
+     * are excluded — they are owned by the application protocol. Mass
+     * erase (0xFFFF) wipes the same 16..119 range deliberately. */
     if (pages[i] < APP_PAGES_START || pages[i] >= ERASABLE_PAGE_END) {
       HAL_FLASH_Lock();
       return false;

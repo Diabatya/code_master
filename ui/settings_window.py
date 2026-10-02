@@ -351,14 +351,14 @@ class SettingsWindow(QMainWindow):
         layout.setSpacing(8)
 
         font = QFont("Segoe UI", 10)
-        self._device_label = QLabel(tr("Устройство"))
+        self._device_label = QLabel(tr("Тип"))
         self._device_label.setFont(font)
-        # «Устройство» и «Серийный номер» — только отображение: значения
-        # записываются при программировании МК (диалог прошивки) и здесь
-        # не редактируются.
+        # «Тип» и «s/n» — только отображение: значения записываются
+        # при программировании МК (диалог прошивки) и здесь не
+        # редактируются.
         self._device_name_label = QLabel()
         self._device_name_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        self._device_name_label.setMinimumWidth(180)
+        self._device_name_label.setMinimumWidth(220)
 
         # Индикатор связи: зелёное «Подключено» / красное «Не подключено».
         self._conn_status_label = QLabel()
@@ -373,11 +373,11 @@ class SettingsWindow(QMainWindow):
         self._fw_value.setMinimumWidth(60)
         self._fw_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
-        self._serial_label = QLabel(tr("Серийный номер"))
+        self._serial_label = QLabel(tr("s/n"))
         self._serial_label.setFont(font)
         self._serial_value = QLabel()
         self._serial_value.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        self._serial_value.setMinimumWidth(120)
+        self._serial_value.setMinimumWidth(160)
         self._serial_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         device_layout = QHBoxLayout()
@@ -1222,9 +1222,9 @@ class SettingsWindow(QMainWindow):
     def retranslate_ui(self) -> None:
         """Обновляет статические строки окна настроек и всех вкладок."""
         self.setWindowTitle(tr("Настройки — Код Мастер"))
-        self._device_label.setText(tr("Устройство"))
+        self._device_label.setText(tr("Тип"))
         self._fw_label.setText(tr("Версия ПО"))
-        self._serial_label.setText(tr("Серийный номер"))
+        self._serial_label.setText(tr("s/n"))
         self._search_edit.setPlaceholderText(tr("Поиск по разделам..."))
         titles = {
             self._trigger_tab: "⚡ " + tr("Триггеры"),

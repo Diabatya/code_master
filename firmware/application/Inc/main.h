@@ -33,7 +33,7 @@ extern "C" {
  * последнюю страницу Flash: [0..3]=magic "APP1", [4..7]=версия формата,
  * [8..11]=размер образа, [12..15]=CRC32 образа. Используется в
  * CMD_SYSTEM_INFO (protocol.c) и в записи EVLOG_VERSION журнала. */
-#define APP_METADATA_ADDR  0x0803D000U
+#define APP_METADATA_ADDR  0x08008800U
 #define APP_METADATA_MAGIC 0x41505031U
 
 /* ---- Board pinout for the custom CAN1/CAN2 TJA1050 board ----------------- */
@@ -141,6 +141,12 @@ void App_ClearCrashDump(void);
  * Диагностика тесноты RAM (два CAN-кольца съедают ~35 КБ из 64 КБ);
  * отдаётся в CMD_SYSTEM_INFO. */
 uint32_t App_GetStackFreeBytes(void);
+/* Телеметрия нагрузки (CMD_SYSTEM_INFO, протокол 9): темп итераций
+ * главного цикла за последнюю секунду, оценка занятости CPU в % и
+ * пиковая занятость RAM в % (доля 64 КБ вне нетронутой канарейки). */
+uint32_t App_GetLoopRate(void);
+uint8_t App_GetCpuLoadPct(void);
+uint8_t App_GetRamUsedPct(void);
 
 #ifdef __cplusplus
 }

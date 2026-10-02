@@ -152,17 +152,32 @@ def _kod_logo(dark: QColor, orange: QColor, width: int = 100,
     p.restore()
     p.setBrush(dark)
 
-    # Буква Д с внутренним вырезом.
+    # Буква Д — по координатам из ТЗ мастера (turtle-холст 100×110):
+    # верхняя фигурная часть + нижняя перекладина. Масштабируется
+    # в слот 640–980 × 0–420 общего viewBox 1000×420.
+    _D_TOP = (
+        (35, 0), (75, 0), (75, 80), (55, 80), (55, 25), (35, 25),
+        (30, 70), (20, 80), (5, 65), (5, 25), (15, 5),
+    )
+    _D_BOTTOM = ((0, 85), (95, 85), (95, 110), (0, 110))
+    d_sx = (980.0 - 640.0) / 95.0
+    d_sy = 420.0 / 110.0
+
+    def _d_pt(pt: tuple[float, float]) -> tuple[float, float]:
+        return 640.0 + pt[0] * d_sx, pt[1] * d_sy
+
     d_path = QPainterPath()
-    d_path.setFillRule(Qt.FillRule.OddEvenFill)
-    d_path.moveTo(680, 0)
-    for x, y in ((950, 0), (950, 60), (870, 60), (870, 380), (980, 380),
-                 (980, 420), (640, 420), (640, 380), (760, 380),
-                 (760, 60), (680, 60)):
-        d_path.lineTo(x, y)
+    d_path.moveTo(*_d_pt(_D_TOP[0]))
+    for pt in _D_TOP[1:]:
+        d_path.lineTo(*_d_pt(pt))
     d_path.closeSubpath()
-    d_path.addRect(760, 60, 110, 150)
     p.drawPath(d_path)
+    d_base = QPainterPath()
+    d_base.moveTo(*_d_pt(_D_BOTTOM[0]))
+    for pt in _D_BOTTOM[1:]:
+        d_base.lineTo(*_d_pt(pt))
+    d_base.closeSubpath()
+    p.drawPath(d_base)
     p.end()
     return pm.scaled(
         width, height,
@@ -178,12 +193,13 @@ class _MatrixBackground(QWidget):
     события мыши (аналог pointer-events: none)."""
 
     # (длительность с, задержка с, прозрачность, размер шрифта px)
+    # Скорость падения снижена в 10 раз (отчёт мастера).
     _COL_STYLE = (
-        (3.0, 0.0, 0.60, 34),   # передний план
-        (5.5, 0.7, 0.25, 20),   # дальний план
-        (4.2, 1.4, 0.45, 28),   # средний план
-        (6.0, 0.3, 0.35, 24),   # средне-дальний
-        (3.8, 2.1, 0.55, 32),   # передний план
+        (30.0, 0.0, 0.60, 34),   # передний план
+        (55.0, 7.0, 0.25, 20),   # дальний план
+        (42.0, 14.0, 0.45, 28),  # средний план
+        (60.0, 3.0, 0.35, 24),   # средне-дальний
+        (38.0, 21.0, 0.55, 32),  # передний план
     )
     _COLS = 8
     _ROWS = 16
@@ -223,6 +239,10 @@ class _MatrixBackground(QWidget):
         color = QColor("#8A8A8A")
         font = QFont("Courier New")
         font.setStyleHint(QFont.StyleHint.TypeWriter)
+        # Полоса колонок центрируется на экране — по краям символов
+        # быть не должно, дождь идёт в середине (отчёт мастера).
+        col_step = 135 * sx
+        x0 = (w - col_step * (self._COLS - 1)) / 2
         for c in range(self._COLS):
             duration, delay, opacity, fsize = self._COL_STYLE[c % len(self._COL_STYLE)]
             t = now - delay
@@ -235,7 +255,7 @@ class _MatrixBackground(QWidget):
             p.setPen(color)
             font.setPixelSize(max(10, int(fsize * sy)))
             p.setFont(font)
-            x = 20 * sx + 135 * sx * c
+            x = x0 + col_step * c
             for r, text in enumerate(self._columns[c]):
                 p.drawText(int(x), int((60 + 45 * r) * sy + y_off), text)
         p.end()
@@ -451,7 +471,10 @@ class _DeviceCard(QWidget):
         font = QFont("Segoe UI", 10)
 
         # Общая голубая рамка с закруглением вокруг информации
-        # и кнопок (отчёт мастера).
+        # и кнопок (отчёт мастера). Без WA_StyledBackground обычный
+        # QWidget не рисует border/background из стиля — рамка
+        # пропадала.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(
             "_DeviceCard { border: 2px solid #3A7BD5; border-radius: 12px;"
             " background: rgba(255,255,255,0.03); }"

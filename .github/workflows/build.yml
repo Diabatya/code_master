@@ -121,10 +121,13 @@ jobs:
             /tmp/codemaster_app_checked.hex
       - name: Collect firmware artifacts
         run: |
-          # В релиз идёт единый объединённый образ (bootloader + app +
-          # метаданные + версионная запись): оператор работает всегда
-          # с одним файлом. --version проставляет номер релиза в поле
-          # «Версия ПО» конфиг-страницы (отчёт мастера).
+          # Два образа по отчёту мастера:
+          #  «2 CAN DFU» — полный образ (bootloader + данные устройства +
+          #    метаданные + application) для первичной прошивки через DFU;
+          #  «2 CAN CDC» — только application + данные устройства/метаданные
+          #    для кнопки «Обновить» на устройствах с загрузчиком.
+          # --version проставляет номер релиза в версионную запись VER1
+          # страницы данных устройства (0x08008000).
           mkdir firmware-artifacts
           FW_VERSION=$(python3 -c "import re; print(re.search(r'VERSION = \"([^\"]+)\"', open('models/version.py').read()).group(1))")
           python3 firmware/tools/make_full_image.py \
@@ -132,6 +135,8 @@ jobs:
             firmware/application/build/codemaster_app.hex \
             firmware-artifacts/codemaster_full.hex \
             firmware-artifacts/codemaster_full.bin \
+            --cdc-hex firmware-artifacts/codemaster_app_cdc.hex \
+            --cdc-bin firmware-artifacts/codemaster_app_cdc.bin \
             --version "$FW_VERSION"
           (cd firmware-artifacts && sha256sum * > SHA256SUMS.txt)
       - name: Upload firmware artifacts
@@ -180,8 +185,13 @@ jobs:
           mv artifacts/CodeMaster-windows/CodeMaster.exe "dist/CODMaster ($VER).exe"
           mv artifacts/CodeMaster-macos/CodeMaster.dmg "dist/CODMaster ($VER).dmg"
           mv artifacts/CodeMaster-linux/CodeMaster "dist/CODMaster ($VER)"
-          mv artifacts/CodeMaster-firmware/codemaster_full.hex "dist/CAN 2 ($VER).hex"
-          mv artifacts/CodeMaster-firmware/codemaster_full.bin "dist/CAN 2 ($VER).bin"
+          # Две прошивки по отчёту мастера: «2 CAN DFU» — полный образ
+          # для первичной прошивки, «2 CAN CDC» — application для
+          # обновления кнопкой «Обновить» (загрузчик уже на плате).
+          mv artifacts/CodeMaster-firmware/codemaster_full.hex "dist/2 CAN DFU ($VER).hex"
+          mv artifacts/CodeMaster-firmware/codemaster_full.bin "dist/2 CAN DFU ($VER).bin"
+          mv artifacts/CodeMaster-firmware/codemaster_app_cdc.hex "dist/2 CAN CDC ($VER).hex"
+          mv artifacts/CodeMaster-firmware/codemaster_app_cdc.bin "dist/2 CAN CDC ($VER).bin"
           chmod +x "dist/CODMaster ($VER)"
           # Контрольные суммы — уже под финальными именами файлов.
           (cd dist && sha256sum * > SHA256SUMS.txt)
