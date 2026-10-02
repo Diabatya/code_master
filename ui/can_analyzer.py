@@ -205,9 +205,7 @@ class CanAnalyzer(QWidget):
             )
         self._title.setText(tr("Трэйс CAN-шины"))
         for table in (self._table1, self._table2):
-            table.setHorizontalHeaderLabels(
-                [tr("Время"), tr("ID"), tr("DLC"), tr("DATA"), tr("Период"), tr("ASCII"), tr("Пояснение")]
-            )
+            table.setHorizontalHeaderLabels(self._column_titles())
 
     def set_dbc(self, dbc_manager) -> None:
         self._dbc_manager = dbc_manager
@@ -263,13 +261,19 @@ class CanAnalyzer(QWidget):
         self._panel1 = self._build_table_panel(self._table1)
         self._panel2 = self._build_table_panel(self._table2)
 
+    @staticmethod
+    def _column_titles() -> list[str]:
+        """Заголовки колонок трейса. Последняя колонка — «Пояснение»
+        (отчёт мастера: у неё не было имени)."""
+        return [
+            tr("Время"), tr("ID"), tr("DLC"), tr("DATA"), tr("Период"),
+            tr("ASCII"), tr("Направление"), tr("Пояснение"),
+        ]
+
     def _build_table(self, font: QFont) -> QTableWidget:
         table = QTableWidget()
         table.setColumnCount(8)
-        table.setHorizontalHeaderLabels([
-            tr("Время"), tr("ID"), tr("DLC"), tr("DATA"), tr("Период"),
-            tr("ASCII"), tr("Пояснение"), tr("Направление"),
-        ])
+        table.setHorizontalHeaderLabels(self._column_titles())
         table.setFont(font)
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -285,8 +289,8 @@ class CanAnalyzer(QWidget):
         table.setColumnWidth(3, 220)
         table.setColumnWidth(4, 90)
         table.setColumnWidth(5, 90)
-        table.setColumnWidth(6, 260)
-        table.setColumnWidth(7, 80)
+        table.setColumnWidth(6, 80)
+        table.setColumnWidth(7, 260)
         return table
 
     def _build_table_panel(self, table: QTableWidget) -> QWidget:
@@ -477,7 +481,7 @@ class CanAnalyzer(QWidget):
         dir_text = "TX" if is_tx else "RX"
         self._pending_rows.setdefault(table, []).append(
             [elapsed_text, id_text, str(len(data)), data_text,
-             period_text, ascii_text, explanation, dir_text]
+             period_text, ascii_text, dir_text, explanation]
         )
         self._pending_dirs.setdefault(table, []).append(is_tx)
         if not self._trace_timer.isActive():
@@ -548,7 +552,7 @@ class CanAnalyzer(QWidget):
         is_tx = bool(frame.get("tx_echo", False))
         dir_text = "TX" if is_tx else "RX"
         bg, fg = _tx_echo_colors()
-        values = [elapsed_text, id_text, dlc_text, data_text, period_text, ascii_text, explanation, dir_text]
+        values = [elapsed_text, id_text, dlc_text, data_text, period_text, ascii_text, dir_text, explanation]
         for col, text in enumerate(values):
             item = QTableWidgetItem(text)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -761,7 +765,7 @@ class CanAnalyzer(QWidget):
         try:
             with open(path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["channel", "time", "id", "dlc", "data", "period", "ascii", "explanation", "dir"])
+                writer.writerow(["channel", "time", "id", "dlc", "data", "period", "ascii", "dir", "explanation"])
                 for table, channel in ((self._table1, 1), (self._table2, 2)):
                     for row in range(table.rowCount()):
                         writer.writerow(
@@ -783,7 +787,7 @@ class CanAnalyzer(QWidget):
                         values = [table.item(row, col).text() if table.item(row, col) else "" for col in range(8)]
                         f.write(
                             f"{values[0]} ID={values[1]} DLC={values[2]} DATA={values[3]} "
-                            f"PERIOD={values[4]} ASCII={values[5]} EXPL={values[6]} DIR={values[7]}\n"
+                            f"PERIOD={values[4]} ASCII={values[5]} DIR={values[6]} EXPL={values[7]}\n"
                         )
         except Exception as exc:  # noqa: BLE001
             logger.error("Ошибка экспорта .trace: %s", exc)
@@ -806,14 +810,21 @@ class CanAnalyzer(QWidget):
         logger.info("Загружено %d кадров из %s", loaded, path)
 
     def _append_loaded_row(self, table: QTableWidget, values: list[str]) -> None:
-        # 8-я колонка «Направление» появилась позже: старые файлы без неё
-        # считаются приёмом с шины (RX).
-        values = list(values[:8]) + ["RX"] * max(0, 8 - len(values))
+        # Колонка «Направление» (RX/TX) появилась позже: старые файлы
+        # без неё считаются приёмом с шины (RX). Старые файлы держали
+        # порядок «… EXPL DIR» — новый: «… DIR EXPL» (Пояснение —
+        # последняя колонка по отчёту мастера); распознаём оба.
+        values = list(values[:8]) + [""] * max(0, 8 - len(values))
+        if values[7].strip().upper() in ("RX", "TX"):
+            # Старый порядок: пояснение@6, направление@7.
+            values[6], values[7] = values[7], values[6]
+        if not values[6].strip():
+            values[6] = "RX"
         if table.rowCount() >= MAX_TABLE_ROWS:
             table.removeRow(0)
         row = table.rowCount()
         table.insertRow(row)
-        is_tx = values[7].strip().upper() == "TX"
+        is_tx = values[6].strip().upper() == "TX"
         for col, text in enumerate(values[:8]):
             item = QTableWidgetItem(text)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -838,9 +849,9 @@ class CanAnalyzer(QWidget):
                     except ValueError:
                         continue
                     table = self._table1 if channel == 1 else self._table2
-                    # time,id,dlc,data,period,ascii,expl,dir — period/ascii/expl пустые
+                    # time,id,dlc,data,period,ascii,dir,expl — period/ascii/expl пустые
                     self._append_loaded_row(
-                        table, [values[0], values[3], values[4], values[5], "", "", "", values[2]]
+                        table, [values[0], values[3], values[4], values[5], "", "", values[2], ""]
                     )
                     loaded += 1
                     continue
@@ -854,12 +865,16 @@ class CanAnalyzer(QWidget):
         return loaded
 
     _TRACE_LINE_RE = re.compile(
+        r"^(\S+)\s+ID=(\S+)\s+DLC=(\S+)\s+DATA=(.*?)\s+PERIOD=(.*?)\s+ASCII=(.*?)\s+DIR=(\S+)\s+EXPL=(.*)$"
+    )
+    _TRACE_LINE_RE_LEGACY = re.compile(
         r"^(\S+)\s+ID=(\S+)\s+DLC=(\S+)\s+DATA=(.*?)\s+PERIOD=(.*?)\s+ASCII=(.*?)\s+EXPL=(.*?)(?:\s+DIR=(\S+))?$"
     )
 
     def _load_trace(self, path: str) -> int:
-        """Формат .trace: секции [CAN1]/[CAN2], строки «time ID=.. DLC=.. DATA=.. .. DIR=RX|TX».
-        Старые строки без DIR= трактуются как приём с шины (RX)."""
+        """Формат .trace: секции [CAN1]/[CAN2], строки «time ID=.. DLC=.. DATA=.. .. DIR=.. EXPL=..».
+        Старые строки без DIR= или в порядке «EXPL .. DIR» тоже
+        принимаются (приём с шины — RX по умолчанию)."""
         loaded = 0
         table = self._table1
         with open(path, encoding="utf-8") as f:
@@ -871,6 +886,15 @@ class CanAnalyzer(QWidget):
                 match = self._TRACE_LINE_RE.match(line)
                 if match:
                     groups = list(match.groups())
+                    # Новый порядок: [t,id,dlc,data,period,ascii,dir,expl].
+                    self._append_loaded_row(table, groups)
+                    loaded += 1
+                    continue
+                match = self._TRACE_LINE_RE_LEGACY.match(line)
+                if match:
+                    groups = list(match.groups())
+                    # Старый порядок: [t,id,dlc,data,period,ascii,expl,dir?] —
+                    # _append_loaded_row сам развернёт колонки.
                     if groups[7] is None:
                         groups[7] = "RX"
                     self._append_loaded_row(table, groups)

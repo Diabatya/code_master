@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
-    QFrame,
     QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
@@ -40,7 +39,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
-    QScrollArea,
     QSizePolicy,
     QSlider,
     QSpinBox,
@@ -156,10 +154,11 @@ def _id_row_color(frame_id: int) -> QColor:
 
 def _id_page_color(frame_id: int, row: int, page_rows: int = _ID_PAGE_ROWS) -> QColor:
     """«Страничная» тонировка колонки ID блоками по `page_rows` строк:
-    чётная группа — базовый цвет ID, нечётная — светлее. Размер группы
-    задаёт оператор спином «Кол-во строк» (отчёт мастера)."""
+    чётная группа — базовый цвет ID, нечётная — заметно светлее
+    (140%, иначе на тёмной теме чередование не читалось — отчёт
+    мастера). Размер группы задаёт оператор спином «Кол-во строк»."""
     color = _id_row_color(frame_id)
-    return color.lighter(135) if (row // max(1, page_rows)) % 2 else color
+    return color.lighter(140) if (row // max(1, page_rows)) % 2 else color
 
 
 def _is_dark_theme() -> bool:
@@ -190,9 +189,10 @@ def _row_base_bg() -> QColor:
 def _row_alt_bg() -> QColor:
     """Фон нечётной группы строк: при настроенном «Кол-во строк» = N
     первые N строк идут базовым фоном, следующие N — этим оттенком,
-    потом снова базовый (группировка по позиции — отчёт мастера)."""
+    потом снова базовый (группировка по позиции — отчёт мастера).
+    Контраст поднят: lighter(125)/darker(106) глаз не различал."""
     base = _row_base_bg()
-    return base.lighter(125) if _is_dark_theme() else base.darker(106)
+    return base.lighter(145) if _is_dark_theme() else base.darker(112)
 
 
 def _row_base_fg() -> QColor:
@@ -714,16 +714,24 @@ class _PercentGraph(QWidget):
         painter.end()
 
 
+# Роль item-данных в таблице истории ID: байт изменился в последнем
+# кадре — рисуется жёлтым шрифтом 500 мс (как подсветка в мониторе).
+_HIST_HL_ROLE = Qt.ItemDataRole.UserRole + 77
+
+
 class _HistoryByteDelegate(QStyledItemDelegate):
     """Рисует ячейки байтовых колонок истории ID.
 
     Включённый в анализ байт — белый шрифт; выключенный — тёмно-жёлтый;
+    изменившийся байт — ярко-жёлтый (подсветка «смена DATA» по правилу
+    «Интервал подсветки», длительность 500 мс — как в мониторе);
     при наведении курсора на галочку «N-байт» вся колонка подсвечивается
     голубым фоном (без изменения item'ов — только при отрисовке)."""
 
     HOVER_BG = QColor("#3F6FA0")
     DISABLED_FG = QColor("#9A7B00")
     ENABLED_FG = QColor("#FFFFFF")
+    CHANGED_FG = QColor("#F2C94C")
 
     def __init__(self, dialog: "IdHistoryDialog") -> None:
         super().__init__(dialog)
@@ -745,16 +753,19 @@ class _HistoryByteDelegate(QStyledItemDelegate):
         text = index.data(Qt.ItemDataRole.DisplayRole) or ""
         if not text:
             return
-        checked = (
-            0 <= byte_idx < len(self._dialog._byte_checks)
-            and self._dialog._byte_checks[byte_idx].isChecked()
-        )
-        # Белый — только на тёмной теме; на светлой байты были
-        # невидимы (белый по белому).
-        enabled_fg = (
-            self.ENABLED_FG if _is_dark_theme() else QColor("#202020")
-        )
-        fg = enabled_fg if checked else self.DISABLED_FG
+        if index.data(_HIST_HL_ROLE):
+            fg = self.CHANGED_FG
+        else:
+            checked = (
+                0 <= byte_idx < len(self._dialog._byte_checks)
+                and self._dialog._byte_checks[byte_idx].isChecked()
+            )
+            # Белый — только на тёмной теме; на светлой байты были
+            # невидимы (белый по белому).
+            enabled_fg = (
+                self.ENABLED_FG if _is_dark_theme() else QColor("#202020")
+            )
+            fg = enabled_fg if checked else self.DISABLED_FG
         painter.save()
         painter.setFont(opt.font)
         painter.setPen(fg)
@@ -776,6 +787,10 @@ class IdHistoryDialog(QDialog):
     FIRST_BYTE_COL = 2  # колонки 2.. — байты DATA 0..N-1
     BYTE_COUNT = 8
 
+    # Ширина байтовой колонки — компактная, рассчитана так, чтобы
+    # позже влезло 64 байта CAN FD (отчёт мастера).
+    BYTE_COL_WIDTH = 30
+
     def __init__(
         self,
         can_id: int,
@@ -783,6 +798,7 @@ class IdHistoryDialog(QDialog):
         samples: list[tuple[float, bytes, bool, int]],
         parent: QWidget | None = None,
         send_callback: Any | None = None,
+        highlight_ms_getter: Any | None = None,
     ) -> None:
         super().__init__(parent)
         self.can_id = can_id
@@ -790,10 +806,21 @@ class IdHistoryDialog(QDialog):
         # Разовая отправка строки на шину для тестирования — колбэк
         # монитора (can_id, data, dlc, rtr). None — без устройства.
         self._send_callback = send_callback
+        # «Интервал подсветки» из монитора — то же правило фильтрации
+        # подсветки изменившихся байтов в истории (отчёт мастера).
+        self._highlight_ms_getter = highlight_ms_getter
+        self._hl_items: list[QTableWidgetItem] = []
+        self._hl_timer = QTimer(self)
+        self._hl_timer.setSingleShot(True)
+        self._hl_timer.timeout.connect(self._clear_highlight)
         self._send_dialog: SendPacketsDialog | None = None
         self._notes = IdNotes()
         self._hover_byte = -1
         self.setWindowTitle(tr("История ID 0x{0:X} — CAN{1}").format(can_id, channel))
+        # Нижний предел размера — после свёртки/развёртки окно не
+        # должно оставаться «маленьким» (отчёт мастера); развёрнутое
+        # состояние восстанавливается в changeEvent.
+        self.setMinimumSize(760, 460)
         # Окно анализа — сразу на весь доступный экран: таблица и
         # график читаются без прокрутки, кнопки остаются видимыми.
         self.setWindowState(Qt.WindowState.WindowMaximized)
@@ -806,55 +833,36 @@ class IdHistoryDialog(QDialog):
         layout.setSpacing(6)
 
         self._table = QTableWidget()
-        # Время + DLC + BYTE_COUNT колонок по байту. Галочки «N-байт»
-        # живут в левой панели сеткой — количество колонок не привязано
-        # к ширине окна и масштабируется до 64 байт (CAN FD).
+        # Время + DLC + BYTE_COUNT колонок по байту. Колонки компактные
+        # фиксированной ширины и прижаты влево — место справа резервируется
+        # под 64 байта CAN FD (отчёт мастера). Галочки «N-байт» сидят
+        # снизу под каждой колонкой байта (_ByteCheckStrip).
         self._table.setColumnCount(2 + self.BYTE_COUNT)
         self._table.setHorizontalHeaderLabels(
             [tr("Время"), tr("DLC")] + [str(i) for i in range(self.BYTE_COUNT)]
         )
         self._table.setFont(font)
         self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setMinimumSectionSize(6)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Interactive
-        )
-        self._table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Interactive
-        )
-        self._table.setColumnWidth(0, 110)
-        self._table.setColumnWidth(1, 46)
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self._table.setColumnWidth(0, 96)
+        self._table.setColumnWidth(1, 34)
         for col in range(2, 2 + self.BYTE_COUNT):
-            self._table.horizontalHeader().setSectionResizeMode(
-                col, QHeaderView.ResizeMode.Stretch
-            )
+            self._table.setColumnWidth(col, self.BYTE_COL_WIDTH)
+        header.setStretchLastSection(False)
         # Мультивыбор строк — «Отправить …» шлёт все выделенные пакеты.
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_table_menu)
-        # Цвет байта (белый=в анализе, тёмно-жёлтый=выключен) и голубая
-        # подсветка колонки при наведении на её галочку — в делегате.
+        # Цвет байта (белый=в анализе, тёмно-жёлтый=выключен,
+        # жёлтый=изменился), голубая подсветка колонки при наведении на
+        # её галочку — в делегате.
         self._byte_delegate = _HistoryByteDelegate(self)
         for col in range(self.FIRST_BYTE_COL, self.FIRST_BYTE_COL + self.BYTE_COUNT):
             self._table.setItemDelegateForColumn(col, self._byte_delegate)
-
-        # Галочки «N-байт» — сеткой в левой панели (4 в ряд: при 64
-        # байтах они не уползают за ширину окна). По умолчанию все
-        # включены.
-        self._byte_checks: list[QCheckBox] = []
-        byte_grid = QGridLayout()
-        byte_grid.setSpacing(2)
-        byte_grid.setContentsMargins(0, 0, 0, 0)
-        for i in range(self.BYTE_COUNT):
-            cb = QCheckBox(tr("{0}-байт").format(i))
-            cb.setFont(QFont("Segoe UI", 8))
-            cb.setChecked(True)
-            cb.setToolTip(tr("Байт {0} в анализе, сумме и на графике").format(i))
-            cb.installEventFilter(self)
-            cb.toggled.connect(lambda _c, _i=i: self._on_bytes_changed())
-            byte_grid.addWidget(cb, i // 4, i % 4)
-            self._byte_checks.append(cb)
 
         self._percent_label = QLabel("0%")
         self._percent_label.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
@@ -870,6 +878,7 @@ class IdHistoryDialog(QDialog):
         self._zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self._zoom_slider.setRange(5, 300)
         self._zoom_slider.setValue(30)
+        self._zoom_slider.setFixedWidth(120)
         self._zoom_label = QLabel(tr("Развёртка: 30 с"))
         self._zoom_label.setFont(font)
         self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
@@ -912,56 +921,76 @@ class IdHistoryDialog(QDialog):
         self._calc_button.setToolTip(tr("BIN/DEC/HEX/CHAR — ввод в любое поле пересчитывает остальные"))
         self._calc_button.clicked.connect(lambda: CalculatorDialog(self).exec())
 
-        # Левая панель: сводка и контролы (просьба мастера — информация
-        # слева). Таблица и график справа занимают всю остальную ширину.
-        left_panel = QWidget()
-        left_panel.setFixedWidth(190)
-        left_col = QVBoxLayout(left_panel)
-        left_col.setSpacing(6)
-        left_col.setContentsMargins(0, 0, 8, 0)
-        pct_row = QHBoxLayout()
-        pct_row.setContentsMargins(0, 0, 0, 0)
-        pct_row.addWidget(self._percent_label)
-        pct_row.addWidget(QLabel("="))
-        pct_row.addWidget(self._value_label)
-        pct_row.addStretch()
-        left_col.addLayout(pct_row)
-        left_col.addWidget(self._zoom_label)
-        left_col.addWidget(self._zoom_slider)
-        bytes_label = QLabel(tr("Байты в анализе:"))
-        bytes_label.setFont(font)
-        left_col.addWidget(bytes_label)
-        byte_holder = QWidget()
-        byte_holder.setLayout(byte_grid)
-        byte_scroll = QScrollArea()
-        byte_scroll.setWidgetResizable(True)
-        byte_scroll.setWidget(byte_holder)
-        byte_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        byte_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        # «Строк» — сколько строк истории умещается в видимой высоте:
+        # плотность (высота строки, затем шрифт) — как «Кол-во строк»
+        # в мониторе (отчёт мастера).
+        self._rows_label = QLabel(tr("Строк"))
+        self._rows_label.setFont(font)
+        self._rows_spin = QSpinBox()
+        self._rows_spin.setFont(font)
+        self._rows_spin.setRange(5, 500)
+        self._rows_spin.setValue(30)
+        self._rows_spin.setFixedWidth(64)
+        self._rows_spin.setToolTip(
+            tr("Сколько строк должно умещаться в видимую высоту таблицы")
         )
-        byte_scroll.setMinimumHeight(56)
-        byte_scroll.setMaximumHeight(200)
-        left_col.addWidget(byte_scroll)
-        left_col.addWidget(self._note_button)
-        left_col.addWidget(self._invert_button)
-        left_col.addWidget(self._calc_button)
-        left_col.addWidget(self._copy_row_button)
-        left_col.addWidget(self._send_row_button)
-        left_col.addWidget(self._export_button)
-        left_col.addStretch()
+        self._rows_spin.valueChanged.connect(self._apply_row_density)
 
-        right_col = QVBoxLayout()
-        right_col.setSpacing(6)
-        right_col.setContentsMargins(0, 0, 0, 0)
-        right_col.addWidget(self._table, 1)
-        right_col.addWidget(self._graph)
+        # Верхняя панель: все кнопки горизонтально одна за другой,
+        # развёртка по времени и процентовка — тут же (отчёт мастера).
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(6)
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.addWidget(self._calc_button)
+        toolbar.addWidget(self._invert_button)
+        toolbar.addWidget(self._note_button)
+        toolbar.addWidget(self._copy_row_button)
+        toolbar.addWidget(self._send_row_button)
+        toolbar.addWidget(self._export_button)
+        toolbar.addSpacing(8)
+        toolbar.addWidget(self._zoom_label)
+        toolbar.addWidget(self._zoom_slider)
+        toolbar.addSpacing(8)
+        toolbar.addWidget(self._percent_label)
+        toolbar.addWidget(QLabel("="))
+        toolbar.addWidget(self._value_label)
+        toolbar.addStretch()
+        toolbar.addWidget(self._rows_label)
+        toolbar.addWidget(self._rows_spin)
+        layout.addLayout(toolbar)
 
-        body = QHBoxLayout()
-        body.setSpacing(8)
-        body.addWidget(left_panel)
-        body.addLayout(right_col, 1)
-        layout.addLayout(body, 1)
+        layout.addWidget(self._table, 1)
+
+        # Галочки «N-байт» — снизу под каждой колонкой байта (отчёт
+        # мастера). Полоса-виджет повторяет геометрию колонок заголовка:
+        # синхронизация — по сигналам header и скролла.
+        self._byte_strip = QWidget(self)
+        self._byte_strip.setFixedHeight(22)
+        self._byte_checks: list[QCheckBox] = []
+        self._byte_boxes: list[QWidget] = []
+        for i in range(self.BYTE_COUNT):
+            cb = QCheckBox()
+            cb.setChecked(True)
+            cb.setToolTip(tr("Байт {0} в анализе, сумме и на графике").format(i))
+            cb.installEventFilter(self)
+            cb.toggled.connect(lambda _c, _i=i: self._on_bytes_changed())
+            box = QWidget(self._byte_strip)
+            box_layout = QHBoxLayout(box)
+            box_layout.setContentsMargins(0, 0, 0, 0)
+            box_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            box_layout.addWidget(cb)
+            self._byte_checks.append(cb)
+            self._byte_boxes.append(box)
+        layout.addWidget(self._byte_strip)
+        header.sectionResized.connect(lambda *_a: self._sync_byte_checks())
+        header.sectionMoved.connect(lambda *_a: self._sync_byte_checks())
+        header.geometriesChanged.connect(self._sync_byte_checks)
+        self._table.horizontalScrollBar().valueChanged.connect(
+            lambda *_a: self._sync_byte_checks()
+        )
+        QTimer.singleShot(0, self._sync_byte_checks)
+
+        layout.addWidget(self._graph)
 
         for sample in samples:
             self._append_row(*sample, repaint=False)
@@ -1001,13 +1030,117 @@ class IdHistoryDialog(QDialog):
             self._table.viewport().update()
         return False
 
+    def _sync_byte_checks(self) -> None:
+        """Галочки «N-байт» выравниваются под колонками байтов таблицы
+        (отчёт мастера: галочки снизу под каждым столбцом)."""
+        header = self._table.horizontalHeader()
+        for i, box in enumerate(self._byte_boxes):
+            col = self.FIRST_BYTE_COL + i
+            x = header.sectionViewportPosition(col)
+            w = header.sectionSize(col)
+            box.setGeometry(x, 0, w, self._byte_strip.height())
+            box.setVisible(x + w > 0)
+
+    def _apply_row_density(self, *_args) -> None:
+        """«Строк» — целевое число видимых строк истории: ужимаем
+        высоту строки, а вслед за ней и шрифт — как «Кол-во строк»
+        в мониторе (отчёт мастера)."""
+        if not hasattr(self, "_base_row_height"):
+            self._base_row_height = 22
+            self._base_font_pt = self._table.font().pointSize() or 9
+        avail = self._table.viewport().height()
+        if avail <= 0:
+            return
+        row_h = avail // max(1, self._rows_spin.value())
+        row_h = max(6, min(self._base_row_height, row_h))
+        if row_h != self._table.verticalHeader().defaultSectionSize():
+            self._table.verticalHeader().setDefaultSectionSize(row_h)
+        if row_h < self._base_row_height:
+            pt = max(5, int(self._base_font_pt * row_h / self._base_row_height))
+        else:
+            pt = self._base_font_pt
+        if pt != self._table.font().pointSize():
+            font = QFont(self._table.font())
+            font.setPointSize(pt)
+            self._table.setFont(font)
+            self._table.horizontalHeader().setFont(font)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._apply_row_density()
+        self._sync_byte_checks()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        """После свёртки/развёртки приложения диалог оставался
+        «маленьким» (Qt снимает maximized у дочернего окна) —
+        возвращаем на весь экран при восстановлении из свёртки
+        (отчёт мастера). Ручное «восстановить вниз» не трогаем:
+        перехватываем только выход из minimized."""
+        if (
+            event.type() == QEvent.Type.WindowStateChange
+            and event.oldState() & Qt.WindowState.WindowMinimized
+            and not self.windowState() & Qt.WindowState.WindowMaximized
+        ):
+            QTimer.singleShot(0, self.showMaximized)
+        super().changeEvent(event)
+
+    def _clear_highlight(self) -> None:
+        """Сброс жёлтой подсветки изменившихся байтов (фикс. 500 мс —
+        как в мониторе)."""
+        for item in self._hl_items:
+            try:
+                if isValid(item):
+                    item.setData(_HIST_HL_ROLE, None)
+            except RuntimeError:
+                pass
+        self._hl_items = []
+
+    def _highlight_changed(
+        self, t: float, data: bytes, dlc: int, row: int
+    ) -> None:
+        """Жёлтый шрифт байтов, сменившихся относительно прошлого кадра
+        этого ID — по правилу «Интервал подсветки» монитора: 0 — все
+        изменения; N — только если прошлый кадр был больше N мс назад
+        (отчёт мастера: подсветка подчиняется одному правилу)."""
+        if len(self._samples_raw) < 2:
+            return
+        prev_t, prev_data, prev_rtr, _pdlc = self._samples_raw[-2]
+        if prev_rtr:
+            return
+        interval = (
+            self._highlight_ms_getter()
+            if callable(self._highlight_ms_getter)
+            else 0
+        )
+        gap_ms = (t - prev_t) * 1000.0
+        if interval and gap_ms <= interval:
+            return
+        changed = {
+            i
+            for i in range(max(len(prev_data), len(data)))
+            if (prev_data[i] if i < len(prev_data) else None)
+            != (data[i] if i < len(data) else None)
+        }
+        if not changed:
+            return
+        # Прошлая вспышка сбрасывается сразу — иначе новый кадр во
+        # время подсветки зажигал байты навсегда.
+        self._hl_timer.stop()
+        self._clear_highlight()
+        for i in changed:
+            item = self._table.item(row, self.FIRST_BYTE_COL + i)
+            if item is not None:
+                item.setData(_HIST_HL_ROLE, True)
+                self._hl_items.append(item)
+        self._hl_timer.start(500)
+
     def _selected_bytes(self) -> list[int] | None:
         """Индексы отмеченных байт DATA; все/ни одного — None (=весь)."""
         sel = [
             i for i, cb in enumerate(self._byte_checks)
             if isValid(cb) and cb.isChecked()
         ]
-        return sel if 0 < len(sel) < 8 else None
+        return sel if 0 < len(sel) < self.BYTE_COUNT else None
 
     def _current_pct(self, data: bytes, rtr: bool, dlc: int) -> float:
         return _data_percent(data, dlc, self._selected_bytes()) if not rtr else 0.0
@@ -1041,6 +1174,10 @@ class IdHistoryDialog(QDialog):
         self._samples_raw.append((t, bytes(data), rtr, dlc))
         if len(self._samples_raw) > self.MAX_ROWS:
             del self._samples_raw[: len(self._samples_raw) - self.MAX_ROWS]
+        # Подсветка сменившихся байтов жёлтым — по «Интервалу
+        # подсветки» монитора (отчёт мастера).
+        if not rtr:
+            self._highlight_changed(t, data, dlc, row)
         pct = self._current_pct(data, rtr, dlc)
         self._graph.add_sample(t, pct)
         if repaint:
@@ -2563,7 +2700,16 @@ class CanChannelMonitor(QWidget):
             return
         samples = list(self._id_history.get(can_id, ()))
         send_cb = self._send_frame_once if self._serial_manager.is_open() else None
-        dialog = IdHistoryDialog(can_id, self._channel, samples, self, send_callback=send_cb)
+        dialog = IdHistoryDialog(
+            can_id,
+            self._channel,
+            samples,
+            self,
+            send_callback=send_cb,
+            # «Интервал подсветки» истории — то же правило, что в
+            # мониторе (отчёт мастера).
+            highlight_ms_getter=lambda: self._highlight_interval_ms,
+        )
         # Закрытый диалог разрушается сразу — его таймер repaint и
         # дочерние виджеты умирают вместе с ним, а не болтаются живыми
         # в детях родителя до его уничтожения.

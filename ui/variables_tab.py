@@ -80,7 +80,8 @@ from ui.hex_edit import create_data_field_widget
 from ui.id_edit import IdPasteEdit
 
 _TYPE_STATIC = "static"
-_TYPE_DYNAMIC = "dynamic"
+_TYPE_DYNAMIC = "dynamic"      # «Численная переменная» (переименована)
+_TYPE_DYNCACHE = "dyn_cache"   # новый вид «Динамическая переменная»
 
 # Метка и версия файла переменных: чужой формат или другая версия
 # отвергаются сообщением, без падения приложения. Имя файла —
@@ -604,6 +605,303 @@ class _FrameRow(QWidget):
         self.value.setCurrentIndex(idx if idx >= 0 else 0)
 
 
+class _ValuePage(QWidget):
+    """Страница байтовой переменной: ID + битность + DLC, побайтовые
+    DATA «от»/«до», live-значение из CAN над графиком, «таблица
+    привязки» и график перевода сырого значения в величину.
+
+    Общий виджет двух видов переменных (отчёт мастера):
+    * «Численная переменная» — значение считается из байтов
+      пришедшего кадра;
+    * «Динамическая переменная» — МК кэширует указанные байты каждого
+      приходящего пакета: новый пакет с заданной DATA перезаписывает
+      прошлые значения в кэше (хранение на стороне устройства).
+
+    ``on_changed`` — колбэк диалога (обновление метки «N Байт»);
+    ``get_row`` — доступ к строке переменной для live-значения."""
+
+    def __init__(
+        self,
+        font: QFont,
+        kind: str,
+        get_row,
+        on_changed=None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._kind = kind
+        self._get_row = get_row
+        self._on_changed = on_changed
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        line1 = QHBoxLayout()
+        line1.addWidget(QLabel("ID:"))
+        self.can_id = _HexIdEdit(font, "0C0")
+        line1.addWidget(self.can_id)
+        self.bit = QComboBox()
+        self.bit.setFont(font)
+        self.bit.addItem(tr("11 бит"), False)
+        self.bit.addItem(tr("29 бит"), True)
+        self.bit.setFixedWidth(92)
+        self.bit.setToolTip(tr("Разрядность CAN-идентификатора"))
+        line1.addWidget(self.bit)
+        line1.addWidget(QLabel("DLC:"))
+        self.dlc = QSpinBox()
+        self.dlc.setFont(font)
+        self.dlc.setRange(0, 8)
+        self.dlc.setValue(8)
+        self.dlc.setFixedWidth(56)
+        line1.addWidget(self.dlc)
+        line1.addStretch()
+        layout.addLayout(line1)
+
+        # Подписи «от»/«до» одной ширины — поля DATA стоят друг
+        # напротив друга по вертикали (отчёт мастера).
+        from_label = QLabel(tr("DATA от:"))
+        to_label = QLabel(tr("DATA до:"))
+        for lbl in (from_label, to_label):
+            lbl.setFont(font)
+            lbl.setFixedWidth(56)
+
+        line2 = QHBoxLayout()
+        line2.addWidget(from_label)
+        self.data_from, from_widget = create_data_field_widget(
+            font, 8, edit_width=34, allow_x=True
+        )
+        line2.addWidget(from_widget)
+        line2.addStretch()
+        layout.addLayout(line2)
+
+        line3 = QHBoxLayout()
+        line3.addWidget(to_label)
+        self.data_to, to_widget = create_data_field_widget(
+            font, 8, edit_width=34, allow_x=True
+        )
+        line3.addWidget(to_widget)
+        line3.addStretch()
+        layout.addLayout(line3)
+
+        self.dlc.valueChanged.connect(self._on_dlc_changed)
+        for edit in (*self.data_from, *self.data_to):
+            edit.textChanged.connect(lambda _t: self._on_edits_changed())
+
+        hint_text = tr(
+            "В расчёт идут только заполненные байты без «X». "
+            "Таблица привязки: слева сырое значение этих байт (HEX — "
+            "как записали, так и остаётся), справа — величина. Точки "
+            "правятся в таблице, линия между ними — интерполяция."
+        ) if kind == "numeric" else tr(
+            "МК анализирует приходящие пакеты: у кадра с этим ID "
+            "указанные байты DATA перезаписывают прежние значения в "
+            "кэше переменной — каждый новый пакет замещает старые "
+            "байты. В перезапись идут только заполненные поля «от»/"
+            "«до» без «X». Таблица привязки переводит кэшированное "
+            "значение в величину."
+        )
+        hint = QLabel(hint_text)
+        hint.setFont(font)
+        hint.setWordWrap(True)
+        _selectable(hint)
+        layout.addWidget(hint)
+
+        live_row = QHBoxLayout()
+        live_row.setSpacing(8)
+        self.live_label = QLabel("0.00")
+        self.live_label.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
+        self.live_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.live_label.setStyleSheet(
+            "color: #7C9EFF; border: 1px solid #3A7BD5;"
+            " border-radius: 6px; padding: 2px 10px;"
+        )
+        _selectable(self.live_label)
+        self.live_hex_label = QLabel("0x—")
+        self.live_hex_label.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
+        self.live_hex_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.live_hex_label.setStyleSheet(
+            "color: #9A9AA5; border: 1px solid #45455A;"
+            " border-radius: 6px; padding: 2px 10px;"
+        )
+        _selectable(self.live_hex_label)
+        live_row.addStretch()
+        live_row.addWidget(self.live_label)
+        live_row.addWidget(self.live_hex_label)
+        live_row.addStretch()
+        layout.addLayout(live_row)
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(250)
+        self._live_timer.timeout.connect(self._update_live_label)
+        self._live_timer.start()
+
+        body = QHBoxLayout()
+        left = QVBoxLayout()
+        binding_title = QLabel(tr("Таблица привязки"))
+        binding_title.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        _selectable(binding_title)
+        left.addWidget(binding_title)
+        self.points_table = QTableWidget(0, 2)
+        self.points_table.setFont(font)
+        self.points_table.setHorizontalHeaderLabels(
+            [tr("Значение DATA"), tr("Величина")]
+        )
+        self.points_table.horizontalHeader().setStretchLastSection(True)
+        self.points_table.setFixedWidth(300)
+        self.points_table.itemChanged.connect(self._on_point_item_changed)
+        left.addWidget(self.points_table, 1)
+        buttons = QHBoxLayout()
+        add_btn = QPushButton(tr("+ точка"))
+        del_btn = QPushButton(tr("− точка"))
+        for btn in (add_btn, del_btn):
+            btn.setFont(font)
+            btn.setFixedHeight(26)
+        add_btn.clicked.connect(self.add_point_row)
+        del_btn.clicked.connect(self.remove_point_row)
+        buttons.addWidget(add_btn)
+        buttons.addWidget(del_btn)
+        buttons.addStretch()
+        left.addLayout(buttons)
+        body.addLayout(left)
+        self.graph = _GraphPreview()
+        body.addWidget(self.graph, 1)
+        layout.addLayout(body, 1)
+
+    # ---- внутреннее -----------------------------------------------------
+
+    def _emit_changed(self) -> None:
+        if self._on_changed is not None:
+            self._on_changed()
+
+    def _on_edits_changed(self) -> None:
+        self._refresh_graph()
+        self._emit_changed()
+
+    def _on_dlc_changed(self, value: int) -> None:
+        _set_data_enabled(self.data_from, value)
+        _set_data_enabled(self.data_to, value)
+        self._refresh_graph()
+        self._emit_changed()
+
+    def add_point_row(self) -> None:
+        row = self.points_table.rowCount()
+        self.points_table.blockSignals(True)
+        self.points_table.insertRow(row)
+        self.points_table.setItem(
+            row, 0, QTableWidgetItem(f"{row * 100:X}")
+        )
+        self.points_table.setItem(row, 1, QTableWidgetItem(str(row * 500)))
+        self.points_table.blockSignals(False)
+        self._refresh_graph()
+        self._emit_changed()
+
+    def remove_point_row(self) -> None:
+        row = self.points_table.currentRow()
+        if row < 0:
+            row = self.points_table.rowCount() - 1
+        if row >= 0:
+            self.points_table.blockSignals(True)
+            self.points_table.removeRow(row)
+            self.points_table.blockSignals(False)
+            self._refresh_graph()
+            self._emit_changed()
+
+    def read_points(self) -> list[tuple[float, float]]:
+        points: list[tuple[float, float]] = []
+        for row in range(self.points_table.rowCount()):
+            x_item = self.points_table.item(row, 0)
+            y_item = self.points_table.item(row, 1)
+            if x_item is None or y_item is None:
+                continue
+            x = _parse_data_hex(x_item.text())
+            y = _parse_axis_value(y_item.text())
+            if x is None or y is None:
+                continue
+            points.append((x, y))
+        return points
+
+    _HEX_CELL_RE = re.compile(r"^(0[xX])?[0-9A-Fa-f]+[hH]?$")
+
+    def _on_point_item_changed(self, item: QTableWidgetItem) -> None:
+        """Колонка DATA принимает только HEX, величина — число;
+        невалидная ячейка подсвечивается красным."""
+        if item.column() == 0:
+            ok = bool(self._HEX_CELL_RE.match(item.text().strip()))
+        else:
+            ok = _parse_axis_value(item.text()) is not None
+        item.setForeground(
+            QColor("#E8E8EF") if ok or not item.text().strip()
+            else QColor("#F44336")
+        )
+        self._refresh_graph()
+        self._emit_changed()
+
+    def bytes_used(self) -> list[int]:
+        return _data_bytes_used(self.data_from)
+
+    def _refresh_graph(self) -> None:
+        # Ось X: начало = значение поля DATA «от», конец = «до»
+        # (отчёт мастера).
+        self.graph.set_axis_x(
+            _edits_raw_value(self.data_from),
+            _edits_raw_value(self.data_to),
+        )
+        self.graph.set_points(self.read_points())
+
+    def _update_live_label(self) -> None:
+        row = self._get_row() if self._get_row is not None else None
+        raw = getattr(row, "live_raw", None) if row is not None else None
+        self.live_hex_label.setText(
+            "0x—" if raw is None else f"0x{raw:X}"
+        )
+        if row is None or len(self.read_points()) < 2:
+            self.live_label.setText("0.00")
+            return
+        live = getattr(row, "live_value", None)
+        self.live_label.setText(
+            "0.00" if live is None else f"{live:.2f}"
+        )
+
+    # ---- конфиг ---------------------------------------------------------
+
+    def write(self, config: dict[str, Any]) -> None:
+        self.can_id.setText(str(config.get("id", "")))
+        self.bit.setCurrentIndex(1 if config.get("extended") else 0)
+        self.dlc.setValue(int(config.get("dlc", 8)))
+        _set_data_enabled(self.data_from, self.dlc.value())
+        _set_data_enabled(self.data_to, self.dlc.value())
+        _text_to_data(self.data_from, config.get("from"))
+        _text_to_data(self.data_to, config.get("to"))
+        self.points_table.setRowCount(0)
+        for point in config.get("points") or []:
+            try:
+                x, y = point
+            except (TypeError, ValueError):
+                continue
+            row = self.points_table.rowCount()
+            self.points_table.insertRow(row)
+            x_text = (
+                f"{int(round(x)):X}"
+                if isinstance(x, (int, float)) else str(x)
+            )
+            self.points_table.setItem(row, 0, QTableWidgetItem(x_text))
+            self.points_table.setItem(row, 1, QTableWidgetItem(str(y)))
+        if self.points_table.rowCount() == 0:
+            for _ in range(4):
+                self.add_point_row()
+        self._refresh_graph()
+
+    def read(self) -> dict[str, Any]:
+        return {
+            "id": self.can_id.text().strip(),
+            "extended": bool(self.bit.currentData()),
+            "dlc": self.dlc.value(),
+            "from": _data_to_text(self.data_from),
+            "to": _data_to_text(self.data_to),
+            "bytes": _data_bytes_used(self.data_from),
+            "points": self.read_points(),
+        }
+
+
 class VariableDialog(QDialog):
     """Настройка одной переменной: выбор вида, имени, носителя
     (ОЗУ/ПЗУ — при записи) и параметров.
@@ -637,7 +935,10 @@ class VariableDialog(QDialog):
         self._type_combo = QComboBox()
         self._type_combo.setFont(font)
         self._type_combo.addItem(tr("Статическая переменная"), _TYPE_STATIC)
-        self._type_combo.addItem(tr("Динамическая переменная"), _TYPE_DYNAMIC)
+        # «Динамическая» переименована в «Численную» (отчёт мастера);
+        # «Динамическая переменная» — новый вид с кэшем байтов на МК.
+        self._type_combo.addItem(tr("Численная переменная"), _TYPE_DYNAMIC)
+        self._type_combo.addItem(tr("Динамическая переменная"), _TYPE_DYNCACHE)
         self._type_combo.currentIndexChanged.connect(self._on_type_changed)
         head.addWidget(self._type_combo)
         head.addSpacing(16)
@@ -675,7 +976,9 @@ class VariableDialog(QDialog):
         head.addWidget(self._ram_radio)
         head.addWidget(self._rom_radio)
         # Под байтовую переменную память выделяется в байтах: показываем,
-        # сколько байт займёт значение по заполненным полям DATA.
+        # сколько байт займёт значение по заполненным полям DATA —
+        # счёт обновляется при каждой правке DATA (отчёт мастера:
+        # «1 Байт» не менялся при выборе двух байт).
         self._storage_size_label = QLabel("")
         self._storage_size_label.setFont(font)
         self._storage_size_label.setStyleSheet("color: #9A9AA5;")
@@ -686,9 +989,19 @@ class VariableDialog(QDialog):
 
         self._stack = QStackedWidget()
         self._static_page = self._build_static_page(font)
-        self._dynamic_page = self._build_dynamic_page(font)
+        self._num_page = _ValuePage(
+            font, "numeric",
+            get_row=lambda: self._row,
+            on_changed=self._refresh_storage_size,
+        )
+        self._dyn_page = _ValuePage(
+            font, "dyn",
+            get_row=lambda: self._row,
+            on_changed=self._refresh_storage_size,
+        )
         self._stack.addWidget(self._static_page)
-        self._stack.addWidget(self._dynamic_page)
+        self._stack.addWidget(self._num_page)
+        self._stack.addWidget(self._dyn_page)
         layout.addWidget(self._stack, 1)
 
         buttons = QDialogButtonBox(
@@ -770,270 +1083,53 @@ class VariableDialog(QDialog):
         self._frames_layout.removeWidget(row)
         row.deleteLater()
 
-    # ---- страница «Динамическая переменная» --------------------------
+    def _active_value_page(self) -> _ValuePage | None:
+        """Страница байтовой переменной текущего вида или None."""
+        if self._type_combo.currentData() == _TYPE_DYNAMIC:
+            return self._num_page
+        if self._type_combo.currentData() == _TYPE_DYNCACHE:
+            return self._dyn_page
+        return None
 
-    def _build_dynamic_page(self, font: QFont) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setSpacing(6)
-
-        line1 = QHBoxLayout()
-        line1.addWidget(QLabel("ID:"))
-        self._graph_id = _HexIdEdit(font, "0C0")
-        line1.addWidget(self._graph_id)
-        # 11/29 бит — разрядность ID фрейма переменной (отчёт мастера).
-        self._graph_bit = QComboBox()
-        self._graph_bit.setFont(font)
-        self._graph_bit.addItem(tr("11 бит"), False)
-        self._graph_bit.addItem(tr("29 бит"), True)
-        # Шире — слово «бит» должно влезать целиком (отчёт мастера).
-        self._graph_bit.setFixedWidth(92)
-        self._graph_bit.setToolTip(tr("Разрядность CAN-идентификатора"))
-        line1.addWidget(self._graph_bit)
-        line1.addWidget(QLabel("DLC:"))
-        self._graph_dlc = QSpinBox()
-        self._graph_dlc.setFont(font)
-        self._graph_dlc.setRange(0, 8)
-        self._graph_dlc.setValue(8)
-        self._graph_dlc.setFixedWidth(56)
-        line1.addWidget(self._graph_dlc)
-        line1.addStretch()
-        layout.addLayout(line1)
-
-        # Подписи «от»/«до» одной ширины — поля DATA стоят друг
-        # напротив друга по вертикали (отчёт мастера).
-        from_label = QLabel(tr("DATA от:"))
-        to_label = QLabel(tr("DATA до:"))
-        for lbl in (from_label, to_label):
-            lbl.setFont(font)
-            lbl.setFixedWidth(56)
-
-        line2 = QHBoxLayout()
-        line2.addWidget(from_label)
-        self._graph_from, from_widget = create_data_field_widget(
-            font, 8, edit_width=34, allow_x=True
-        )
-        line2.addWidget(from_widget)
-        line2.addStretch()
-        layout.addLayout(line2)
-
-        line3 = QHBoxLayout()
-        line3.addWidget(to_label)
-        self._graph_to, to_widget = create_data_field_widget(
-            font, 8, edit_width=34, allow_x=True
-        )
-        line3.addWidget(to_widget)
-        line3.addStretch()
-        layout.addLayout(line3)
-
-        # DLC ограничивает поля DATA в «от»/«до» — лишние байты за
-        # DLC недоступны, как в триггерах (отчёт мастера).
-        self._graph_dlc.valueChanged.connect(self._on_dlc_changed)
-        for edit in (*self._graph_from, *self._graph_to):
-            edit.textChanged.connect(lambda _t: self._refresh_graph())
-
-        hint = QLabel(tr(
-            "В расчёт идут только заполненные байты без «X». "
-            "Таблица привязки: слева сырое значение этих байт (HEX — "
-            "как записали, так и остаётся), справа — величина. Точки "
-            "правятся в таблице, линия между ними — интерполяция."
-        ))
-        hint.setFont(font)
-        hint.setWordWrap(True)
-        _selectable(hint)
-        layout.addWidget(hint)
-
-        # Live-значение переменной из CAN над графиком: «0.00», пока
-        # привязка не задана (меньше 2 точек) или кадр ещё не пришёл
-        # (отчёт мастера). Дублируется в строке переменной.
-        live_row = QHBoxLayout()
-        live_row.setSpacing(8)
-        self._live_label = QLabel("0.00")
-        self._live_label.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
-        self._live_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._live_label.setStyleSheet(
-            "color: #7C9EFF; border: 1px solid #3A7BD5;"
-            " border-radius: 6px; padding: 2px 10px;"
-        )
-        _selectable(self._live_label)
-        # Сырое HEX-значение DATA — рядом с десятичным, обновляется
-        # онлайн от приходящих кадров (отчёт мастера).
-        self._live_hex_label = QLabel("0x—")
-        self._live_hex_label.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
-        self._live_hex_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._live_hex_label.setStyleSheet(
-            "color: #9A9AA5; border: 1px solid #45455A;"
-            " border-radius: 6px; padding: 2px 10px;"
-        )
-        _selectable(self._live_hex_label)
-        live_row.addStretch()
-        live_row.addWidget(self._live_label)
-        live_row.addWidget(self._live_hex_label)
-        live_row.addStretch()
-        layout.addLayout(live_row)
-        self._live_timer = QTimer(self)
-        self._live_timer.setInterval(250)
-        self._live_timer.timeout.connect(self._update_live_label)
-        self._live_timer.start()
-
-        body = QHBoxLayout()
-        left = QVBoxLayout()
-        binding_title = QLabel(tr("Таблица привязки"))
-        binding_title.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        _selectable(binding_title)
-        left.addWidget(binding_title)
-        self._points_table = QTableWidget(0, 2)
-        self._points_table.setFont(font)
-        self._points_table.setHorizontalHeaderLabels(
-            [tr("Значение DATA"), tr("Величина")]
-        )
-        self._points_table.horizontalHeader().setStretchLastSection(True)
-        self._points_table.setFixedWidth(300)
-        self._points_table.itemChanged.connect(self._on_point_item_changed)
-        left.addWidget(self._points_table, 1)
-        buttons = QHBoxLayout()
-        add_btn = QPushButton(tr("+ точка"))
-        del_btn = QPushButton(tr("− точка"))
-        for btn in (add_btn, del_btn):
-            btn.setFont(font)
-            btn.setFixedHeight(26)
-        add_btn.clicked.connect(self._add_point_row)
-        del_btn.clicked.connect(self._remove_point_row)
-        buttons.addWidget(add_btn)
-        buttons.addWidget(del_btn)
-        buttons.addStretch()
-        left.addLayout(buttons)
-        body.addLayout(left)
-        self._graph_preview = _GraphPreview()
-        body.addWidget(self._graph_preview, 1)
-        layout.addLayout(body, 1)
-        return page
-
-    def _add_point_row(self) -> None:
-        row = self._points_table.rowCount()
-        self._points_table.blockSignals(True)
-        self._points_table.insertRow(row)
-        # Сырое значение — в HEX, как записано так и остаётся
-        # (отчёт мастера: без пересчёта в десятичную).
-        self._points_table.setItem(
-            row, 0, QTableWidgetItem(f"{row * 100:X}")
-        )
-        self._points_table.setItem(row, 1, QTableWidgetItem(str(row * 500)))
-        self._points_table.blockSignals(False)
-        self._refresh_graph()
-
-    def _remove_point_row(self) -> None:
-        row = self._points_table.currentRow()
-        if row < 0:
-            row = self._points_table.rowCount() - 1
-        if row >= 0:
-            self._points_table.blockSignals(True)
-            self._points_table.removeRow(row)
-            self._points_table.blockSignals(False)
-            self._refresh_graph()
-
-    def _read_points(self) -> list[tuple[float, float]]:
-        points: list[tuple[float, float]] = []
-        for row in range(self._points_table.rowCount()):
-            x_item = self._points_table.item(row, 0)
-            y_item = self._points_table.item(row, 1)
-            if x_item is None or y_item is None:
-                continue
-            # Колонка «Значение DATA» — сырое значение байтов, всегда
-            # HEX (отчёт мастера: «как записали — так и остаётся»).
-            x = _parse_data_hex(x_item.text())
-            y = _parse_axis_value(y_item.text())
-            if x is None or y is None:
-                continue
-            points.append((x, y))
-        return points
-
-    _HEX_CELL_RE = re.compile(r"^(0[xX])?[0-9A-Fa-f]+[hH]?$")
-
-    def _on_point_item_changed(self, item: QTableWidgetItem) -> None:
-        """Проверка записи в «Таблице привязки»: колонка DATA принимает
-        только HEX, колонка величины — число. Невалидная ячейка
-        подсвечивается красным (отчёт мастера: проверка не работала)."""
-        if item.column() == 0:
-            ok = bool(self._HEX_CELL_RE.match(item.text().strip()))
-        else:
-            ok = _parse_axis_value(item.text()) is not None
-        item.setForeground(
-            QColor("#E8E8EF") if ok or not item.text().strip()
-            else QColor("#F44336")
-        )
-        self._refresh_graph()
-
-    def _on_dlc_changed(self, value: int) -> None:
-        _set_data_enabled(self._graph_from, value)
-        _set_data_enabled(self._graph_to, value)
-        self._refresh_graph()
-        self._refresh_storage_size()
-
-    def _refresh_storage_size(self) -> None:
-        """Размер хранения — в байтах: сколько заполненных байт DATA,
-        столько и нужно под значение в ОЗУ/ПЗУ (отчёт мастера)."""
-        if self._type_combo.currentData() != _TYPE_DYNAMIC:
+    def _refresh_storage_size(self, *_args) -> None:
+        """Метка «N Байт» в шапке — фактическое число байт значения
+        по заполненным полям DATA «от» (обновляется при каждой правке
+        — отчёт мастера: «1 Байт» не менялся при выборе двух байт)."""
+        page = self._active_value_page()
+        if page is None:
             self._storage_size_label.setText("")
             return
-        count = max(1, len(_data_bytes_used(self._graph_from)))
-        self._storage_size_label.setText(
-            tr("байт: {0}").format(count)
-        )
-
-    def _update_live_label(self) -> None:
-        """Онлайн-значение из CAN над графиком: «0.00», пока привязки
-        нет (меньше 2 точек) или кадр по ID ещё не приходил. Рядом —
-        сырое HEX-значение DATA (отчёт мастера)."""
-        row = self._row
-        raw = getattr(row, "live_raw", None) if row is not None else None
-        self._live_hex_label.setText(
-            "0x—" if raw is None else f"0x{raw:X}"
-        )
-        if row is None or len(self._read_points()) < 2:
-            self._live_label.setText("0.00")
-            return
-        live = getattr(row, "live_value", None)
-        self._live_label.setText(
-            "0.00" if live is None else f"{live:.2f}"
-        )
-
-    def _refresh_graph(self) -> None:
-        # Ось X: начало = значение поля DATA «от», конец = «до»
-        # (отчёт мастера).
-        self._graph_preview.set_axis_x(
-            _edits_raw_value(self._graph_from),
-            _edits_raw_value(self._graph_to),
-        )
-        self._graph_preview.set_points(self._read_points())
+        count = max(1, len(page.bytes_used()))
+        self._storage_size_label.setText(tr("{0} Байт").format(count))
 
     # ---- общее --------------------------------------------------------
 
     def _on_type_changed(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
         # Пример имени зависит от вида переменной (по ТЗ):
-        # динамическая → «Обороты ДВС», статическая → «Дверь водителя».
+        # байтовые → «Обороты ДВС», статическая → «Дверь водителя».
         example = (
-            tr("например, «Обороты ДВС»") if index == 1
+            tr("например, «Обороты ДВС»") if index in (1, 2)
             else tr("например, «Дверь водителя»")
         )
         self._name_edit.setPlaceholderText(example)
         # У новой переменной таблица точек пуста — при первом заходе
-        # на динамическую страницу даём две стартовые точки, чтобы
-        # график сразу строился (отчёт мастера).
-        if index == 1 and self._points_table.rowCount() == 0:
-            self._add_point_row()
-            self._add_point_row()
-        # «в бит» — статические (бит состояния), «в байт» —
-        # динамические (байты значения) — отчёт мастера.
+        # на байтовую страницу даём две стартовые точки, чтобы график
+        # сразу строился (отчёт мастера).
+        page = self._active_value_page()
+        if page is not None and page.points_table.rowCount() == 0:
+            page.add_point_row()
+            page.add_point_row()
+        # «в бит» — статические (бит состояния), «в байт» — байтовые
+        # переменные (значение занимает байты) — отчёт мастера.
         self._cache_bit_check.setText(
-            tr("в байт") if index == 1 else tr("в бит")
+            tr("в байт") if page is not None else tr("в бит")
         )
-        if index == 1:
-            _set_data_enabled(self._graph_from, self._graph_dlc.value())
-            _set_data_enabled(self._graph_to, self._graph_dlc.value())
+        if page is not None:
+            _set_data_enabled(page.data_from, page.dlc.value())
+            _set_data_enabled(page.data_to, page.dlc.value())
+            page._refresh_graph()
         self._refresh_storage_size()
-        self._refresh_graph()
 
     def _apply_config(self, config: dict[str, Any]) -> None:
         var_type = config.get("type", _TYPE_STATIC)
@@ -1041,6 +1137,8 @@ class VariableDialog(QDialog):
         if var_type in ("flags", _TYPE_STATIC):
             var_type = _TYPE_STATIC
             idx = 0
+        elif var_type == _TYPE_DYNCACHE:
+            idx = 2
         else:
             var_type = _TYPE_DYNAMIC
             idx = 1
@@ -1052,45 +1150,21 @@ class VariableDialog(QDialog):
             if not self._frame_rows:
                 self._add_frame_row(None)
         else:
-            self._graph_id.setText(str(config.get("id", "")))
-            self._graph_bit.setCurrentIndex(1 if config.get("extended") else 0)
-            self._graph_dlc.setValue(int(config.get("dlc", 8)))
-            _set_data_enabled(self._graph_from, self._graph_dlc.value())
-            _set_data_enabled(self._graph_to, self._graph_dlc.value())
-            _text_to_data(self._graph_from, config.get("from"))
-            _text_to_data(self._graph_to, config.get("to"))
-            self._points_table.setRowCount(0)
-            for point in config.get("points") or []:
-                try:
-                    x, y = point
-                except (TypeError, ValueError):
-                    continue
-                row = self._points_table.rowCount()
-                self._points_table.insertRow(row)
-                # X — сырое значение DATA: показываем в HEX, как его
-                # записали — без пересчёта в десятичную (отчёт мастера).
-                x_text = (
-                    f"{int(round(x)):X}"
-                    if isinstance(x, (int, float)) else str(x)
-                )
-                self._points_table.setItem(row, 0, QTableWidgetItem(x_text))
-                self._points_table.setItem(row, 1, QTableWidgetItem(str(y)))
-            if self._points_table.rowCount() == 0:
-                for _ in range(4):
-                    self._add_point_row()
-            self._refresh_graph()
+            page = self._num_page if var_type == _TYPE_DYNAMIC else self._dyn_page
+            page.write(config)
 
     def _on_accept(self) -> None:
-        """Проверка DATA при записи динамической переменной
+        """Проверка DATA при записи байтовой переменной
         (отчёт мастера): валидный ID, хотя бы один байт в «от»,
         минимум две точки графика."""
-        if self._type_combo.currentData() == _TYPE_DYNAMIC:
+        page = self._active_value_page()
+        if page is not None:
             errors: list[str] = []
-            if hex_to_int(self._graph_id.text()) is None:
+            if hex_to_int(page.can_id.text()) is None:
                 errors.append(tr("ID — шестнадцатеричное число"))
-            if not _data_bytes_used(self._graph_from):
+            if not page.bytes_used():
                 errors.append(tr("DATA от — заполните хотя бы один байт"))
-            if len(self._read_points()) < 2:
+            if len(page.read_points()) < 2:
                 errors.append(
                     tr("график — минимум 2 точки с корректными значениями")
                 )
@@ -1111,22 +1185,17 @@ class VariableDialog(QDialog):
             "storage": "rom" if self._rom_radio.isChecked() else "ram",
             "cache_bit": self._cache_bit_check.isChecked(),
         }
-        if self._type_combo.currentData() == _TYPE_STATIC:
+        var_type = self._type_combo.currentData()
+        if var_type == _TYPE_STATIC:
             base.update({
                 "type": _TYPE_STATIC,
                 "frames": [row.read() for row in self._frame_rows],
             })
         else:
-            base.update({
-                "type": _TYPE_DYNAMIC,
-                "id": self._graph_id.text().strip(),
-                "extended": bool(self._graph_bit.currentData()),
-                "dlc": self._graph_dlc.value(),
-                "from": _data_to_text(self._graph_from),
-                "to": _data_to_text(self._graph_to),
-                "bytes": _data_bytes_used(self._graph_from),
-                "points": self._read_points(),
-            })
+            base.update(
+                {"type": var_type},
+                **self._active_value_page().read(),
+            )
         return base
 
 
@@ -1203,7 +1272,11 @@ class _VariableRow(QFrame):
     def _refresh_labels(self) -> None:
         name = self.config.get("name", "").strip()
         self._name_label.setText(name or tr("— (без имени)"))
-        self._state_label.setText("0.00" if self.config.get("type") == _TYPE_DYNAMIC else "0")
+        self._state_label.setText(
+            "0.00"
+            if self.config.get("type") in (_TYPE_DYNAMIC, _TYPE_DYNCACHE)
+            else "0"
+        )
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         # Клик по свободному месту строки — редактор; по кнопке
@@ -1385,14 +1458,22 @@ class VariablesTab(QWidget):
     # ---- онлайн-значения из CAN ----------------------------------------
 
     def _on_can_frames(self, frames: list[dict[str, Any]]) -> None:
-        """Пересчитывает значения динамических переменных по приходящим
+        """Пересчитывает значения байтовых переменных по приходящим
         кадрам: ID (+ битность) совпал → сырое значение из заполненных
         байтов «DATA от» → величина по «таблице привязки». Результат
-        виден в строке переменной и над графиком в её настройке."""
+        виден в строке переменной и над графиком в её настройке.
+
+        «Численная» переменная считает значение из байтов пришедшего
+        кадра. «Динамическая» переменная (МК-кэш) перезаписывает
+        кэшированные байты каждым новым пакетом: в перезапись идут
+        только указанные оператором позиции DATA, остальные байты кэша
+        сохраняют прежнее значение до следующего пакета (отчёт
+        мастера)."""
         for col in (self._read_col, self._ctrl_col, self._aux_col):
             for row in list(col._rows):
                 cfg = row.config
-                if cfg.get("type") != _TYPE_DYNAMIC:
+                var_type = cfg.get("type")
+                if var_type not in (_TYPE_DYNAMIC, _TYPE_DYNCACHE):
                     continue
                 fid = hex_to_int(str(cfg.get("id", "")))
                 points = cfg.get("points") or []
@@ -1408,22 +1489,41 @@ class VariablesTab(QWidget):
                     data = bytes(frame.get("data", b""))
                     raw = 0
                     seen = False
-                    for i in used:
-                        if i < len(data):
-                            raw = (raw << 8) | data[i]
-                            seen = True
+                    if var_type == _TYPE_DYNCACHE:
+                        # Перезапись кэша только указанными байтами —
+                        # чужие позиции кэша не трогаем.
+                        cache = getattr(row, "_dyn_cache", {})
+                        for i in used:
+                            if i < len(data):
+                                cache[i] = data[i]
+                        row._dyn_cache = cache
+                        for i in used:
+                            if i in cache:
+                                raw = (raw << 8) | cache[i]
+                                seen = True
+                    else:
+                        for i in used:
+                            if i < len(data):
+                                raw = (raw << 8) | data[i]
+                                seen = True
                     if seen:
                         row.set_live_value(_map_points(points, raw), raw)
 
     # ---- списки переменных для Гибкой логики -------------------------
 
-    def variable_names(self, column: str, var_type: str | None = None) -> list[str]:
+    def variable_names(
+        self,
+        column: str,
+        var_type: str | tuple[str, ...] | None = None,
+    ) -> list[str]:
         """Имена переменных колонки («read»/«control»); var_type —
-        фильтр по виду («static»/«dynamic»), None — все."""
+        фильтр по виду (строка или кортеж видов), None — все."""
         col = self._read_col if column == "read" else self._ctrl_col
         names: list[str] = []
         for cfg in col.configs():
-            if var_type is not None and cfg.get("type") != var_type:
+            if var_type is not None and cfg.get("type") not in (
+                (var_type,) if isinstance(var_type, str) else var_type
+            ):
                 continue
             names.append(cfg.get("name", "").strip() or "—")
         return names

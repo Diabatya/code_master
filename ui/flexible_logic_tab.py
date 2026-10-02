@@ -770,7 +770,12 @@ class _EventItem(QWidget):
     def refresh_variables(self) -> None:
         """Обновляет списки переменных в комбобоксах события."""
         tab = self._row._tab._variables_tab
-        dyn = tab.variable_names("read", "dynamic") if tab else []
+        # Числовые переменные обоих видов («Численная» и «Динамическая»
+        # с МК-кэшем) доступны в условиях ГЛ (отчёт мастера).
+        dyn = (
+            tab.variable_names("read", ("dynamic", "dyn_cache"))
+            if tab else []
+        )
         st = tab.variable_names("read", "static") if tab else []
         self._dyn.var.set_names(dyn, tr("— не выбрано —"))
         self._static.var.set_names(st, tr("— не выбрано —"))
@@ -1016,7 +1021,12 @@ class _CondItem(QWidget):
 
     def refresh_variables(self) -> None:
         tab = self._row._tab._variables_tab
-        dyn = tab.variable_names("read", "dynamic") if tab else []
+        # Числовые переменные обоих видов («Численная» и «Динамическая»
+        # с МК-кэшем) доступны в условиях ГЛ (отчёт мастера).
+        dyn = (
+            tab.variable_names("read", ("dynamic", "dyn_cache"))
+            if tab else []
+        )
         st = tab.variable_names("read", "static") if tab else []
         self.st_var.set_names(st, tr("— не выбрано —"))
         self.dyn_var.set_names(dyn, tr("— не выбрано —"))
@@ -1514,14 +1524,14 @@ class _ActionItem(QWidget):
         )
 
     def _on_var_changed(self, *_args) -> None:
-        """Статическая — выбор →1/→0, динамическая — число."""
+        """Статическая — выбор →1/→0, байтовая — число."""
         is_dynamic = False
         tab = self._row._tab._variables_tab
         if tab is not None:
             name = self.var.get_name()
             for cfg in tab._ctrl_col.configs():
                 if cfg.get("name", "").strip() == name:
-                    is_dynamic = cfg.get("type") == "dynamic"
+                    is_dynamic = cfg.get("type") in ("dynamic", "dyn_cache")
                     break
         self.var_value.setVisible(not is_dynamic)
         self.var_num.setVisible(is_dynamic)

@@ -1,11 +1,19 @@
 """Главное окно приложения «Код Мастер»."""
 
+import random
 import subprocess
 import sys
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer
+from PySide6.QtCore import (
+    QEasingCurve,
+    QElapsedTimer,
+    QPropertyAnimation,
+    QSize,
+    Qt,
+    QTimer,
+)
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -105,60 +113,132 @@ def _plus_icon(color: QColor, size: int = 96) -> QIcon:
     return QIcon(pm)
 
 
-def _car_icon(color: QColor, size: int = 96) -> QIcon:
-    """Векторный силуэт Porsche 911 (вид сбоку) вместо молотка
-    и ключа (отчёт мастера)."""
-    pm = QPixmap(size, size)
+def _kod_logo(dark: QColor, orange: QColor, width: int = 100,
+              height: int = 42) -> QPixmap:
+    """Векторный логотип «КОД» по ТЗ мастера: viewBox 1000×420,
+    буквы К и Д + левая половина кольца «О» — основным цветом
+    (на светлой теме чёрный, на тёмной — светлый, иначе не видно),
+    правая половина «О» — оранжевым #E87A2A."""
+    scale = 4  # суперсэмплинг для ровных краёв
+    pm = QPixmap(width * scale, height * scale)
+    pm.setDevicePixelRatio(1)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.scale(width * scale / 1000.0, height * scale / 420.0)
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(color)
-    s = size / 96.0
+    p.setBrush(dark)
 
-    def pt(x: float, y: float) -> tuple[float, float]:
-        return x * s, y * s
+    # Буква К
+    k_path = QPainterPath()
+    k_path.moveTo(50, 0)
+    for x, y in ((130, 0), (130, 180), (260, 0), (340, 0), (200, 210),
+                 (340, 420), (260, 420), (130, 240), (130, 420), (50, 420)):
+        k_path.lineTo(x, y)
+    k_path.closeSubpath()
+    p.drawPath(k_path)
 
-    # Кузов: низкий силуэт с покатой крышей 911.
-    body = QPainterPath()
-    x, y = pt(6, 66)
-    body.moveTo(x, y)
-    x, y = pt(10, 60)
-    body.lineTo(x, y)                      # нос
-    x, y = pt(30, 56)
-    body.lineTo(x, y)                      # капот
-    x, y = pt(38, 42)
-    body.cubicTo(x, y, *pt(44, 38), *pt(50, 38))   # лобовое → крыша
-    x, y = pt(62, 40)
-    body.cubicTo(x, y, *pt(68, 46), *pt(72, 52))   # задок
-    x, y = pt(88, 56)
-    body.lineTo(x, y)                      # хвост
-    x, y = pt(91, 62)
-    body.lineTo(x, y)
-    x, y = pt(90, 68)
-    body.lineTo(x, y)
-    x, y = pt(84, 68)
-    body.lineTo(x, y)
-    # арка заднего колеса
-    x, y = pt(78, 68)
-    body.lineTo(x, y)
-    x, y = pt(72, 60)
-    body.cubicTo(x, y, *pt(60, 60), *pt(56, 68))
-    x, y = pt(38, 68)
-    body.lineTo(x, y)
-    # арка переднего колеса
-    x, y = pt(32, 60)
-    body.cubicTo(x, y, *pt(20, 60), *pt(16, 68))
-    x, y = pt(6, 68)
-    body.lineTo(x, y)
-    body.closeSubpath()
-    p.drawPath(body)
-    # Колёса.
-    for cx in (24.0, 64.0):
-        x, y = pt(cx, 68)
-        p.drawEllipse(int(x - 9 * s), int(y - 9 * s), int(18 * s), int(18 * s))
+    # Буква О — кольцо R=130, r=70 с центром (500, 210).
+    ring = QPainterPath()
+    ring.setFillRule(Qt.FillRule.OddEvenFill)
+    ring.addEllipse(500 - 130, 210 - 130, 260, 260)
+    ring.addEllipse(500 - 70, 210 - 70, 140, 140)
+    p.drawPath(ring)
+    # Правая половина кольца — оранжевой.
+    p.save()
+    p.setClipRect(500, 0, 500, 420)
+    p.setBrush(orange)
+    p.drawPath(ring)
+    p.restore()
+    p.setBrush(dark)
+
+    # Буква Д с внутренним вырезом.
+    d_path = QPainterPath()
+    d_path.setFillRule(Qt.FillRule.OddEvenFill)
+    d_path.moveTo(680, 0)
+    for x, y in ((950, 0), (950, 60), (870, 60), (870, 380), (980, 380),
+                 (980, 420), (640, 420), (640, 380), (760, 380),
+                 (760, 60), (680, 60)):
+        d_path.lineTo(x, y)
+    d_path.closeSubpath()
+    d_path.addRect(760, 60, 110, 150)
+    p.drawPath(d_path)
     p.end()
-    return QIcon(pm)
+    return pm.scaled(
+        width, height,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+
+
+class _MatrixBackground(QWidget):
+    """Анимированный «матричный» фон по ТЗ мастера: 8 колонок
+    падающих символов, у каждой своя скорость, прозрачность и
+    размер шрифта (глубина). Нижний слой — не перехватывает
+    события мыши (аналог pointer-events: none)."""
+
+    # (длительность с, задержка с, прозрачность, размер шрифта px)
+    _COL_STYLE = (
+        (3.0, 0.0, 0.60, 34),   # передний план
+        (5.5, 0.7, 0.25, 20),   # дальний план
+        (4.2, 1.4, 0.45, 28),   # средний план
+        (6.0, 0.3, 0.35, 24),   # средне-дальний
+        (3.8, 2.1, 0.55, 32),   # передний план
+    )
+    _COLS = 8
+    _ROWS = 16
+    _REF_W = 1080.0
+    _REF_H = 720.0
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        # Фон — нижний слой: мышь проходит насквозь (pointer-events: none).
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        rng = random.Random(0xC0DE)
+        # Содержимое колонок генерируется один раз — цифровой «дождь».
+        self._columns: list[list[str]] = [
+            [
+                " ".join(
+                    str(rng.randrange(10))
+                    for _ in range(rng.randrange(1, 6))
+                )
+                for _ in range(self._ROWS)
+            ]
+            for _ in range(self._COLS)
+        ]
+        self._elapsed = QElapsedTimer()
+        self._elapsed.start()
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.update)
+        self._timer.start(33)  # ~30 fps
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        w, h = max(self.width(), 1), max(self.height(), 1)
+        sx = w / self._REF_W
+        sy = h / self._REF_H
+        now = self._elapsed.elapsed() / 1000.0
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor("#8A8A8A")
+        font = QFont("Courier New")
+        font.setStyleHint(QFont.StyleHint.TypeWriter)
+        for c in range(self._COLS):
+            duration, delay, opacity, fsize = self._COL_STYLE[c % len(self._COL_STYLE)]
+            t = now - delay
+            frac = (t % duration) / duration if t >= 0 else 0.0
+            # Кадр из ТЗ: 0→0, 80%→+720, 81%→-720, 100%→0.
+            y_off = (
+                frac / 0.8 if frac < 0.8 else -1.0 + (frac - 0.8) / 0.2
+            ) * self._REF_H * sy
+            color.setAlphaF(opacity)
+            p.setPen(color)
+            font.setPixelSize(max(10, int(fsize * sy)))
+            p.setFont(font)
+            x = 20 * sx + 135 * sx * c
+            for r, text in enumerate(self._columns[c]):
+                p.drawText(int(x), int((60 + 45 * r) * sy + y_off), text)
+        p.end()
 
 
 def _usb_icon(color: QColor, size: int = 96) -> QIcon:
@@ -294,7 +374,13 @@ class _ConfigMenuPopup(QWidget):
                 )
                 text_col.addWidget(lbl)
             inner.addLayout(text_col, 1)
-            card.clicked.connect(lambda h=handler: (self.close(), h()))
+            # clicked() передаёт checked (bool) позиционно — глотаем
+            # его отдельным параметром, иначе он подменяет handler
+            # и «Создать/Загрузить конфигурацию» падает с
+            # "'bool' object is not callable" (отчёт мастера).
+            card.clicked.connect(
+                lambda _checked=False, h=handler: (self.close(), h())
+            )
             layout.addWidget(card)
 
         outer = QVBoxLayout(self)
@@ -512,14 +598,13 @@ class MainWindow(QMainWindow):
         self._top_panel.setObjectName("topPanel")
         self._top_panel.setFixedHeight(60)
 
-        # Логотип: силуэт Porsche 911 вместо «молоток и ключ»
-        # (отчёт мастера), текст «Код Мастер» рядом.
+        # Логотип «КОД» по ТЗ мастера (вектор: К/Д + левая половина
+        # кольца — тёмные, правая половина «О» — оранжевая), текст
+        # «Код Мастер» рядом.
         self._logo_icon_label = QLabel()
-        self._logo_icon_label.setFixedSize(56, 40)
+        self._logo_icon_label.setFixedSize(120, 50)
         self._logo_icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._logo_icon_label.setPixmap(
-            _car_icon(QColor("#7C9EFF"), 96).pixmap(56, 40)
-        )
+        self._apply_logo()
         self._logo_label = QLabel(tr("Код Мастер"))
         # Название в 2 раза крупнее прежнего (отчёт мастера).
         self._logo_label.setFont(QFont("Segoe UI", 24, QFont.Weight.Bold))
@@ -624,6 +709,9 @@ class MainWindow(QMainWindow):
         self._central_stack = QStackedWidget()
 
         self._startup_page = QWidget()
+        # Матричный фон — нижний слой стартовой страницы,
+        # не перехватывает мышь (pointer-events: none, ТЗ мастера).
+        self._matrix_bg = _MatrixBackground(self._startup_page)
 
         # Страница прошивки
         self._firmware_page = FirmwarePage(self._serial_manager, self)
@@ -771,6 +859,7 @@ class MainWindow(QMainWindow):
         firmware_layout.addWidget(self._firmware_page, 1)
 
         self._central_stack.addWidget(self._startup_page)
+        self._matrix_bg.lower()
         self._central_stack.addWidget(firmware_container)
         root.addWidget(self._central_stack, 1)
         root.addWidget(self._status_bar)
@@ -897,8 +986,11 @@ class MainWindow(QMainWindow):
         сам загрузчик при этом не переписывается.
 
         Проверки по отчёту мастера:
-        * образ с областью загрузчика (< 0x08008000) через CDC не шьём —
-          предупреждаем, что такую прошивку ставят через DFU;
+        * объединённый образ (bootloader + application) прошивается
+          через CDC: область загрузчика отрезается автоматически
+          (trim_to_application_region в flash_firmware), сам
+          загрузчик остаётся прежним — обновление больше не требует
+          DFU (отчёт мастера);
         * если в образе есть страница конфигурации с именем устройства
           и оно не совпадает с подключённым — предупреждение с выбором
           «продолжить/отмена».
@@ -923,17 +1015,19 @@ class MainWindow(QMainWindow):
         if base == 0:
             base = guess_firmware_base(data)
 
-        # Образ покрывает область загрузчика — через CDC его не трогаем:
-        # такую прошивку ставят полным образом через DFU.
+        # Образ покрывает область загрузчика — через CDC шьём только
+        # application: flash_firmware сам отрезает область < 0x08008000
+        # (trim_to_application_region). Загрузчик остаётся прежним,
+        # DFU для обновления не нужен (отчёт мастера).
         if base < APPLICATION_BASE_ADDR:
-            QMessageBox.warning(
-                self,
-                tr("Обновление"),
-                tr("Прошивка содержит область загрузчика — обновите "
-                   "устройство через DFU (кнопка «Прошить МК», способ "
-                   "«USB (DFU)»)."),
+            logger.info(
+                "Объединённый образ: область загрузчика будет пропущена, "
+                "прошивается только application"
             )
-            return
+            self._status_bar.showMessage(
+                tr("Область загрузчика пропущена — прошивается приложение"),
+                6000,
+            )
 
         # Сверка имени устройства с конфиг-страницей внутри прошивки.
         cfg_off = DEVICE_CONFIG_PAGE_ADDR - base
@@ -1121,6 +1215,24 @@ class MainWindow(QMainWindow):
             logger.error("Не удалось открыть папку с логами: %s", exc)
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось открыть папку с логами: {0}").format(exc))
 
+    def _apply_logo(self) -> None:
+        """Перерисовывает логотип «КОД» — тёмные элементы следуют
+        теме: на тёмной теме они светлые, иначе их не видно."""
+        light = bool(self._config.get("light_theme"))
+        dark_color = QColor("#0A0A0A") if light else QColor("#E8EAF2")
+        self._logo_icon_label.setPixmap(
+            _kod_logo(dark_color, QColor("#E87A2A"), 120, 50)
+        )
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        # Матричный фон тянется за стартовой страницей.
+        self._matrix_bg.resize(self._startup_page.size())
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._matrix_bg.resize(self._startup_page.size())
+
     def _set_dark_theme(self) -> None:
         """Устанавливает тёмную тему."""
         app = QApplication.instance()
@@ -1129,6 +1241,7 @@ class MainWindow(QMainWindow):
         self._config.set("light_theme", False)
         self._config.set("theme", "dark")
         apply_theme(app, False)
+        self._apply_logo()
 
     def _set_light_theme(self) -> None:
         """Устанавливает светлую тему."""
@@ -1138,6 +1251,7 @@ class MainWindow(QMainWindow):
         self._config.set("light_theme", True)
         self._config.set("theme", "light")
         apply_theme(app, True)
+        self._apply_logo()
 
     def _on_language_changed(self, index: int) -> None:
         """Переключает язык через выпадающий список и обновляет открытые окна."""

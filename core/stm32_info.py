@@ -164,11 +164,17 @@ def parse_legacy_device_config(page: bytes) -> tuple[str, str] | None:
 
 
 def merge_device_config_page(incoming_page: bytes, existing_page: bytes) -> bytes:
-    """Сохраняет аппаратные поля существующей config-страницы при обновлении."""
+    """Сохраняет аппаратные поля существующей config-страницы при
+    обновлении. Версионная запись VER1 берётся из НОВОГО образа —
+    иначе после прошивки на карточке оставалась бы старая версия
+    (или пусто), а релизная прошивка несёт свою (отчёт мастера)."""
     incoming = parse_device_config(incoming_page)
     if incoming is None:
         return incoming_page
-    return build_device_config_page(incoming[0], incoming[1], existing_page)
+    ver = parse_device_fw_version(incoming_page)
+    return build_device_config_page(
+        incoming[0], incoming[1], existing_page, fw_version=ver
+    )
 
 
 def build_app_metadata(image: bytes) -> bytes:

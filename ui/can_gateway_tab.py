@@ -123,9 +123,17 @@ def _set_data_enabled(edits: list[QLineEdit], count: int) -> None:
             edit.setEnabled(True)
 
 
-def _spec_match(spec: dict[str, Any], frame_id: int, data: bytes) -> bool:
+def _spec_match(
+    spec: dict[str, Any],
+    frame_id: int,
+    data: bytes,
+    byte_from: int = 1,
+    byte_to: int = 8,
+) -> bool:
     """Фрейм подходит под спецификацию: ID равен, все заполненные
-    байты DATA равны («X» и пустое поле — wildcard)."""
+    байты DATA в диапазоне «от»–«до» равны («X» и пустое поле —
+    wildcard). byte_from/byte_to — позиции байтов с 1 (отчёт мастера:
+    у «Игнорирования» тоже есть DATA от/до)."""
     spec_id = hex_to_int(str(spec.get("id", "")))
     if spec_id is None or spec_id != frame_id:
         return False
@@ -134,6 +142,8 @@ def _spec_match(spec: dict[str, Any], frame_id: int, data: bytes) -> bool:
         token = token.strip().upper()
         if not token or token == "X":
             continue
+        if not (byte_from <= i + 1 <= byte_to):
+            continue  # байт вне диапазона от/до не участвует в сравнении
         value = hex_to_int(token)
         if value is None or i >= len(data) or data[i] != value:
             return False
@@ -771,6 +781,40 @@ class _GatewayProgram(QGroupBox):
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
+        # «Игнорирование»: DATA ОТ/ДО — диапазон байтов, участвующих в
+        # сравнении (как в «Подмене» — отчёт мастера).
+        self._ignore_range = QWidget()
+        range_row = QHBoxLayout(self._ignore_range)
+        range_row.setSpacing(6)
+        range_row.setContentsMargins(0, 0, 0, 0)
+        range_row.addWidget(QLabel(tr("DATA от:")))
+        self._ignore_from = QSpinBox()
+        self._ignore_from.setFont(font)
+        self._ignore_from.setRange(1, 8)
+        self._ignore_from.setValue(1)
+        self._ignore_from.setFixedWidth(54)
+        self._ignore_from.setToolTip(
+            tr("Первый байт DATA, участвующий в сравнении (с 1)")
+        )
+        range_row.addWidget(self._ignore_from)
+        range_row.addWidget(QLabel(tr("до:")))
+        self._ignore_to = QSpinBox()
+        self._ignore_to.setFont(font)
+        self._ignore_to.setRange(1, 8)
+        self._ignore_to.setValue(8)
+        self._ignore_to.setFixedWidth(54)
+        self._ignore_to.setToolTip(
+            tr("Последний байт DATA, участвующий в сравнении")
+        )
+        range_row.addWidget(self._ignore_to)
+        range_row.addStretch()
+        self._ignore_from.valueChanged.connect(self._validate_ignore_range)
+        self._ignore_to.valueChanged.connect(self._validate_ignore_range)
+        self._ignore_from.valueChanged.connect(tab.mark_dirty)
+        self._ignore_to.valueChanged.connect(tab.mark_dirty)
+        self._ignore_range.setVisible(self.mode == _MODE_IGNORE)
+        layout.addWidget(self._ignore_range)
+
         # Подмена DATA по графику — только для программ «Подмена»:
         # по блоку на направление («ОТ»/«ДО» — байты DATA, к которым
         # применяется кривая; «Таблица привязки» — HEX-пары;
@@ -817,6 +861,11 @@ class _GatewayProgram(QGroupBox):
             else tr("Подмена")
         )
 
+    def _validate_ignore_range(self, *_args) -> None:
+        """ОТ не больше ДО — поля автоматически выравниваются."""
+        if self._ignore_from.value() > self._ignore_to.value():
+            self._ignore_to.setValue(self._ignore_from.value())
+
     def _on_direction_changed(self) -> None:
         """Стрелка направления: показываются блоки кривых только
         выбранных направлений (↔ — оба)."""
@@ -852,6 +901,10 @@ class _GatewayProgram(QGroupBox):
             "spec1": self.spec_left.read(),
             "spec2": self.spec_right.read(),
         }
+        if self.mode == _MODE_IGNORE:
+            # DATA от/до игнорирования — диапазон байтов сравнения.
+            rule["data_from"] = self._ignore_from.value()
+            rule["data_to"] = self._ignore_to.value()
         if self.mode == _MODE_SUBSTITUTE and self._curve_check.isChecked():
             rule["curves"] = {
                 "12": self._curve_12.read(),
@@ -868,6 +921,9 @@ class _GatewayProgram(QGroupBox):
         )
         self.spec_left.write(rule.get("spec1") or {})
         self.spec_right.write(rule.get("spec2") or {})
+        if self.mode == _MODE_IGNORE:
+            self._ignore_from.setValue(int(rule.get("data_from", 1) or 1))
+            self._ignore_to.setValue(int(rule.get("data_to", 8) or 8))
         if self.mode == _MODE_SUBSTITUTE:
             curves = rule.get("curves") or {}
             legacy = rule.get("curve") or {}
@@ -1098,6 +1154,12 @@ class CanGatewayTab(QWidget):
         self._memory_indicator.update_usage(
             self._memory_indicator.estimate_rules(rules)
         )
+        # Оценка загрузки ОЗУ/CPU по числу активных правил шлюза
+        # (отчёт мастера: две доп. строки процента у индикатора).
+        self._memory_indicator.update_load(
+            len(self._internal_rules),
+            len(self._internal_rules) * 64,
+        )
 
     # ---- исполнение ------------------------------------------------------
 
@@ -1135,7 +1197,13 @@ class CanGatewayTab(QWidget):
                 match_spec, out_spec = rule["spec2"], rule["spec1"]
             if not direction_ok or not _spec_filled(match_spec):
                 continue
-            if not _spec_match(match_spec, frame_id, data):
+            if rule["mode"] == _MODE_IGNORE:
+                # DATA от/до ограничивают байты сравнения (отчёт мастера).
+                byte_from = int(rule.get("data_from", 1) or 1)
+                byte_to = int(rule.get("data_to", 8) or 8)
+            else:
+                byte_from, byte_to = 1, 8
+            if not _spec_match(match_spec, frame_id, data, byte_from, byte_to):
                 continue
 
             if rule["mode"] == _MODE_IGNORE:
