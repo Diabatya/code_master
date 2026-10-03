@@ -193,13 +193,13 @@ class _MatrixBackground(QWidget):
     события мыши (аналог pointer-events: none)."""
 
     # (длительность с, задержка с, прозрачность, размер шрифта px)
-    # Скорость падения снижена в 10 раз (отчёт мастера).
+    # Скорость падения снижена ещё в 5 раз (отчёт мастера).
     _COL_STYLE = (
-        (30.0, 0.0, 0.60, 34),   # передний план
-        (55.0, 7.0, 0.25, 20),   # дальний план
-        (42.0, 14.0, 0.45, 28),  # средний план
-        (60.0, 3.0, 0.35, 24),   # средне-дальний
-        (38.0, 21.0, 0.55, 32),  # передний план
+        (150.0, 0.0, 0.60, 34),   # передний план
+        (275.0, 25.0, 0.25, 20),  # дальний план
+        (210.0, 45.0, 0.45, 28),  # средний план
+        (300.0, 10.0, 0.35, 24),  # средне-дальний
+        (190.0, 65.0, 0.55, 32),  # передний план
     )
     _COLS = 8
     _ROWS = 16
@@ -476,8 +476,7 @@ class _DeviceCard(QWidget):
         # пропадала.
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(
-            "_DeviceCard { border: 2px solid #3A7BD5; border-radius: 12px;"
-            " background: rgba(255,255,255,0.03); }"
+            "_DeviceCard { border: 2px solid #3A7BD5; border-radius: 12px; }"
         )
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 12)
@@ -504,7 +503,8 @@ class _DeviceCard(QWidget):
         for line in (
             tr("ID: {0}").format(port or "—"),
             tr("Серийный номер: {0}").format(serial or "—"),
-            tr("Тип устройства: {0}").format(dev_type or "—"),
+            # «Тип устройства» не выводим строкой — он уже показан
+            # крупным именем карточки (отчёт мастера).
             tr("Версия ПО: {0}").format(version or "—"),
         ):
             label = QLabel(line)
@@ -628,7 +628,7 @@ class MainWindow(QMainWindow):
         self._logo_icon_label.setFixedSize(120, 50)
         self._logo_icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._apply_logo()
-        self._logo_label = QLabel(tr("Код Мастер"))
+        self._logo_label = QLabel(tr("Мастер"))
         # Название в 2 раза крупнее прежнего (отчёт мастера).
         self._logo_label.setFont(QFont("Segoe UI", 24, QFont.Weight.Bold))
         self._logo_label.setProperty("title", True)
@@ -709,6 +709,15 @@ class MainWindow(QMainWindow):
         self._cards_scroll.setWidget(self._cards_box)
         self._cards_scroll.setStyleSheet(
             "QScrollArea { border: none; background: transparent; }"
+        )
+        # Viewport — отдельный виджет: без прозрачности он заливает
+        # середину экрана и матрица видна только по периметру
+        # (отчёт мастера).
+        self._cards_scroll.viewport().setStyleSheet(
+            "background: transparent;"
+        )
+        self._cards_box.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground
         )
 
         # Нижние служебные кнопки стартового экрана.
@@ -823,7 +832,7 @@ class MainWindow(QMainWindow):
         # Логотип x2: иконка Porsche 911 + «Код Мастер» крупно,
         # с отступом от голубой линии и ниже верхнего края.
         logo_row = QHBoxLayout()
-        logo_row.setSpacing(14)
+        logo_row.setSpacing(4)
         logo_row.addSpacing(18)
         logo_row.addWidget(self._logo_icon_label)
         logo_row.addWidget(
@@ -1441,12 +1450,27 @@ class MainWindow(QMainWindow):
         current = table.currentItem()
         device_type = current.text() if current is not None else "2 CAN"
         # Офлайн-редактор: порт-эмулятор, тип устройства — выбранный.
+        # Новая конфигурация стартует ПУСТОЙ: ключи-сидеры вкладок
+        # затираем (прежняя программа остаётся в backup-снапшоте,
+        # отчёт мастера — «демо подтягивало тестовый конфиг»).
+        self._config.backup_snapshot("before_new_config")
         baud = int(self._config.get("baudrate", 115200) or 115200)
         self._config.set_bulk({
             "port": "FAKE",
             "emulation": True,
             "device_type_name": device_type,
+            "device_name": "",
+            "device_serial": "",
+            "triggers": [],
+            "gateway_rules": [],
+            "gateway_ignore": [],
+            "flexible_rules": [],
         })
+        # Переменные живут в сессии окна настроек — чистим вкладку
+        # у уже созданного окна, иначе в «пустой» демо-конфигурации
+        # всплывали бы строки прошлой сессии (отчёт мастера).
+        if self._settings_window is not None:
+            self._settings_window._variables_tab.import_config({})
         if self._serial_manager.open_port(
             "FAKE", baud, emulation=True, auto_reconnect=True
         ):
@@ -1519,6 +1543,10 @@ class MainWindow(QMainWindow):
         # без флага это воскрешало главное окно посреди выхода.
         self._closing_app = True
         self._heartbeat_timer.stop()
+        # Фоновый поллер телеметрии МК — гасим до разрыва порта,
+        # иначе поток мог бы сидеть в read на закрытом дескрипторе.
+        from ui.memory_indicator import MemoryIndicator
+        MemoryIndicator.shutdown_poller()
         if self._settings_window is not None:
             self._settings_window.close()
         if self._com_logger_window is not None:

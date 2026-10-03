@@ -571,6 +571,75 @@ class Translator:
                 "например, «Обороты ДВС»": "e.g. 'Engine RPM'",
                 "например, «Состояние АКПП»": "e.g. 'Gearbox state'",
                 "например, «Управление заслонками»": "e.g. 'Flap control'",
+                "Импульсная переменная": "Pulse variable",
+                "например, «Нажатие кнопки»": "e.g. 'Button press'",
+                "— импульс": "— pulse",
+                "— импульс активен": "— pulse active",
+                "Один фрейм: приход пакета с совпадающими байтами DATA "
+                "поднимает переменную в «1» на 0.5 секунды. X в DATA — "
+                "любой байт, пустое поле не участвует в сравнении.":
+                    "Single frame: an incoming packet with matching DATA "
+                    "bytes raises the variable to '1' for 0.5 seconds. "
+                    "X in DATA means any byte; an empty field is ignored.",
+                "Онлайн-данные кадра с этим ID на шине":
+                    "Live data of the frame with this ID on the bus",
+                "DATA — заполните хотя бы один байт":
+                    "DATA — fill in at least one byte",
+                "DATA от — заполните хотя бы один байт":
+                    "DATA from — fill in at least one byte",
+                "ID — шестнадцатеричное число":
+                    "ID — hexadecimal number",
+                "в байт": "as byte",
+                "в бит": "as bit",
+                "Не хранить": "Do not store",
+                "Проверка переменной": "Variable check",
+                "Исправьте поля: {0}": "Fix the fields: {0}",
+                "график — минимум 2 точки с корректными значениями":
+                    "graph — at least 2 points with valid values",
+                "таблица привязки — хотя бы одна строка "
+                "«значение DATA + имя»":
+                    "binding table — at least one row "
+                    "'DATA value + name'",
+                "Таблица привязки": "Binding table",
+                "Разрядность CAN-идентификатора":
+                    "CAN identifier bit length",
+                "Config Variable": "Config Variable",
+                "Файл не является конфигурацией переменных или несовместим "
+                "с версией приложения":
+                    "The file is not a variable configuration or is "
+                    "incompatible with the application version",
+                "Это файл общей конфигурации — загрузите его кнопкой "
+                "«Загрузить конфигурацию».":
+                    "This is a general configuration file — load it with "
+                    "the 'Load configuration' button.",
+                "В расчёт идут только заполненные байты без «X»; при "
+                "нескольких байтах сырое значение — их сумма. Таблица "
+                "привязки: слева сырое значение этих байт (HEX — как "
+                "записали, так и остаётся), справа — величина. Точки "
+                "правятся в таблице и должны лежать на линии графика "
+                "в пределах «ОТ»–«ДО».":
+                    "Only filled bytes without 'X' are counted; with "
+                    "several bytes the raw value is their sum. Binding "
+                    "table: raw value of these bytes on the left (HEX — "
+                    "kept as entered), quantity on the right. Points are "
+                    "edited in the table and must lie on the graph line "
+                    "within the FROM–TO range.",
+                "МК анализирует приходящие пакеты: у кадра с этим ID "
+                "указанные байты DATA перезаписывают прежние значения в "
+                "кэше переменной — каждый новый пакет замещает старые "
+                "байты. В перезапись идут только заполненные поля "
+                "«от»/«до» без «X». Таблица привязки задаёт символьное "
+                "имя значению кэша: одинаковые имена у разных DATA "
+                "объединяют состояния — такие строки раскрашиваются "
+                "одним цветом.":
+                    "The MCU parses incoming packets: in a frame with "
+                    "this ID the specified DATA bytes overwrite previous "
+                    "values in the variable cache — each new packet "
+                    "replaces old bytes. Only filled 'from'/'to' fields "
+                    "without 'X' are overwritten. The binding table maps "
+                    "a symbolic name to the cache value: same names for "
+                    "different DATA merge states — such rows share "
+                    "one color.",
                 "ОЗУ": "RAM",
                 "ПЗУ": "ROM",
                 "ПЗУ появится после подключения EEPROM к МК":

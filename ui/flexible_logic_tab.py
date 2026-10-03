@@ -42,6 +42,7 @@ OUT1-4 («Вкл»/«Выкл»/«Подать импульсы»/«Вкл ШИ�
 from __future__ import annotations
 
 import contextlib
+import time
 from typing import Any
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, Slot
@@ -71,13 +72,14 @@ from models.translations import _ as tr
 from models.utils import hex_to_int
 from ui.hex_edit import create_data_field_widget
 from ui.ui_utils import setup_button
-from ui.variables_tab import _HexIdEdit
+from ui.variables_tab import _HexIdEdit, _tokens_match
 
 logger = get_logger(__name__)
 
 _EVENT_NONE = "none"
 _EVENT_DYN = "dyn"
 _EVENT_NUM = "num"   # «Численная переменная» — отдельный вид (отчёт мастера)
+_EVENT_IMPULSE = "impulse"  # «Импульсная переменная» (отчёт мастера)
 _EVENT_STATIC = "static"
 _EVENT_AUX = "aux"
 _EVENT_FRAME = "frame"
@@ -86,6 +88,7 @@ _COND_NONE = "none"
 _COND_STATIC = "static"
 _COND_DYN = "dyn"
 _COND_NUM = "num"    # «Численная переменная» (отчёт мастера)
+_COND_IMPULSE = "impulse"  # «Импульсная переменная» (отчёт мастера)
 _COND_AUX = "aux"
 
 _ACT_NONE = "none"
@@ -134,20 +137,6 @@ def _text_to_tokens(edits: list[QLineEdit], text: Any) -> None:
     )
     for i, edit in enumerate(edits):
         edit.setText(tokens[i].upper() if i < len(tokens) else "")
-
-
-def _tokens_match(tokens: list[str], data: bytes) -> bool:
-    """Проверка DATA по маске токенов: «»/«X» — байт не участвует."""
-    for i, token in enumerate(tokens):
-        if not token or token == "X":
-            continue
-        value = hex_to_int(token)
-        if value is None:
-            continue
-        byte = data[i] if i < len(data) else 0
-        if byte != value:
-            return False
-    return True
 
 
 def _tokens_range_match(lo: list[str], hi: list[str], data: bytes) -> bool:
@@ -501,6 +490,23 @@ class _CondVarPage(QWidget):
         self.value.textChanged.connect(mark_dirty)
 
 
+class _ImpulseVarPage(QWidget):
+    """Страница «Импульсная переменная» — только имя переменной:
+    событие срабатывает на каждый импульс (совпадение DATA на шине),
+    условие истинно, пока импульс активен (0.5 с — отчёт мастера)."""
+
+    def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(_small_label(tr("Переменная:"), font))
+        self.var = _VarCombo(font)
+        layout.addWidget(self.var)
+        layout.addStretch()
+        self.var.currentIndexChanged.connect(mark_dirty)
+
+
 class _AuxEventPage(QWidget):
     """Событие «Доп канал»: номер канала и состояние
     «Активен»/«Не активен» (отчёт мастера)."""
@@ -718,7 +724,7 @@ class _EventItem(QWidget):
     (в программе событий может быть несколько — ИЛИ, отчёт мастера)."""
 
     _PAGES = (_EVENT_NONE, _EVENT_STATIC, _EVENT_DYN, _EVENT_NUM,
-              _EVENT_AUX, _EVENT_FRAME)
+              _EVENT_IMPULSE, _EVENT_AUX, _EVENT_FRAME)
 
     def __init__(self, row: RuleRowWidget, font: QFont, event: dict | None = None) -> None:
         super().__init__(row)
@@ -754,6 +760,7 @@ class _EventItem(QWidget):
         self._type.addItem(tr("Статическая переменная"), _EVENT_STATIC)
         self._type.addItem(tr("Динамическая переменная"), _EVENT_DYN)
         self._type.addItem(tr("Численная переменная"), _EVENT_NUM)
+        self._type.addItem(tr("Импульсная переменная"), _EVENT_IMPULSE)
         self._type.addItem(tr("Доп канал"), _EVENT_AUX)
         self._type.addItem(tr("Фрейм"), _EVENT_FRAME)
         self._type.currentIndexChanged.connect(self._on_type)
@@ -766,11 +773,12 @@ class _EventItem(QWidget):
         self._static = _StaticEventPage(font, row._mark_dirty)
         self._dyn = _DynEventPage(font, row._mark_dirty, _EVENT_DYN)
         self._num = _DynEventPage(font, row._mark_dirty, _EVENT_NUM)
+        self._impulse = _ImpulseVarPage(font, row._mark_dirty)
         self._aux = _AuxEventPage(font, row._mark_dirty)
         self._frame = _FrameEventPage(font, row._mark_dirty)
         for page in (
             self._none, self._static, self._dyn, self._num,
-            self._aux, self._frame
+            self._impulse, self._aux, self._frame
         ):
             self._stack.addWidget(page)
         editor_layout.addWidget(self._stack)
@@ -783,7 +791,8 @@ class _EventItem(QWidget):
 
         # Сводка обновляется при любом изменении полей события.
         for page in (
-            self._dyn, self._num, self._static, self._aux, self._frame
+            self._dyn, self._num, self._impulse,
+            self._static, self._aux, self._frame
         ):
             for child in page.findChildren(QWidget):
                 if isinstance(child, QComboBox):
@@ -816,6 +825,11 @@ class _EventItem(QWidget):
         if etype == _EVENT_NONE:
             # Ненастроенное событие не участвует в программе.
             return {"type": _EVENT_NONE}
+        if etype == _EVENT_IMPULSE:
+            return {
+                "type": _EVENT_IMPULSE,
+                "var": self._impulse.var.get_name(),
+            }
         pages = {
             _EVENT_DYN: self._dyn,
             _EVENT_NUM: self._num,
@@ -830,6 +844,9 @@ class _EventItem(QWidget):
         idx = self._type.findData(etype)
         self._type.setCurrentIndex(idx if idx >= 0 else 0)
         self._stack.setCurrentIndex(self._type.currentIndex())
+        if etype == _EVENT_IMPULSE:
+            self._impulse.var.set_name(str(event.get("var", "")))
+            return
         page = {
             _EVENT_DYN: self._dyn,
             _EVENT_NUM: self._num,
@@ -848,9 +865,11 @@ class _EventItem(QWidget):
         # в событиях/условиях это отдельные пункты (отчёт мастера).
         dyn = tab.variable_names("read", "dyn_cache") if tab else []
         num = tab.variable_names("read", "dynamic") if tab else []
+        imp = tab.variable_names("read", "impulse") if tab else []
         st = tab.variable_names("read", "static") if tab else []
         self._dyn.var.set_names(dyn, tr("— не выбрано —"))
         self._num.var.set_names(num, tr("— не выбрано —"))
+        self._impulse.var.set_names(imp, tr("— не выбрано —"))
         self._static.var.set_names(st, tr("— не выбрано —"))
 
     def _update_summary(self, *_args) -> None:
@@ -867,6 +886,12 @@ class _EventItem(QWidget):
                 else tr("стали меньше")
             )
             text = f"{name} {func} {page.value.text().strip()}".rstrip()
+        elif etype == _EVENT_IMPULSE:
+            # «Нажатие кнопки — импульс».
+            text = (
+                f"{self._impulse.var.get_name() or '—'} "
+                f"{tr('— импульс')}"
+            )
         elif etype == _EVENT_STATIC:
             name = self._static.var.get_name() or "—"
             func = {
@@ -896,7 +921,8 @@ class _CondItem(QWidget):
     """Одно условие программы: компактная строка + тип + настройки.
     Условий может быть несколько — все должны выполняться (И)."""
 
-    _PAGES = (_COND_NONE, _COND_STATIC, _COND_DYN, _COND_NUM, _COND_AUX)
+    _PAGES = (_COND_NONE, _COND_STATIC, _COND_DYN, _COND_NUM,
+              _COND_IMPULSE, _COND_AUX)
 
     def __init__(self, row: RuleRowWidget, font: QFont, cond: dict | None = None) -> None:
         super().__init__(row)
@@ -929,6 +955,7 @@ class _CondItem(QWidget):
         self._type.addItem(tr("Статическая переменная"), _COND_STATIC)
         self._type.addItem(tr("Динамическая переменная"), _COND_DYN)
         self._type.addItem(tr("Численная переменная"), _COND_NUM)
+        self._type.addItem(tr("Импульсная переменная"), _COND_IMPULSE)
         self._type.addItem(tr("Доп канал"), _COND_AUX)
         self._type.currentIndexChanged.connect(self._on_type)
         editor_layout.addWidget(self._type)
@@ -960,6 +987,8 @@ class _CondItem(QWidget):
 
         dyn_page = _CondVarPage(font, row._mark_dirty)
         num_page = _CondVarPage(font, row._mark_dirty)
+        impulse_page = _ImpulseVarPage(font, row._mark_dirty)
+        self.imp_var = impulse_page.var
         self.dyn_var = dyn_page.var
         self.dyn_op = dyn_page.op
         self.dyn_value = dyn_page.value
@@ -988,7 +1017,10 @@ class _CondItem(QWidget):
         aux_layout.addLayout(aux_row)
         aux_layout.addStretch()
 
-        for page in (none_page, static_page, dyn_page, num_page, aux_page):
+        for page in (
+            none_page, static_page, dyn_page, num_page,
+            impulse_page, aux_page
+        ):
             self._stack.addWidget(page)
         editor_layout.addWidget(self._stack)
         layout.addWidget(self._editor)
@@ -1006,6 +1038,7 @@ class _CondItem(QWidget):
         self.num_var.currentIndexChanged.connect(self._update_summary)
         self.num_op.currentIndexChanged.connect(self._update_summary)
         self.num_value.textChanged.connect(self._update_summary)
+        self.imp_var.currentIndexChanged.connect(self._update_summary)
         self.aux_channel.valueChanged.connect(self._update_summary)
         self.aux_state.currentIndexChanged.connect(self._update_summary)
         self.st_var.currentIndexChanged.connect(row._mark_dirty)
@@ -1013,6 +1046,7 @@ class _CondItem(QWidget):
         self.dyn_var.currentIndexChanged.connect(row._mark_dirty)
         self.dyn_op.currentIndexChanged.connect(row._mark_dirty)
         self.dyn_value.textChanged.connect(row._mark_dirty)
+        self.imp_var.currentIndexChanged.connect(row._mark_dirty)
         self.aux_channel.valueChanged.connect(row._mark_dirty)
         self.aux_state.currentIndexChanged.connect(row._mark_dirty)
 
@@ -1048,6 +1082,9 @@ class _CondItem(QWidget):
                 "op": op.currentData(),
                 "value": val.text().strip(),
             }
+        if ctype == _COND_IMPULSE:
+            # «Импульс активен» — пока горит вспышка 0.5 с.
+            return {"type": _COND_IMPULSE, "var": self.imp_var.get_name()}
         if ctype == _COND_AUX:
             return {
                 "type": _COND_AUX,
@@ -1073,6 +1110,8 @@ class _CondItem(QWidget):
             oidx = op.findData(cond.get("op", "gt"))
             op.setCurrentIndex(oidx if oidx >= 0 else 0)
             val.setText(str(cond.get("value", "")))
+        elif ctype == _COND_IMPULSE:
+            self.imp_var.set_name(str(cond.get("var", "")))
         elif ctype == _COND_AUX:
             self.aux_channel.setValue(int(cond.get("channel", 1) or 1))
             sidx = self.aux_state.findData(int(cond.get("state", 1) or 0))
@@ -1085,10 +1124,12 @@ class _CondItem(QWidget):
         # (отчёт мастера).
         dyn = tab.variable_names("read", "dyn_cache") if tab else []
         num = tab.variable_names("read", "dynamic") if tab else []
+        imp = tab.variable_names("read", "impulse") if tab else []
         st = tab.variable_names("read", "static") if tab else []
         self.st_var.set_names(st, tr("— не выбрано —"))
         self.dyn_var.set_names(dyn, tr("— не выбрано —"))
         self.num_var.set_names(num, tr("— не выбрано —"))
+        self.imp_var.set_names(imp, tr("— не выбрано —"))
 
     def _update_summary(self, *_args) -> None:
         ctype = self._type.currentData()
@@ -1107,6 +1148,12 @@ class _CondItem(QWidget):
                 f"{var.get_name() or '—'} {op} "
                 f"{val.text().strip()}"
             ).rstrip()
+        elif ctype == _COND_IMPULSE:
+            # «Кнопка — импульс активен».
+            text = (
+                f"{self.imp_var.get_name() or '—'} "
+                f"{tr('— импульс активен')}"
+            )
         elif ctype == _COND_AUX:
             # «Доп канал 1 активен».
             state = (
@@ -2287,6 +2334,11 @@ class FlexibleLogicTab(QWidget):
         # больше/меньше» — фронт булева состояния, а не каждый кадр.
         # Ключ: (программа, событие, имя переменной).
         self._dyn_flags: dict[tuple[int, int, str], bool] = {}
+        # «Импульсные переменные»: имя → время (monotonic) гашения
+        # вспышки; _pulsed_now — имена, вспыхнувшие на текущем кадре
+        # (фронт для событий ГЛ — отчёт мастера).
+        self._impulse_until: dict[str, float] = {}
+        self._pulsed_now: set[str] = set()
         # Кэш действий: индекс программы → последний подошедший кадр.
         self._fl_cache: dict[int, dict[str, Any]] = {}
         # «Сработок на DATA» событий-фреймов:
@@ -2440,11 +2492,24 @@ class FlexibleLogicTab(QWidget):
         Возвращает статические переменные, сменившие состояние
         (имя → новое значение) — это фронты событий «Статическая»."""
         changed: dict[str, int] = {}
+        self._pulsed_now.clear()
         for var in self._variable_defs():
             name = var.get("name", "").strip()
             if not name:
                 continue
-            if var.get("type") == "static":
+            if var.get("type") == "impulse":
+                # «Импульсная переменная»: один фрейм, совпадение
+                # указанных байтов DATA (X — любой) вспыхивает
+                # переменную в «1» на 0.5 с (отчёт мастера).
+                fid = hex_to_int(str(var.get("id", "")))
+                if fid is None or fid != frame_id:
+                    continue
+                tokens = str(var.get("data", "")).split()
+                if not _tokens_match(tokens, data):
+                    continue
+                self._impulse_until[name] = time.monotonic() + 0.5
+                self._pulsed_now.add(name)
+            elif var.get("type") == "static":
                 for frame_def in var.get("frames") or []:
                     fid = hex_to_int(str(frame_def.get("id", "")))
                     if fid is None or fid != frame_id:
@@ -2573,6 +2638,10 @@ class FlexibleLogicTab(QWidget):
             if op == "eq":
                 return value == threshold
             return value > threshold
+        if ctype == _COND_IMPULSE:
+            # «Импульс активен» — пока не истекли 0.5 с вспышки.
+            until = self._impulse_until.get(str(cond.get("var", "")), 0.0)
+            return time.monotonic() < until
         if ctype == _COND_AUX:
             # «Доп канал N активен» — ПК-зеркало команд CMD_AUX_SET.
             ch = int(cond.get("channel", 1) or 1)
@@ -2896,6 +2965,11 @@ class FlexibleLogicTab(QWidget):
             fired = flag and not self._dyn_flags.get(key, False)
             self._dyn_flags[key] = flag
             return fired
+        if etype == _EVENT_IMPULSE:
+            # «Импульсная переменная»: событие — фронт вспышки на
+            # этом кадре (каждый подошедший кадр — новая сработка,
+            # как нажатие кнопки — отчёт мастера).
+            return str(event.get("var", "")).strip() in self._pulsed_now
         if etype == _EVENT_AUX:
             # Фронт состояния доп. канала по ПК-зеркалу CMD_AUX_SET:
             # «активен»/«не активен» стреляет на переходе уровня.

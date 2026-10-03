@@ -56,7 +56,7 @@ class _TelemetryPoller(QThread):
                 # request_control держит _lock, опрос между ними давал
                 # бы каждой команде дополнительный таймаут (полевой баг
                 # «прогрузка большого конфига с 5-10 раза»).
-                if mgr.is_control_session_active():
+                if mgr.in_control_session:
                     continue
                 info = mgr.read_system_info()
             except Exception:  # noqa: BLE001
@@ -89,6 +89,10 @@ class MemoryIndicator(QWidget):
         poller = cls._shared_poller
         if poller is not None:
             poller.stop()
+            # Ждём завершения run(): без wait() Qt при выходе
+            # приложения падал с «QThread: Destroyed while thread is
+            # still running» — поток ещё спал на _stop_event.
+            poller.wait(2000)
             cls._shared_poller = None
 
     def __init__(self, parent: QWidget | None = None) -> None:

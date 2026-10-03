@@ -84,6 +84,11 @@ def _make_window(qapp, monkeypatch):
     window = SettingsWindow(_FakeSerialManager(), _FakeConfig(), None)
     yield window
     window.deleteLater()
+    # SettingsWindow запускает общий поллер телеметрии МК — гасим,
+    # иначе поток живёт до выхода интерпретатора и pytest падает
+    # с «QThread: Destroyed while thread is still running».
+    from ui.memory_indicator import MemoryIndicator
+    MemoryIndicator.shutdown_poller()
 
 
 def test_signature_stable_across_tab_switches(qapp, monkeypatch) -> None:

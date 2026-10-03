@@ -82,6 +82,21 @@ from ui.id_edit import IdPasteEdit
 _TYPE_STATIC = "static"
 _TYPE_DYNAMIC = "dynamic"      # «Численная переменная» (переименована)
 _TYPE_DYNCACHE = "dyn_cache"   # новый вид «Динамическая переменная»
+_TYPE_IMPULSE = "impulse"      # «Импульсная переменная» — вспышка 0.5 с
+
+
+def _tokens_match(tokens: list[str], data: bytes) -> bool:
+    """Проверка DATA по маске токенов: «»/«X» — байт не участвует."""
+    for i, token in enumerate(tokens):
+        if not token or token == "X":
+            continue
+        value = hex_to_int(token)
+        if value is None:
+            continue
+        byte = data[i] if i < len(data) else 0
+        if byte != value:
+            return False
+    return True
 
 # Метка и версия файла переменных: чужой формат или другая версия
 # отвергаются сообщением, без падения приложения. Имя файла —
@@ -386,6 +401,9 @@ class _GraphPreview(QWidget):
         if xs:
             x0, x1 = min(x0, min(xs)), max(x1, max(xs))
         y0, y1 = (min(ys), max(ys)) if ys else (0.0, 1.0)
+        # Обе оси всегда включают 0 — линия графика начинается
+        # в точке пересечения осей (отчёт мастера).
+        x0, y0 = min(x0, 0.0), min(y0, 0.0)
         if x1 == x0:
             x1 = x0 + 1
         if y1 == y0:
@@ -471,16 +489,21 @@ class _GraphPreview(QWidget):
                 self._fmt_y(_y),
             )
 
-        # Линия идёт от значения DATA «от» до «до»: крайние точки —
-        # границы диапазона с экстраполяцией по краевым сегментам,
-        # точки таблицы лежат на линии между ними (отчёт мастера).
+        # Линия начинается в точке пересечения осей (0,0) и идёт до
+        # значения DATA «до»: крайние точки — границы диапазона
+        # «от»/«до» с экстраполяцией по краевым сегментам, точки
+        # таблицы лежат на линии между ними (отчёт мастера).
         painter.setPen(QPen(QColor(108, 140, 255), 2))
-        line_xs = [x0, *(p[0] for p in self._points if x0 < p[0] < x1), x1]
-        prev = None
+        if self._axis_x is not None:
+            lx0, lx1 = self._axis_x
+        else:
+            lx0 = min(p[0] for p in self._points)
+            lx1 = max(p[0] for p in self._points)
+        line_xs = [lx0, *(p[0] for p in self._points if lx0 < p[0] < lx1), lx1]
+        prev = self._to_screen(rect, x0, y0)
         for x in line_xs:
             px, py = self._to_screen(rect, x, _map_points(self._points, x))
-            if prev is not None:
-                painter.drawLine(int(prev[0]), int(prev[1]), int(px), int(py))
+            painter.drawLine(int(prev[0]), int(prev[1]), int(px), int(py))
             prev = (px, py)
         painter.setPen(QPen(QColor(255, 170, 80), 1))
         painter.setBrush(QColor(255, 170, 80))
@@ -594,6 +617,17 @@ class _FrameRow(QWidget):
         self.value.addItem(tr("→ 0"), 0)
         row.addWidget(self.value)
 
+        # Онлайн-строка DATA кадра с этим ID — как в мониторинге
+        # (отчёт мастера: «как только записали ID — сразу выводи»).
+        self.live_label = QLabel("—")
+        self.live_label.setFont(QFont("Consolas", 8))
+        self.live_label.setStyleSheet("color: #7C9EFF;")
+        self.live_label.setMinimumWidth(96)
+        self.live_label.setToolTip(
+            tr("Онлайн-данные кадра с этим ID на шине")
+        )
+        row.addWidget(self.live_label)
+
         # Крестик — стандартная иконка закрытия: символ «✕» в части
         # шрифтов не рендерится (отчёт мастера).
         remove = QPushButton()
@@ -623,6 +657,19 @@ class _FrameRow(QWidget):
         idx = self.value.findData(int(data.get("value", 1)))
         self.value.setCurrentIndex(idx if idx >= 0 else 0)
 
+    def update_live(self, tab) -> None:
+        """Онлайн-DATA кадра с текущим ID — опрашивается диалогом
+        по таймеру (отчёт мастера)."""
+        fid = hex_to_int(self.can_id.text())
+        data = (
+            None
+            if fid is None or tab is None
+            else tab.live_frame(fid, bool(self.bit.currentData()))
+        )
+        self.live_label.setText(
+            "—" if data is None else " ".join(f"{b:02X}" for b in data)
+        )
+
 
 class _ValuePage(QWidget):
     """Страница байтовой переменной: ID + битность + DLC, побайтовые
@@ -645,11 +692,13 @@ class _ValuePage(QWidget):
         kind: str,
         get_row,
         on_changed=None,
+        get_tab=None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._kind = kind
         self._get_row = get_row
+        self._get_tab = get_tab
         self._on_changed = on_changed
         layout = QVBoxLayout(self)
         layout.setSpacing(6)
@@ -746,9 +795,23 @@ class _ValuePage(QWidget):
             " border-radius: 6px; padding: 2px 10px;"
         )
         _selectable(self.live_hex_label)
+        # Онлайн-строка DATA всего кадра с этим ID — как в
+        # мониторинге (отчёт мастера).
+        self.live_data_label = QLabel("—")
+        self.live_data_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        self.live_data_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.live_data_label.setStyleSheet(
+            "color: #4CAF50; border: 1px solid #45455A;"
+            " border-radius: 6px; padding: 2px 10px;"
+        )
+        self.live_data_label.setToolTip(
+            tr("Онлайн-данные кадра с этим ID на шине")
+        )
+        _selectable(self.live_data_label)
         live_row.addStretch()
         live_row.addWidget(self.live_label)
         live_row.addWidget(self.live_hex_label)
+        live_row.addWidget(self.live_data_label)
         live_row.addStretch()
         layout.addLayout(live_row)
         self._live_timer = QTimer(self)
@@ -985,6 +1048,18 @@ class _ValuePage(QWidget):
 
     def _update_live_label(self) -> None:
         row = self._get_row() if self._get_row is not None else None
+        # Онлайн-DATA кадра с ID из поля — показываем всю строку
+        # сразу после ввода ID (отчёт мастера).
+        tab = self._get_tab() if self._get_tab is not None else None
+        fid = hex_to_int(self.can_id.text())
+        data = (
+            None
+            if fid is None or tab is None
+            else tab.live_frame(fid, bool(self.bit.currentData()))
+        )
+        self.live_data_label.setText(
+            "—" if data is None else " ".join(f"{b:02X}" for b in data)
+        )
         raw = getattr(row, "live_raw", None) if row is not None else None
         self.live_hex_label.setText(
             "0x—" if raw is None else f"0x{raw:X}"
@@ -1051,6 +1126,127 @@ class _ValuePage(QWidget):
         return cfg
 
 
+class _ImpulsePage(QWidget):
+    """Страница «Импульсной переменной» (отчёт мастера): один фрейм —
+    ID и поле DATA на 1..8 байт; приход кадра с совпадающими байтами
+    поднимает переменную в «1» на 0.5 с. Онлайн-строка DATA кадра —
+    как в мониторинге."""
+
+    def __init__(
+        self,
+        font: QFont,
+        get_tab,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._get_tab = get_tab
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        hint = QLabel(tr(
+            "Один фрейм: приход пакета с совпадающими байтами DATA "
+            "поднимает переменную в «1» на 0.5 секунды. X в DATA — "
+            "любой байт, пустое поле не участвует в сравнении."
+        ))
+        hint.setFont(font)
+        hint.setWordWrap(True)
+        _selectable(hint)
+        layout.addWidget(hint)
+
+        line1 = QHBoxLayout()
+        line1.addWidget(QLabel("ID:"))
+        self.can_id = _HexIdEdit(font, "0C0")
+        line1.addWidget(self.can_id)
+        self.bit = QComboBox()
+        self.bit.setFont(font)
+        self.bit.addItem(tr("11 бит"), False)
+        self.bit.addItem(tr("29 бит"), True)
+        self.bit.setFixedWidth(92)
+        self.bit.setToolTip(tr("Разрядность CAN-идентификатора"))
+        line1.addWidget(self.bit)
+        line1.addWidget(QLabel("DLC:"))
+        self.dlc = QSpinBox()
+        self.dlc.setFont(font)
+        self.dlc.setRange(1, 8)
+        self.dlc.setValue(8)
+        self.dlc.setFixedWidth(56)
+        line1.addWidget(self.dlc)
+        line1.addStretch()
+        layout.addLayout(line1)
+
+        line2 = QHBoxLayout()
+        data_label = QLabel(tr("DATA:"))
+        data_label.setFont(font)
+        data_label.setFixedWidth(56)
+        line2.addWidget(data_label)
+        self.data, data_widget = create_data_field_widget(
+            font, 8, edit_width=34, allow_x=True
+        )
+        line2.addWidget(data_widget)
+        line2.addStretch()
+        layout.addLayout(line2)
+        self.dlc.valueChanged.connect(
+            lambda v: _set_data_enabled(self.data, v)
+        )
+        _set_data_enabled(self.data, self.dlc.value())
+
+        # Онлайн-строка DATA кадра с этим ID (отчёт мастера).
+        self.live_data_label = QLabel("—")
+        self.live_data_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        self.live_data_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.live_data_label.setStyleSheet(
+            "color: #4CAF50; border: 1px solid #45455A;"
+            " border-radius: 6px; padding: 2px 10px;"
+        )
+        self.live_data_label.setToolTip(
+            tr("Онлайн-данные кадра с этим ID на шине")
+        )
+        _selectable(self.live_data_label)
+        live_row = QHBoxLayout()
+        live_row.addStretch()
+        live_row.addWidget(self.live_data_label)
+        live_row.addStretch()
+        layout.addLayout(live_row)
+        layout.addStretch(1)
+
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(250)
+        self._live_timer.timeout.connect(self._update_live_label)
+        self._live_timer.start()
+
+    def bytes_used(self) -> list[int]:
+        return _data_bytes_used(self.data)
+
+    def _update_live_label(self) -> None:
+        tab = self._get_tab() if self._get_tab is not None else None
+        fid = hex_to_int(self.can_id.text())
+        data = (
+            None
+            if fid is None or tab is None
+            else tab.live_frame(fid, bool(self.bit.currentData()))
+        )
+        self.live_data_label.setText(
+            "—" if data is None else " ".join(f"{b:02X}" for b in data)
+        )
+
+    def read(self) -> dict[str, Any]:
+        return {
+            "id": self.can_id.text().strip(),
+            "extended": bool(self.bit.currentData()),
+            "dlc": self.dlc.value(),
+            "data": _data_to_text(self.data),
+            "bytes": _data_bytes_used(self.data),
+        }
+
+    def write(self, config: dict[str, Any]) -> None:
+        self.can_id.setText(str(config.get("id", "")))
+        self.bit.setCurrentIndex(1 if config.get("extended") else 0)
+        self.dlc.setValue(int(config.get("dlc", 8)))
+        _set_data_enabled(self.data, self.dlc.value())
+        _text_to_data(self.data, config.get("data"))
+
+
 class VariableDialog(QDialog):
     """Настройка одной переменной: выбор вида, имени, носителя
     (ОЗУ/ПЗУ — при записи) и параметров.
@@ -1075,6 +1271,9 @@ class VariableDialog(QDialog):
         config = config or {}
         self._row = row
         self._for_control = for_control
+        # Вкладка «Переменные» — источник онлайн-кадров для
+        # live-строк DATA в таблицах настройки (отчёт мастера).
+        self._var_tab = parent if isinstance(parent, VariablesTab) else None
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -1088,6 +1287,7 @@ class VariableDialog(QDialog):
         # «Динамическая переменная» — новый вид с кэшем байтов на МК.
         self._type_combo.addItem(tr("Численная переменная"), _TYPE_DYNAMIC)
         self._type_combo.addItem(tr("Динамическая переменная"), _TYPE_DYNCACHE)
+        self._type_combo.addItem(tr("Импульсная переменная"), _TYPE_IMPULSE)
         self._type_combo.currentIndexChanged.connect(self._on_type_changed)
         head.addWidget(self._type_combo)
         head.addSpacing(16)
@@ -1112,18 +1312,23 @@ class VariableDialog(QDialog):
         head.addWidget(self._cache_bit_check)
         self._ram_radio = QRadioButton(tr("ОЗУ"))
         self._rom_radio = QRadioButton(tr("ПЗУ"))
-        for radio in (self._ram_radio, self._rom_radio):
+        # «Импульсная переменная» может вообще не храниться —
+        # третий вариант носителя (отчёт мастера).
+        self._none_radio = QRadioButton(tr("Не хранить"))
+        for radio in (self._ram_radio, self._rom_radio, self._none_radio):
             radio.setFont(font)
-        self._ram_radio.setChecked(config.get("storage", "ram") != "rom")
-        self._rom_radio.setChecked(config.get("storage") == "rom")
+        storage = config.get("storage", "ram")
+        self._ram_radio.setChecked(storage != "rom" and storage != "none")
+        self._rom_radio.setChecked(storage == "rom")
+        self._none_radio.setChecked(storage == "none")
         # Без галочки «в бит»/«в байт» выбор носителя не кликабелен
         # (отчёт мастера).
-        self._cache_bit_check.toggled.connect(self._ram_radio.setEnabled)
-        self._cache_bit_check.toggled.connect(self._rom_radio.setEnabled)
-        self._ram_radio.setEnabled(self._cache_bit_check.isChecked())
-        self._rom_radio.setEnabled(self._cache_bit_check.isChecked())
+        for radio in (self._ram_radio, self._rom_radio, self._none_radio):
+            self._cache_bit_check.toggled.connect(radio.setEnabled)
+            radio.setEnabled(self._cache_bit_check.isChecked())
         head.addWidget(self._ram_radio)
         head.addWidget(self._rom_radio)
+        head.addWidget(self._none_radio)
         # Под байтовую переменную память выделяется в байтах: показываем,
         # сколько байт займёт значение по заполненным полям DATA —
         # счёт обновляется при каждой правке DATA (отчёт мастера:
@@ -1142,15 +1347,21 @@ class VariableDialog(QDialog):
             font, "numeric",
             get_row=lambda: self._row,
             on_changed=self._refresh_storage_size,
+            get_tab=lambda: self._var_tab,
         )
         self._dyn_page = _ValuePage(
             font, "dyn",
             get_row=lambda: self._row,
             on_changed=self._refresh_storage_size,
+            get_tab=lambda: self._var_tab,
+        )
+        self._impulse_page = _ImpulsePage(
+            font, get_tab=lambda: self._var_tab
         )
         self._stack.addWidget(self._static_page)
         self._stack.addWidget(self._num_page)
         self._stack.addWidget(self._dyn_page)
+        self._stack.addWidget(self._impulse_page)
         layout.addWidget(self._stack, 1)
 
         buttons = QDialogButtonBox(
@@ -1163,6 +1374,20 @@ class VariableDialog(QDialog):
 
         self._apply_config(config)
         self._on_type_changed(self._type_combo.currentIndex())
+
+        # Онлайн-DATA во всех таблицах настройки переменной —
+        # опрос вкладки по таймеру (отчёт мастера: «как только
+        # записали ID — сразу выводи онлайн»).
+        self._live_poll = QTimer(self)
+        self._live_poll.setInterval(250)
+        self._live_poll.timeout.connect(self._poll_live)
+        self._live_poll.start()
+
+    def _poll_live(self) -> None:
+        """Раздаёт онлайн-DATA строкам фреймов статической страницы
+        (численная/динамическая/импульсная опрашивают свои таймеры)."""
+        for row in self._frame_rows:
+            row.update_live(self._var_tab)
 
     # ---- страница «Статическая переменная» -------------------------
 
@@ -1244,6 +1469,12 @@ class VariableDialog(QDialog):
         """Метка «N Байт» в шапке — фактическое число байт значения
         по заполненным полям DATA «от» (обновляется при каждой правке
         — отчёт мастера: «1 Байт» не менялся при выборе двух байт)."""
+        if self._type_combo.currentData() == _TYPE_IMPULSE:
+            count = max(1, len(self._impulse_page.bytes_used()))
+            self._storage_size_label.setText(
+                tr("{0} Байт").format(count)
+            )
+            return
         page = self._active_value_page()
         if page is None:
             self._storage_size_label.setText("")
@@ -1257,10 +1488,11 @@ class VariableDialog(QDialog):
         self._stack.setCurrentIndex(index)
         # Пример имени зависит от вида переменной (отчёт мастера):
         # численная → «Обороты ДВС», динамическая → «Состояние АКПП»,
-        # статическая → «Дверь водителя».
+        # импульсная → «Нажатие кнопки», статическая → «Дверь водителя».
         example = (
             tr("например, «Обороты ДВС»") if index == 1
             else tr("например, «Состояние АКПП»") if index == 2
+            else tr("например, «Нажатие кнопки»") if index == 3
             else tr("например, «Дверь водителя»")
         )
         self._name_edit.setPlaceholderText(example)
@@ -1274,8 +1506,15 @@ class VariableDialog(QDialog):
         # «в бит» — статические (бит состояния), «в байт» — байтовые
         # переменные (значение занимает байты) — отчёт мастера.
         self._cache_bit_check.setText(
-            tr("в байт") if page is not None else tr("в бит")
+            tr("в байт")
+            if page is not None or index == 3
+            else tr("в бит")
         )
+        # «Не хранить» — только у «Импульсной переменной»
+        # (отчёт мастера).
+        self._none_radio.setVisible(index == 3)
+        if index != 3 and self._none_radio.isChecked():
+            self._ram_radio.setChecked(True)
         if page is not None:
             _set_data_enabled(page.data_from, page.dlc.value())
             _set_data_enabled(page.data_to, page.dlc.value())
@@ -1290,6 +1529,8 @@ class VariableDialog(QDialog):
             idx = 0
         elif var_type == _TYPE_DYNCACHE:
             idx = 2
+        elif var_type == _TYPE_IMPULSE:
+            idx = 3
         else:
             var_type = _TYPE_DYNAMIC
             idx = 1
@@ -1300,6 +1541,8 @@ class VariableDialog(QDialog):
                 self._add_frame_row(frame)
             if not self._frame_rows:
                 self._add_frame_row(None)
+        elif var_type == _TYPE_IMPULSE:
+            self._impulse_page.write(config)
         else:
             page = self._num_page if var_type == _TYPE_DYNAMIC else self._dyn_page
             page.write(config)
@@ -1308,9 +1551,24 @@ class VariableDialog(QDialog):
         """Проверка DATA при записи байтовой переменной
         (отчёт мастера): валидный ID, хотя бы один байт в «от»,
         минимум две точки графика."""
+        if self._type_combo.currentData() == _TYPE_IMPULSE:
+            errors: list[str] = []
+            if hex_to_int(self._impulse_page.can_id.text()) is None:
+                errors.append(tr("ID — шестнадцатеричное число"))
+            if not self._impulse_page.bytes_used():
+                errors.append(tr("DATA — заполните хотя бы один байт"))
+            if errors:
+                QMessageBox.warning(
+                    self,
+                    tr("Проверка переменной"),
+                    tr("Исправьте поля: {0}").format(", ".join(errors)),
+                )
+                return
+            self.accept()
+            return
         page = self._active_value_page()
         if page is not None:
-            errors: list[str] = []
+            errors = []
             if hex_to_int(page.can_id.text()) is None:
                 errors.append(tr("ID — шестнадцатеричное число"))
             if not page.bytes_used():
@@ -1339,7 +1597,11 @@ class VariableDialog(QDialog):
         """Текущая конфигурация диалога."""
         base: dict[str, Any] = {
             "name": self._name_edit.text().strip(),
-            "storage": "rom" if self._rom_radio.isChecked() else "ram",
+            "storage": (
+                "none" if self._none_radio.isChecked()
+                else "rom" if self._rom_radio.isChecked()
+                else "ram"
+            ),
             "cache_bit": self._cache_bit_check.isChecked(),
         }
         var_type = self._type_combo.currentData()
@@ -1348,6 +1610,11 @@ class VariableDialog(QDialog):
                 "type": _TYPE_STATIC,
                 "frames": [row.read() for row in self._frame_rows],
             })
+        elif var_type == _TYPE_IMPULSE:
+            base.update(
+                {"type": _TYPE_IMPULSE},
+                **self._impulse_page.read(),
+            )
         else:
             base.update(
                 {"type": var_type},
@@ -1470,6 +1737,12 @@ class _VariableRow(QFrame):
         # Сырое HEX-значение DATA того же кадра — показываем рядом
         # с десятичным над графиком привязки (отчёт мастера).
         self.live_raw: int | None = None
+        # «Импульсная переменная»: таймер вспышки «1» на 0.5 с
+        # при совпадении DATA на шине (отчёт мастера).
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.setSingleShot(True)
+        self._pulse_timer.setInterval(500)
+        self._pulse_timer.timeout.connect(self._pulse_end)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setProperty("varRow", True)
         self.setStyleSheet(
@@ -1521,6 +1794,17 @@ class _VariableRow(QFrame):
         self._state_label.setText(
             text if text is not None else f"{value:.2f}"
         )
+
+    def pulse(self) -> None:
+        """Вспышка «1» на 0.5 с — «Импульсная переменная» при
+        совпадении указанных байтов DATA на шине (отчёт мастера)."""
+        self.live_value = 1.0
+        self._state_label.setText("1")
+        self._pulse_timer.start()
+
+    def _pulse_end(self) -> None:
+        self.live_value = 0.0
+        self._state_label.setText("0")
 
     def _refresh_labels(self) -> None:
         name = self.config.get("name", "").strip()
@@ -1660,6 +1944,9 @@ class VariablesTab(QWidget):
         self._font = QFont("Segoe UI", 9)
         self._config = Config()
         self._serial_manager = serial_manager
+        # Последний кадр по каждому ID на шине — онлайн-строки DATA
+        # в таблицах настройки переменных (отчёт мастера).
+        self._last_frames: dict[int, tuple[bool, bytes]] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -1739,10 +2026,56 @@ class VariablesTab(QWidget):
         только указанные оператором позиции DATA, остальные байты кэша
         сохраняют прежнее значение до следующего пакета (отчёт
         мастера)."""
+        for frame in frames:
+            fid = int(frame.get("id", -1))
+            if fid >= 0:
+                self._last_frames[fid] = (
+                    bool(frame.get("extended", False)),
+                    bytes(frame.get("data", b"")),
+                )
         for col in (self._read_col, self._ctrl_col, self._aux_col):
             for row in list(col._rows):
                 cfg = row.config
                 var_type = cfg.get("type")
+                if var_type == _TYPE_STATIC:
+                    # Статическая переменная — бит: фрейм со значением
+                    # «1» поднимает флаг, «0» — сбрасывает до прихода
+                    # противоположного (отчёт мастера: «всегда 0»).
+                    for frame in frames:
+                        fid = int(frame.get("id", -1))
+                        data = bytes(frame.get("data", b""))
+                        want_ext = bool(frame.get("extended", False))
+                        for fdef in cfg.get("frames") or []:
+                            if hex_to_int(str(fdef.get("id", ""))) != fid:
+                                continue
+                            if bool(fdef.get("extended", False)) != want_ext:
+                                continue
+                            tokens = str(fdef.get("data", "")).split()
+                            if not _tokens_match(tokens, data):
+                                continue
+                            value = int(fdef.get("value", 1) or 0)
+                            if row.live_value != value:
+                                row.set_live_value(float(value))
+                    continue
+                if var_type == _TYPE_IMPULSE:
+                    # «Импульсная переменная»: совпадение указанных
+                    # байтов DATA — вспышка «1» на 0.5 с (отчёт мастера).
+                    fid = hex_to_int(str(cfg.get("id", "")))
+                    if fid is None:
+                        continue
+                    tokens = str(cfg.get("data", "")).split()
+                    for frame in frames:
+                        if int(frame.get("id", -1)) != fid:
+                            continue
+                        if bool(frame.get("extended", False)) != bool(
+                            cfg.get("extended", False)
+                        ):
+                            continue
+                        data = bytes(frame.get("data", b""))
+                        if _tokens_match(tokens, data):
+                            row.pulse()
+                            break
+                    continue
                 if var_type not in (_TYPE_DYNAMIC, _TYPE_DYNCACHE):
                     continue
                 fid = hex_to_int(str(cfg.get("id", "")))
@@ -1795,6 +2128,17 @@ class VariablesTab(QWidget):
                                 seen = True
                         if seen:
                             row.set_live_value(_map_points(points, raw), raw)
+
+    def live_frame(
+        self, frame_id: int, extended: bool = False
+    ) -> bytes | None:
+        """Последняя DATA кадра с этим ID на шине — для онлайн-строк
+        в таблицах настройки переменных (отчёт мастера: «как только
+        записали ID — сразу выводи онлайн»)."""
+        entry = self._last_frames.get(frame_id)
+        if entry is None or entry[0] != extended:
+            return None
+        return entry[1]
 
     # ---- списки переменных для Гибкой логики -------------------------
 

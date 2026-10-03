@@ -339,6 +339,11 @@ class SettingsWindow(QMainWindow):
         super().__init__(parent)
         self._serial_manager = serial_manager
         self._main_window = main_window
+        # Общий поллер телеметрии МК (CPU/ОЗУ из CMD_SYSTEM_INFO) —
+        # один на все MemoryIndicator вкладок; должен запуститься ДО
+        # создания вкладок, иначе индикаторы не получат сигнал и
+        # счётчики остаются статическими (отчёт мастера).
+        MemoryIndicator.attach_serial_manager(serial_manager)
         self._config = Config()
         self.setWindowTitle(tr("Настройки — Код Мастер"))
         self.resize(1100, 700)
@@ -1860,6 +1865,10 @@ class SettingsWindow(QMainWindow):
             self._config.save()
             self._trigger_tab.set_config(self._config.get("triggers", []))
             self._flexible_tab.set_config(self._config.get("flexible_rules", []))
+            # «Заводские настройки» стирают и переменные — МК чистит
+            # весь пак хранилища (страницы переменных входят в него),
+            # на ПК сбрасываем строки вкладки (отчёт мастера).
+            self._variables_tab.import_config({})
             if hasattr(self._gateway_tab, "set_config"):
                 self._gateway_tab.set_config(
                     self._config.get("gateway_rules", []),
