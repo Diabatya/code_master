@@ -72,8 +72,12 @@ class Bootloader:
         self._progress_callback = progress_callback
         self._stop_requested = False
 
-    OPEN_RETRIES = 15
-    OPEN_RETRY_DELAY = 0.2
+    # Windows держит «Cannot configure port / PermissionError(13,
+    # ERROR_GEN_FAILURE)» заметно дольше пары секунд после
+    # пере-энумерации CDC-устройства — окно повторов расширено
+    # (отчёт мастера: обновление через CDC падало с этой ошибкой).
+    OPEN_RETRIES = 40
+    OPEN_RETRY_DELAY = 0.25
 
     @classmethod
     def open(

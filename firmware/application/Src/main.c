@@ -22,6 +22,7 @@
 #include "usbd_desc.h"
 #include "can_bridge.h"
 #include "device_config.h"
+#include "storage.h"
 #include "trigger.h"
 #include "event_log.h"
 #include "aux_out.h"
@@ -202,12 +203,28 @@ int main(void)
   MX_GPIO_Init();
   MX_IWDG_Init();
 
-  /* Журнал — максимально рано: запись EVLOG_BOOT должна лечь во Flash даже
-   * если что-то из дальнейшей инициализации (DeviceConfig/Trigger/CAN/USB)
-   * упадёт или зависнет — иначе «жёлтый» старт без журнала остаётся
-   * недоказуемым в поле. После MX_IWDG_Init, потому что EventLog_Init()
-   * может стирать/писать Flash (первый старт после обновления прошивки,
-   * оборот кольца) — сторож уже должен быть настроен на долгое стирание. */
+  /* Маркерное хранилище — до журнала/конфига/триггеров: они берут у
+   * storage.c свои позиции (EVLH/TRGH находятся сканированием, VARH/FLXH
+   * определяют зазоры). Storage_Init только читает Flash — безопасно
+   * вызывать до IWDG-обслуживания, записей не делает. */
+  Storage_Init();
+
+  /* Триггеры — до журнала: каноничная позиция EVLH (ровно под VARH, у
+   * конца Flash) пересекается с легаси-регионом триггеров 0x0803E000,
+   * который storage.c резервирует до миграции. Если журнал встать
+   * раньше, он уехал бы вниз (каноничное место «занято» резервом) и
+   * схлопнул зазор триггеров навсегда: миграция не смогла бы записать
+   * область и резерв никогда не снялся бы — тупик. Trigger_Init
+   * сначала завершает миграцию (запись TRGH в зазор + стирание легаси),
+   * потом журнал встаёт на освободившееся каноничное место. */
+  Trigger_Init();
+  App_NoteStage(3U); /* триггеры загружены — до журнала, см. выше */
+
+  /* Журнал: запись EVLOG_BOOT должна лечь во Flash до конца
+   * инициализации (DeviceConfig/CAN/USB) — «жёлтый» старт без журнала
+   * недоказуем в поле. После MX_IWDG_Init, потому что EventLog_Init()
+   * может стирать/писать Flash (создание области, оборот кольца) —
+   * сторож уже должен быть настроен на долгое стирание. */
   EventLog_Init();
 
   /* Отпечаток сборки в журнал: полевой event_log.txt сам говорит, какая
@@ -253,9 +270,8 @@ int main(void)
    * (usbd_desc.c reads DeviceConfig_Get()). */
   DeviceConfig_Init();
   App_NoteStage(2U);
-  Trigger_Init();
   AuxOut_Init();
-  App_NoteStage(3U);
+  App_NoteStage(3U); /* триггеры+доп.каналы готовы — этап 3 */
 
   /* CAN + triggers must run standalone even with USB deactivated (ТЗ
    * 12.4), so bring the CAN bridge up unconditionally, before deciding
@@ -373,6 +389,7 @@ int main(void)
     CanBridge_PollHealth();
     Trigger_Poll();
     AuxOut_Poll(); /* фронты импульсов/ШИМ доп. каналов (CMD_AUX_SET) */
+    Storage_Poll(); /* таймаут незавершённой сессии записи блоба */
     if (usb_active) {
       Protocol_Poll();
       /* Дозабор TX-кольца CAN-кадров: CDC_QueueTx() сам пинает pump, но

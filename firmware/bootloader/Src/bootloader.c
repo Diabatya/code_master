@@ -31,25 +31,25 @@
 #define APP_METADATA_MAGIC 0x41505031U
 #define APP_METADATA_VERSION 1U
 
-/* Memory map (firmware/PROTOCOL.md §2) — идентификация устройства
- * перенесена в начало Flash, хранилище упаковано у конца:
+/* Memory map (firmware/PROTOCOL.md, Часть 3) — идентификация устройства
+ * перенесена в начало Flash, хранилища — маркерные области без
+ * фиксированных адресов (storage.c): FLXH за концом кода, TRGH посередине
+ * зазора, EVLH + VARH у конца Flash и растут вниз.
  *   0x08008000-0x080087FF  device info page (page 16) — тип/s/n/версия,
  *                          writable via AN3155 for config-only updates
  *   0x08008800-0x08008FFF  app metadata page (page 17)
- *   0x08009000-0x0803BFFF  application code (pages 18-119)
- *   0x0803C000-0x0803DFFF  event log (pages 120-123) — owned by the
- *                          application, not erasable via AN3155
- *   0x0803E000-0x0803FFFF  trigger storage (pages 124-127) — triggers are
- *                          written ONLY through the application protocol
- *                          (CMD_TRIGGER_*), never via raw AN3155 writes.
- *                          При появлении конфигурации переменных она
- *                          займёт верхние адреса, а этот пул сместится
- *                          ниже неё (пак у конца Flash, см. PROTOCOL.md).
+ *   0x08009000-0x0803BFFF  application code + нижние маркерные области
+ *                          (FLXH/TRGH могут жить здесь — обновление кода
+ *                          может их затереть; ПК перезаливает блобы после
+ *                          прошивки штатно)
+ *   0x0803C000-0x0803FFFF  верх Flash — VARH/EVLH (и легаси-пулы старых
+ *                          прошивок 0x0803C000/0x0803E000): owned by the
+ *                          application protocol (CMD_STORAGE_* и
+ *                          CMD_TRIGGER_*), never writable via AN3155.
  */
 #define DEVICE_INFO_ADDR   0x08008000U
 #define DEVICE_CFG_ADDR    DEVICE_INFO_ADDR
-#define EVENT_LOG_ADDR     0x0803C000U
-#define TRIGGER_ADDR       0x0803E000U
+#define EVENT_LOG_ADDR     0x0803C000U /* граница записи, не база журнала */
 #define APP_PAGES_START    16U    /* первая стираемая страница = info page */
 #define ERASABLE_PAGE_END  120U   /* pages 16..119: info+metadata+app code */
 #define APP_PAGES_TOTAL    (ERASABLE_PAGE_END - APP_PAGES_START)
@@ -103,7 +103,7 @@ static bool bl_address_in_app(uint32_t address)
   return true;
 }
 
-/* Read Memory may cover the whole application region (config + trigger
+/* Read Memory may cover the whole application region (marker storage
  * pages included — "read full flash" needs them). */
 static bool bl_address_readable(uint32_t address, uint16_t len)
 {
@@ -117,10 +117,10 @@ static bool bl_address_readable(uint32_t address, uint16_t len)
 }
 
 /* Write Memory is restricted to the device info page + metadata +
- * application code (0x08008000–0x0803BFFF). The event log and the
- * storage pack at the end of Flash are never writable through AN3155:
- * they are owned by the application protocol (CMD_*), so a corrupted or
- * malicious .hex cannot silently rewrite them. */
+ * application code (0x08008000–0x0803BFFF). The upper 16 KB under marker
+ * storage are never writable through AN3155: they are owned by the
+ * application protocol (CMD_STORAGE_*), so a corrupted or malicious
+ * .hex cannot silently rewrite them. */
 static bool bl_address_writable(uint32_t address, uint16_t len)
 {
   if (address < DEVICE_INFO_ADDR || address >= WRITABLE_END) {

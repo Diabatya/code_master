@@ -43,6 +43,7 @@ from PySide6.QtCore import (
     QEasingCurve,
     QPropertyAnimation,
     QRegularExpression,
+    QSize,
     Qt,
     QTimer,
     Signal,
@@ -69,8 +70,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QTableWidget,
     QTableWidgetItem,
-    QTreeWidget,
-    QTreeWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -228,6 +228,27 @@ def _edits_bytes_sum(edits: list[QLineEdit]) -> int | None:
     return total if used else None
 
 
+def _autofill_x_on_id(
+    id_edit: QLineEdit, *edit_groups: list[QLineEdit]
+) -> None:
+    """После ввода ID поля DATA переменной чтения автоматически
+    заполняются «X» — байт-подстановка «любое значение»
+    (отчёт мастера). Срабатывает один раз на непустой ID; поля,
+    уже заполненные оператором, не трогает."""
+    filled = {"done": False}
+
+    def _fill(text: str) -> None:
+        if filled["done"] or not text.strip():
+            return
+        filled["done"] = True
+        for edits in edit_groups:
+            for edit in edits:
+                if edit.isEnabled() and not edit.text().strip():
+                    edit.setText("X")
+
+    id_edit.textChanged.connect(_fill)
+
+
 def _set_data_enabled(edits: list[QLineEdit], count: int) -> None:
     """DLC ограничивает поля DATA: за пределами DLC поля пустые
     и неактивные — как в триггерах (отчёт мастера)."""
@@ -247,25 +268,96 @@ def _selectable(label: QLabel) -> QLabel:
     return label
 
 
-def _copy_button(label: QLabel, font: QFont) -> QPushButton:
-    """Кнопка «Копировать» рядом с онлайн-строкой DATA — копирует всю
-    строку целиком в буфер (побайтно или полностью текст и так можно
-    выделить мышью — кнопка просто ускоряет «скопировать всё», отчёт
-    мастера). Вставка в поле DATA настройки распределяет байты по
-    полям — см. HexDataEdit.insertFromMimeData."""
-    button = QPushButton(tr("Копировать"))
-    button.setFont(font)
-    button.setFixedHeight(22)
+def _clip_icon_button(icon, tooltip: str) -> QToolButton:
+    """Маленькая иконка-кнопка буфера обмена — та же стилистика, что
+    у кнопок «копировать/вставить» в триггерах (отчёт мастера: текст
+    «Копировать» заменён значком)."""
+    button = QToolButton()
+    button.setIcon(icon)
+    button.setIconSize(QSize(18, 18))
+    button.setFixedSize(24, 24)
+    button.setToolTip(tooltip)
     button.setCursor(Qt.CursorShape.PointingHandCursor)
-    button.setToolTip(tr("Скопировать онлайн-DATA в буфер обмена"))
+    button.setStyleSheet(
+        "QToolButton { background-color: palette(button);"
+        " color: palette(text); border: none; border-radius: 4px; }"
+        "QToolButton:hover { background-color: palette(midlight); }"
+        "QToolButton:pressed { background-color: palette(mid); }"
+    )
+    return button
+
+
+def _clipboard_buttons(
+    label: QLabel,
+    font: QFont,
+    target_edits: list | None = None,
+) -> QWidget:
+    """Иконки «копировать» + «вставить» рядом с онлайн-строкой DATA
+    (значки как в триггерах — отчёт мастера).
+
+    Копирование — вся строка целиком в буфер (выделить мышью можно и
+    так — кнопка ускоряет «скопировать всё»). Вставка — разложить
+    байты из буфера по полям DATA настройки переменной (target_edits);
+    полный пакет «ID=.. DLC=.. DATA=..» тоже принимается — берётся
+    только часть DATA."""
+    widget = QWidget()
+    row = QHBoxLayout(widget)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(2)
+
+    copy_button = _clip_icon_button(
+        widget.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon),
+        tr("Скопировать онлайн-DATA в буфер обмена"),
+    )
 
     def _do_copy() -> None:
         text = label.text().strip()
         if text and text != "—":
             QApplication.clipboard().setText(text)
 
-    button.clicked.connect(_do_copy)
-    return button
+    copy_button.clicked.connect(_do_copy)
+    row.addWidget(copy_button)
+
+    if target_edits:
+        paste_button = _clip_icon_button(
+            widget.style().standardIcon(
+                QStyle.StandardPixmap.SP_DialogOpenButton
+            ),
+            tr("Вставить DATA из буфера в поля настройки"),
+        )
+
+        def _do_paste() -> None:
+            text = QApplication.clipboard().text().strip()
+            if not text:
+                return
+            # Полный пакет «ID=.. DATA=..» — берём только DATA.
+            if "=" in text:
+                match = re.search(
+                    r"DATA\s*=\s*(.*)$", text, re.IGNORECASE | re.DOTALL
+                )
+                text = match.group(1) if match else ""
+            text = translate_cyrillic_hex(text).strip()
+            tokens = [t for t in re.split(r"[\s,;]+", text) if t]
+            if len(tokens) == 1:
+                # Слитная строка «0102AB» — режем по байтам.
+                tokens = [
+                    tokens[0][i : i + 2]
+                    for i in range(0, len(tokens[0]), 2)
+                ]
+            for i, edit in enumerate(target_edits):
+                token = tokens[i].upper() if i < len(tokens) else ""
+                if token == "X" and not getattr(edit, "_allow_x", False):
+                    token = ""
+                if token and not all(
+                    ch in "0123456789ABCDEF" for ch in token
+                ) and token != "X":
+                    token = ""
+                edit.setText(token[:2])
+                edit.textEdited.emit(token[:2])
+
+        paste_button.clicked.connect(_do_paste)
+        row.addWidget(paste_button)
+    return widget
 
 
 def _map_points(points: list[tuple[float, float]], raw: float) -> float:
@@ -639,6 +731,9 @@ class _FrameRow(QWidget):
             lambda v: _set_data_enabled(self.data, v)
         )
         _set_data_enabled(self.data, self.dlc.value())
+        # После ввода ID поля DATA заполняются «X» — «любой байт»
+        # (отчёт мастера).
+        _autofill_x_on_id(self.can_id, self.data)
 
         # Выбор записываемого значения — справа от фрейма (по ТЗ).
         self.value = QComboBox()
@@ -658,7 +753,9 @@ class _FrameRow(QWidget):
         )
         _selectable(self.live_label)
         row.addWidget(self.live_label)
-        row.addWidget(_copy_button(self.live_label, font))
+        row.addWidget(
+            _clipboard_buttons(self.live_label, font, self.data)
+        )
 
         # Крестик — стандартная иконка закрытия: символ «✕» в части
         # шрифтов не рендерится (отчёт мастера).
@@ -786,6 +883,9 @@ class _ValuePage(QWidget):
         self.dlc.valueChanged.connect(self._on_dlc_changed)
         for edit in (*self.data_from, *self.data_to):
             edit.textChanged.connect(lambda _t: self._on_edits_changed())
+        # После ввода ID поля DATA «от»/«до» заполняются «X»
+        # (отчёт мастера).
+        _autofill_x_on_id(self.can_id, self.data_from, self.data_to)
 
         hint_text = tr(
             "В расчёт идут только заполненные байты без «X»; при "
@@ -844,7 +944,11 @@ class _ValuePage(QWidget):
         live_row.addWidget(self.live_label)
         live_row.addWidget(self.live_hex_label)
         live_row.addWidget(self.live_data_label)
-        live_row.addWidget(_copy_button(self.live_data_label, font))
+        live_row.addWidget(
+            _clipboard_buttons(
+                self.live_data_label, font, self.data_from
+            )
+        )
         live_row.addStretch()
         layout.addLayout(live_row)
         self._live_timer = QTimer(self)
@@ -1239,6 +1343,8 @@ class _ImpulsePage(QWidget):
             lambda v: _set_data_enabled(self.data, v)
         )
         _set_data_enabled(self.data, self.dlc.value())
+        # После ввода ID поля DATA заполняются «X» (отчёт мастера).
+        _autofill_x_on_id(self.can_id, self.data)
 
         # Онлайн-строка DATA кадра с этим ID (отчёт мастера).
         self.live_data_label = QLabel("—")
@@ -1270,7 +1376,9 @@ class _ImpulsePage(QWidget):
         live_row = QHBoxLayout()
         live_row.addStretch()
         live_row.addWidget(self.live_data_label)
-        live_row.addWidget(_copy_button(self.live_data_label, font))
+        live_row.addWidget(
+            _clipboard_buttons(self.live_data_label, font, self.data)
+        )
         live_row.addSpacing(10)
         live_row.addWidget(self.flag_label)
         live_row.addStretch()
@@ -1681,6 +1789,25 @@ class _CommandDialog(QDialog):
         self._frames_layout.removeWidget(row)
         row.deleteLater()
 
+    def current_config(self) -> dict[str, Any]:
+        """Снимок полей без валидации — частичный ввод тоже
+        сохраняется при закрытии окна (отчёт мастера)."""
+        return {
+            "type": _TYPE_COMMAND,
+            "name": self._name_edit.text().strip(),
+            "folder": self.config.get("folder", ""),
+            "frames": [r.read() for r in self._frame_rows],
+            "cache": {
+                "enabled": self._cache_check.isChecked(),
+                "channel": self.cache_channel.currentData(),
+                "extended": bool(self.cache_bit.currentData()),
+                "id": self.cache_id.text().strip(),
+                "dlc": self.cache_dlc.value(),
+                "from": _data_to_text(self.cache_from),
+                "to": _data_to_text(self.cache_to),
+            },
+        }
+
     def accept(self) -> None:  # noqa: D102
         name = self._name_edit.text().strip()
         if not name:
@@ -1699,313 +1826,8 @@ class _CommandDialog(QDialog):
                 tr("Добавьте хотя бы один фрейм с заполненным ID."),
             )
             return
-        self.config = {
-            "type": _TYPE_COMMAND,
-            "name": name,
-            "folder": self.config.get("folder", ""),
-            "frames": frames,
-            "cache": {
-                "enabled": self._cache_check.isChecked(),
-                "channel": self.cache_channel.currentData(),
-                "extended": bool(self.cache_bit.currentData()),
-                "id": self.cache_id.text().strip(),
-                "dlc": self.cache_dlc.value(),
-                "from": _data_to_text(self.cache_from),
-                "to": _data_to_text(self.cache_to),
-            },
-        }
+        self.config = self.current_config()
         super().accept()
-
-
-class _CommandColumn(QWidget):
-    """Колонка «Управление» (отчёт мастера): дерево команд с папками
-    и подпапками. Видов переменных здесь больше нет — только команды
-    (списки фреймов с паузами/количеством/кэшем, как «Ответ»
-    триггера) и их группировка; перетаскивание мышью раскладывает
-    команды по папкам.
-
-    Хранение в конфиге — плоский список: папки — записи
-    ``{"type": "folder", "path": "а/б"}``, команды —
-    ``{"type": "command", "name", "folder", "frames", "cache"}``."""
-
-    _FOLDER_ROLE = Qt.ItemDataRole.UserRole
-    _CONFIG_ROLE = Qt.ItemDataRole.UserRole + 1
-
-    def __init__(
-        self,
-        title: str,
-        tab: VariablesTab,
-        key: str,
-        font: QFont,
-    ) -> None:
-        super().__init__(tab)
-        self._tab = tab
-        self.key = key
-        self._font = font
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-
-        self._group = QFrame()
-        self._group.setStyleSheet(
-            "QFrame { border: 1px solid #454552; border-radius: 10px; }"
-        )
-        box = QVBoxLayout(self._group)
-        self._title = QLabel(title)
-        self._title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        box.addWidget(self._title)
-
-        self._tree = QTreeWidget()
-        self._tree.setHeaderHidden(True)
-        self._tree.setFont(font)
-        self._tree.setSelectionMode(
-            QTreeWidget.SelectionMode.SingleSelection
-        )
-        # Папки и команды раскладываются перетаскиванием — структура
-        # дерева и есть структура папок (отчёт мастера).
-        self._tree.setDragDropMode(QTreeWidget.DragDropMode.InternalMove)
-        self._tree.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self._tree.itemDoubleClicked.connect(self._on_double_click)
-        box.addWidget(self._tree, 1)
-        layout.addWidget(self._group, 1)
-
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
-        self._add_folder_btn = QPushButton(tr("＋ Папка"))
-        self._add_cmd_btn = QPushButton(tr("＋ Команда"))
-        self._remove_btn = QPushButton(tr("✕"))
-        for btn in (
-            self._add_folder_btn, self._add_cmd_btn, self._remove_btn
-        ):
-            btn.setFont(font)
-            btn.setFixedHeight(30)
-        self._remove_btn.setFixedWidth(40)
-        self._remove_btn.setToolTip(tr("Удалить выбранное"))
-        btn_row.addWidget(self._add_folder_btn, 1)
-        btn_row.addWidget(self._add_cmd_btn, 1)
-        btn_row.addWidget(self._remove_btn)
-        layout.addLayout(btn_row)
-
-        self._add_folder_btn.clicked.connect(self._add_folder)
-        self._add_cmd_btn.clicked.connect(self._add_command)
-        self._remove_btn.clicked.connect(self._remove_selected)
-        # После перетаскивания пути папок в конфигах пересчитываются
-        # по фактической структуре дерева.
-        self._tree.model().rowsMoved.connect(lambda *_a: self.persist())
-        self._tree.itemChanged.connect(lambda *_a: self.persist())
-
-    # ---- дерево -------------------------------------------------------
-
-    def _folder_path(self, item: QTreeWidgetItem | None) -> str:
-        """Путь «а/б/в» папки-родителя элемента (пусто — корень)."""
-        parts: list[str] = []
-        node = item.parent() if item is not None else None
-        while node is not None:
-            parts.append(node.text(0))
-            node = node.parent()
-        return "/".join(reversed(parts))
-
-    def _ensure_folder(self, path: str) -> QTreeWidgetItem | None:
-        """Возвращает (при необходимости создаёт) элемент папки по
-        пути «а/б/в»."""
-        if not path:
-            return None
-        parent: QTreeWidgetItem | None = None
-        for part in [p for p in path.split("/") if p]:
-            found = None
-            count = (
-                self._tree.topLevelItemCount()
-                if parent is None
-                else parent.childCount()
-            )
-            for i in range(count):
-                child = (
-                    self._tree.topLevelItem(i)
-                    if parent is None
-                    else parent.child(i)
-                )
-                if (
-                    child.data(0, self._FOLDER_ROLE)
-                    and child.text(0) == part
-                ):
-                    found = child
-                    break
-            if found is None:
-                found = QTreeWidgetItem([part])
-                found.setData(0, self._FOLDER_ROLE, True)
-                found.setFlags(
-                    found.flags()
-                    | Qt.ItemFlag.ItemIsEditable
-                    | Qt.ItemFlag.ItemIsDropEnabled
-                )
-                if parent is None:
-                    self._tree.addTopLevelItem(found)
-                else:
-                    parent.addChild(found)
-                found.setExpanded(True)
-            parent = found
-        return parent
-
-    def _command_item(
-        self, cfg: dict[str, Any], folder_item: QTreeWidgetItem | None
-    ) -> QTreeWidgetItem:
-        item = QTreeWidgetItem([cfg.get("name", "") or tr("Команда")])
-        item.setData(0, self._FOLDER_ROLE, False)
-        item.setData(0, self._CONFIG_ROLE, cfg)
-        item.setFlags(
-            (item.flags() | Qt.ItemFlag.ItemIsDragEnabled)
-            & ~Qt.ItemFlag.ItemIsDropEnabled
-        )
-        item.setToolTip(0, tr("Двойной клик — настройка команды"))
-        if folder_item is None:
-            self._tree.addTopLevelItem(item)
-        else:
-            folder_item.addChild(item)
-            folder_item.setExpanded(True)
-        return item
-
-    def _selected_folder(self) -> QTreeWidgetItem | None:
-        """Папка для новых элементов: выбранная папка либо родитель
-        выбранной команды."""
-        item = self._tree.currentItem()
-        while item is not None and not item.data(0, self._FOLDER_ROLE):
-            item = item.parent()
-        return item
-
-    # ---- кнопки -------------------------------------------------------
-
-    def _add_folder(self) -> None:
-        parent = self._selected_folder()
-        item = QTreeWidgetItem([tr("Новая папка")])
-        item.setData(0, self._FOLDER_ROLE, True)
-        item.setFlags(
-            item.flags()
-            | Qt.ItemFlag.ItemIsEditable
-            | Qt.ItemFlag.ItemIsDropEnabled
-        )
-        if parent is None:
-            self._tree.addTopLevelItem(item)
-        else:
-            parent.addChild(item)
-            parent.setExpanded(True)
-        self._tree.setCurrentItem(item)
-        self._tree.editItem(item)
-        self.persist()
-
-    def _add_command(self) -> None:
-        parent = self._selected_folder()
-        cfg = {
-            "type": _TYPE_COMMAND,
-            "name": "",
-            "folder": self._folder_path(parent),
-            "frames": [],
-            "cache": {},
-        }
-        item = self._command_item(cfg, parent)
-        self._tree.setCurrentItem(item)
-        self._edit_command(item)
-        # Пустую (отменённую) команду не оставляем.
-        if not cfg.get("name"):
-            self._tree.removeItemWidget(item, 0)
-            (item.parent() or self._tree.invisibleRootItem()).removeChild(
-                item
-            )
-
-    def _remove_selected(self) -> None:
-        item = self._tree.currentItem()
-        if item is None:
-            return
-        if item.data(0, self._FOLDER_ROLE):
-            count = self._count_children(item)
-            if count:
-                answer = QMessageBox.question(
-                    self,
-                    tr("Удаление папки"),
-                    tr("Удалить папку «{0}» и {1} команд(у) в ней?")
-                    .format(item.text(0), count),
-                )
-                if answer != QMessageBox.StandardButton.Yes:
-                    return
-        (item.parent() or self._tree.invisibleRootItem()).removeChild(item)
-        self.persist()
-
-    def _count_children(self, item: QTreeWidgetItem) -> int:
-        total = 0
-        for i in range(item.childCount()):
-            child = item.child(i)
-            total += (
-                self._count_children(child)
-                if child.data(0, self._FOLDER_ROLE)
-                else 1
-            )
-        return total
-
-    def _on_double_click(self, item: QTreeWidgetItem, _col: int) -> None:
-        if item.data(0, self._FOLDER_ROLE):
-            self._tree.editItem(item)
-        else:
-            self._edit_command(item)
-
-    def _edit_command(self, item: QTreeWidgetItem) -> None:
-        cfg = item.data(0, self._CONFIG_ROLE) or {}
-        cfg["folder"] = self._folder_path(item)
-        dialog = _CommandDialog(self, cfg)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        cfg.update(dialog.config)
-        cfg["folder"] = self._folder_path(item)
-        item.setData(0, self._CONFIG_ROLE, cfg)
-        item.setText(0, cfg.get("name", ""))
-        self.persist()
-
-    # ---- совместимость с _VarColumn ------------------------------------
-
-    def add_row(self, config: dict[str, Any] | None = None) -> None:
-        """Импорт: старые виды переменных «Управления» переводятся
-        в команды (обратная совместимость)."""
-        cfg = dict(config or {})
-        ctype = cfg.get("type")
-        if ctype == _TYPE_FOLDER:
-            self._ensure_folder(str(cfg.get("path", "")))
-            return
-        if ctype != _TYPE_COMMAND:
-            for command in _legacy_to_command(cfg):
-                self.add_row(command)
-            return
-        self._command_item(cfg, self._ensure_folder(cfg.get("folder", "")))
-
-    def configs(self) -> list[dict[str, Any]]:
-        """Плоский список: папки (path) + команды (folder-атрибут)."""
-        result: list[dict[str, Any]] = []
-
-        def walk(item: QTreeWidgetItem, path: str) -> None:
-            current = f"{path}/{item.text(0)}" if path else item.text(0)
-            if item.data(0, self._FOLDER_ROLE):
-                result.append({"type": _TYPE_FOLDER, "path": current})
-                for i in range(item.childCount()):
-                    walk(item.child(i), current)
-            else:
-                cfg = dict(item.data(0, self._CONFIG_ROLE) or {})
-                cfg["type"] = _TYPE_COMMAND
-                cfg["name"] = item.text(0)
-                cfg["folder"] = path
-                result.append(cfg)
-
-        for i in range(self._tree.topLevelItemCount()):
-            walk(self._tree.topLevelItem(i), "")
-        return result
-
-    def commands(self) -> list[dict[str, Any]]:
-        """Только команды (без записей папок) — для Гибкой логики."""
-        return [c for c in self.configs() if c.get("type") == _TYPE_COMMAND]
-
-    def clear(self) -> None:
-        self._tree.clear()
-        self.persist()
-
-    def persist(self) -> None:
-        self._tab.persist()
 
 
 class VariableDialog(QDialog):
@@ -2404,11 +2226,20 @@ _AUX_FUNCTIONS = (
     ("discrete_out", "Дискретный выход"),
 )
 
+# Вид «Переменная» — именованный флаг из одного бита ОЗУ/ПЗУ
+# (отчёт мастера): оператор выбирает носитель, бит резервируется,
+# имя фигурирует в Гибкой логике (событие «Стала 1/0», условие,
+# действия «включить/включить на/выключить»).
+_TYPE_FLAG = "flag"
+
 
 class _AuxDialog(QDialog):
-    """Настройка доп. канала входа/выхода: имя, номер пина/канала и
-    функция канала. Никаких полей фреймов — каналы программируются
-    в МК отдельно, а здесь задаётся только его роль (отчёт мастера)."""
+    """Настройка строки третьей колонки («Дополнительные каналы
+    входа, выхода и переменные» — отчёт мастера): имя + вид.
+
+    Вид «Канал входа/выхода» — номер пина и функция канала.
+    Вид «Переменная» — один фиксированный бит: выбор носителя
+    «ОЗУ»/«ПЗУ», имя — для использования в Гибкой логике."""
 
     def __init__(
         self,
@@ -2417,7 +2248,7 @@ class _AuxDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         font = QFont("Segoe UI", 9)
-        self.setWindowTitle(tr("Настройка доп. канала"))
+        self.setWindowTitle(tr("Настройка доп. канала / переменной"))
         self.setMinimumWidth(420)
         self.setFont(font)
         config = config or {}
@@ -2436,7 +2267,21 @@ class _AuxDialog(QDialog):
         head.addWidget(self._name_edit, 1)
         layout.addLayout(head)
 
-        row = QHBoxLayout()
+        kind_row = QHBoxLayout()
+        kind_row.addWidget(QLabel(tr("Вид:")))
+        self._kind = QComboBox()
+        self._kind.setFont(font)
+        self._kind.addItem(tr("Доп канал входа/выхода"), "aux")
+        self._kind.addItem(tr("Переменная"), _TYPE_FLAG)
+        kind_row.addWidget(self._kind, 1)
+        kind_row.addStretch()
+        layout.addLayout(kind_row)
+
+        self._stack = QStackedWidget()
+
+        channel_page = QWidget()
+        row = QHBoxLayout(channel_page)
+        row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(QLabel(tr("Пин (канал):")))
         self._channel = QSpinBox()
         self._channel.setFont(font)
@@ -2452,17 +2297,59 @@ class _AuxDialog(QDialog):
         fidx = self._function.findData(config.get("function", "analog_out"))
         self._function.setCurrentIndex(fidx if fidx >= 0 else 0)
         row.addWidget(self._function, 1)
-        layout.addLayout(row)
+        self._stack.addWidget(channel_page)
 
-        hint = QLabel(tr(
+        flag_page = QWidget()
+        flag_layout = QVBoxLayout(flag_page)
+        flag_layout.setContentsMargins(0, 0, 0, 0)
+        flag_layout.setSpacing(6)
+        storage_row = QHBoxLayout()
+        storage_row.addWidget(QLabel(tr("Носитель:")))
+        self._storage = QComboBox()
+        self._storage.setFont(font)
+        # «выбери 1 бит озу или пзу и зафиксируй его» — бит
+        # резервируется за переменной (отчёт мастера).
+        self._storage.addItem(tr("ОЗУ"), "ram")
+        self._storage.addItem(tr("ПЗУ"), "flash")
+        sidx = self._storage.findData(config.get("storage", "ram"))
+        self._storage.setCurrentIndex(sidx if sidx >= 0 else 0)
+        storage_row.addWidget(self._storage)
+        storage_row.addStretch()
+        flag_layout.addLayout(storage_row)
+        flag_hint = QLabel(tr(
+            "Именованная переменная из одного бита: Гибкая логика "
+            "может включать её постоянно, включать на время и "
+            "выключать; события «Стала 1»/«Стала 0» запускают "
+            "программы по переходу."
+        ))
+        flag_hint.setFont(font)
+        flag_hint.setWordWrap(True)
+        _selectable(flag_hint)
+        flag_layout.addWidget(flag_hint)
+        flag_layout.addStretch()
+        self._stack.addWidget(flag_page)
+
+        kidx = self._kind.findData(
+            _TYPE_FLAG if config.get("type") == _TYPE_FLAG else "aux"
+        )
+        self._kind.setCurrentIndex(kidx if kidx >= 0 else 0)
+        self._stack.setCurrentIndex(self._kind.currentIndex())
+        self._kind.currentIndexChanged.connect(self._stack.setCurrentIndex)
+        layout.addWidget(self._stack)
+
+        self._hint = QLabel(tr(
             "Количество пинов и их названия появятся после "
             "программирования каналов в МК. Здесь настраивается "
             "только роль конкретного канала."
         ))
-        hint.setFont(font)
-        hint.setWordWrap(True)
-        _selectable(hint)
-        layout.addWidget(hint)
+        self._hint.setFont(font)
+        self._hint.setWordWrap(True)
+        _selectable(self._hint)
+        layout.addWidget(self._hint)
+        self._hint.setVisible(self._kind.currentIndex() == 0)
+        self._kind.currentIndexChanged.connect(
+            lambda i: self._hint.setVisible(i == 0)
+        )
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -2474,6 +2361,12 @@ class _AuxDialog(QDialog):
 
     @property
     def config(self) -> dict[str, Any]:
+        if self._kind.currentData() == _TYPE_FLAG:
+            return {
+                "type": _TYPE_FLAG,
+                "name": self._name_edit.text().strip(),
+                "storage": self._storage.currentData(),
+            }
         return {
             "type": "aux",
             "name": self._name_edit.text().strip(),
@@ -2580,7 +2473,24 @@ class _VariableRow(QFrame):
     def _refresh_labels(self) -> None:
         name = self.config.get("name", "").strip()
         self._name_label.setText(name or tr("— (без имени)"))
-        if self.config.get("type") == "aux":
+        cfg_type = self.config.get("type")
+        if cfg_type == _TYPE_COMMAND:
+            # Переменная управления — команда: число фреймов.
+            frames = self.config.get("frames") or []
+            self._state_label.setText(
+                tr("{0} кадр(ов)").format(len(frames))
+            )
+            return
+        if cfg_type == _TYPE_FLAG:
+            # «Переменная» — именованный бит ОЗУ/ПЗУ (отчёт мастера).
+            storage = self.config.get("storage", "ram")
+            self._state_label.setText(
+                tr("бит · {storage}").format(
+                    storage=tr("ОЗУ") if storage == "ram" else tr("ПЗУ")
+                )
+            )
+            return
+        if cfg_type == "aux":
             # Доп. канал: вместо «0» показываем пин и функцию канала.
             func = dict(_AUX_FUNCTIONS).get(
                 self.config.get("function", ""), ""
@@ -2593,7 +2503,7 @@ class _VariableRow(QFrame):
             return
         self._state_label.setText(
             "0.00"
-            if self.config.get("type") in (_TYPE_DYNAMIC, _TYPE_DYNCACHE)
+            if cfg_type in (_TYPE_DYNAMIC, _TYPE_DYNCACHE)
             else "0"
         )
 
@@ -2652,7 +2562,20 @@ class _VarColumn(QWidget):
         layout.addWidget(self._add_btn)
 
     def add_row(self, config: dict[str, Any] | None = None) -> _VariableRow:
-        row = _VariableRow(self, self._font, config)
+        cfg = dict(config or {})
+        if self.key == "control" and cfg and cfg.get("type") != _TYPE_COMMAND:
+            # Обратная совместимость: старые виды переменных
+            # «Управления» и записи папок переводятся в команды
+            # (папки — плоские записи, в колонке не отображаются).
+            if cfg.get("type") == _TYPE_FOLDER:
+                return None  # type: ignore[return-value]
+            commands = _legacy_to_command(cfg)
+            if not commands:
+                return None  # type: ignore[return-value]
+            cfg = commands[0]
+            for extra in commands[1:]:
+                self.add_row(extra)
+        row = _VariableRow(self, self._font, cfg)
         if "storage" not in row.config:
             row.config["storage"] = "ram"
         self._rows.append(row)
@@ -2668,16 +2591,36 @@ class _VarColumn(QWidget):
 
     def edit_row(self, row: _VariableRow) -> None:
         # Доп. каналы — компактный диалог без фреймов: только имя,
-        # пин и функция канала (отчёт мастера).
-        dialog = (
-            _AuxDialog(self._tab, row.config)
-            if self.key == "aux" or row.config.get("type") == "aux"
-            else VariableDialog(
+        # пин и функция канала; «Управление» — редактор команды
+        # (список фреймов с паузами/количеством/кэшем); остальные —
+        # полный диалог переменной (отчёт мастера).
+        if self.key == "aux" or row.config.get("type") in (
+            "aux", _TYPE_FLAG
+        ):
+            dialog = _AuxDialog(self._tab, row.config)
+        elif self.key == "control" or row.config.get("type") == _TYPE_COMMAND:
+            dialog = _CommandDialog(self._tab, row.config)
+        else:
+            dialog = VariableDialog(
                 self._tab, row.config, row=row,
                 for_control=(self.key == "control"),
             )
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        if not accepted:
+            # Частичный ввод не теряется при закрытии окна —
+            # сохраняем всё, что оператор успел ввести, даже без
+            # обязательных полей (отчёт мастера).
+            partial = getattr(dialog, "current_config", None)
+            if not callable(partial):
+                partial = getattr(dialog, "config", None)
+            snapshot = (
+                partial() if callable(partial)
+                else (partial if isinstance(partial, dict) else None)
+            )
+            if snapshot:
+                row.config.update(snapshot)
+                row._refresh_labels()
+                self.persist()
             return
         row.config.update(dialog.config)
         row._refresh_labels()
@@ -2792,18 +2735,18 @@ class VariablesTab(QWidget):
         columns = QHBoxLayout()
         columns.setSpacing(12)
         self._read_col = _VarColumn(tr("Чтение"), self, "read", self._font)
-        # «Управление» — дерево команд с папками/подпапками, а не
-        # список переменных (отчёт мастера).
-        self._ctrl_col = _CommandColumn(
+        # «Управление» — обычная колонка строк, как «Чтение»/«Доп
+        # каналы»: кнопка «Добавить переменную» внизу, без кнопок
+        # «Команда»/«Папка»/«✕» (отчёт мастера).
+        self._ctrl_col = _VarColumn(
             tr("Управление"), self, "control", self._font
         )
         # Три равные колонки: Чтение / Управление / Дополнительные
-        # каналы входа и выхода — у третьей та же таблица переменных
-        # и кнопка «Добавить переменную» внизу (отчёт мастера).
+        # каналы входа, выхода и переменные (отчёт мастера).
         columns.addWidget(self._read_col, 1)
         columns.addWidget(self._ctrl_col, 1)
         self._aux_col = _VarColumn(
-            tr("Дополнительные каналы входа и выхода"),
+            tr("Дополнительные каналы входа, выхода и переменные"),
             self, "aux", self._font,
         )
         columns.addWidget(self._aux_col, 1)
@@ -2937,6 +2880,17 @@ class VariablesTab(QWidget):
                         if seen:
                             row.set_live_value(_map_points(points, raw), raw)
 
+    def set_flag_live(self, name: str, value: int) -> None:
+        """Онлайн-состояние бита «Переменная» из Гибкой логики —
+        строка третьей колонки показывает «1»/«0» (отчёт мастера)."""
+        name = str(name).strip()
+        for row in self._aux_col._rows:
+            cfg = row.config
+            if cfg.get("type") == _TYPE_FLAG and (
+                cfg.get("name", "").strip() == name
+            ):
+                row.set_live_value(float(value), text=str(int(value)))
+
     def live_frame(
         self, frame_id: int, extended: bool = False
     ) -> bytes | None:
@@ -2955,9 +2909,14 @@ class VariablesTab(QWidget):
         column: str,
         var_type: str | tuple[str, ...] | None = None,
     ) -> list[str]:
-        """Имена переменных колонки («read»/«control»); var_type —
-        фильтр по виду (строка или кортеж видов), None — все."""
-        col = self._read_col if column == "read" else self._ctrl_col
+        """Имена переменных колонки («read»/«control»/«aux»);
+        var_type — фильтр по виду (строка или кортеж видов),
+        None — все."""
+        col = {
+            "read": self._read_col,
+            "control": self._ctrl_col,
+            "aux": self._aux_col,
+        }.get(column, self._read_col)
         # «Управление» — только команды (отчёт мастера); «Чтение» —
         # все виды переменных либо фильтр по виду.
         if var_type is None and column == "control":
@@ -2977,7 +2936,11 @@ class VariablesTab(QWidget):
         """Символьные имена из таблицы привязки «Динамической
         переменной» name — для выпадающего списка состояний в событиях
         и условиях ГЛ (отчёт мастера)."""
-        col = self._read_col if column == "read" else self._ctrl_col
+        col = {
+            "read": self._read_col,
+            "control": self._ctrl_col,
+            "aux": self._aux_col,
+        }.get(column, self._read_col)
         for cfg in col.configs():
             if cfg.get("type") != _TYPE_DYNCACHE:
                 continue
@@ -3059,26 +3022,28 @@ class VariablesTab(QWidget):
         }
 
     def _device_matches(self, payload: dict[str, Any]) -> bool:
-        """Сверка файла с подключённым устройством. Без подключения —
-        всегда подходит (офлайн-редактирование); у файла без полей
-        устройства (старый формат) — тоже."""
+        """Сверка файла с подключённым устройством — только по типу
+        оборудования, серийные номера игнорируются (отчёт мастера).
+        Без подключения — всегда подходит (офлайн-редактирование);
+        у файла без полей устройства (старый формат) — тоже."""
+        file_type = payload.get("device_type")
         file_name = payload.get("device_name") or payload.get(
             "device_type_name"
         )
-        file_serial = payload.get("device_serial")
-        if not file_name and not file_serial:
+        if file_type in (None, "") and not file_name:
             return True
         if not self._serial_manager or not self._serial_manager.is_open():
             return True
-        dev_name = self._config.get("device_name", "") or self._config.get(
-            "device_type_name", ""
+        dev_type = self._config.get("device_type")
+        if file_type not in (None, "") and dev_type is not None:
+            try:
+                return int(file_type) == int(dev_type)
+            except (TypeError, ValueError):
+                pass
+        dev_name = self._config.get("device_type_name", "") or self._config.get(
+            "device_name", ""
         )
-        dev_serial = self._config.get("device_serial", "") or self._config.get(
-            "serial_number", ""
-        )
-        return (not file_name or file_name == dev_name) and (
-            not file_serial or file_serial == dev_serial
-        )
+        return not dev_name or not file_name or file_name == dev_name
 
     def _route_program_file(self, path: str) -> None:
         """В руках оператора оказался общий конфиг программы —
@@ -3095,15 +3060,33 @@ class VariablesTab(QWidget):
                    "«Загрузить конфигурацию»."),
             )
 
+    def _file_prefix(self) -> str:
+        """Префикс имени файла — тип оборудования подключённого
+        устройства (отчёт мастера: «в предложенных именах перед
+        названием подставляй Тип оборудования»)."""
+        name = (
+            self._config.get("device_type_name", "")
+            or self._config.get("device_name", "")
+        ).strip()
+        if name:
+            name = "".join(
+                c if c.isalnum() or c in "._-" else "_" for c in name
+            )
+            return name + " "
+        return ""
+
     def _save_file(self) -> None:
+        last_dir = self._config.get("last_variables_dir", "")
+        start_dir = last_dir or _config_info_dir()
         path, _ = QFileDialog.getSaveFileName(
             self,
             tr("Сохранить переменные"),
-            f"{_config_info_dir()}/{_CONFIG_INFO_NAME}",
+            f"{start_dir}/{self._file_prefix()}{_CONFIG_INFO_NAME}",
             "Config Variable (*.json)",
         )
         if not path:
             return
+        self._config.set("last_variables_dir", str(Path(path).parent))
         payload = {
             "kind": _CONFIG_INFO_KIND,
             "format": _CONFIG_INFO_VERSION,
@@ -3122,14 +3105,21 @@ class VariablesTab(QWidget):
             )
 
     def _load_file(self) -> None:
+        # Открываем папку последнего файла переменных, а не
+        # стартовую (отчёт мастера).
+        start_dir = (
+            self._config.get("last_variables_dir", "")
+            or _config_info_dir()
+        )
         path, _ = QFileDialog.getOpenFileName(
             self,
             tr("Загрузить переменные"),
-            _config_info_dir(),
+            start_dir,
             "Config Variable (*.json);;" + tr("Все файлы (*)"),
         )
         if not path:
             return
+        self._config.set("last_variables_dir", str(Path(path).parent))
         try:
             raw = Path(path).read_bytes()
         except OSError as exc:
@@ -3194,14 +3184,9 @@ class VariablesTab(QWidget):
         self._read_col._title.setText(tr("Чтение"))
         self._ctrl_col._title.setText(tr("Управление"))
         self._aux_col._title.setText(
-            tr("Дополнительные каналы входа и выхода")
+            tr("Дополнительные каналы входа, выхода и переменные")
         )
-        # «Управление» — дерево команд: свои кнопки и без строк
-        # переменных (отчёт мастера).
-        self._ctrl_col._add_folder_btn.setText(tr("＋ Папка"))
-        self._ctrl_col._add_cmd_btn.setText(tr("＋ Команда"))
-        self._ctrl_col._remove_btn.setText(tr("✕"))
-        for col in (self._read_col, self._aux_col):
+        for col in (self._read_col, self._ctrl_col, self._aux_col):
             col._add_btn.setText(tr("＋ Добавить переменную"))
             for row in col._rows:
                 row._refresh_labels()

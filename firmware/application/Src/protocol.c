@@ -9,6 +9,7 @@
 #include "usbd_cdc_if.h"
 #include "can_bridge.h"
 #include "device_config.h"
+#include "storage.h"
 #include "trigger.h"
 #include "event_log.h"
 #include "aux_out.h"
@@ -50,6 +51,17 @@
 #define CMD_TRIGGER_NAME_WRITE   0xD1U /* [index][len][имя]: RAM-зеркало, Flash по COMMIT */
 #define CMD_TRIGGER_NAME_COMMIT  0xD2U /* запись таблицы имён во Flash (страница конфига) */
 #define CMD_AUX_SET              0xD3U /* доп. канал OUT1-4: вкл/выкл/импульсы/ШИМ (aux_out.h) */
+#define CMD_SYS_RESET            0xD4U /* перезагрузка устройства (кнопка в «Мониторинге») */
+/* Маркерное хранилище блобов (storage.h): переменные и программы ГЛ
+ * живут во Flash камня — PC сериализует их в JSON-блобы, прошивка
+ * размещает/переносит области. Чтение всегда активно; запись —
+ * транзакцией BEGIN → DATA×N → COMMIT (заголовок последним). */
+#define CMD_STORAGE_INFO         0xD5U /* [region] → [base][len][gen] */
+#define CMD_STORAGE_READ         0xD6U /* [region][off u16][len] → данные */
+#define CMD_STORAGE_BEGIN        0xD7U /* [region][len u32] → [base u32] */
+#define CMD_STORAGE_DATA         0xD8U /* [off u16][данные] → статус */
+#define CMD_STORAGE_COMMIT       0xD9U /* [crc32 u32] → статус */
+#define CMD_STORAGE_CLEAR        0xDAU /* [region][0xA5] → стереть область */
 
 /* Защита деструктивных команд от фантомного срабатывания при рассинхроне
  * CDC-потока: парсер после битого кадра пересматривает следующие байты
@@ -327,12 +339,15 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
         send_new_cmd_response(cmd, 0x01U, NULL, 0U);
         break;
       }
-      /* Заводские настройки стирают хранилище триггеров — иначе записи
-       * оставались во Flash и продолжали срабатывать после «сброса».
-       * Страницу конфигурации (имя/серийный номер/VID/PID) команда НЕ
-       * трогает: идентичность задаётся при программировании и не
-       * является пользовательской настройкой. */
+      /* Заводские настройки стирают хранилище триггеров и блобы
+       * переменных/ГЛ — иначе записи оставались во Flash и продолжали
+       * срабатывать/подтягиваться после «сброса». Журнал событий и
+       * страницу конфигурации (имя/серийный номер/VID/PID) команда НЕ
+       * трогает: идентичность задаётся при программировании, а журнал —
+       * диагностика, не пользовательская настройка. */
       Trigger_ClearAll();
+      Storage_Clear(STORE_REGION_VAR);
+      Storage_Clear(STORE_REGION_FLEX);
       send_new_cmd_response(cmd, 0x00U, NULL, 0U);
       /* Та же причина, что у CMD_CFG_WRITE: сначала гарантированная
        * доставка ответа хосту, потом reset — иначе хост видел таймаут
@@ -613,7 +628,7 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * версии ПК читают только первые 16 байт. */
       uint8_t out[84] = {
         s_device_version,
-        9U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
+        10U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
              * деструктивных команд; 4 = записи триггеров v3 (90 Б —
              * fire_limit + флаги эха), старым прошивкам хост шлёт 82 Б;
              * 5 = имена триггеров (CMD_TRIGGER_NAME_*) в config-странице;
@@ -625,7 +640,9 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
              * кэш, ответ не вооружается: связка «автозапись в кэш +
              * обычный ответ» одного триггера;
              * 9 = онлайн-телеметрия нагрузки в хвосте [76..83]:
-             * темп главного цикла, %CPU, %RAM (отчёт мастера) */
+             * темп главного цикла, %CPU, %RAM (отчёт мастера);
+             * 10 = маркерное хранилище CMD_STORAGE_* (0xD5..0xDA):
+             * переменные/ГЛ в камне, области по маркерам */
         0U,
         1U,
         cfg->reserved[0],
@@ -753,6 +770,113 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
           (uint16_t)(payload[8] | ((uint16_t)payload[9] << 8)),
           payload[10], pwm_time);
       send_new_cmd_response(cmd, ok ? 0x00U : 0x01U, NULL, 0U);
+      break;
+    }
+
+    case CMD_SYS_RESET: {
+      /* Перезагрузка устройства по кнопке «Перезагрузить устройство»
+       * в мониторинге (отчёт мастера): ответ уходит первым, потом
+       * сброс — как у CMD_CFG_FACTORY_RESET. Приложение стартует
+       * заново, USB пере-энумирируется, хост переподключается сам
+       * (expect_reboot на стороне ПК). */
+      send_new_cmd_response(cmd, 0x00U, NULL, 0U);
+      CDC_FlushTx(200U);
+      reboot_to_application();
+      break;
+    }
+
+    case CMD_STORAGE_INFO: {
+      /* [region] → [base u32][len u32][gen u32]; status 0x02 — области нет */
+      if (payload_len < 1U || payload[0] > STORE_REGION_VAR) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      uint32_t r_base = 0U, r_len = 0U, r_gen = 0U;
+      if (!Storage_RegionInfo(payload[0], &r_base, &r_len, &r_gen)) {
+        send_new_cmd_response(cmd, 0x02U, NULL, 0U);
+        break;
+      }
+      uint8_t out[12];
+      memcpy(&out[0], &r_base, 4U);
+      memcpy(&out[4], &r_len, 4U);
+      memcpy(&out[8], &r_gen, 4U);
+      send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
+      break;
+    }
+
+    case CMD_STORAGE_READ: {
+      /* [region][off u16][len u8] → len байт полезной нагрузки */
+      if (payload_len < 4U || payload[0] > STORE_REGION_VAR || payload[3] == 0U) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      uint32_t off = (uint32_t)payload[1] | ((uint32_t)payload[2] << 8);
+      uint8_t out[255];
+      if (!Storage_Read(payload[0], off, out, payload[3])) {
+        send_new_cmd_response(cmd, 0x02U, NULL, 0U);
+        break;
+      }
+      send_new_cmd_response(cmd, 0x00U, out, payload[3]);
+      break;
+    }
+
+    case CMD_STORAGE_BEGIN: {
+      /* [region][len u32] → [base u32]; подготовка места может
+       * пересаживать области триггеров/журнала — команда долгая. */
+      if (payload_len < 5U || payload[0] > STORE_REGION_VAR) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      uint32_t len = (uint32_t)payload[1] | ((uint32_t)payload[2] << 8)
+                   | ((uint32_t)payload[3] << 16) | ((uint32_t)payload[4] << 24);
+      if (!Storage_BeginWrite(payload[0], len)) {
+        send_new_cmd_response(cmd, 0x02U, NULL, 0U);
+        break;
+      }
+      uint8_t out[4];
+      uint32_t base = Storage_WriteBase();
+      memcpy(&out[0], &base, 4U);
+      send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
+      break;
+    }
+
+    case CMD_STORAGE_DATA: {
+      /* [off u16][данные] — кусок полезной нагрузки по смещению.
+       * Регион не повторяем: сессия одна (BEGIN выбрал область). */
+      if (payload_len < 3U) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      uint32_t off = (uint32_t)payload[0] | ((uint32_t)payload[1] << 8);
+      uint8_t ok = Storage_WriteChunk(off, &payload[2],
+                                      (uint32_t)(payload_len - 2U));
+      send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
+      break;
+    }
+
+    case CMD_STORAGE_COMMIT: {
+      /* [crc32 u32] — сверка прочитанного блоба; заголовок пишется
+       * последним и делает область видимой. */
+      if (payload_len < 4U) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      uint32_t crc = (uint32_t)payload[0] | ((uint32_t)payload[1] << 8)
+                   | ((uint32_t)payload[2] << 16) | ((uint32_t)payload[3] << 24);
+      uint8_t ok = Storage_Commit(crc);
+      send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
+      break;
+    }
+
+    case CMD_STORAGE_CLEAR: {
+      /* [region][0xA5] — ключ как у прочих деструктивных команд. */
+      if (payload_len < 2U || payload[0] > STORE_REGION_VAR
+          || payload[1] != TRIGGER_CLEAR_KEY) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      uint8_t ok = Storage_Clear(payload[0]);
+      send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
       break;
     }
 

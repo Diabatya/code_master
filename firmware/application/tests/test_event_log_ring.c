@@ -33,7 +33,11 @@ typedef struct __attribute__((packed)) {
   uint8_t  pad[2];
 } wire_record_t;
 
-static uint8_t s_pool[EVENT_LOG_TOTAL_SLOTS * EVENT_LOG_RECORD_SIZE];
+/* The pool mirrors the on-Flash EVLH region: a 32-byte header followed
+ * by EVENT_LOG_TOTAL_SLOTS 16-byte records, so page boundaries fall
+ * mid-slot exactly like in the firmware (erase granularity is a whole
+ * Flash page, not a page-aligned group of records). */
+static uint8_t s_pool[EVENT_LOG_POOL_PAGES * EVENT_LOG_FLASH_PAGE];
 static uint32_t s_next_seq;
 static uint16_t s_next_slot;
 
@@ -49,7 +53,11 @@ static uint8_t crc8(const uint8_t *data, uint32_t len)
   return crc;
 }
 
-static uint8_t *slot_ptr(uint16_t slot) { return &s_pool[(uint32_t)slot * EVENT_LOG_RECORD_SIZE]; }
+static uint8_t *slot_ptr(uint16_t slot)
+{
+  return &s_pool[EVENT_LOG_HEADER_BYTES
+                 + (uint32_t)slot * EVENT_LOG_RECORD_SIZE];
+}
 
 static uint8_t slot_is_blank(uint16_t slot)
 {
@@ -69,8 +77,14 @@ static uint8_t load_slot(uint16_t slot, wire_record_t *out)
 
 static void erase_page_for_slot(uint16_t slot)
 {
-  uint32_t page_start = (slot / EVENT_LOG_SLOTS_PER_PAGE) * EVENT_LOG_SLOTS_PER_PAGE;
-  memset(slot_ptr((uint16_t)page_start), 0xFF, EVENT_LOG_FLASH_PAGE);
+  /* Mirrors slot_page() in event_log.c: the page a slot lives in is
+   * computed from its byte offset inside the region — with the 32-byte
+   * EVLH header the last two slots of each page spill into the next
+   * page's erase granularity. */
+  uint32_t offset = EVENT_LOG_HEADER_BYTES
+      + (uint32_t)slot * EVENT_LOG_RECORD_SIZE;
+  uint32_t page = (offset / EVENT_LOG_FLASH_PAGE) * EVENT_LOG_FLASH_PAGE;
+  memset(&s_pool[page], 0xFF, EVENT_LOG_FLASH_PAGE);
 }
 
 /* Mirrors EventLog_Init(): scan for highest seq, resume right after it. */
@@ -177,20 +191,19 @@ int main(void)
   /* 4) Wrap the whole pool past capacity: oldest records must be gone
    * (their page got erased), remaining ones must still read back in
    * ascending seq order with no gaps/duplicates. Erasure happens a
-   * whole page (EVENT_LOG_SLOTS_PER_PAGE records) at a time, so the
-   * "oldest alive == total_written - TOTAL_SLOTS + 1" formula only
-   * holds exactly when the write count beyond the first full lap is
-   * itself a multiple of the page size (chosen below) — otherwise the
-   * currently-being-filled page is left partially blank and the still
-   * page-aligned older pages survive intact (also correct, just not
-   * expressible as a single linear formula, see comment in sim_add()). */
+   * whole Flash page at a time — the "oldest alive" formula below only
+   * holds exactly when the extra writes beyond the first full lap land
+   * the write head exactly at a page boundary (each erased page is
+   * then fully rewritten). Page 0 holds 126 slots (the 32-byte EVLH
+   * header eats the first two slot positions), pages 1..3 — 128 each:
+   * extra_writes = 126 + 2*128 stops at the page-3 boundary. */
   uint32_t total_written = 10U;
   uint32_t fill_first_lap = (uint32_t)EVENT_LOG_TOTAL_SLOTS - total_written;
-  uint32_t extra_pages = 2U * (uint32_t)EVENT_LOG_SLOTS_PER_PAGE;
-  for (uint32_t i = 0; i < fill_first_lap + extra_pages; i++) {
+  uint32_t extra_writes = 126U + 2U * 128U;
+  for (uint32_t i = 0; i < fill_first_lap + extra_writes; i++) {
     sim_add(6U, 0U, 0U);
   }
-  total_written += fill_first_lap + extra_pages;
+  total_written += fill_first_lap + extra_writes;
 
   /* EventLog_Read()'s max_count is a uint8_t (mirrors the real
    * CMD_EVENT_LOG wire limit) — pull the whole ring via the same

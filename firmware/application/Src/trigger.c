@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include "main.h"
 #include "trigger.h"
+#include "storage.h"
 
 /* sizeof(trigger_t) must be a multiple of 2 (half-word) so that
  * flash_write_store()'s halfword-by-halfword HAL_FLASH_Program()
@@ -20,7 +21,8 @@ static uint8_t s_stage_flags[TRIGGER_MAX_RECORDS];
 static uint8_t s_staged_max;    /* наибольший staged-индекс +1 */
 static uint32_t s_stage_tick;   /* тик последнего STAGE */
 static uint8_t s_count;         /* активных записей в списке */
-static uint32_t s_store_base;   /* адрес заголовка области в пуле, 0 — нет */
+static uint32_t s_store_base;   /* адрес заголовка области во Flash, 0 — нет */
+static uint32_t s_store_pages;  /* страниц, занятых текущей областью */
 static uint32_t s_generation;   /* generation последнего коммита */
 
 /* Кэш режима «автоматическая запись DATA»: последний кадр, попавший в
@@ -84,6 +86,17 @@ static uint8_t trigger_fields_valid(const trigger_t *trig);
 static uint8_t erase_pages(uint32_t from, uint32_t to);
 static uint8_t program_store(uint32_t base, uint32_t generation, uint8_t total,
                              const trigger_t **src);
+
+/* Позиция области триггеров для раскладки storage.c. */
+uint32_t Trigger_StoreBase(void)
+{
+  return s_store_base;
+}
+
+uint32_t Trigger_StorePages(void)
+{
+  return s_store_pages;
+}
 
 static uint8_t crc8(const uint8_t *data, uint32_t len)
 {
@@ -155,7 +168,10 @@ static uint32_t find_store(uint8_t *count_out, uint32_t *gen_out,
   uint32_t best = 0U;
   uint32_t best_gen = 0U;
   uint32_t best_stride = 0U;
-  for (uint32_t page = TRIGGER_POOL_BASE; page < TRIGGER_FLASH_END;
+  /* Сквозной скан всего свободного пространства за кодом: область
+   * триггеров плавает (storage.c пересаживает её при росте
+   * переменных/ГЛ), жёсткого адреса нет — только маркер TRGH. */
+  for (uint32_t page = Storage_CodeEnd(); page < TRIGGER_FLASH_END;
        page += TRIGGER_FLASH_PAGE) {
     const trigger_header_t *h = (const trigger_header_t *)page;
     uint32_t stride;
@@ -210,6 +226,7 @@ void Trigger_Init(void)
   s_staged_max = 0U;
   s_stage_tick = 0U;
   s_store_base = 0U;
+  s_store_pages = 0U;
   s_generation = 0U;
   s_flash_valid_count = 0U;
 
@@ -232,7 +249,22 @@ void Trigger_Init(void)
       }
     }
     s_store_base = base;
+    s_store_pages = (TRIGGER_HEADER_SIZE + (uint32_t)count * stride
+                     + TRIGGER_FLASH_PAGE - 1U) / TRIGGER_FLASH_PAGE;
     s_generation = gen;
+    Storage_NoteTrig(base, s_store_pages);
+    /* Легаси-регион при живом новом хранилище — мусорный резерв
+     * (миграция оборвалась после записи области, но до стирания
+     * легаси): записи уже подняты из TRGH, источник дублирует их —
+     * стираем и снимаем резерв у storage.c. */
+    if (*(const uint32_t *)TRIGGER_LEGACY_ADDR == TRIGGER_MAGIC) {
+      uint32_t legacy_end = TRIGGER_LEGACY_ADDR
+          + ((TRIGGER_LEGACY_COUNT * TRIGGER_RECORD_SIZE_V2
+              + TRIGGER_FLASH_PAGE - 1U) / TRIGGER_FLASH_PAGE)
+            * TRIGGER_FLASH_PAGE;
+      (void)erase_pages(TRIGGER_LEGACY_ADDR, legacy_end);
+      Storage_NoteLegacyTrigDone();
+    }
     return;
   }
 
@@ -250,12 +282,12 @@ void Trigger_Init(void)
     }
   }
 
-  /* Миграция финализируется сразу: поднятые записи пишем v3-хранилищем
-   * в верх пула, легаси-страницу внизу НЕ стираем — при обрыве питания
-   * посреди записи следующий старт снова найдёт источник и повторит
-   * переезд. Без финализации легаси реимпортировалось при КАЖДОМ
-   * старте: удалённый, но ни разу не сохранённый триггер воскресал
-   * «фантомом» после каждого ребута. */
+  /* Миграция финализируется сразу: поднятые записи пишем в зазор
+   * «посередине» (см. storage.c), легаси-регион стираем после успеха —
+   * при обрыве питания посреди записи следующий старт снова найдёт
+   * источник и повторит переезд. Без финализации легаси
+   * реимпортировалось при КАЖДОМ старте: удалённый, но ни разу не
+   * сохранённый триггер воскресал «фантомом» после каждого ребута. */
   if (s_count != 0U) {
     const trigger_t *src[TRIGGER_MAX_RECORDS];
     for (uint8_t j = 0U; j < s_count; j++) {
@@ -263,14 +295,44 @@ void Trigger_Init(void)
     }
     uint32_t size = TRIGGER_HEADER_SIZE + (uint32_t)s_count * sizeof(trigger_t);
     uint32_t pages = (size + TRIGGER_FLASH_PAGE - 1U) / TRIGGER_FLASH_PAGE;
-    uint32_t base = TRIGGER_FLASH_END - pages * TRIGGER_FLASH_PAGE;
-    /* Хранилище привязано к верху пула и при максимуме записей не
-     * достаёт до легаси-страницы — стираем только целевой диапазон. */
-    if (base > TRIGGER_LEGACY_ADDR
-        && erase_pages(base, TRIGGER_FLASH_END)
+    uint32_t gap_lo = Storage_TrigGapBase();
+    uint32_t gap_hi = Storage_TrigGapEnd();
+    uint32_t base = 0U;
+    if (gap_lo + pages * TRIGGER_FLASH_PAGE <= gap_hi) {
+      /* Кандидаты — середина и края зазора; обязателен RangeFree:
+       * легаси-пул журнала (0x0803C000) внутри зазора резервирован
+       * до миграции записей в EVLH — сесть на него нельзя. */
+      const uint32_t cands[3] = {
+        (gap_lo + (gap_hi - gap_lo - pages * TRIGGER_FLASH_PAGE) / 2U)
+            & ~(TRIGGER_FLASH_PAGE - 1U),
+        gap_hi - pages * TRIGGER_FLASH_PAGE,
+        gap_lo,
+      };
+      for (uint8_t c = 0U; c < 3U; c++) {
+        if (cands[c] >= gap_lo
+            && cands[c] + pages * TRIGGER_FLASH_PAGE <= gap_hi
+            && Storage_RangeFree(cands[c],
+                                 cands[c] + pages * TRIGGER_FLASH_PAGE)) {
+          base = cands[c];
+          break;
+        }
+      }
+    }
+    if (base != 0U
+        && erase_pages(base, base + pages * TRIGGER_FLASH_PAGE)
         && program_store(base, 1U, s_count, src)) {
       s_store_base = base;
+      s_store_pages = pages;
       s_generation = 1U;
+      Storage_NoteTrig(base, pages);
+      /* Легаси-страницы стираем только ПОСЛЕ валидного нового
+       * хранилища; резерв storage снимаем при успехе. */
+      uint32_t legacy_end = TRIGGER_LEGACY_ADDR
+          + ((TRIGGER_LEGACY_COUNT * TRIGGER_RECORD_SIZE_V2
+              + TRIGGER_FLASH_PAGE - 1U) / TRIGGER_FLASH_PAGE)
+            * TRIGGER_FLASH_PAGE;
+      (void)erase_pages(TRIGGER_LEGACY_ADDR, legacy_end);
+      Storage_NoteLegacyTrigDone();
     }
     /* Сбой записи не фатален: список уже в RAM и работает, переезд
      * повторится при следующем старте. */
@@ -330,10 +392,56 @@ static uint8_t erase_pages(uint32_t from, uint32_t to)
   return 1U;
 }
 
-/* Стирает все непустые страницы пула триггеров. */
-static uint8_t erase_pool(void)
+/* Стирает все области триггеров (активная TRGH + зомби-регионы после
+ * обрывов + легаси v2). Пул как диапазон больше не существует —
+ * чужие области (VARH/EVLH/FLXH) не трогаем. */
+static uint8_t erase_trig_regions(void)
 {
-  return erase_pages(TRIGGER_POOL_BASE, TRIGGER_FLASH_END);
+  for (uint32_t page = Storage_CodeEnd(); page < TRIGGER_FLASH_END;
+       page += TRIGGER_FLASH_PAGE) {
+    const trigger_header_t *h = (const trigger_header_t *)page;
+    if (h->magic != TRIGGER_HEADER_MAGIC) {
+      continue;
+    }
+    /* Размер области считается только из ВАЛИДНОГО заголовка (version/
+     * count/crc8 — те же проверки, что у find_store): мусорный count
+     * из повреждённого заголовка иначе стирал бы страницы соседних
+     * областей (VARH/EVLH) — маркер TRGH сам по себе не граница. */
+    uint8_t stride;
+    if (h->version == TRIGGER_STORE_VERSION) {
+      stride = TRIGGER_RECORD_SIZE;
+    } else if (h->version == TRIGGER_STORE_VERSION_V3) {
+      stride = TRIGGER_RECORD_SIZE_V2;
+    } else {
+      stride = 0U;
+    }
+    uint32_t pages;
+    if (stride != 0U && h->count <= TRIGGER_MAX_RECORDS
+        && crc8((const uint8_t *)h, offsetof(trigger_header_t, crc8))
+               == h->crc8) {
+      uint32_t bytes = TRIGGER_HEADER_SIZE + (uint32_t)h->count * stride;
+      pages = (bytes + TRIGGER_FLASH_PAGE - 1U) / TRIGGER_FLASH_PAGE;
+      if (page + pages * TRIGGER_FLASH_PAGE > TRIGGER_FLASH_END) {
+        pages = (TRIGGER_FLASH_END - page) / TRIGGER_FLASH_PAGE;
+      }
+    } else {
+      pages = 1U; /* дохлый маркер — вытираем только свою страницу */
+    }
+    if (!erase_pages(page, page + pages * TRIGGER_FLASH_PAGE)) {
+      return 0U;
+    }
+  }
+  /* Легаси-регион v2 вытираем тоже — иначе его записи снова
+   * смигрируют при следующем старте после «Заводских настроек». */
+  uint32_t legacy_end = TRIGGER_LEGACY_ADDR
+      + ((TRIGGER_LEGACY_COUNT * TRIGGER_RECORD_SIZE_V2
+          + TRIGGER_FLASH_PAGE - 1U) / TRIGGER_FLASH_PAGE)
+        * TRIGGER_FLASH_PAGE;
+  if (!erase_pages(TRIGGER_LEGACY_ADDR, legacy_end)) {
+    return 0U;
+  }
+  Storage_NoteLegacyTrigDone();
+  return 1U;
 }
 
 /* Пишет записи + заголовок в область [base, ...) — пул уже стёрт.
@@ -397,12 +505,14 @@ static uint8_t program_store(uint32_t base, uint32_t generation, uint8_t total,
 
 void Trigger_ClearAll(void)
 {
-  erase_pool();
+  erase_trig_regions();
   s_count = 0U;
   s_staged_max = 0U;
   s_stage_tick = 0U;
   s_store_base = 0U;
+  s_store_pages = 0U;
   s_flash_valid_count = 0U;
+  Storage_NoteTrig(0U, 0U);
   memset(s_stage_flags, 0, sizeof(s_stage_flags));
   memset(s_pending, 0, sizeof(s_pending));
   memset(s_cache_valid, 0, sizeof(s_cache_valid));
@@ -498,54 +608,79 @@ uint8_t Trigger_Commit(uint8_t total)
     }
   }
 
-  /* Область привязана к верху Flash: растёт вниз по мере добавления.
+  /* Область триггеров плавает «посередине» свободного пространства
+   * (между EVLH/VARH сверху и FLXH снизу — границы даёт storage.c).
    * 0 записей — 0 страниц: хранилище отсутствует, память свободна. */
   uint32_t size = (total != 0U)
       ? TRIGGER_HEADER_SIZE + (uint32_t)total * sizeof(trigger_t)
       : 0U;
   uint32_t pages = (size + TRIGGER_FLASH_PAGE - 1U) / TRIGGER_FLASH_PAGE;
-  uint32_t base_top = TRIGGER_FLASH_END - pages * TRIGGER_FLASH_PAGE;
-  if (total != 0U && base_top < TRIGGER_POOL_BASE) {
-    return 0U; /* не помещается даже во весь пул */
+  uint32_t gap_lo = Storage_TrigGapBase();
+  uint32_t gap_hi = Storage_TrigGapEnd();
+  uint32_t base_mid = 0U;
+  if (total != 0U && gap_lo + pages * TRIGGER_FLASH_PAGE <= gap_hi) {
+    base_mid = (gap_lo + (gap_hi - gap_lo - pages * TRIGGER_FLASH_PAGE) / 2U)
+               & ~(TRIGGER_FLASH_PAGE - 1U);
+  } else if (total != 0U) {
+    return 0U; /* зазор не вмещает список — переменные/ГЛ съели место */
   }
 
   /* Атомарная замена: новая область пишется в страницы, НЕ занятые
-   * действующим хранилищем (второй якорь — низ пула), и становится
-   * видимой только когда дописан заголовок (program_store пишет его
-   * последним). Сброс посреди коммита — IWDG, обрыв USB, питание —
-   * оставляет ПРЕЖНИЙ список целым: следующий старт видит старые
-   * триггеры вместо урезанных/мусорных. Рядом не помещаются (оба
-   * якоря пересекаются со старым) — старое поведение: зачистка пула
-   * целиком, обрыв тогда даёт пустое хранилище, а не мусор. */
+   * действующим хранилищем (кандидаты — середина и края зазора), и
+   * становится видимой только когда дописан заголовок (program_store
+   * пишет его последним). Сброс посреди коммита — IWDG, обрыв USB,
+   * питание — оставляет ПРЕЖНИЙ список целым. Если все кандидаты
+   * пересекаются со старым — стираем старую область и пишем на её
+   * место: обрыв тогда даёт пустое хранилище, а не мусор. */
   uint32_t base = 0xFFFFFFFFU;
   uint32_t old_base = s_store_base;
   uint32_t old_end = 0U;
   if (old_base != 0U) {
-    /* Устаревшее хранилище могло быть записано с шагом 82 Б (store v3) —
-     * sizeof(trigger_t) здесь завышает оценку, но это безопасно:
-     * пересечение проверяется с запасом, а стирание зажато концом Flash. */
-    uint32_t old_pages = (TRIGGER_HEADER_SIZE
-                          + (uint32_t)s_count * sizeof(trigger_t)
-                          + (TRIGGER_FLASH_PAGE - 1U)) / TRIGGER_FLASH_PAGE;
-    old_end = old_base + old_pages * TRIGGER_FLASH_PAGE;
+    old_end = old_base + s_store_pages * TRIGGER_FLASH_PAGE;
     if (old_end > TRIGGER_FLASH_END) {
       old_end = TRIGGER_FLASH_END;
     }
   }
   if (total != 0U && old_base != 0U) {
-    const uint32_t anchors[2] = { base_top, TRIGGER_POOL_BASE };
-    for (uint8_t c = 0U; c < 2U; c++) {
+    const uint32_t anchors[3] = { base_mid, gap_hi - pages * TRIGGER_FLASH_PAGE,
+                                  gap_lo };
+    for (uint8_t c = 0U; c < 3U; c++) {
       uint32_t cand = anchors[c];
       uint32_t cand_end = cand + pages * TRIGGER_FLASH_PAGE;
+      if (cand < gap_lo || cand_end > gap_hi) {
+        continue;
+      }
       if (cand >= old_end || cand_end <= old_base) {
-        base = cand; /* не пересекается со старым хранилищем */
-        break;
+        /* Не пересекается со старым хранилищем — но должно быть
+         * свободно по storage (резервы легаси-регионов и прочие
+         * области зазора тоже считаются). */
+        if (Storage_RangeFree(cand, cand_end)) {
+          base = cand;
+          break;
+        }
+      }
+    }
+  } else if (total != 0U) {
+    /* Старого хранилища нет — в середину зазора, если она свободна. */
+    if (Storage_RangeFree(base_mid, base_mid + pages * TRIGGER_FLASH_PAGE)) {
+      base = base_mid;
+    } else {
+      const uint32_t cands[2] = { gap_hi - pages * TRIGGER_FLASH_PAGE,
+                                  gap_lo };
+      for (uint8_t c = 0U; c < 2U; c++) {
+        if (cands[c] >= gap_lo
+            && cands[c] + pages * TRIGGER_FLASH_PAGE <= gap_hi
+            && Storage_RangeFree(cands[c],
+                                 cands[c] + pages * TRIGGER_FLASH_PAGE)) {
+          base = cands[c];
+          break;
+        }
       }
     }
   }
 
   if (total == 0U) {
-    if (!erase_pool()) {
+    if (!erase_trig_regions()) {
       return 0U;
     }
   } else if (base != 0xFFFFFFFFU) {
@@ -557,14 +692,32 @@ uint8_t Trigger_Commit(uint8_t total)
      * сбой здесь оставляет зомби-заголовок, но find_store() выбирает
      * область с большим generation — новую. */
     (void)erase_pages(old_base, old_end);
+    s_store_pages = pages;
+    Storage_NoteTrig(base, pages);
   } else {
-    if (!erase_pool()) {
+    /* Все свободные кандидаты заняты/пересекаются со старым — стираем
+     * старую область и пишем на её место: обрыв здесь даёт пустое
+     * хранилище, а не мусор (RAM-список обновляется только при успехе).
+     * Старой области нет (old_base == 0) — in-place писать некуда:
+     * erase_pages(0, ...) стёр бы страницы от адреса 0 (бутлоадер) —
+     * честный отказ вместо кирпича. */
+    if (old_base == 0U) {
       return 0U;
     }
-    if (!program_store(base_top, s_generation + 1U, total, src)) {
+    uint32_t new_end = old_base + pages * TRIGGER_FLASH_PAGE;
+    if (new_end > old_end && !Storage_RangeFree(old_end, new_end)) {
+      return 0U; /* рост списка упрётся в чужую область — отказ */
+    }
+    if (!erase_pages(old_base,
+                     new_end > old_end ? new_end : old_end)) {
+      return 0U;
+    }
+    if (!program_store(old_base, s_generation + 1U, total, src)) {
       return 0U; /* RAM-список не трогаем: на Flash старое/мусор */
     }
-    base = base_top;
+    base = old_base;
+    s_store_pages = pages;
+    Storage_NoteTrig(base, pages);
   }
 
   for (uint8_t j = 0U; j < total; j++) {
@@ -572,6 +725,10 @@ uint8_t Trigger_Commit(uint8_t total)
   }
   s_count = total;
   s_store_base = (total != 0U) ? base : 0U;
+  if (total == 0U) {
+    s_store_pages = 0U;
+    Storage_NoteTrig(0U, 0U);
+  }
   s_generation++;
   s_staged_max = 0U;
   s_stage_tick = 0U;
@@ -598,6 +755,49 @@ uint8_t Trigger_Set(uint8_t index, const trigger_t *trig)
     total = (uint8_t)(index + 1U);
   }
   return Trigger_Commit(total);
+}
+
+/* Пересадка области на новый адрес — вызывается из storage.c, когда
+ * растущая область переменных/ГЛ наезжает на триггеры. Содержимое
+ * берётся из RAM-копии списка (область — только проекция). Новое
+ * место стирается, пишется целиком, старые страницы вычищаются. */
+uint8_t Trigger_Relocate(uint32_t new_base)
+{
+  if (s_store_base == 0U || s_count == 0U) {
+    return 1U; /* переносить нечего */
+  }
+  if (new_base < Storage_CodeEnd()
+      || new_base + s_store_pages * TRIGGER_FLASH_PAGE > TRIGGER_FLASH_END) {
+    return 0U;
+  }
+  if (new_base == s_store_base) {
+    return 1U;
+  }
+  const trigger_t *src[TRIGGER_MAX_RECORDS];
+  for (uint8_t j = 0U; j < s_count; j++) {
+    src[j] = &s_triggers[j];
+  }
+  /* Целевой диапазон стирается целиком — он может частично пересекаться
+   * со старой областью, но список в RAM, так что это не страшно. */
+  if (!erase_pages(new_base, new_base + s_store_pages * TRIGGER_FLASH_PAGE)) {
+    return 0U;
+  }
+  uint32_t old_base = s_store_base;
+  uint32_t old_end = old_base + s_store_pages * TRIGGER_FLASH_PAGE;
+  if (!program_store(new_base, s_generation + 1U, s_count, src)) {
+    return 0U;
+  }
+  s_generation++;
+  s_store_base = new_base;
+  Storage_NoteTrig(new_base, s_store_pages);
+  /* Страницы старой области вне новой — зомби, вытираем. */
+  if (old_base < new_base) {
+    (void)erase_pages(old_base, new_base < old_end ? new_base : old_end);
+  }
+  if (old_end > new_base + s_store_pages * TRIGGER_FLASH_PAGE) {
+    (void)erase_pages(new_base + s_store_pages * TRIGGER_FLASH_PAGE, old_end);
+  }
+  return 1U;
 }
 
 uint8_t Trigger_SetEnabled(uint8_t index, uint8_t enabled)

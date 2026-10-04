@@ -2926,6 +2926,17 @@ class CanMonitorTab(QWidget):
         self._sleep_mode_combo.currentIndexChanged.connect(self._on_sleep_mode_changed)
         self._update_sleep_time_state(self._sleep_mode_combo.currentIndex())
 
+        # «Перезагрузить устройство» — рядом с полем режима сна
+        # (отчёт мастера): шлёт CMD_SYS_RESET, МК отвечает и уходит в
+        # reset; связь восстанавливает авто-переподключение.
+        self._reboot_button = QPushButton(tr("Перезагрузить устройство"))
+        self._reboot_button.setFont(compact_font)
+        self._reboot_button.setToolTip(
+            tr("Перезагрузить STM32 — устройство отключится и вернётся "
+               "на связь само")
+        )
+        self._reboot_button.clicked.connect(self._on_reboot_device)
+
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._monitor1 = CanChannelMonitor(1, self._serial_manager, self)
@@ -2968,6 +2979,7 @@ class CanMonitorTab(QWidget):
         buttons_layout.addWidget(self._sleep_mode_label)
         buttons_layout.addWidget(self._sleep_time_spin)
         buttons_layout.addWidget(self._sleep_mode_combo)
+        buttons_layout.addWidget(self._reboot_button)
         buttons_layout.addStretch()
         layout.addLayout(buttons_layout)
         layout.addWidget(self._splitter)
@@ -3234,6 +3246,31 @@ class CanMonitorTab(QWidget):
     def _on_sleep_mode_changed(self, index: int) -> None:
         self._config.set("sleep_mode", index)
         self._update_sleep_time_state(index)
+
+    def _on_reboot_device(self) -> None:
+        """«Перезагрузить устройство» — CMD_SYS_RESET; МК отвечает и
+        уходит в reset, связь восстанавливает авто-переподключение
+        (команда в _REBOOTING_COMMANDS — отключение порта ошибкой не
+        считается)."""
+        if not self._serial_manager.is_open():
+            QMessageBox.warning(
+                self, tr("Внимание"), tr("Устройство не подключено")
+            )
+            return
+        try:
+            self._serial_manager.request_sys_reset()
+        except Exception as exc:  # noqa: BLE001
+            # Мёртвый порт после ответа — тоже «успех»: устройство уже
+            # ушло в reset до прочтения ack. Ошибки записи показываем.
+            if not self._serial_manager.is_open():
+                logger.info("Перезагрузка устройства: порт закрылся до чтения ответа")
+            else:
+                QMessageBox.warning(
+                    self, tr("Ошибка"),
+                    tr("Не удалось перезагрузить устройство: {0}").format(exc),
+                )
+                return
+        logger.info("Отправлена команда перезагрузки устройства")
 
     def _update_sleep_time_state(self, index: int) -> None:
         """Активирует/деактивирует поле времени сна в зависимости от режима."""

@@ -247,17 +247,16 @@ def validate_application_vector(data: bytes, base_address: int) -> tuple[bool, s
 def validate_write_region(base: int, size: int) -> tuple[bool, str]:
     """Проверяет, что область записи [base, base+size) допустима для AN3155.
 
-    Новая карта Flash (отчёт мастера): через bootloader разрешена запись
-    страницы идентификации устройства, метаданных приложения и кода —
-    непрерывный диапазон 0x08008000–0x0803BFFF. Журнал событий
-    (0x0803C000+) и хранилище триггеров/переменных у конца Flash через
-    AN3155 не пишутся — они обновляются командами приложения.
+    Карта Flash (bootloader): через AN3155 разрешена запись страницы
+    идентификации устройства, метаданных приложения и кода — непрерывный
+    диапазон 0x08008000–0x0803BFFF. Верхние 16 КБ (0x0803C000+) под
+    маркерное хранилище через AN3155 не пишутся — области
+    VARH/FLXH/EVLH/TRGH обновляются командами CMD_STORAGE_*/CMD_*.
     """
     from core.stm32_info import (
         DEVICE_INFO_PAGE_ADDR,
         EVENT_LOG_ADDR,
         FLASH_END_ADDR,
-        TRIGGER_REGION_ADDR,
     )
 
     end = base + size
@@ -268,13 +267,13 @@ def validate_write_region(base: int, size: int) -> tuple[bool, str]:
         )
     if base >= EVENT_LOG_ADDR:
         return False, (
-            f"Адрес 0x{base:08X} попадает в область журнала/хранилища "
+            f"Адрес 0x{base:08X} попадает в область маркерного хранилища "
             f"(0x{EVENT_LOG_ADDR:08X}–0x{FLASH_END_ADDR:08X}) — запись запрещена"
         )
     if end > EVENT_LOG_ADDR:
         return False, (
-            f"Образ выходит за 0x{EVENT_LOG_ADDR:08X} в область журнала и "
-            f"хранилища (до 0x{TRIGGER_REGION_ADDR:08X} включительно) — запись запрещена"
+            f"Образ выходит за 0x{EVENT_LOG_ADDR:08X} в область маркерного "
+            f"хранилища (до 0x{FLASH_END_ADDR:08X}) — запись запрещена"
         )
     return True, ""
 

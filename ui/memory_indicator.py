@@ -115,16 +115,21 @@ class MemoryIndicator(QWidget):
         bar.setFixedWidth(180)
         self._row_layout.addWidget(label)
         self._row_layout.addWidget(bar)
-        return bar
+        return bar, label
 
     def _create_widgets(self) -> None:
         self._row_layout = QHBoxLayout(self)
         self._row_layout.setSpacing(8)
         self._row_layout.setContentsMargins(0, 0, 0, 0)
 
-        self._progress = self._cell(tr("Память:"))
-        self._ram_bar = self._cell(tr("ОЗУ:"))
-        self._cpu_bar = self._cell(tr("CPU:"))
+        self._progress, _ = self._cell(tr("Память:"))
+        # Счётчик «ОЗУ» убран из приложения (отчёт мастера): телеметрия
+        # ram_used_pct по протоколу по-прежнему читается МК — поле
+        # просто не выводится.
+        self._ram_bar, self._ram_label = self._cell(tr("ОЗУ:"))
+        self._ram_bar.setVisible(False)
+        self._ram_label.setVisible(False)
+        self._cpu_bar, _ = self._cell(tr("CPU:"))
         self._row_layout.addStretch()
         self._ram_bar.setToolTip(tr(
             "Онлайн с МК: пиковая занятость RAM (канарейка стека); "
@@ -187,9 +192,9 @@ class MemoryIndicator(QWidget):
         used_slots: int,
         extra_features: int = 0,
     ) -> None:
-        """Процент занятого пула Flash триггеров (8 КБ над config).
+        """Процент занятой маркерной области триггеров (оценка, пул 8 КБ).
 
-        Одинаковый смысл во всех вкладках: доля пула 0x0803E000–0x0803FFFF,
+        Одинаковый смысл во всех вкладках: доля референс-пула TRGH,
         занятая настроенными триггерами; пустое устройство — 0%.
         Попутно обновляет оценку ОЗУ/CPU: каждый триггер держит кэш
         последнего DATA и состояние условий в ОЗУ.

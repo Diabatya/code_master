@@ -1,5 +1,6 @@
 """Окно настроек и рабочего CAN-пространства."""
 
+import json
 import os
 from pathlib import Path
 
@@ -42,6 +43,8 @@ from core.can_protocol import (
     DEVICE_TYPE_CAN_FD,
     EXPECTED_PROTOCOL_VERSION,
     FACTORY_RESET_KEY,
+    STORAGE_REGION_FLEX,
+    STORAGE_REGION_VAR,
 )
 
 from core.serial_manager import SerialManager
@@ -764,6 +767,19 @@ class SettingsWindow(QMainWindow):
         for widget in root.findChildren(QGroupBox):
             if widget.isCheckable() and not _skip(widget):
                 sig.append(("group", widget.isChecked()))
+        # Строки «Переменных» — не поля Qt: findChildren их не видит,
+        # и загрузка «Config Variable» не меняла снимок («Сохранить»
+        # не активировалась — отчёт мастера). Добавляем их в сигнатуру
+        # сериализованным export_config.
+        var_tab = getattr(self, "_variables_tab", None)
+        if var_tab is not None:
+            sig.append((
+                "vars",
+                json.dumps(
+                    var_tab.export_config(),
+                    sort_keys=True, ensure_ascii=False, default=str,
+                ),
+            ))
         # findChildren отдаёт виджеты в z-order — QTabWidget меняет его
         # при каждом переключении вкладки, и позиционная сигнатура
         # расходилась с эталоном без всякой правки: «Сохранить» сама
@@ -1128,6 +1144,16 @@ class SettingsWindow(QMainWindow):
             )
         elif applied:
             self._device_diverged = False
+            # Переменные и программы ГЛ живут в камне (маркерное
+            # хранилище): подтягиваем блобы до _mark_clean — их
+            # применение к вкладкам не должно включать «Сохранить».
+            try:
+                self._download_config_blobs()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Не удалось вычитать блобы переменных/ГЛ из МК: %s",
+                    exc,
+                )
             self._mark_clean()
         # PC-исполняемые триггеры «сработка после старта устройства»
         # стреляют один раз на подключение — ПОСЛЕ вычитки, чтобы флаги
@@ -1180,9 +1206,15 @@ class SettingsWindow(QMainWindow):
 
     def _on_device_identified(self, device_type: int, device_version: int) -> None:
         """Запоминает тип реально подключённого устройства — сверка
-        типа при записи конфига опирается на него, а не на поля файла."""
+        типа при записи конфига опирается на него, а не на поля файла.
+        Устройство опознано = камень полностью загрузился после
+        включения питания — событие ГЛ «Включение устройства»
+        (отчёт мастера)."""
         self._connected_device_type = device_type
         self._update_device_info(device_type, device_version)
+        notify = getattr(self._flexible_tab, "notify_device_ready", None)
+        if callable(notify):
+            notify()
 
     def _update_device_info(
         self, device_type: int = 0, device_version: int = 0, query_device: bool = True
@@ -1611,12 +1643,26 @@ class SettingsWindow(QMainWindow):
             return "2CAN_FD"
         return "2CAN"
 
+    def _equipment_type_name(self) -> str:
+        """Тип оборудования для имени файла и сверки (отчёт мастера)."""
+        name = (self._config.get("device_type_name", "") or "").strip()
+        if not name:
+            device_type = self._config.get("device_type", DEVICE_TYPE_BASIC)
+            name = self._DEVICE_TYPE_NAMES.get(device_type, "")
+        return "".join(
+            c if c.isalnum() or c in "._- " else "_" for c in name
+        ).strip()
+
     def _save_config(self) -> None:
         start_dir = self._config.get("last_config_dir", "") or ""
         # Общий конфиг (триггеры/ГЛ/шлюз/скорости/терминаторы) при
-        # сохранении предлагается как «Config Program» — устройство
-        # хранится внутри файла, имя свободное (отчёт мастера).
-        default_name = os.path.join(start_dir, "Config Program.kmc")
+        # сохранении предлагается как «<Тип оборудования> Config Program»
+        # — тип перед названием (отчёт мастера).
+        prefix = self._equipment_type_name()
+        default_name = os.path.join(
+            start_dir, f"{prefix} Config Program.kmc" if prefix
+            else "Config Program.kmc"
+        )
         path, _ = QFileDialog.getSaveFileName(
             self,
             tr("Сохранить конфигурацию"),
@@ -1668,27 +1714,35 @@ class SettingsWindow(QMainWindow):
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось загрузить: {0}").format(exc))
             return
 
-        # Сверяем идентичность файла с подключённым устройством до
-        # применения настроек — файл мог быть выгружен с другого
-        # экземпляра.
+        # Сверяем файл с подключённым устройством только по типу
+        # оборудования — серийные номера не учитываются (отчёт
+        # мастера): один и тот же конфиг ставится на все приборы
+        # серии.
         if self._serial_manager.is_open() and not self._config.get("emulation", False):
-            dev_name = self._config.get("device_name", "") or self._config.get("device_type_name", "")
-            dev_serial = self._config.get("device_serial", "") or self._config.get("serial_number", "")
-            if (file_name or file_serial) and (
-                (file_name and file_name != dev_name)
-                or (file_serial and file_serial != dev_serial)
-            ):
+            file_type = payload.get("device_type")
+            dev_type = self._config.get("device_type")
+            mismatch = False
+            if file_type not in (None, "") and dev_type is not None:
+                try:
+                    mismatch = int(file_type) != int(dev_type)
+                except (TypeError, ValueError):
+                    mismatch = False
+            elif file_name:
+                mismatch = file_name != (
+                    self._config.get("device_type_name", "")
+                    or self._config.get("device_name", "")
+                )
+            if mismatch:
+                dev_type_name = self._equipment_type_name() or "—"
                 answer = QMessageBox.question(
                     self,
                     tr("Загрузить конфигурацию"),
                     tr(
-                        "Файл записан для устройства «{0}» (s/n {1}), "
-                        "подключено «{2}» (s/n {3}). Загрузить всё равно?"
+                        "Файл записан для другого типа оборудования "
+                        "«{0}», подключено «{1}». Загрузить всё равно?"
                     ).format(
-                        file_name or "—",
-                        file_serial or "—",
-                        dev_name or "—",
-                        dev_serial or "—",
+                        file_name or str(file_type or "—"),
+                        dev_type_name,
                     ),
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
@@ -1810,6 +1864,10 @@ class SettingsWindow(QMainWindow):
                         self._progress_offset = 85.0
                         self._progress_scale = 15.0
                         self._monitor_tab.apply_can_settings_to_device()
+                    # Переменные и программы ГЛ — в камень (маркерное
+                    # хранилище, протокол v10): устройство хранит их
+                    # автономно, вычитка поднимает на любом ПК.
+                    self._upload_config_blobs()
                     self._loading_progress.setValue(100)
                 finally:
                     self._hide_loading_overlay()
@@ -1834,6 +1892,62 @@ class SettingsWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить: {0}").format(exc))
             return False
+
+    def _upload_config_blobs(self) -> None:
+        """Пишет блобы переменных и программ ГЛ в маркерное хранилище
+        МК (CMD_STORAGE_*, протокол v10): переменные — в область VARH у
+        конца Flash, программы ГЛ — в FLXH за концом кода. Прошивка без
+        storage-команд отвечает отказом — сохранение не срываем."""
+        try:
+            info = self._serial_manager.read_system_info()
+            if int(info.get("protocol_version", 0)) < 10:
+                return
+            var_blob = json.dumps(
+                {
+                    "kind": "code_master_variables",
+                    "format": 1,
+                    "variables": self._variables_tab.export_config(),
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+            self._serial_manager.storage_upload(STORAGE_REGION_VAR, var_blob)
+            flex_blob = json.dumps(
+                {
+                    "kind": "code_master_flex_logic",
+                    "format": 1,
+                    "rules": self._flexible_tab.get_config(),
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+            self._serial_manager.storage_upload(STORAGE_REGION_FLEX, flex_blob)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Не удалось записать блобы переменных/ГЛ в МК: %s", exc
+            )
+
+    def _download_config_blobs(self) -> None:
+        """Подтягивает переменные и программы ГЛ из маркерного
+        хранилища МК — устройство без файла на ПК отдаёт свою
+        конфигурацию целиком."""
+        info = self._serial_manager.read_system_info()
+        if int(info.get("protocol_version", 0)) < 10:
+            return
+        var_data = self._serial_manager.storage_download(STORAGE_REGION_VAR)
+        if var_data:
+            try:
+                blob = json.loads(var_data.decode("utf-8"))
+                self._variables_tab.import_config(
+                    blob.get("variables", blob)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Блоб переменных в МК не читается: %s", exc)
+        flex_data = self._serial_manager.storage_download(STORAGE_REGION_FLEX)
+        if flex_data:
+            try:
+                blob = json.loads(flex_data.decode("utf-8"))
+                self._flexible_tab.set_config(blob.get("rules", blob))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Блоб программ ГЛ в МК не читается: %s", exc)
 
     def _factory_reset(self) -> None:
         """Сбрасывает настройки к заводским с подтверждением."""

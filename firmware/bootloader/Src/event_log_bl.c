@@ -1,7 +1,11 @@
 /* Минимальная append-only запись в кольцо журнала событий приложения.
  *
- * Пул и формат записи идентичны firmware/application/Src/event_log.c:
- * 4 страницы по 2048 Б с 0x0803C000, записи 16 Б, CRC8 poly 0x07 init 0x00.
+ * Журнал приложения — маркерная область EVLH (см. storage.c): позиция
+ * не фиксирована, бутлоадер находит её сканированием страниц по
+ * заголовку EVLH в начале области. Записи 16 Б идут со смещения 32
+ * (заголовок 20 Б + выравнивание), CRC8 poly 0x07 init 0x00. Если EVLH
+ * не найден (камень со старой прошивкой), пишем в легаси-пул
+ * 0x0803C000 — тот же формат записей, но без заголовка.
  *
  * Жёсткое правило: бутлоадер НИКОГДА не стирает страницы журнала — если
  * следующий слот не чист, запись просто пропускается. Стиранием кольца
@@ -13,16 +17,20 @@
  * момент не работает). Теперь вход в загрузчик виден в логе, включая случай
  * «приложение невалидно/отсутствует» — самое раннее событие во всей системе. */
 
+#include <stddef.h>
 #include "stm32f1xx_hal.h"
 #include "event_log_bl.h"
 
-#define EVLOG_POOL_BASE    0x0803C000UL
 #define EVLOG_PAGE_SIZE    2048U
 #define EVLOG_PAGES        4U
 #define EVLOG_RECORD_SIZE  16U
-#define EVLOG_SLOTS        (EVLOG_PAGES * EVLOG_PAGE_SIZE / EVLOG_RECORD_SIZE) /* 512 */
+#define EVLOG_HDR_BYTES    32U /* заголовок EVLH в начале области */
 #define EVLOG_MAGIC        0x4C45U   /* 'EL' little-endian */
+#define EVLOG_HDR_MAGIC    0x45564C48UL /* 'EVLH' — маркер области */
 #define EVLOG_TYPE_BL      11U       /* EVLOG_BOOTLOADER */
+#define EVLOG_FLASH_END    0x08040000UL
+#define EVLOG_SCAN_START   0x08009000UL /* конец кода приложения */
+#define EVLOG_LEGACY_BASE  0x0803C000UL /* пул прошивок без маркеров */
 
 typedef struct __attribute__((packed)) {
   uint16_t magic;          /* 'EL' */
@@ -49,19 +57,51 @@ static uint8_t evlog_crc8(const uint8_t *data, uint32_t len)
   return crc;
 }
 
+/* Находит область журнала: EVLH-заголовок в начале страницы. *slots —
+ * сетка слотов у найденного формата (у легаси её больше на 32 байта). */
+static uint32_t evlog_find_pool(uint32_t *slots, uint32_t *rec_off)
+{
+  for (uint32_t page = EVLOG_SCAN_START; page < EVLOG_FLASH_END;
+       page += EVLOG_PAGE_SIZE) {
+    if (*(const uint32_t *)page == EVLOG_HDR_MAGIC) {
+      *slots = (EVLOG_PAGES * EVLOG_PAGE_SIZE - EVLOG_HDR_BYTES)
+               / EVLOG_RECORD_SIZE;
+      *rec_off = EVLOG_HDR_BYTES;
+      return page;
+    }
+  }
+  /* Фолбэк: легаси-пул старых прошивок — записи валидируются своим
+   * magic+crc8, поэтому мусорные данные не примутся. */
+  const evlog_rec_t *r0 = (const evlog_rec_t *)EVLOG_LEGACY_BASE;
+  if (r0->magic == EVLOG_MAGIC && r0->seq != 0U
+      && r0->crc8 == evlog_crc8((const uint8_t *)r0, 15U)) {
+    *slots = EVLOG_PAGES * EVLOG_PAGE_SIZE / EVLOG_RECORD_SIZE;
+    *rec_off = 0U;
+    return EVLOG_LEGACY_BASE;
+  }
+  return 0U;
+}
+
 /* Записывает одну запись «вход в загрузчик» в следующий слот кольца.
  * code: 1 — остались по флагу хоста, 2 — приложение невалидно/отсутствует.
- * Тихий выход, если слот занят (стирать из бутлоадера нельзя) или Flash
- * не запрограммировалась — бутлоадер должен остаться рабочим при любом
- * состоянии журнала. */
+ * Тихий выход, если области нет, слот занят (стирать из бутлоадера
+ * нельзя) или Flash не запрограммировалась — бутлоадер должен остаться
+ * рабочим при любом состоянии журнала. */
 void BlEventLog_NoteBoot(uint8_t code)
 {
+  uint32_t slots = 0U;
+  uint32_t rec_off = 0U;
+  uint32_t base = evlog_find_pool(&slots, &rec_off);
+  if (base == 0U) {
+    return;
+  }
+
   /* Находим запись с максимальным seq — следующий слот идёт за ней по кольцу.
-   * Скан 512 слотов — чистое чтение Flash, ~мкс на 72 МГц. */
+   * Скан сотен слотов — чистое чтение Flash, ~мкс на 72 МГц. */
   uint32_t best_seq = 0U;
   int32_t  best_slot = -1;
-  for (uint32_t slot = 0; slot < EVLOG_SLOTS; slot++) {
-    const evlog_rec_t *r = (const evlog_rec_t *)(EVLOG_POOL_BASE + slot * EVLOG_RECORD_SIZE);
+  for (uint32_t slot = 0; slot < slots; slot++) {
+    const evlog_rec_t *r = (const evlog_rec_t *)(base + rec_off + slot * EVLOG_RECORD_SIZE);
     if ((r->magic == EVLOG_MAGIC) && (r->seq != 0U) && (r->seq != 0xFFFFFFFFUL) &&
         (r->crc8 == evlog_crc8((const uint8_t *)r, 15U)) && (r->seq >= best_seq)) {
       best_seq = r->seq;
@@ -69,8 +109,9 @@ void BlEventLog_NoteBoot(uint8_t code)
     }
   }
 
-  uint32_t next = (best_slot >= 0) ? ((uint32_t)best_slot + 1U) % EVLOG_SLOTS : 0U;
-  const uint32_t *slot_words = (const uint32_t *)(EVLOG_POOL_BASE + next * EVLOG_RECORD_SIZE);
+  uint32_t next = (best_slot >= 0) ? ((uint32_t)best_slot + 1U) % slots : 0U;
+  const uint32_t *slot_words =
+      (const uint32_t *)(base + rec_off + next * EVLOG_RECORD_SIZE);
   for (uint32_t i = 0; i < EVLOG_RECORD_SIZE / 4U; i++) {
     if (slot_words[i] != 0xFFFFFFFFUL) {
       return; /* слот занят — без erase-полномочий писать некуда */
@@ -90,7 +131,7 @@ void BlEventLog_NoteBoot(uint8_t code)
 
   HAL_FLASH_Unlock();
   const uint16_t *src = (const uint16_t *)&rec;
-  uint32_t dst = EVLOG_POOL_BASE + next * EVLOG_RECORD_SIZE;
+  uint32_t dst = base + rec_off + next * EVLOG_RECORD_SIZE;
   for (uint32_t i = 0; i < EVLOG_RECORD_SIZE / 2U; i++, dst += 2U) {
     if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, dst, src[i]) != HAL_OK) {
       break; /* частичная запись отбрасывается CRC/магией при следующем скане */

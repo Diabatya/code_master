@@ -83,6 +83,17 @@ _EVENT_IMPULSE = "impulse"  # «Импульсная переменная» (о�
 _EVENT_STATIC = "static"
 _EVENT_AUX = "aux"
 _EVENT_FRAME = "frame"
+# «Включение устройства» — программа стартует сразу после полной
+# загрузки камня по включению питания (отчёт мастера). Событие без
+# параметров; в «Прервать если» не предлагается.
+_EVENT_POWER = "power"
+# «Переменная» — именованный бит ОЗУ/ПЗУ из третьей колонки
+# «Переменных» (вид «Переменная», отчёт мастера): событие «Стала 1»/
+# «Стала 0» — на фронте, условие — по текущему состоянию, действие —
+# «включить»/«включить на N мс»/«выключить».
+_EVENT_FLAG = "flag"
+_COND_FLAG = "flag"
+_ACT_FLAG = "flag"
 
 _COND_NONE = "none"
 _COND_STATIC = "static"
@@ -576,8 +587,10 @@ class _ImpulseVarPage(QWidget):
 
 
 class _AuxEventPage(QWidget):
-    """Событие «Доп канал»: номер канала и состояние
-    «Активен»/«Не активен» (отчёт мастера)."""
+    """Событие «Доп канал»: направление «Вход»/«Выход», номер канала
+    и состояние «Активен»/«Не активен» (отчёт мастера: помимо входов
+    в событиях доступны и выходы — программа срабатывает по включению
+    выбранного выхода)."""
 
     def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
         super().__init__(parent)
@@ -586,6 +599,11 @@ class _AuxEventPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         row = QHBoxLayout()
+        self.direction = QComboBox()
+        self.direction.setFont(font)
+        self.direction.addItem(tr("Вход"), "in")
+        self.direction.addItem(tr("Выход"), "out")
+        row.addWidget(self.direction)
         row.addWidget(_small_label(tr("Доп канал №"), font))
         self.channel = QSpinBox()
         self.channel.setFont(font)
@@ -602,20 +620,91 @@ class _AuxEventPage(QWidget):
         layout.addLayout(row)
         layout.addStretch()
 
+        self.direction.currentIndexChanged.connect(mark_dirty)
         self.channel.valueChanged.connect(mark_dirty)
         self.state.currentIndexChanged.connect(mark_dirty)
 
     def read(self) -> dict[str, Any]:
         return {
             "type": _EVENT_AUX,
+            "direction": self.direction.currentData(),
             "channel": self.channel.value(),
             "state": self.state.currentData(),
         }
 
     def write(self, event: dict[str, Any]) -> None:
+        didx = self.direction.findData(event.get("direction", "in"))
+        self.direction.setCurrentIndex(didx if didx >= 0 else 0)
         self.channel.setValue(int(event.get("channel", 1) or 1))
         sidx = self.state.findData(int(event.get("state", 1) or 0))
         self.state.setCurrentIndex(sidx if sidx >= 0 else 0)
+
+
+class _PowerEventPage(QWidget):
+    """Событие «Включение устройства» — без параметров: программа
+    стартует сразу после полной загрузки камня по включению питания
+    (отчёт мастера). На ПК момент определяется подключением и
+    опознанием устройства (device_identified)."""
+
+    def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.setContentsMargins(0, 0, 0, 0)
+        hint = QLabel(tr(
+            "Программа запускается один раз сразу после полной "
+            "загрузки устройства по включению питания."
+        ))
+        hint.setFont(font)
+        hint.setStyleSheet("color: #9A9AA5;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch()
+
+    def read(self) -> dict[str, Any]:
+        return {"type": _EVENT_POWER}
+
+    def write(self, event: dict[str, Any]) -> None:  # noqa: ARG002
+        pass
+
+
+class _FlagEventPage(QWidget):
+    """Событие «Переменная» — именованный бит ОЗУ/ПЗУ: выбор
+    переменной из третьей колонки «Переменных» и фронт «Стала 1»/
+    «Стала 0» (отчёт мастера)."""
+
+    def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(_small_label(tr("Переменная:"), font))
+        self.var = _VarCombo(font)
+        layout.addWidget(self.var)
+        row = QHBoxLayout()
+        row.addWidget(_small_label(tr("Событие:"), font))
+        self.edge = QComboBox()
+        self.edge.setFont(font)
+        self.edge.addItem(tr("Стала 1"), 1)
+        self.edge.addItem(tr("Стала 0"), 0)
+        row.addWidget(self.edge)
+        row.addStretch()
+        layout.addLayout(row)
+        layout.addStretch()
+        self.var.currentIndexChanged.connect(mark_dirty)
+        self.edge.currentIndexChanged.connect(mark_dirty)
+
+    def read(self) -> dict[str, Any]:
+        return {
+            "type": _EVENT_FLAG,
+            "var": self.var.get_name(),
+            "state": self.edge.currentData(),
+        }
+
+    def write(self, event: dict[str, Any]) -> None:
+        self.var.set_name(str(event.get("var", "")))
+        eidx = self.edge.findData(int(event.get("state", 1) or 0))
+        self.edge.setCurrentIndex(eidx if eidx >= 0 else 0)
 
 
 class _FrameEventPage(QWidget):
@@ -756,6 +845,127 @@ class _FrameEventPage(QWidget):
         self.fire_limit.setValue(max(1, limit))
 
 
+class _AbortEventEditor(QWidget):
+    """«Прервать если» — событие-прерыватель действия (отчёт
+    мастера): те же виды событий, кроме «Включение устройства» —
+    оно одноразовое и не может прервать отложенное действие.
+
+    Пока действие ждёт своей «Задержки», рантайм следит за
+    событием-прерывателем: сработал → действие отменяется."""
+
+    _TYPES = (
+        (_EVENT_STATIC, "Статическая переменная"),
+        (_EVENT_DYN, "Динамическая переменная"),
+        (_EVENT_NUM, "Численная переменная"),
+        (_EVENT_IMPULSE, "Импульсная переменная"),
+        (_EVENT_AUX, "Доп канал"),
+        (_EVENT_FLAG, "Переменная"),
+        (_EVENT_FRAME, "Фрейм"),
+    )
+
+    def __init__(self, font: QFont, mark_dirty, get_tab, parent=None) -> None:
+        super().__init__(parent)
+        self._get_tab = get_tab
+        layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        row = QHBoxLayout()
+        self.enable = QCheckBox(tr("Прервать если"))
+        self.enable.setFont(font)
+        self.enable.setToolTip(tr(
+            "Отменить это действие, если за время задержки "
+            "произошло выбранное событие"
+        ))
+        row.addWidget(self.enable)
+        self._type = QComboBox()
+        self._type.setFont(font)
+        for code, title in self._TYPES:
+            self._type.addItem(tr(title), code)
+        self._type.setEnabled(False)
+        row.addWidget(self._type, 1)
+        layout.addLayout(row)
+
+        self._stack = QStackedWidget()
+        self._stack.setEnabled(False)
+        self._static = _StaticEventPage(font, mark_dirty)
+        self._dyn = _DynEventPage(font, mark_dirty, _EVENT_DYN, get_tab=get_tab)
+        self._num = _DynEventPage(font, mark_dirty, _EVENT_NUM)
+        self._impulse = _ImpulseVarPage(font, mark_dirty)
+        self._aux = _AuxEventPage(font, mark_dirty)
+        self._flag = _FlagEventPage(font, mark_dirty)
+        self._frame = _FrameEventPage(font, mark_dirty)
+        for page in (
+            self._static, self._dyn, self._num, self._impulse,
+            self._aux, self._flag, self._frame,
+        ):
+            self._stack.addWidget(page)
+        layout.addWidget(self._stack)
+
+        self.enable.toggled.connect(self._type.setEnabled)
+        self.enable.toggled.connect(self._stack.setEnabled)
+        self.enable.toggled.connect(mark_dirty)
+        self._type.currentIndexChanged.connect(self._stack.setCurrentIndex)
+        self._type.currentIndexChanged.connect(mark_dirty)
+
+    def read(self) -> dict[str, Any]:
+        """Событие-прерыватель; «Не выбрано», если галочка снята."""
+        if not self.enable.isChecked():
+            return {"type": _EVENT_NONE}
+        etype = self._type.currentData()
+        if etype == _EVENT_IMPULSE:
+            return {
+                "type": _EVENT_IMPULSE,
+                "var": self._impulse.var.get_name(),
+            }
+        page = {
+            _EVENT_STATIC: self._static,
+            _EVENT_DYN: self._dyn,
+            _EVENT_NUM: self._num,
+            _EVENT_AUX: self._aux,
+            _EVENT_FLAG: self._flag,
+            _EVENT_FRAME: self._frame,
+        }[etype]
+        return page.read()
+
+    def write(self, abort: dict[str, Any] | None) -> None:
+        abort = abort or {}
+        etype = abort.get("type", _EVENT_NONE)
+        enabled = etype not in (None, "", _EVENT_NONE, _EVENT_POWER)
+        self.enable.setChecked(enabled)
+        if not enabled:
+            return
+        idx = self._type.findData(etype)
+        self._type.setCurrentIndex(idx if idx >= 0 else 0)
+        if etype == _EVENT_IMPULSE:
+            self._impulse.var.set_name(str(abort.get("var", "")))
+            return
+        page = {
+            _EVENT_STATIC: self._static,
+            _EVENT_DYN: self._dyn,
+            _EVENT_NUM: self._num,
+            _EVENT_AUX: self._aux,
+            _EVENT_FLAG: self._flag,
+            _EVENT_FRAME: self._frame,
+        }.get(etype)
+        if page is not None:
+            page.write(abort)
+
+    def refresh_variables(self) -> None:
+        tab = self._get_tab() if callable(self._get_tab) else None
+        dyn = tab.variable_names("read", "dyn_cache") if tab else []
+        num = tab.variable_names("read", "dynamic") if tab else []
+        imp = tab.variable_names("read", "impulse") if tab else []
+        st = tab.variable_names("read", "static") if tab else []
+        flags = tab.variable_names("aux", "flag") if tab else []
+        self._static.var.set_names(st, tr("— не выбрано —"))
+        self._dyn.var.set_names(dyn, tr("— не выбрано —"))
+        self._num.var.set_names(num, tr("— не выбрано —"))
+        self._impulse.var.set_names(imp, tr("— не выбрано —"))
+        self._flag.var.set_names(flags, tr("— не выбрано —"))
+        self._dyn.refresh_binding_names()
+
+
 def _detach_item(item, sep) -> None:
     """Отсоединяет и удаляет пункт события/условия/действия (и его
     разделитель) — выполняется на следующем тике после клика по
@@ -804,7 +1014,8 @@ class _EventItem(QWidget):
     (в программе событий может быть несколько — ИЛИ, отчёт мастера)."""
 
     _PAGES = (_EVENT_NONE, _EVENT_STATIC, _EVENT_DYN, _EVENT_NUM,
-              _EVENT_IMPULSE, _EVENT_AUX, _EVENT_FRAME)
+              _EVENT_IMPULSE, _EVENT_AUX, _EVENT_FLAG, _EVENT_FRAME,
+              _EVENT_POWER)
 
     def __init__(self, row: RuleRowWidget, font: QFont, event: dict | None = None) -> None:
         super().__init__(row)
@@ -842,7 +1053,9 @@ class _EventItem(QWidget):
         self._type.addItem(tr("Численная переменная"), _EVENT_NUM)
         self._type.addItem(tr("Импульсная переменная"), _EVENT_IMPULSE)
         self._type.addItem(tr("Доп канал"), _EVENT_AUX)
+        self._type.addItem(tr("Переменная"), _EVENT_FLAG)
         self._type.addItem(tr("Фрейм"), _EVENT_FRAME)
+        self._type.addItem(tr("Включение устройства"), _EVENT_POWER)
         self._type.currentIndexChanged.connect(self._on_type)
         editor_layout.addWidget(self._type)
 
@@ -860,10 +1073,13 @@ class _EventItem(QWidget):
             font, row._mark_dirty, caption=tr("получено")
         )
         self._aux = _AuxEventPage(font, row._mark_dirty)
+        self._flag = _FlagEventPage(font, row._mark_dirty)
         self._frame = _FrameEventPage(font, row._mark_dirty)
+        self._power = _PowerEventPage(font, row._mark_dirty)
         for page in (
             self._none, self._static, self._dyn, self._num,
-            self._impulse, self._aux, self._frame
+            self._impulse, self._aux, self._flag, self._frame,
+            self._power,
         ):
             self._stack.addWidget(page)
         editor_layout.addWidget(self._stack)
@@ -877,7 +1093,7 @@ class _EventItem(QWidget):
         # Сводка обновляется при любом изменении полей события.
         for page in (
             self._dyn, self._num, self._impulse,
-            self._static, self._aux, self._frame
+            self._static, self._aux, self._flag, self._frame
         ):
             for child in page.findChildren(QWidget):
                 if isinstance(child, QComboBox):
@@ -920,7 +1136,9 @@ class _EventItem(QWidget):
             _EVENT_NUM: self._num,
             _EVENT_STATIC: self._static,
             _EVENT_AUX: self._aux,
+            _EVENT_FLAG: self._flag,
             _EVENT_FRAME: self._frame,
+            _EVENT_POWER: self._power,
         }
         return pages[etype].read()
 
@@ -937,7 +1155,9 @@ class _EventItem(QWidget):
             _EVENT_NUM: self._num,
             _EVENT_STATIC: self._static,
             _EVENT_AUX: self._aux,
+            _EVENT_FLAG: self._flag,
             _EVENT_FRAME: self._frame,
+            _EVENT_POWER: self._power,
         }.get(etype)
         if page is not None:
             page.write(event)
@@ -952,10 +1172,14 @@ class _EventItem(QWidget):
         num = tab.variable_names("read", "dynamic") if tab else []
         imp = tab.variable_names("read", "impulse") if tab else []
         st = tab.variable_names("read", "static") if tab else []
+        # «Переменная» — именованные биты из третьей колонки
+        # «Переменных» (вид «Переменная» — отчёт мастера).
+        flags = tab.variable_names("aux", "flag") if tab else []
         self._dyn.var.set_names(dyn, tr("— не выбрано —"))
         self._num.var.set_names(num, tr("— не выбрано —"))
         self._impulse.var.set_names(imp, tr("— не выбрано —"))
         self._static.var.set_names(st, tr("— не выбрано —"))
+        self._flag.var.set_names(flags, tr("— не выбрано —"))
         # Список состояний «Динамической переменной» подтягивается
         # из её таблицы привязки (отчёт мастера).
         self._dyn.refresh_binding_names()
@@ -998,19 +1222,34 @@ class _EventItem(QWidget):
                 "both": tr("→ 1 или 0"),
             }.get(self._static.edge.currentData(), "")
             text = f"{name} {func}".rstrip()
+        elif etype == _EVENT_FLAG:
+            # «Переменная»: имя бита + фронт «Стала 1»/«Стала 0»
+            # (отчёт мастера).
+            name = self._flag.var.get_name() or "—"
+            func = (
+                tr("Стала 1") if self._flag.edge.currentData() == 1
+                else tr("Стала 0")
+            )
+            text = f"{name}: {func}"
         elif etype == _EVENT_FRAME:
             can_id = self._frame.can_id.text().strip()
             if self._frame.rtr.isChecked():
                 text = f"ID {can_id} RTR" if can_id else "RTR"
             else:
                 text = f"ID {can_id}" if can_id else tr("Фрейм")
+        elif etype == _EVENT_POWER:
+            text = tr("Включение устройства")
         else:
+            direction = (
+                tr("вход") if self._aux.direction.currentData() == "in"
+                else tr("выход")
+            )
             state = (
                 tr("активен") if self._aux.state.currentData() == 1
                 else tr("не активен")
             )
-            text = tr("Доп канал №{0} {1}").format(
-                self._aux.channel.value(), state
+            text = tr("Доп канал №{0} {1} {2}").format(
+                self._aux.channel.value(), direction, state
             )
         self._summary.setText(text)
 
@@ -1020,7 +1259,7 @@ class _CondItem(QWidget):
     Условий может быть несколько — все должны выполняться (И)."""
 
     _PAGES = (_COND_NONE, _COND_STATIC, _COND_DYN, _COND_NUM,
-              _COND_IMPULSE, _COND_AUX)
+              _COND_IMPULSE, _COND_AUX, _COND_FLAG)
 
     def __init__(self, row: RuleRowWidget, font: QFont, cond: dict | None = None) -> None:
         super().__init__(row)
@@ -1055,6 +1294,7 @@ class _CondItem(QWidget):
         self._type.addItem(tr("Численная переменная"), _COND_NUM)
         self._type.addItem(tr("Импульсная переменная"), _COND_IMPULSE)
         self._type.addItem(tr("Доп канал"), _COND_AUX)
+        self._type.addItem(tr("Переменная"), _COND_FLAG)
         self._type.currentIndexChanged.connect(self._on_type)
         editor_layout.addWidget(self._type)
 
@@ -1119,9 +1359,27 @@ class _CondItem(QWidget):
         aux_layout.addLayout(aux_row)
         aux_layout.addStretch()
 
+        # Условие «Переменная» — именованный бит ОЗУ/ПЗУ: имя +
+        # состояние 1/0 — перед действием опрашивается текущее
+        # состояние переменной (отчёт мастера).
+        flag_page = QWidget()
+        flag_layout = QVBoxLayout(flag_page)
+        flag_layout.setSpacing(4)
+        flag_layout.setContentsMargins(0, 0, 0, 0)
+        flag_layout.addWidget(_small_label(tr("Переменная:"), font))
+        self.flag_var = _VarCombo(font)
+        flag_layout.addWidget(self.flag_var)
+        flag_layout.addWidget(_small_label(tr("Состояние:"), font))
+        self.flag_state = QComboBox()
+        self.flag_state.setFont(font)
+        self.flag_state.addItem("1", 1)
+        self.flag_state.addItem("0", 0)
+        flag_layout.addWidget(self.flag_state)
+        flag_layout.addStretch()
+
         for page in (
             none_page, static_page, dyn_page, num_page,
-            impulse_page, aux_page
+            impulse_page, aux_page, flag_page
         ):
             self._stack.addWidget(page)
         editor_layout.addWidget(self._stack)
@@ -1141,6 +1399,10 @@ class _CondItem(QWidget):
         self.imp_var.currentIndexChanged.connect(self._update_summary)
         self.aux_channel.valueChanged.connect(self._update_summary)
         self.aux_state.currentIndexChanged.connect(self._update_summary)
+        self.flag_var.currentIndexChanged.connect(self._update_summary)
+        self.flag_state.currentIndexChanged.connect(self._update_summary)
+        self.flag_var.currentIndexChanged.connect(row._mark_dirty)
+        self.flag_state.currentIndexChanged.connect(row._mark_dirty)
         self.st_var.currentIndexChanged.connect(row._mark_dirty)
         self.st_state.currentIndexChanged.connect(row._mark_dirty)
         self.dyn_var.currentIndexChanged.connect(row._mark_dirty)
@@ -1190,6 +1452,12 @@ class _CondItem(QWidget):
                 "channel": self.aux_channel.value(),
                 "state": self.aux_state.currentData(),
             }
+        if ctype == _COND_FLAG:
+            return {
+                "type": _COND_FLAG,
+                "var": self.flag_var.get_name(),
+                "state": self.flag_state.currentData(),
+            }
         return {"type": _COND_NONE}
 
     def write(self, cond: dict[str, Any]) -> None:
@@ -1214,6 +1482,10 @@ class _CondItem(QWidget):
             self.aux_channel.setValue(int(cond.get("channel", 1) or 1))
             sidx = self.aux_state.findData(int(cond.get("state", 1) or 0))
             self.aux_state.setCurrentIndex(sidx if sidx >= 0 else 0)
+        elif ctype == _COND_FLAG:
+            self.flag_var.set_name(str(cond.get("var", "")))
+            sidx = self.flag_state.findData(int(cond.get("state", 1) or 0))
+            self.flag_state.setCurrentIndex(sidx if sidx >= 0 else 0)
 
     def refresh_variables(self) -> None:
         tab = self._row._tab._variables_tab
@@ -1224,10 +1496,12 @@ class _CondItem(QWidget):
         num = tab.variable_names("read", "dynamic") if tab else []
         imp = tab.variable_names("read", "impulse") if tab else []
         st = tab.variable_names("read", "static") if tab else []
+        flags = tab.variable_names("aux", "flag") if tab else []
         self.st_var.set_names(st, tr("— не выбрано —"))
         self.dyn_var.set_names(dyn, tr("— не выбрано —"))
         self.num_var.set_names(num, tr("— не выбрано —"))
         self.imp_var.set_names(imp, tr("— не выбрано —"))
+        self.flag_var.set_names(flags, tr("— не выбрано —"))
 
     def _update_summary(self, *_args) -> None:
         ctype = self._type.currentData()
@@ -1263,6 +1537,12 @@ class _CondItem(QWidget):
             text = tr("Доп канал {0} {1}").format(
                 self.aux_channel.value(), state
             )
+        elif ctype == _COND_FLAG:
+            # «Свет салона 1» — имя переменной + состояние.
+            text = (
+                f"{self.flag_var.get_name() or '—'} "
+                f"{self.flag_state.currentData()}"
+            )
         else:
             text = tr("Не выбрано")
         self._summary.setText(text)
@@ -1285,7 +1565,8 @@ class _ActionItem(QWidget):
     разворачивает настройки. Действий может быть несколько —
     выполняются все по порядку (отчёт мастера)."""
 
-    _PAGES = (_ACT_NONE, _ACT_AUX, _ACT_VAR, _ACT_FRAME, _ACT_CACHE)
+    _PAGES = (_ACT_NONE, _ACT_AUX, _ACT_VAR, _ACT_FLAG, _ACT_FRAME,
+              _ACT_CACHE)
 
     def __init__(
         self,
@@ -1320,6 +1601,7 @@ class _ActionItem(QWidget):
         self._type.addItem(tr("Не выбрано"), _ACT_NONE)
         self._type.addItem(tr("Доп канал"), _ACT_AUX)
         self._type.addItem(tr("Переменные управления"), _ACT_VAR)
+        self._type.addItem(tr("Переменные"), _ACT_FLAG)
         self._type.addItem(tr("Отправить фрейм"), _ACT_FRAME)
         self._type.addItem(tr("Запись DATA в кэш"), _ACT_CACHE)
         self._type.currentIndexChanged.connect(self._on_type)
@@ -1332,9 +1614,34 @@ class _ActionItem(QWidget):
         self._stack.addWidget(self._none)
         self._build_aux_page(font, row._mark_dirty)
         self._build_var_page(font, row._mark_dirty)
+        self._build_flag_page(font, row._mark_dirty)
         self._build_frame_page(font, row._mark_dirty)
         self._build_cache_page(font, row._mark_dirty)
         editor_layout.addWidget(self._stack)
+
+        # Общие параметры действия (отчёт мастера): «Задержка»
+        # выполнения 0–999999 мс и «Прервать если» — событие-
+        # прерыватель, отменяющее действие, пока оно ждёт задержку.
+        delay_row = QHBoxLayout()
+        delay_row.setContentsMargins(0, 2, 0, 0)
+        delay_row.addWidget(_small_label(tr("Задержка"), font))
+        self.exec_delay = QSpinBox()
+        self.exec_delay.setFont(font)
+        self.exec_delay.setRange(0, 999999)
+        self.exec_delay.setSuffix(tr(" мс"))
+        self.exec_delay.setFixedWidth(110)
+        self.exec_delay.setToolTip(
+            tr("Выполнить действие через указанную паузу")
+        )
+        delay_row.addWidget(self.exec_delay)
+        delay_row.addStretch()
+        editor_layout.addLayout(delay_row)
+        self._abort = _AbortEventEditor(
+            font, row._mark_dirty,
+            get_tab=lambda: row._tab._variables_tab,
+        )
+        editor_layout.addWidget(self._abort)
+        self.exec_delay.valueChanged.connect(row._mark_dirty)
         layout.addWidget(self._editor)
         self._editor_anim = QPropertyAnimation(
             self._editor, b"maximumHeight", self
@@ -1516,6 +1823,51 @@ class _ActionItem(QWidget):
 
         self.var.currentIndexChanged.connect(mark_dirty)
         self.var.currentIndexChanged.connect(self._update_summary)
+
+    def _build_flag_page(self, font: QFont, mark_dirty) -> None:
+        """«Переменные»: выбор именованного бита (вид «Переменная»
+        третьей колонки «Переменных») и операции «Включить» /
+        «Включить на …мс» / «Выключить» (отчёт мастера)."""
+        page = QWidget()
+        pl = QVBoxLayout(page)
+        pl.setSpacing(4)
+        pl.setContentsMargins(0, 0, 0, 0)
+        row1 = QHBoxLayout()
+        row1.addWidget(_small_label(tr("Переменная:"), font))
+        self.flag_var = _VarCombo(font)
+        row1.addWidget(self.flag_var, 1)
+        pl.addLayout(row1)
+        row2 = QHBoxLayout()
+        row2.addWidget(_small_label(tr("Действие:"), font))
+        self.flag_mode = QComboBox()
+        self.flag_mode.setFont(font)
+        self.flag_mode.addItem(tr("Включить"), "on")
+        self.flag_mode.addItem(tr("Включить на"), "pulse")
+        self.flag_mode.addItem(tr("Выключить"), "off")
+        row2.addWidget(self.flag_mode)
+        self.flag_time = QSpinBox()
+        self.flag_time.setFont(font)
+        self.flag_time.setRange(1, 999999)
+        self.flag_time.setValue(100)
+        self.flag_time.setSuffix(tr(" мс"))
+        self.flag_time.setFixedWidth(110)
+        self.flag_time.setVisible(False)
+        row2.addWidget(self.flag_time)
+        row2.addStretch()
+        pl.addLayout(row2)
+        pl.addStretch()
+        self._stack.addWidget(page)
+
+        self.flag_var.currentIndexChanged.connect(mark_dirty)
+        self.flag_var.currentIndexChanged.connect(self._update_summary)
+        self.flag_mode.currentIndexChanged.connect(mark_dirty)
+        self.flag_mode.currentIndexChanged.connect(
+            lambda _i: self.flag_time.setVisible(
+                self.flag_mode.currentData() == "pulse"
+            )
+        )
+        self.flag_mode.currentIndexChanged.connect(self._update_summary)
+        self.flag_time.valueChanged.connect(mark_dirty)
 
     def _build_frame_page(self, font: QFont, mark_dirty) -> None:
         """«Отправить фрейм»: канал/бит/ID/DLC/DATA (X — из кадра
@@ -1699,10 +2051,14 @@ class _ActionItem(QWidget):
 
     def refresh_variables(self) -> None:
         tab = self._row._tab._variables_tab
-        # «Переменные управления» — команды из раздела «Управление»
-        # (отчёт мастера).
+        # «Переменные управления» — команды из раздела «Управление»;
+        # «Переменные» — именованные биты третьей колонки; «Прервать
+        # если» — те же списки событий (отчёт мастера).
         ctrl = tab.variable_names("control") if tab else []
         self.var.set_names(ctrl, tr("— не выбрано —"))
+        flags = tab.variable_names("aux", "flag") if tab else []
+        self.flag_var.set_names(flags, tr("— не выбрано —"))
+        self._abort.refresh_variables()
 
     # ---- схема -----------------------------------------------------------
 
@@ -1710,13 +2066,21 @@ class _ActionItem(QWidget):
         """Плоский словарь с теми же ключами, что у старого единого
         блока «Действие» + маркер «type» — совместимо с исполнением."""
         atype = self._type.currentData()
+        result: dict[str, Any]
         if atype == _ACT_VAR:
-            return {
+            result = {
                 "type": _ACT_VAR,
                 "var": self.var.get_name(),
             }
-        if atype == _ACT_FRAME:
-            return {
+        elif atype == _ACT_FLAG:
+            result = {
+                "type": _ACT_FLAG,
+                "flag_var": self.flag_var.get_name(),
+                "flag_mode": self.flag_mode.currentData(),
+                "flag_time": self.flag_time.value(),
+            }
+        elif atype == _ACT_FRAME:
+            result = {
                 "type": _ACT_FRAME,
                 "frame_enabled": True,
                 "channel": self.fr_channel.currentIndex(),
@@ -1728,8 +2092,8 @@ class _ActionItem(QWidget):
                 "count": self.fr_count.value(),
                 "between": self.fr_between.value(),
             }
-        if atype == _ACT_AUX:
-            return {
+        elif atype == _ACT_AUX:
+            result = {
                 "type": _ACT_AUX,
                 "aux_enabled": True,
                 "aux_channel": self.aux_channel.value(),
@@ -1742,8 +2106,8 @@ class _ActionItem(QWidget):
                 "aux_pwm_duty": self.aux_pwm_duty.value(),
                 "aux_pwm_time": self.aux_pwm_time.value(),
             }
-        if atype == _ACT_CACHE:
-            return {
+        elif atype == _ACT_CACHE:
+            result = {
                 "type": _ACT_CACHE,
                 "cache_enabled": True,
                 "cache_channel": self.cache_channel.currentData(),
@@ -1756,7 +2120,16 @@ class _ActionItem(QWidget):
                 "cache_delay": self.cache_delay.value(),
                 "cache_count": self.cache_count.value(),
             }
-        return {"type": _ACT_NONE}
+        else:
+            result = {"type": _ACT_NONE}
+        # Общие параметры любого действия (отчёт мастера):
+        # «Задержка» выполнения и событие-прерыватель «Прервать если».
+        if self.exec_delay.value() > 0:
+            result["exec_delay"] = self.exec_delay.value()
+        abort = self._abort.read()
+        if abort.get("type") not in (None, "", _EVENT_NONE):
+            result["abort"] = abort
+        return result
 
     def write(self, action: dict[str, Any]) -> None:
         """action — словарь одного действия (с ключом «type») либо
@@ -1769,6 +2142,8 @@ class _ActionItem(QWidget):
                 atype = _ACT_FRAME
             elif action.get("cache_enabled"):
                 atype = _ACT_CACHE
+            elif action.get("flag_var"):
+                atype = _ACT_FLAG
             elif action.get("var"):
                 atype = _ACT_VAR
             else:
@@ -1778,6 +2153,14 @@ class _ActionItem(QWidget):
         self._stack.setCurrentIndex(self._type.currentIndex())
         if atype == _ACT_VAR:
             self.var.set_name(str(action.get("var", "")))
+        elif atype == _ACT_FLAG:
+            self.flag_var.set_name(str(action.get("flag_var", "")))
+            midx = self.flag_mode.findData(action.get("flag_mode", "on"))
+            self.flag_mode.setCurrentIndex(midx if midx >= 0 else 0)
+            self.flag_time.setValue(int(action.get("flag_time", 100) or 100))
+            self.flag_time.setVisible(
+                self.flag_mode.currentData() == "pulse"
+            )
         elif atype == _ACT_FRAME:
             self.fr_channel.setCurrentIndex(int(action.get("channel", 0) or 0))
             self.fr_bit.setCurrentIndex(1 if action.get("extended") else 0)
@@ -1828,6 +2211,9 @@ class _ActionItem(QWidget):
             )
             self.cache_delay.setValue(int(action.get("cache_delay", 0) or 0))
             self.cache_count.setValue(int(action.get("cache_count", 1) or 1))
+        # Общие параметры действия (отчёт мастера).
+        self.exec_delay.setValue(int(action.get("exec_delay", 0) or 0))
+        self._abort.write(action.get("abort"))
         self._update_summary()
 
     def _update_summary(self, *_args) -> None:
@@ -1847,6 +2233,17 @@ class _ActionItem(QWidget):
                 text = tr("Вкл доп канал №{0}").format(ch)
         elif atype == _ACT_VAR:
             text = self.var.get_name() or tr("Переменная")
+        elif atype == _ACT_FLAG:
+            name = self.flag_var.get_name() or "—"
+            mode = self.flag_mode.currentData()
+            if mode == "off":
+                text = f"{name}: {tr('выключить')}"
+            elif mode == "pulse":
+                text = tr("{0}: включить на {1} мс").format(
+                    name, self.flag_time.value()
+                )
+            else:
+                text = f"{name}: {tr('включить')}"
         elif atype == _ACT_FRAME:
             text = tr("Фрейм")
         elif atype == _ACT_CACHE:
@@ -2395,6 +2792,17 @@ class FlexibleLogicTab(QWidget):
         # (фронт для событий ГЛ — отчёт мастера).
         self._impulse_until: dict[str, float] = {}
         self._pulsed_now: set[str] = set()
+        # «Переменные» — именованные биты ОЗУ/ПЗУ (вид «Переменная»
+        # третьей колонки): имя → 0/1. _flag_edges — переходы текущего
+        # тика для событий «Стала 1»/«Стала 0»; _flag_pulse_until —
+        # время авто-гашения «включить на N мс» (отчёт мастера).
+        self._flag_states: dict[str, int] = {}
+        self._flag_edges: dict[str, int] = {}
+        self._flag_pulse_until: dict[str, float] = {}
+        # Отложенные действия с «Задержкой»/«Прервать если»: ждут
+        # своего таймера, событие-прерыватель отменяет их.
+        self._pending_actions: list[dict[str, Any]] = []
+        self._abort_key_seq = 0
         # Кэш действий: индекс программы → последний подошедший кадр.
         self._fl_cache: dict[int, dict[str, Any]] = {}
         # «Автоматическая запись DATA в кэш» команд «Управления»:
@@ -2713,6 +3121,11 @@ class FlexibleLogicTab(QWidget):
             ch = int(cond.get("channel", 1) or 1)
             state = self._aux_states.get(ch, 0)
             return state == int(cond.get("state", 1))
+        if ctype == _COND_FLAG:
+            # «Переменная N» — текущее состояние именованного бита
+            # ОЗУ/ПЗУ (отчёт мастера).
+            state = self._flag_states.get(str(cond.get("var", "")).strip(), 0)
+            return state == int(cond.get("state", 1))
         return True  # «Нет» — не блокирует.
 
     def _update_cache(self, rule_index: int, action: dict[str, Any], frame: dict[str, Any]) -> None:
@@ -2839,6 +3252,124 @@ class FlexibleLogicTab(QWidget):
     def _run_actions(
         self, rule_index: int, action: dict[str, Any], frame: dict[str, Any]
     ) -> None:
+        """Входная точка действия: «Задержка» + «Прервать если»
+        (отчёт мастера). Без них — исполнение сразу; с ними —
+        действие регистрируется как отложенное и событие-прерыватель
+        может его отменить, пока идёт задержка."""
+        delay = int(action.get("exec_delay", 0) or 0)
+        abort = action.get("abort") or {}
+        has_abort = abort.get("type") not in (None, "", _EVENT_NONE)
+        if delay <= 0 and not has_abort:
+            self._run_actions_now(rule_index, action, frame)
+            return
+        if has_abort and self._abort_level_true(abort):
+            # Условие прерывания уже истинно — действие не запускаем.
+            return
+        self._abort_key_seq += 1
+        entry: dict[str, Any] = {
+            "key": self._abort_key_seq,
+            "rule_index": rule_index,
+            "action": dict(action),
+            "frame": dict(frame),
+            "abort": abort if has_abort else None,
+            "aborted": False,
+        }
+        if has_abort:
+            self._pending_actions.append(entry)
+        if delay > 0:
+            QTimer.singleShot(
+                delay, lambda e=entry: self._execute_scheduled(e)
+            )
+        else:
+            self._execute_scheduled(entry)
+
+    def _execute_scheduled(self, entry: dict[str, Any]) -> None:
+        """Таймер «Задержки» дотикал — проверяем прерыватель и
+        исполняем."""
+        if entry in self._pending_actions:
+            self._pending_actions.remove(entry)
+        if entry["aborted"]:
+            logger.info("ГЛ: действие прервано событием «Прервать если»")
+            return
+        abort = entry["abort"]
+        if abort and self._abort_level_true(abort):
+            return
+        self._run_actions_now(
+            entry["rule_index"], entry["action"], entry["frame"]
+        )
+
+    def _abort_level_true(self, abort: dict[str, Any]) -> bool:
+        """Уровневая проверка события-прерывателя прямо сейчас —
+        для типов с состоянием (переменные, доп. каналы). События
+        «фрейм»/«импульс» — фронтовые, уровня не имеют."""
+        etype = abort.get("type")
+        if etype == _EVENT_AUX:
+            ch = int(abort.get("channel", 1) or 1)
+            return self._aux_states.get(ch, 0) == int(
+                abort.get("state", 1) or 0
+            )
+        if etype == _EVENT_FLAG:
+            name = str(abort.get("var", "")).strip()
+            return self._flag_states.get(name, 0) == int(
+                abort.get("state", 1) or 0
+            )
+        if etype == _EVENT_STATIC:
+            name = str(abort.get("var", "")).strip()
+            state = self._static_states.get(name)
+            if state is None:
+                return False
+            edge = abort.get("edge", "both")
+            return (
+                edge == "both"
+                or (edge == "on" and state == 1)
+                or (edge == "off" and state == 0)
+            )
+        if etype in (_EVENT_DYN, _EVENT_NUM):
+            name = str(abort.get("var", "")).strip()
+            current = self._dyn_values.get(name)
+            if current is None:
+                return False
+            try:
+                threshold = float(
+                    str(abort.get("value", "")).replace(",", ".")
+                )
+            except (TypeError, ValueError):
+                return str(current) == str(abort.get("value", "")).strip()
+            if not isinstance(current, (int, float)):
+                return False
+            return (
+                current > threshold
+                if abort.get("dir", "gt") == "gt"
+                else current < threshold
+            )
+        if etype == _EVENT_IMPULSE:
+            name = str(abort.get("var", "")).strip()
+            return time.monotonic() < self._impulse_until.get(name, 0.0)
+        return False
+
+    def _check_pending_aborts(
+        self,
+        frame: dict[str, Any],
+        frame_data: bytes,
+        changed_static: dict[str, int],
+    ) -> None:
+        """Проверяет события-прерыватели отложенных действий на
+        текущем тике — сработавший прерыватель отменяет действие."""
+        if not self._pending_actions:
+            return
+        for entry in list(self._pending_actions):
+            abort = entry["abort"]
+            if abort is None:
+                continue
+            if self._event_fired(
+                -entry["key"], 0, abort, frame, frame_data, changed_static
+            ):
+                entry["aborted"] = True
+                self._pending_actions.remove(entry)
+
+    def _run_actions_now(
+        self, rule_index: int, action: dict[str, Any], frame: dict[str, Any]
+    ) -> None:
         # 1. «Переменные управления» — команда из раздела
         #    «Управление»: отправляет свою последовательность фреймов
         #    (паузы/количество/пауза до следующего заданы в команде;
@@ -2858,6 +3389,19 @@ class FlexibleLogicTab(QWidget):
                 if cmd.get("name", "").strip() in candidates:
                     self._run_command(cmd)
                     break
+
+        # 1б. «Переменные» — именованный бит ОЗУ/ПЗУ: «включить»,
+        #     «включить на N мс», «выключить» (отчёт мастера).
+        flag_name = str(action.get("flag_var", "")).strip()
+        if flag_name:
+            flag_mode = str(action.get("flag_mode", "on"))
+            pulse_ms = int(action.get("flag_time", 0) or 0)
+            if flag_mode == "off":
+                self._set_flag(flag_name, 0)
+            elif flag_mode == "pulse":
+                self._set_flag(flag_name, 1, pulse_ms=max(1, pulse_ms))
+            else:
+                self._set_flag(flag_name, 1)
 
         # 2. Ручной фрейм: «X»-байты подставляются из кадра события.
         if action.get("frame_enabled"):
@@ -2935,12 +3479,108 @@ class FlexibleLogicTab(QWidget):
                         channel, cached["id"], cached["data"], delay * (n + 1)
                     )
 
+    def _set_flag(
+        self, name: str, value: int, pulse_ms: int = 0
+    ) -> None:
+        """Действие «Переменные»: перевод именованного бита ОЗУ/ПЗУ
+        в 0/1. Переход — событие «Стала 1»/«Стала 0» для программ;
+        биты с носителем «ПЗУ» сохраняются в конфиге (отчёт мастера)."""
+        name = str(name).strip()
+        if not name:
+            return
+        value = 1 if value else 0
+        changed = self._flag_states.get(name, 0) != value
+        self._flag_states[name] = value
+        if pulse_ms > 0 and value == 1:
+            self._flag_pulse_until[name] = (
+                time.monotonic() + pulse_ms / 1000
+            )
+            QTimer.singleShot(
+                pulse_ms, lambda n=name: self._flag_pulse_check(n)
+            )
+        if not changed:
+            return
+        self._persist_flag_states()
+        if self._variables_tab is not None:
+            self._variables_tab.set_flag_live(name, value)
+        self._flag_edges[name] = value
+        # Переход бита — событие «Стала 1/0»; там же проверяются
+        # прерыватели отложенных действий (отчёт мастера).
+        self._fire_aux_events()
+        self._flag_edges.pop(name, None)
+
+    def _flag_pulse_check(self, name: str) -> None:
+        """Авто-гашение «включить на N мс»: время вышло — бит в 0."""
+        if time.monotonic() >= self._flag_pulse_until.get(name, 0.0):
+            self._set_flag(name, 0)
+
+    def _persist_flag_states(self) -> None:
+        """Биты «Переменная» с носителем «ПЗУ» сохраняются в общий
+        конфиг — состояние переживает перезапуск приложения
+        (отчёт мастера: бит фиксируется в ПЗУ)."""
+        if self._variables_tab is None:
+            return
+        states: dict[str, int] = {}
+        for cfg in self._variables_tab.export_config().get("aux") or []:
+            if cfg.get("type") != "flag":
+                continue
+            name = str(cfg.get("name", "")).strip()
+            if name and cfg.get("storage") == "flash":
+                states[name] = self._flag_states.get(name, 0)
+        self._config.set("flag_states", states)
+
+    def _restore_flag_states(self) -> None:
+        """Поднимает сохранённые ПЗУ-биты из конфига."""
+        for name, state in (self._config.get("flag_states") or {}).items():
+            if isinstance(state, int):
+                self._flag_states[str(name)] = 1 if state else 0
+
+    def notify_device_ready(self) -> None:
+        """Устройство полностью загрузилось после подачи питания
+        (опознано по USB) — событие «Включение устройства»
+        (отчёт мастера): программы с таким событием стартуют раз."""
+        if self._rules_dirty:
+            self._build_internal_rules()
+            self._rules_dirty = False
+        self._restore_flag_states()
+        dummy_frame = {"id": 0, "channel": 0, "data": b"", "extended": False}
+        for internal in self._internal_rules:
+            rule_index = internal["index"]
+            rule = internal["rule"]
+            events = rule.get("events")
+            if not isinstance(events, list) or not events:
+                events = [rule.get("event") or {}]
+            if not any(
+                e.get("type") == _EVENT_POWER for e in events
+            ):
+                continue
+            conditions = rule.get("conditions")
+            if not isinstance(conditions, list) or not conditions:
+                conditions = [rule.get("condition") or {}]
+            if not all(
+                self._condition_passed(cond) for cond in conditions
+            ):
+                continue
+            self._rule_counters[rule_index] += 1
+            self._row_widgets[rule_index].set_counter(
+                self._rule_counters[rule_index]
+            )
+            actions = rule.get("actions")
+            if not isinstance(actions, list) or not actions:
+                actions = [rule.get("action") or {}]
+            for action in actions:
+                self._run_actions(rule_index, action, dummy_frame)
+            logger.info(
+                "ГЛ: «Включение устройства» — программа «%s»",
+                rule.get("title") or rule_index,
+            )
+
     def _fire_aux_events(self) -> None:
-        """Смена состояния доп. канала — проход по программам с
-        событиями «Доп канал»: условия И → действия (ИЛИ по событиям).
-        Реентерабельность ограничена: действие может само щёлкать
-        каналом — глубже одного уровня не идём, чтобы кольцевая
-        программа («канал 1 → канал 1») не зациклила ПК."""
+        """Смена состояния доп. канала/бита «Переменная» — проход по
+        программам с событиями «Доп канал»/«Переменная»: условия И →
+        действия (ИЛИ по событиям). Реентерабельность ограничена:
+        действие может само щёлкать каналом или битом — глубже одного
+        уровня не идём, чтобы кольцевая программа не зациклила ПК."""
         if getattr(self, "_aux_events_busy", False):
             return
         self._aux_events_busy = True
@@ -2954,6 +3594,9 @@ class FlexibleLogicTab(QWidget):
             self._build_internal_rules()
             self._rules_dirty = False
         dummy_frame = {"id": 0, "channel": 0, "data": b"", "extended": False}
+        # События-прерыватели отложенных действий реагируют и на
+        # смену состояний (доп. каналы, биты «Переменная»).
+        self._check_pending_aborts(dummy_frame, b"", {})
         for internal in self._internal_rules:
             rule_index = internal["index"]
             rule = internal["rule"]
@@ -2965,7 +3608,7 @@ class FlexibleLogicTab(QWidget):
                 conditions = [rule.get("condition") or {}]
             fired = False
             for sub_index, event in enumerate(events):
-                if event.get("type") == _EVENT_AUX and self._event_fired(
+                if event.get("type") in (_EVENT_AUX, _EVENT_FLAG) and self._event_fired(
                     rule_index, sub_index, event, dummy_frame,
                     b"", {},
                 ):
@@ -3063,6 +3706,17 @@ class FlexibleLogicTab(QWidget):
             # этом кадре (каждый подошедший кадр — новая сработка,
             # как нажатие кнопки — отчёт мастера).
             return str(event.get("var", "")).strip() in self._pulsed_now
+        if etype == _EVENT_FLAG:
+            # «Переменная» (бит ОЗУ/ПЗУ): фронт «Стала 1»/«Стала 0»
+            # зафиксирован в _flag_edges текущего тика (отчёт мастера).
+            name = str(event.get("var", "")).strip()
+            return self._flag_edges.get(name) == int(
+                event.get("state", 1) or 0
+            )
+        if etype == _EVENT_POWER:
+            # «Включение устройства» срабатывает отдельным вызовом
+            # notify_device_ready() — по кадрам не проверяется.
+            return False
         if etype == _EVENT_AUX:
             # Фронт состояния доп. канала по ПК-зеркалу CMD_AUX_SET:
             # «активен»/«не активен» стреляет на переходе уровня.
@@ -3096,6 +3750,9 @@ class FlexibleLogicTab(QWidget):
         # Сначала состояние переменных — от него зависят и события,
         # и условия ПРИ.
         changed_static = self._update_variable_states(frame_id, frame_data)
+        # События-прерыватели отложенных действий («Прервать если» —
+        # отчёт мастера) реагируют на этот кадр и смену состояний.
+        self._check_pending_aborts(frame, frame_data, changed_static)
         # «Автоматическая запись DATA в кэш» команд «Управления» —
         # работает независимо от срабатывания программ (отчёт мастера).
         self._update_command_caches(frame_id, frame_data, frame)

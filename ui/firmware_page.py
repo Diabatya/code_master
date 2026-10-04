@@ -94,7 +94,7 @@ class BootloaderWorker(QThread):
             # Даём ОС отдать handle — иначе на Windows сразу после
             # close_port() CreateFile/SetCommState отвечает
             # PermissionError(13)/ERROR_GEN_FAILURE (отчёт мастера).
-            time.sleep(0.3)
+            time.sleep(0.6)
 
         # Открытие через Bootloader.open — тот же путь с повторами,
         # что у flash_dialog: порт USB CDC ещё недолго «не готов»

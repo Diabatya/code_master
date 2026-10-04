@@ -22,12 +22,16 @@ BOOTLOADER_SIZE = 0x8000
 #   0x08000000–0x08007FFF  bootloader (32 KB)
 #   0x08008000–0x080087FF  DEVICE INFO — CFG0+CEX0+TNM0+VER1 (стр. 16)
 #   0x08008800–0x08008FFF  APP metadata APP1 (стр. 17)
-#   0x08009000–0x0803BFFF  application code (стр. 18–119)
-#   0x0803C000–0x0803DFFF  журнал событий (стр. 120–123)
-#   0x0803E000–0x0803FFFF  пак хранилища у конца Flash (стр. 124–127):
-#                          снизу вверх — ГЛ, триггеры, конфиг переменных
-#                          (переменные занимают верхние адреса и растут
-#                          вниз — пустого резерва под них нет).
+#   0x08009000–…           application code (со стр. 18 до конца образа)
+#   …–0x0803FFFF          маркерное хранилище (storage.c): области без
+#                          фиксированных адресов, ищутся по заголовкам —
+#                          FLXH (гибкая логика, за концом кода, растёт
+#                          вверх), TRGH (триггеры, плавает в зазоре),
+#                          EVLH (журнал, под переменными), VARH
+#                          (переменные, от конца Flash растут вниз).
+#   Легаси-адреса (читаются один раз при миграции, затем стираются):
+#   0x0803C000–0x0803DFFF  старый пул журнала (стр. 120–123)
+#   0x0803E000–0x0803FFFF  старый пул триггеров TRG2 (стр. 124–127)
 DEVICE_INFO_PAGE_ADDR = 0x08008000
 DEVICE_CONFIG_PAGE_ADDR = DEVICE_INFO_PAGE_ADDR
 DEVICE_CONFIG_PAGE_SIZE = 2048
@@ -42,53 +46,20 @@ APP_METADATA_PAGE_ADDR_LEGACY = 0x0803D000
 LEGACY_CONFIG_PAGE_ADDR = 0x0803F800
 APP_METADATA_MAGIC = 0x41505031
 APP_METADATA_VERSION = 1
-# Журнал событий — нижняя секция пака хранения у конца Flash.
+# Граница записи AN3155: bootloader разрешает сырые команды записи только
+# до 0x0803C000 — верхние 16 КБ под маркерным хранилищем недоступны для
+# mass-write/page-erase и меняются только командами CMD_STORAGE_*/CMD_*.
+# Совпадает с легаси-адресом пула журнала — отсюда имя константы.
 EVENT_LOG_ADDR = 0x0803C000
 EVENT_LOG_SIZE = 8192
-# Область хранения триггеров — верхние страницы пака (124–127). Через
-# AN3155 bootloader она недоступна для записи/постраничного стирания:
-# триггеры меняются только командами CMD_TRIGGER_* в приложении.
-# Когда конфигурация переменных начнёт храниться в МК, она займёт
-# верхние адреса, а триггеры сместятся ниже неё — адрес считается
-# от FLASH_END, а не зашит жёстко (см. storage_layout()).
+# Легаси-пул триггеров v2 (записи TRG2 без заголовка) — читается прошивкой
+# один раз при миграции в маркерную область TRGH, затем стирается.
+# Использовать только как адрес миграции, не как текущее хранилище.
 TRIGGER_REGION_ADDR = 0x0803E000
 TRIGGER_REGION_SIZE = 8192
 FLASH_END_ADDR = 0x08040000
 
 
-def storage_layout(
-    flash_end: int = FLASH_END_ADDR,
-    flex_bytes: int = 0,
-    var_bytes: int = 0,
-    page_size: int = 2048,
-) -> dict[str, int]:
-    """Раскладка пака хранилища у конца Flash (отчёт мастера).
-
-    Секции идут подряд от младших адресов к старшим:
-    ГИБКАЯ ЛОГИКА → ТРИГГЕРЫ → ПЕРЕМЕННЫЕ. Переменные занимают самые
-    верхние адреса и при росте их количества заполняют Flash «снизу
-    вверх» (от конца) — резервного пустого пространства не остаётся.
-    Размеры округляются до границы страницы стирания.
-    """
-    def _pages(nbytes: int) -> int:
-        return (nbytes + page_size - 1) // page_size if nbytes > 0 else 0
-
-    var_size = _pages(var_bytes) * page_size
-    flex_size = _pages(flex_bytes) * page_size
-    trig_size = TRIGGER_REGION_SIZE
-    var_start = flash_end - var_size
-    trig_start = var_start - trig_size
-    flex_start = trig_start - flex_size
-    return {
-        "flash_end": flash_end,
-        "storage_start": flex_start,
-        "flex_start": flex_start,
-        "flex_size": flex_size,
-        "trigger_start": trig_start,
-        "trigger_size": trig_size,
-        "var_start": var_start,
-        "var_size": var_size,
-    }
 DEVICE_CONFIG_NAME_MAX = 9
 DEVICE_CONFIG_SERIAL_MAX = 10
 DEVICE_CONFIG_MAGIC = 0x43464730

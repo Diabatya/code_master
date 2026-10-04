@@ -9,6 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import (
     QEasingCurve,
     QElapsedTimer,
+    QPointF,
     QPropertyAnimation,
     QSize,
     Qt,
@@ -239,6 +240,10 @@ class _MatrixBackground(QWidget):
         self._overlays: list[QWidget] = []
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
+        # PreciseTimer: обычный QTimer на Windows квантуется до ~15 мс
+        # и кадры приходят пачками «два подряд, потом пауза» — заметные
+        # рывки (отчёт мастера «анимация чисел с рывками»).
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.start(16)  # ~60 fps — более плавное движение
 
     def add_overlay(self, widget: QWidget) -> None:
@@ -283,7 +288,12 @@ class _MatrixBackground(QWidget):
             for r, text in enumerate(self._columns[c]):
                 base_y = row_step * r
                 y = (base_y + speed * t) % span - row_step
-                p.drawText(int(x), int(60 * sy + y), text)
+                # QPointF, а не целые координаты: drawText(int,int)
+                # округлял базовую линию до пикселя — при медленной
+                # скорости строка «двигалась рывками» по 1 px
+                # (отчёт мастера). Субпиксельная позиция + Antialiasing
+                # дают непрерывное движение.
+                p.drawText(QPointF(x, 60 * sy + y), text)
         p.end()
 
 

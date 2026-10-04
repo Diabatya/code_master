@@ -23,6 +23,7 @@ from core.can_protocol import (
     CMD_TRIGGER_STAGE,
     CMD_TRIGGER_STATS,
     CMD_TRIGGER_WRITE,
+    CMD_SYS_RESET,
     CMD_SYSTEM_INFO,
     CMD_USB_STATS,
     CMD_CFG_FACTORY_RESET,
@@ -33,6 +34,12 @@ from core.can_protocol import (
     CMD_DEVICE_INFO,
     CMD_DEVICE_INFO_RESP,
     CMD_EVENT_LOG,
+    CMD_STORAGE_BEGIN,
+    CMD_STORAGE_CLEAR,
+    CMD_STORAGE_COMMIT,
+    CMD_STORAGE_DATA,
+    CMD_STORAGE_INFO,
+    CMD_STORAGE_READ,
     DEVICE_TYPE_BASIC,
     MARKER_RX,
     MARKER_RX_EXT,
@@ -57,7 +64,9 @@ logger = get_logger(__name__)
 # после ответа. Закрываем его сразу сами — иначе до обнаружения обрыва
 # reader'ом следующие команды уходят в мёртвый порт таймаутами
 # («прогрузка конфига после заводского сброса не работала ни разу»).
-_REBOOTING_COMMANDS = frozenset((CMD_CFG_WRITE, CMD_CFG_FACTORY_RESET))
+_REBOOTING_COMMANDS = frozenset(
+    (CMD_CFG_WRITE, CMD_CFG_FACTORY_RESET, CMD_SYS_RESET)
+)
 # Команды, меняющие состояние устройства (Flash/настройки/таблица
 # триггеров) — их исходящий лог обязателен для полевой диагностики:
 # фантомный сброс МК со стёртыми триггерами оказался недоказуем именно
@@ -67,6 +76,8 @@ _MUTATING_COMMANDS = frozenset((
     CMD_TRIGGER_ENABLE, CMD_TRIGGER_STAGE, CMD_TRIGGER_COMMIT,
     CMD_TRIGGER_NAME_WRITE, CMD_TRIGGER_NAME_COMMIT,
     CMD_CAN_MODE, CMD_CAN_SPEED,
+    CMD_STORAGE_BEGIN, CMD_STORAGE_DATA, CMD_STORAGE_COMMIT,
+    CMD_STORAGE_CLEAR,
 ))
 
 # USB IDs приложения (загрузчик — PID 0x5741, см. core/bootloader.py).
@@ -929,6 +940,98 @@ class SerialManager(QObject):
             + int(pwm_time_ms).to_bytes(4, "little")
         )
         return self.send_data(bytes((CMD_AUX_SET, len(payload))) + payload)
+
+    def request_sys_reset(self) -> None:
+        """CMD_SYS_RESET: перезагрузка устройства (кнопка «Перезагрузить
+        устройство» в мониторинге — отчёт мастера). Команда в списке
+        _REBOOTING_COMMANDS: после подтверждённого ответа порт
+        закрывается через expect_reboot(), авто-переподключение
+        восстанавливает связь с перезагруженным МК."""
+        self.request_control(CMD_SYS_RESET, b"")
+
+    # --- Маркерное хранилище блобов во Flash МК (storage.c, протокол v10) ---
+    # Переменные (VARH, верхние адреса) и программы ГЛ (FLXH, за кодом)
+    # хранятся в камне непрозрачными для прошивки блобами — PC
+    # сериализует их в JSON и пишет транзакцией BEGIN→DATA×N→COMMIT.
+    # Чтение обратно позволяет поднять настройки с устройства при
+    # подключении без файла на ПК.
+
+    def storage_info(self, region: int) -> dict | None:
+        """CMD_STORAGE_INFO: позиция/длина/generation области или None,
+        если области нет либо прошивка команд не знает."""
+        try:
+            resp = self.request_control(
+                CMD_STORAGE_INFO, bytes((region & 0xFF,))
+            )
+        except Exception:
+            return None
+        if len(resp) < 12:
+            return None
+        return {
+            "base": int.from_bytes(resp[0:4], "little"),
+            "len": int.from_bytes(resp[4:8], "little"),
+            "gen": int.from_bytes(resp[8:12], "little"),
+        }
+
+    def storage_download(self, region: int) -> bytes | None:
+        """Вычитывает блоб области (CMD_STORAGE_INFO + READ по кускам).
+        None — области нет, прошивка старая или чтение оборвалось."""
+        info = self.storage_info(region)
+        if info is None or info["len"] == 0:
+            return None
+        total = info["len"]
+        out = bytearray()
+        while len(out) < total:
+            # Размер куска ограничен payload команды (u8) и буфером
+            # ответа прошивки — 240 Б безопасно под 255-байтный ответ.
+            want = min(240, total - len(out))
+            if want > 0xFFFF:
+                want = 0xFFFF
+            payload = (
+                bytes((region & 0xFF,))
+                + len(out).to_bytes(2, "little")
+                + bytes((want & 0xFF,))
+            )
+            chunk = self.request_control(CMD_STORAGE_READ, payload)
+            if len(chunk) < want:
+                return bytes(out) if out else None
+            out += chunk[:want]
+        return bytes(out)
+
+    def storage_upload(self, region: int, data: bytes) -> bool:
+        """Пишет блоб транзакцией BEGIN → DATA×N → COMMIT.
+
+        Прошивка сама размещает область (VARH — с конца Flash вниз,
+        FLXH — за концом кода) и при надобности пересаживает области
+        триггеров/журнала. CRC32 — стандартный zlib.crc32, прошивке его
+        считает по записанному (Storage_Commit сверяет)."""
+        import zlib
+
+        if not data:
+            return False
+        payload = bytes((region & 0xFF,)) + len(data).to_bytes(4, "little")
+        resp = self.request_control(CMD_STORAGE_BEGIN, payload)
+        if len(resp) < 4:
+            return False
+        # Кусок полезной нагрузки: [off u16][данные] — u8-длина payload
+        # команды ограничивает кадр 255 байтами → 250 данных за раз.
+        offset = 0
+        while offset < len(data):
+            chunk = data[offset : offset + 250]
+            payload = offset.to_bytes(2, "little") + chunk
+            self.request_control(CMD_STORAGE_DATA, payload)
+            offset += len(chunk)
+        crc = zlib.crc32(data) & 0xFFFFFFFF
+        self.request_control(CMD_STORAGE_COMMIT, crc.to_bytes(4, "little"))
+        return True
+
+    def storage_clear(self, region: int) -> bool:
+        """CMD_STORAGE_CLEAR: стирает область блобов (ключ 0xA5 — как у
+        прочих деструктивных команд)."""
+        resp = self.request_control(
+            CMD_STORAGE_CLEAR, bytes((region & 0xFF, 0xA5))
+        )
+        return resp is not None
 
     def read_can_stats(self, channel: int) -> dict[str, int]:
         """Возвращает накопительные RX/TX/lost-счётчики CAN-канала.

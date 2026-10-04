@@ -5,12 +5,15 @@
  * симптом: разрыв CAN/USB, устраняется только отключением одного из
  * CAN-проводов — см. firmware/PROTOCOL.md и CanBridge_PollHealth()).
  *
- * Хранилище: кольцо на EVENT_LOG_POOL_PAGES страницах Flash
- * (0x0803C000..0x0803DFFF, см. STM32F105RCTx_APP.ld::_eventlog_pool_addr),
- * запись — фиксированные 16 байт, 128 записей на страницу. Пишется строго
- * последовательно (seq растёт монотонно); при заполнении кольцо оборачивается
- * и стирает следующую страницу целиком (128 самых старых записей разом) —
- * дешёвая амортизация числа стираний вместо стирания на каждую запись.
+ * Хранилище: кольцо на EVENT_LOG_POOL_PAGES страницах Flash — маркерная
+ * область EVLH (см. storage.c), позиция не фиксирована: область сидит
+ * ровно под областью переменных VARH и переносится вместе с ней
+ * (EventLog_Relocate копирует записи дословно — журнал не теряется при
+ * росте хранилищ). Первые EVENT_LOG_HEADER_BYTES байт области —
+ * заголовок EVLH, записи 16 Б идут следом. Пишется строго
+ * последовательно (seq растёт монотонно); при заполнении кольцо
+ * оборачивается и стирает следующую страницу целиком (страница с
+ * заголовком после стирания получает его заново).
  *
  * ВАЖНО: запись — только из главного цикла (EventLog_Add вызывает
  * HAL_FLASH_Program/Erase), никогда из IRQ-контекста. */
@@ -27,8 +30,14 @@ extern "C" {
 #define EVENT_LOG_POOL_PAGES      4U
 #define EVENT_LOG_FLASH_PAGE      2048U
 #define EVENT_LOG_RECORD_SIZE     16U
-#define EVENT_LOG_SLOTS_PER_PAGE  (EVENT_LOG_FLASH_PAGE / EVENT_LOG_RECORD_SIZE)
-#define EVENT_LOG_TOTAL_SLOTS     (EVENT_LOG_POOL_PAGES * EVENT_LOG_SLOTS_PER_PAGE)
+#define EVENT_LOG_HEADER_BYTES    32U /* store_header_t (20) + выравнивание до слота */
+#define EVENT_LOG_TOTAL_SLOTS     ((EVENT_LOG_POOL_PAGES * EVENT_LOG_FLASH_PAGE \
+                                    - EVENT_LOG_HEADER_BYTES) \
+                                   / EVENT_LOG_RECORD_SIZE) /* 510 */
+/* Легаси-пул старой прошивки: записи без заголовка, 512 слотов с
+ * 0x0803C000 — читаются один раз при миграции. */
+#define EVENT_LOG_LEGACY_BASE     0x0803C000U
+#define EVENT_LOG_LEGACY_SLOTS    512U
 
 /* Типы событий. code/channel — доп. данные, специфичные для типа (см.
  * комментарии), совпадают с семантикой, которую core/serial_manager.py
@@ -127,6 +136,11 @@ uint8_t EventLog_Read(uint32_t after_seq, event_log_entry_t *out, uint8_t max_co
 
 /* Последний записанный seq (0 — журнал пуст). */
 uint32_t EventLog_LastSeq(void);
+
+/* Пересадка кольца на new_base (storage.c): страницы копируются
+ * дословно с учётом перекрытия диапазонов, старые вычищаются. Записи
+ * журнала сохраняются. */
+uint8_t EventLog_Relocate(uint32_t new_base);
 
 #ifdef __cplusplus
 }

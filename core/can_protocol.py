@@ -41,6 +41,21 @@ CMD_TRIGGER_NAME_READ = 0xD0    # [index] → [len][имя] — из config-ст
 CMD_TRIGGER_NAME_WRITE = 0xD1   # [index][len][имя] — в RAM, фиксация по CMD_TRIGGER_NAME_COMMIT
 CMD_TRIGGER_NAME_COMMIT = 0xD2  # Записать таблицу имён триггеров во Flash (перезапись config-страницы)
 CMD_AUX_SET = 0xD3  # Доп. канал OUT1-4: [ch][mode][on u16][off u16][count u16][freq u16][duty][time u32]
+CMD_SYS_RESET = 0xD4  # Перезагрузка устройства (кнопка «Перезагрузить устройство» в мониторинге)
+
+# Маркерное хранилище блобов во Flash МК (storage.c, протокол v10):
+# переменные (VARH — верхние адреса, растёт вниз) и программы гибкой
+# логики (FLXH — за концом кода, растёт вверх). Запись транзакцией
+# BEGIN → DATA×N → COMMIT, заголовок области пишется последним.
+CMD_STORAGE_INFO = 0xD5    # [region] → [base u32][len u32][gen u32]
+CMD_STORAGE_READ = 0xD6    # [region][off u16][len u8] → данные
+CMD_STORAGE_BEGIN = 0xD7   # [region][len u32] → [base u32]
+CMD_STORAGE_DATA = 0xD8    # [off u16][данные] → статус
+CMD_STORAGE_COMMIT = 0xD9  # [crc32 u32] → статус
+CMD_STORAGE_CLEAR = 0xDA   # [region][0xA5] → стереть область
+
+STORAGE_REGION_FLEX = 0  # программы гибкой логики
+STORAGE_REGION_VAR = 1   # конфигурация переменных
 
 # Типы событий CMD_EVENT_LOG (event_log_type_t в прошивке).
 EVLOG_BOOT = 1
@@ -70,9 +85,9 @@ EVLOG_FAULT_LR = 17    # timestamp=застеканный LR, channel+code=SCB->
 
 # Версия протокола, которую ожидает хост. Прошивка отвечает её в
 # CMD_SYSTEM_INFO (payload[1]); меньше — функции нового протокола
-# (stage/commit триггеров, cfg-команды, смена бод-рейта CAN) на
-# устройстве отсутствуют.
-EXPECTED_PROTOCOL_VERSION = 3
+# (stage/commit триггеров, cfg-команды, смена бод-рейта CAN,
+# маркерное хранилище CMD_STORAGE_* с v10) на устройстве отсутствуют.
+EXPECTED_PROTOCOL_VERSION = 10
 
 # Ключи деструктивных команд (протокол v3): прошивка отвергает
 # CMD_CFG_WRITE без трейлера A5 5A, CMD_CFG_FACTORY_RESET без "FCLR" и

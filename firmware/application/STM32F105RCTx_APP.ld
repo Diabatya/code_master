@@ -6,21 +6,21 @@
  *                                    (идентификация — в начале Flash)
  *   0x08008800 - 0x08008FFF (2 KB)   application integrity metadata (APP1)
  *   0x08009000 - 0x0803BFFF (204 KB) application code  <-- this .ld's FLASH region
- *   0x0803C000 - 0x0803DFFF (8 KB)   event log ring (see Inc/event_log.h)
- *   0x0803E000 - 0x0803FFFF (8 KB)   хранилище у конца Flash: [ГЛ][триггеры]
- *                                    [переменные — верхние адреса, растут вниз]
+ *   code_end   - 0x0803FFFF          маркерное хранилище (storage.c):
+ *                                    FLXH (ГЛ) за кодом · TRGH «посередине»
+ *                                    · EVLH (журнал) · VARH (переменные) у
+ *                                    конца Flash — области по маркерам,
+ *                                    фиксированных адресов нет
  *
  * The metadata page is intentionally excluded from the linker FLASH region.
  * It is generated after linking by firmware/tools/add_app_metadata.py and
  * contains the application size and CRC32 used by the bootloader.
  *
- * The metadata, event log, config and trigger pages are intentionally
- * excluded from the linker FLASH region so that .text/.data can never be
- * placed there by accident; device_config.c / trigger.c / event_log.c
- * address their own fixed pages directly (see Inc/device_config.h,
- * Inc/trigger.h, Inc/event_log.h). Shrinking the app region from the
- * previous 212 KB frees the 8 KB now reserved for the event log — the
- * application uses well under half of the smaller region.
+ * The metadata and storage regions are intentionally excluded from the
+ * linker FLASH region so that .text/.data can never be placed there by
+ * accident; storage.c/trigger.c/event_log.c find their areas by scanning
+ * marker headers (see Inc/storage.h). The application uses well under
+ * half of the region — the rest is free space for the storage chain.
  */
 
 MEMORY
@@ -36,13 +36,9 @@ _estack = ORIGIN(RAM) + LENGTH(RAM);
 _Min_Heap_Size  = 0x800;
 _Min_Stack_Size = 0x800;
 
-/* Fixed addresses for the event log/config/trigger Flash pages, used by
- * event_log.c / device_config.c / trigger.c. Kept here (rather than only in
- * a header) so the memory map is visible in one place next to the FLASH
- * region definition above. */
-_eventlog_pool_addr = 0x0803C000;
-_config_page_addr  = 0x08008000;
-_trigger_page_addr = 0x0803E000;
+/* Fixed addresses живут в заголовках модулей (device_config.h,
+ * trigger.h — TRIGGER_LEGACY_ADDR, event_log.h — EVENT_LOG_LEGACY_BASE):
+ * у маркерного хранилища фиксированных адресов нет — только маркеры. */
 
 SECTIONS
 {
@@ -113,6 +109,10 @@ SECTIONS
   } >FLASH
 
   _sidata = LOADADDR(.data);
+
+  /* Конец области кода/данных во Flash — начало маркерного хранилища
+   * (storage.c): FLXH/EVLH/TRGH/VARH размещаются выше этого адреса. */
+  _app_code_end = _sidata + SIZEOF(.data);
 
   .data :
   {

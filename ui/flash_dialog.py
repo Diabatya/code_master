@@ -68,6 +68,7 @@ from core.can_protocol import (
 )
 from core.stm32_info import (
     APPLICATION_BASE_ADDR,
+    APP_METADATA_MAGIC,
     APP_METADATA_PAGE_ADDR,
     APP_METADATA_PAGE_SIZE,
     BOOTLOADER_BASE_ADDR,
@@ -117,16 +118,63 @@ def _flash_size_for_chip_id(chip_id: int | None) -> str:
     return f"{CHIP_FLASH_SIZE_KB.get(chip_id, tr('Неизвестно'))} KB"
 
 
-def _is_valid_trigger_blob(blob: bytes) -> bool:
-    """Пул триггеров — валидное хранилище?
+# Маркерное хранилище (storage.c): области не имеют фиксированных
+# адресов — только 20-байтовый заголовок в начале страницы.
+_STORE_PAGE = 2048
+_STORE_MAGICS = (0x56415248, 0x464C5848, 0x45564C48)  # VARH, FLXH, EVLH
+_STORE_MAX_PAYLOAD = 48 * 1024
+_TRIG_HEADER_MAGIC = 0x54524748  # "TRGH"
+_TRIG_MAGIC_LEGACY = 0x54524732  # "TRG2"
+_TRIG_MAX_RECORDS = 70
 
-    Ищем заголовок "TRGH" (хранилище v3) или записи "TRG2" (легаси v2 —
-    прошивка сама мигрирует их при старте). Если ни того ни другого —
-    область содержит мусор/чужие данные, восстанавливать её нельзя.
-    """
-    trgh = (0x54524748).to_bytes(4, "little")
-    trg2 = (0x54524732).to_bytes(4, "little")
-    return trgh in blob or trg2 in blob
+
+def _find_storage_regions(blob: bytes, base_addr: int) -> list[tuple[int, bytes]]:
+    """Сканирует дамп Flash постранично и возвращает [(addr, образ)] всех
+    валидных маркерных областей хранилища — для восстановления после
+    mass erase. TRGH (триггеры) имеет свой 16-байтовый заголовок, остальные
+    области — общий store_header_t (20 Б) с магиком VARH/FLXH/EVLH.
+    Легаси-пул триггеров (записи TRG2 без заголовка) ищется по своему
+    фиксированному адресу и сохраняется целиком."""
+    from core.trigger_protocol import crc8
+
+    regions: list[tuple[int, bytes]] = []
+    for off in range(0, len(blob) - 19, _STORE_PAGE):
+        magic = int.from_bytes(blob[off : off + 4], "little")
+        if magic == _TRIG_HEADER_MAGIC:
+            version, count = blob[off + 4], blob[off + 5]
+            if (
+                version in (3, 4)
+                and count <= _TRIG_MAX_RECORDS
+                and crc8(blob[off : off + 15]) == blob[off + 15]
+            ):
+                stride = 90 if version == 4 else 82
+                size = -(-(16 + count * stride) // _STORE_PAGE) * _STORE_PAGE
+                if off + size <= len(blob):
+                    regions.append((base_addr + off, blob[off : off + size]))
+        elif magic in _STORE_MAGICS:
+            payload_len = int.from_bytes(blob[off + 8 : off + 12], "little")
+            version = int.from_bytes(blob[off + 16 : off + 18], "little")
+            if (
+                version == 1
+                and payload_len <= _STORE_MAX_PAYLOAD
+                and crc8(blob[off : off + 19]) == blob[off + 19]
+            ):
+                size = -(-(20 + payload_len) // _STORE_PAGE) * _STORE_PAGE
+                if off + size <= len(blob):
+                    regions.append((base_addr + off, blob[off : off + size]))
+    # Легаси-пул триггеров v2 — записи без заголовка по фиксированному
+    # адресу; сохраняем весь старый диапазон до конца Flash (прошивка
+    # при старте смигрирует записи в маркерную область).
+    legacy_off = TRIGGER_REGION_ADDR - base_addr
+    if (
+        0 <= legacy_off <= len(blob) - 4
+        and int.from_bytes(blob[legacy_off : legacy_off + 4], "little")
+        == _TRIG_MAGIC_LEGACY
+    ):
+        regions.append(
+            (TRIGGER_REGION_ADDR, blob[legacy_off : FLASH_END_ADDR - base_addr])
+        )
+    return regions
 
 
 def _format_chip_id(value: int | None) -> str:
@@ -1074,13 +1122,9 @@ class FlashWorker(QThread):
                         (BOOTLOADER_BASE_ADDR, APPLICATION_BASE_ADDR - BOOTLOADER_BASE_ADDR),
                         (DEVICE_CONFIG_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE),
                     ]
-                    if self._preserve_triggers:
-                        preserve.append(
-                            (TRIGGER_REGION_ADDR, FLASH_END_ADDR - TRIGGER_REGION_ADDR)
-                        )
                     saved_regions = []
                     self.log_line.emit(
-                        tr("USB DFU: сохранение bootloader/config/триггеров...")
+                        tr("USB DFU: сохранение bootloader/config/хранилища...")
                         if self._preserve_triggers
                         else tr("USB DFU: сохранение bootloader/config...")
                     )
@@ -1109,15 +1153,68 @@ class FlashWorker(QThread):
                                 "устройство не повреждено"
                             ).format(p_addr, exc)
                         if any(b != 0xFF for b in blob):
-                            # Пул триггеров восстанавливаем только если
-                            # там валидное хранилище ("TRGH" v3 или
-                            # легаси-записи "TRG2") — иначе вернём мусор.
-                            if p_addr == TRIGGER_REGION_ADDR and not _is_valid_trigger_blob(blob):
-                                self.log_line.emit(
-                                    tr("USB DFU: область триггеров без валидного хранилища — не восстанавливается")
-                                )
-                                continue
                             saved_regions.append((p_addr, blob))
+
+                    if self._preserve_triggers:
+                        # Маркерное хранилище: области триггеров (TRGH),
+                        # переменных (VARH), гибкой логики (FLXH) и журнала
+                        # (EVLH) не имеют фиксированных адресов — сканируем
+                        # пространство за концом кода приложения (конец
+                        # берём из страницы метаданных APP1 — округляем
+                        # ВНИЗ до страницы: последняя страница кода тоже
+                        # сканируется, лишний проход безвреден; если
+                        # метаданных нет — сканируем весь диапазон, ~220 КБ).
+                        scan_base = APPLICATION_BASE_ADDR
+                        try:
+                            meta = bytes(
+                                dfu.upload(APP_METADATA_PAGE_ADDR, APP_METADATA_PAGE_SIZE)
+                            )
+                            # К этому моменту magic APP1 уже погашен
+                            # записью нулей выше (UPDATE_STARTED) — поле
+                            # image_size при этом осталось валидным.
+                            magic = int.from_bytes(meta[0:4], "little")
+                            if len(meta) >= 16 and magic in (APP_METADATA_MAGIC, 0):
+                                image_size = int.from_bytes(meta[8:12], "little")
+                                if 0 < image_size < FLASH_END_ADDR - APPLICATION_BASE_ADDR:
+                                    # Страница запаса: конец кода внутри
+                                    # образа может быть раньше image_size
+                                    # на padding — сканировать код безвредно
+                                    # (magic+crc8 отсекают ложные области).
+                                    scan_base = max(
+                                        APPLICATION_BASE_ADDR,
+                                        APPLICATION_BASE_ADDR
+                                        + image_size // _STORE_PAGE * _STORE_PAGE
+                                        - _STORE_PAGE,
+                                    )
+                        except Exception:  # noqa: BLE001
+                            pass  # метаданные недоступны — сканируем всё
+                        try:
+                            tail = bytes(
+                                dfu.upload(scan_base, FLASH_END_ADDR - scan_base)
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.error("DFU: не удалось прочитать хранилище: %s", exc)
+                            return False, tr(
+                                "USB DFU: не удалось прочитать область хранилища "
+                                "перед стиранием ({0}) — запись отменена, "
+                                "устройство не повреждено"
+                            ).format(exc)
+                        found = _find_storage_regions(tail, scan_base)
+                        for r_addr, r_blob in found:
+                            covered = any(
+                                start < r_addr + len(r_blob)
+                                and r_addr < start + len(data)
+                                for start, data in segments
+                            )
+                            if covered:
+                                continue  # область поставляет сам образ
+                            saved_regions.append((r_addr, r_blob))
+                        if found:
+                            self.log_line.emit(
+                                tr("USB DFU: найдено областей хранилища: {0}").format(
+                                    len(found)
+                                )
+                            )
 
                     self.log_line.emit(
                         tr("USB DFU: полное стирание Flash (mass erase)...")
@@ -1634,13 +1731,14 @@ class FlashDialog(QDialog):
         self._verify_checkbox.setChecked(True)
         self._verify_checkbox.setToolTip(tr("Отключите, чтобы ускорить прошивку за счёт пропуска чтения обратно"))
 
-        self._preserve_triggers_checkbox = QCheckBox(tr("Сохранять триггеры"))
+        self._preserve_triggers_checkbox = QCheckBox(tr("Сохранять данные хранилища"))
         self._preserve_triggers_checkbox.setChecked(
             bool(self._config.get("preserve_triggers", False))
         )
         self._preserve_triggers_checkbox.setToolTip(
-            tr("При DFU-прошивке возвращать сохранённые триггеры обратно. "
-               "Снимите для чистой прошивки без старых триггеров")
+            tr("При DFU-прошивке возвращать области хранилища (триггеры, "
+               "переменные, гибкую логику, журнал) обратно. "
+               "Снимите для чистой прошивки")
         )
         self._preserve_triggers_checkbox.toggled.connect(
             lambda checked: self._config.set("preserve_triggers", bool(checked))
@@ -2240,7 +2338,7 @@ class FlashDialog(QDialog):
         # Даём ОС вернуть handle — иначе на Windows Bootloader.open()
         # сразу после закрытия падает с PermissionError(13)/
         # ERROR_GEN_FAILURE (отчёт мастера).
-        time.sleep(0.3)
+        time.sleep(0.6)
 
     def _restore_serial_port(self) -> None:
         """Возвращает COM-порт приложению, если он был закрыт перед операцией."""
