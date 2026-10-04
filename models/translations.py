@@ -587,6 +587,39 @@ class Translator:
                     "DATA — fill in at least one byte",
                 "DATA от — заполните хотя бы один байт":
                     "DATA from — fill in at least one byte",
+                "получено": "received",
+                "Команда": "Command",
+                "Команда:": "Command:",
+                "Переменные управления": "Control commands",
+                "＋ Папка": "+ Folder",
+                "＋ Команда": "+ Command",
+                "Настройка команды": "Command settings",
+                "Имя команды:": "Command name:",
+                "Фреймы команды": "Command frames",
+                "Любой канал": "Any channel",
+                "до след.": "to next",
+                "Пауза до следующего фрейма команды":
+                    "Delay before the next command frame",
+                "Двойной клик — настройка команды":
+                    "Double click — command settings",
+                "Новая папка": "New folder",
+                "Удалить выбранное": "Delete selected",
+                "Удаление папки": "Delete folder",
+                "Удалить папку «{0}» и {1} команд(у) в ней?":
+                    "Delete folder “{0}” and {1} command(s) inside?",
+                "Введите имя команды.": "Enter a command name.",
+                "Добавьте хотя бы один фрейм с заполненным ID.":
+                    "Add at least one frame with a filled ID.",
+                "Отправляет фреймы выбранной команды «Управления» — "
+                "с её паузами, количеством и подстановкой байтов «X» "
+                "из автоматически записанного кэша.":
+                    "Sends the frames of the selected 'Control' command — "
+                    "with its delays, counts and substitution of 'X' bytes "
+                    "from the automatically recorded cache.",
+                "между": "between",
+                "1 или 0": "1 or 0",
+                "→ 1 или 0": "→ 1 or 0",
+                "DATA до:": "DATA to:",
                 "ID — шестнадцатеричное число":
                     "ID — hexadecimal number",
                 "в байт": "as byte",

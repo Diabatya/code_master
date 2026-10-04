@@ -719,9 +719,10 @@ class _GatewayProgram(QGroupBox):
         layout.setSpacing(6)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        # Шапка: № + вид программы слева («ПОДМЕНА»/«Игнорирование»),
-        # имя программы по центру крупно в поле ввода как в триггерах
-        # (отчёт мастера), активность, голубой крестик.
+        # Шапка: № + вид программы + галочка активности слева
+        # («ПОДМЕНА»/«Игнорирование» — отчёт мастера: активность рядом
+        # с номером, а не в правом углу), имя программы по центру
+        # крупно в поле ввода как в триггерах, голубой крестик справа.
         header = QHBoxLayout()
         self._number_label = QLabel()
         self._number_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
@@ -731,6 +732,10 @@ class _GatewayProgram(QGroupBox):
         self._mode_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         self._mode_label.setStyleSheet("color: #9A9AA5;")
         header.addWidget(self._mode_label)
+        self._active = QCheckBox(tr("Активна"))
+        self._active.setFont(font)
+        self._active.toggled.connect(tab.mark_dirty)
+        header.addWidget(self._active)
         header.addStretch()
         self._name_edit = QLineEdit()
         self._name_edit.setFont(QFont("Segoe UI", 16))
@@ -741,10 +746,6 @@ class _GatewayProgram(QGroupBox):
         self._name_edit.textChanged.connect(tab.mark_dirty)
         header.addWidget(self._name_edit)
         header.addStretch()
-        self._active = QCheckBox(tr("Активна"))
-        self._active.setFont(font)
-        self._active.toggled.connect(tab.mark_dirty)
-        header.addWidget(self._active)
         self._remove = _close_button(font, tr("Удалить программу"))
         self._remove.clicked.connect(lambda: tab.remove_program(self))
         header.addWidget(self._remove)

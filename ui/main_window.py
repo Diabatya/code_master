@@ -190,10 +190,16 @@ class _MatrixBackground(QWidget):
     """Анимированный «матричный» фон по ТЗ мастера: 8 колонок
     падающих символов, у каждой своя скорость, прозрачность и
     размер шрифта (глубина). Нижний слой — не перехватывает
-    события мыши (аналог pointer-events: none)."""
+    события мыши (аналог pointer-events: none).
 
-    # (длительность с, задержка с, прозрачность, размер шрифта px)
-    # Скорость падения снижена ещё в 5 раз (отчёт мастера).
+    Каждая строка колонки скроллится НЕЗАВИСИМО и бесконечно
+    (modulo по периоду, который чуть шире экрана — заворот всегда
+    происходит выше видимой области): единый блок-переход «весь
+    столбец телепортируется» убран — именно он дёргал анимацию
+    (отчёт мастера)."""
+
+    # (длительность полного прохода экрана, с; задержка фазы, с;
+    # прозрачность; размер шрифта px).
     _COL_STYLE = (
         (150.0, 0.0, 0.60, 34),   # передний план
         (275.0, 25.0, 0.25, 20),  # дальний план
@@ -203,6 +209,7 @@ class _MatrixBackground(QWidget):
     )
     _COLS = 8
     _ROWS = 16
+    _ROW_STEP = 45.0
     _REF_W = 1080.0
     _REF_H = 720.0
 
@@ -225,9 +232,25 @@ class _MatrixBackground(QWidget):
         ]
         self._elapsed = QElapsedTimer()
         self._elapsed.start()
+        # Виджеты поверх матрицы (прозрачная область списка устройств):
+        # Qt не перерисовывает их сам, когда меняется только нижний
+        # слой — без принудительного update() центр экрана замирал
+        # после первого кадра (отчёт мастера).
+        self._overlays: list[QWidget] = []
         self._timer = QTimer(self)
-        self._timer.timeout.connect(self.update)
-        self._timer.start(33)  # ~30 fps
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(16)  # ~60 fps — более плавное движение
+
+    def add_overlay(self, widget: QWidget) -> None:
+        """Регистрирует прозрачный виджет поверх матрицы, который
+        нужно перерисовывать вручную на каждом кадре анимации."""
+        self._overlays.append(widget)
+
+    def _tick(self) -> None:
+        self.update()
+        for widget in self._overlays:
+            if isValid(widget):
+                widget.update()
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         w, h = max(self.width(), 1), max(self.height(), 1)
@@ -243,21 +266,24 @@ class _MatrixBackground(QWidget):
         # быть не должно, дождь идёт в середине (отчёт мастера).
         col_step = 135 * sx
         x0 = (w - col_step * (self._COLS - 1)) / 2
+        row_step = self._ROW_STEP * sy
+        # Период чуть больше экрана — заворот строки на верх всегда
+        # происходит за пределами видимой области, поэтому скачок
+        # невидим и движение выглядит непрерывным.
+        span = self._REF_H * sy + row_step
         for c in range(self._COLS):
             duration, delay, opacity, fsize = self._COL_STYLE[c % len(self._COL_STYLE)]
+            speed = (self._REF_H * sy) / duration
             t = now - delay
-            frac = (t % duration) / duration if t >= 0 else 0.0
-            # Кадр из ТЗ: 0→0, 80%→+720, 81%→-720, 100%→0.
-            y_off = (
-                frac / 0.8 if frac < 0.8 else -1.0 + (frac - 0.8) / 0.2
-            ) * self._REF_H * sy
             color.setAlphaF(opacity)
             p.setPen(color)
             font.setPixelSize(max(10, int(fsize * sy)))
             p.setFont(font)
             x = x0 + col_step * c
             for r, text in enumerate(self._columns[c]):
-                p.drawText(int(x), int((60 + 45 * r) * sy + y_off), text)
+                base_y = row_step * r
+                y = (base_y + speed * t) % span - row_step
+                p.drawText(int(x), int(60 * sy + y), text)
         p.end()
 
 
@@ -475,8 +501,12 @@ class _DeviceCard(QWidget):
         # QWidget не рисует border/background из стиля — рамка
         # пропадала.
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # Непрозрачный фон цвета окна: матричная анимация не должна
+        # проглядывать сквозь голубую рамку устройства — символы
+        # идут только ВОКРУГ неё (отчёт мастера).
         self.setStyleSheet(
-            "_DeviceCard { border: 2px solid #3A7BD5; border-radius: 12px; }"
+            "_DeviceCard { border: 2px solid #3A7BD5; border-radius: 12px;"
+            " background: palette(window); }"
         )
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 12)
@@ -744,6 +774,12 @@ class MainWindow(QMainWindow):
         # Матричный фон — нижний слой стартовой страницы,
         # не перехватывает мышь (pointer-events: none, ТЗ мастера).
         self._matrix_bg = _MatrixBackground(self._startup_page)
+        # Прозрачная область списка устройств лежит поверх матрицы —
+        # без ручного update() на каждый кадр анимации она не
+        # перерисовывалась сама, и символы в центре экрана замирали
+        # после первого кадра (отчёт мастера).
+        self._matrix_bg.add_overlay(self._cards_scroll.viewport())
+        self._matrix_bg.add_overlay(self._cards_box)
 
         # Страница прошивки
         self._firmware_page = FirmwarePage(self._serial_manager, self)

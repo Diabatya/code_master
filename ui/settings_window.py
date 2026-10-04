@@ -420,6 +420,9 @@ class SettingsWindow(QMainWindow):
         self._variables_tab = VariablesTab(self, self._serial_manager)
         # Списки переменных для событий/условий/действий ГЛ.
         self._flexible_tab.set_variables_tab(self._variables_tab)
+        # Загрузка файла переменных — тоже правка, «Сохранить» должна
+        # включиться (отчёт мастера).
+        self._variables_tab.loaded.connect(self._mark_dirty)
         self._library_tab = LibraryBrowser(self._trigger_tab, self._flexible_tab, self)
         self._analyzer_tab = CanAnalyzer(self._serial_manager, self)
         self._topology_tab = CanTopologyWidget(self)
@@ -1630,11 +1633,11 @@ class SettingsWindow(QMainWindow):
             self._flexible_tab._save_config()
             if hasattr(self._gateway_tab, "_save_config"):
                 self._gateway_tab._save_config()
-            # Переменные в config.json не кэшируются — в файл общего
-            # конфига их добавляем вручную, только на запись
-            # (отчёт мастера).
+            # Файл общего конфига и файл переменных («Config Variable»)
+            # полностью раздельные — ни один не несёт данных другого
+            # (отчёт мастера: «опять привязываются переменные»).
             data = self._config.all()
-            data["variables"] = self._variables_tab.export_config()
+            data.pop("variables", None)
             name = data.get("device_name") or data.get("device_type_name") or ""
             serial = data.get("device_serial") or data.get("serial_number") or ""
             Path(path).write_bytes(pack_config_file(data, name, serial))
@@ -1692,10 +1695,11 @@ class SettingsWindow(QMainWindow):
                 )
                 if answer != QMessageBox.StandardButton.Yes:
                     return
-        # Секцию переменных вынимаем до импорта — в config.json она не
-        # кэшируется (отчёт мастера: старые переменные всплывали после
-        # перепрошивки); прогружаем прямо на страницу «Переменные».
-        file_vars = payload.pop("variables", None)
+        # Файл общего конфига переменных не несёт и не трогает вкладку
+        # «Переменные» — для них отдельный файл «Config Variable»
+        # (отчёт мастера). Секцию на всякий случай вырезаем даже из
+        # старых файлов, сохранённых до разделения.
+        payload.pop("variables", None)
         try:
             self._config.import_data(payload)
             self._config.set("last_config_dir", os.path.dirname(path))
@@ -1713,11 +1717,6 @@ class SettingsWindow(QMainWindow):
             self._trigger_tab.set_config(
                 self._config.get("triggers", []), suspend_execution=True
             )
-            # Если файл несёт секцию переменных — прогружаем и её:
-            # вид конфига определяется содержимым, а не именем файла
-            # (отчёт мастера).
-            if isinstance(file_vars, dict):
-                self._variables_tab.import_config(file_vars)
             self._flexible_tab.set_config(self._config.get("flexible_rules", []))
             if hasattr(self._gateway_tab, "set_config"):
                 self._gateway_tab.set_config(

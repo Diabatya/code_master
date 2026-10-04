@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt, QMimeData
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication, QLineEdit
 
-from models.utils import parse_packet_string
+from models.utils import CYRILLIC_HEX_MAP, parse_packet_string
 
 
 class IdPasteEdit(QLineEdit):
@@ -38,6 +38,14 @@ class IdPasteEdit(QLineEdit):
             if parsed is not None:
                 self._fill_callback(parsed)
                 return
+        # Кириллица на той же клавише раскладки, что латинские HEX-цифры
+        # A-F (не переключил раскладку) — подменяем на латиницу прямо
+        # при вводе, не отдавая оригинальный символ валидатору (отчёт
+        # мастера: касается всех HEX-полей ID во всём приложении).
+        typed = event.text()
+        if typed in CYRILLIC_HEX_MAP:
+            self.insert(CYRILLIC_HEX_MAP[typed])
+            return
         super().keyPressEvent(event)
 
     def insertFromMimeData(self, source: QMimeData) -> None:

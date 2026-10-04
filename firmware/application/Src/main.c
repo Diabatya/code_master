@@ -157,14 +157,23 @@ uint8_t App_GetCpuLoadPct(void)
 
 uint8_t App_GetRamUsedPct(void)
 {
-  /* Пиковое потребление RAM = весь объём (от 0x20000000 до _estack)
-   * минус нетронутая канарейкой полоса [_ebss..low-watermark]. */
+  /* Живое значение «сейчас», а не исторический пик: .data/.bss (CAN-
+   * кольца и прочие статики) + стек, занятый ПРЯМО СЕЙЧАС (от текущего
+   * SP до вершины стека). Канарейка (App_GetStackFreeBytes) — это
+   * худший зафиксированный запас с момента старта и почти сразу
+   * застывает на максимуме, поэтому индикатор выглядел «сломанным»
+   * (не шевелился) — отчёт мастера: «должен показывать данные онлайн». */
+  register uint32_t sp;
+  __asm volatile ("mov %0, sp" : "=r" (sp));
   const uint32_t total = (uint32_t)&_estack - 0x20000000UL;
-  uint32_t free_b = App_GetStackFreeBytes();
-  if (free_b >= total) {
-    return 0U;
+  uint32_t bss_used = (uint32_t)&_ebss - 0x20000000UL;
+  uint32_t stack_used = (sp < (uint32_t)&_estack)
+      ? ((uint32_t)&_estack - sp) : 0U;
+  uint32_t used = bss_used + stack_used;
+  if (used >= total) {
+    return 100U;
   }
-  return (uint8_t)(((total - free_b) * 100U) / total);
+  return (uint8_t)((used * 100U) / total);
 }
 
 int main(void)

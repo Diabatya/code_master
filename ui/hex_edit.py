@@ -5,6 +5,8 @@ from PySide6.QtCore import QRegularExpression, Qt
 from PySide6.QtGui import QFont, QKeyEvent, QRegularExpressionValidator
 from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QScrollArea, QWidget
 
+from models.utils import CYRILLIC_HEX_MAP, translate_cyrillic_hex
+
 _HEX_CHARS = set("0123456789ABCDEFabcdef")
 
 
@@ -53,6 +55,10 @@ class HexDataEdit(QLineEdit):
             self._focus_prev()
             return
         text = event.text()
+        # Кириллица на той же клавише раскладки, что и A-F — не
+        # переключил раскладку, подменяем на латиницу (отчёт мастера).
+        if text in CYRILLIC_HEX_MAP:
+            text = CYRILLIC_HEX_MAP[text]
         # «X» — не смешивается с цифрами: заменяет всё содержимое поля,
         # а ввод hex поверх wildcard перезаписывает его с нуля.
         if (
@@ -99,7 +105,48 @@ class HexDataEdit(QLineEdit):
             finally:
                 self._suppress_autofocus = False
             return
+        if text != event.text() and (
+            text in _HEX_CHARS or (self._allow_x and text.upper() == "X")
+        ):
+            # Транслитерированный кириллический символ — вставляем его,
+            # а не отдаём исходное событие валидатору (он его отклонит).
+            self.insert(text.upper())
+            return
         super().keyPressEvent(event)
+
+    def insertFromMimeData(self, source) -> None:  # noqa: N802
+        """Вставка всей скопированной строки DATA (из онлайн-метки —
+        «Копировать» или обычный Ctrl+C/Ctrl+V): байты распределяются
+        по этому и соседним полям начиная с текущей позиции, а не
+        обрезаются до одного байта (отчёт мастера)."""
+        if not source.hasText():
+            super().insertFromMimeData(source)
+            return
+        text = translate_cyrillic_hex(source.text()).strip()
+        tokens = text.split() if " " in text else [
+            text[i : i + 2] for i in range(0, len(text), 2)
+        ]
+        tokens = [t for t in tokens if t]
+        if len(tokens) <= 1:
+            super().insertFromMimeData(source)
+            return
+        try:
+            start = self._siblings.index(self)
+        except ValueError:
+            super().insertFromMimeData(source)
+            return
+        for offset, token in enumerate(tokens):
+            idx = start + offset
+            if idx >= len(self._siblings):
+                break
+            field = self._siblings[idx]
+            upper = token.upper()
+            if not (field._allow_x and upper == "X") and not all(
+                ch in _HEX_CHARS for ch in upper
+            ):
+                continue
+            field.setText(upper[:2])
+            field.textEdited.emit(upper[:2])
 
     def _focus_next(self) -> None:
         try:

@@ -25,7 +25,10 @@ class Toast(QLabel):
     def __init__(self, parent: QWidget, text: str, success: bool = True) -> None:
         super().__init__(text, parent)
         self.setFont(QFont("Segoe UI", 10, QFont.Weight.Medium))
-        color = "#4CAF50" if success else "#E65100"
+        # Серый вместо зелёного — яркая зелёная плашка в углу читалась
+        # как тревожный/праздничный акцент (отчёт мастера); анимация
+        # появления/исчезновения (fade) уже есть ниже.
+        color = "#4A4A58" if success else "#E65100"
         self.setStyleSheet(
             f"color: #FFFFFF; background-color: {color};"
             "border-radius: 8px; padding: 8px 16px;"

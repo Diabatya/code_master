@@ -9,18 +9,45 @@ from typing import Any
 from platformdirs import user_data_dir
 
 
+# Кириллические буквы на тех же физических клавишах раскладки ЙЦУКЕН,
+# что и латинские hex-цифры A-F на QWERTY (А↔F, В↔D, С↔C, Е↔T не hex,
+# только буквы A-F нужны): оператор случайно печатает кириллицей
+# (не переключил раскладку) — вместо молчаливого отказа подменяем на
+# нужный латинский символ (отчёт мастера, относится ко всем HEX-полям
+# ID/DATA/таблиц привязки во всём приложении).
+CYRILLIC_HEX_MAP = {
+    "а": "f", "А": "F",
+    "в": "d", "В": "D",
+    "с": "c", "С": "C",
+    "и": "b", "И": "B",
+    "у": "e", "У": "E",
+    "ф": "a", "Ф": "A",
+}
+
+
+def translate_cyrillic_hex(text: str) -> str:
+    """Подменяет кириллические буквы на латинские HEX-цифры по
+    раскладке клавиатуры (см. CYRILLIC_HEX_MAP)."""
+    if not text:
+        return text
+    return "".join(CYRILLIC_HEX_MAP.get(ch, ch) for ch in text)
+
+
 def hex_to_int(text: str) -> int | None:
     """Преобразует строку с HEX-значением в целое число.
 
     Args:
-        text: Строка, например «1A», «0x1A» или «1a».
+        text: Строка, например «1A», «0x1A», «1a» или «1 A» (пробелы
+            игнорируются — вставка DATA через буфер обмена часто
+            приходит с разделителями между байтами).
 
     Returns:
         Целое число или None, если строка пустая или некорректная.
     """
     if not text:
         return None
-    cleaned = text.strip().replace("0x", "").replace("0X", "")
+    cleaned = translate_cyrillic_hex(text).strip()
+    cleaned = cleaned.replace(" ", "").replace("0x", "").replace("0X", "")
     if not cleaned:
         return None
     try:

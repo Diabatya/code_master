@@ -153,9 +153,29 @@ def guess_firmware_base(data: bytes) -> int:
         APP_METADATA_PAGE_ADDR,
         BOOTLOADER_BASE_ADDR,
         BOOTLOADER_SIZE,
+        DEVICE_CONFIG_VER_MAGIC,
+        DEVICE_CONFIG_VER_OFFSET,
+        DEVICE_INFO_PAGE_ADDR,
     )
 
     if len(data) >= 8:
+        # BIN «2 CAN CDC» (make_full_image.py --cdc-bin) начинается со
+        # страницы данных устройства: имя/серийник не пишутся (0xFF),
+        # но версионная запись VER1 на смещении 1024 всегда есть —
+        # признак страницы идентификации у начала файла. Без этой
+        # проверки .bin ошибочно принимался за application-образ со
+        # смещением +0x1000: страница VER1 никогда не записывалась,
+        # и «Версия ПО» после обновления через CDC оставалась пустой
+        # (отчёт мастера).
+        if (
+            len(data) >= DEVICE_CONFIG_VER_OFFSET + 4
+            and int.from_bytes(
+                data[DEVICE_CONFIG_VER_OFFSET : DEVICE_CONFIG_VER_OFFSET + 4],
+                "little",
+            )
+            == DEVICE_CONFIG_VER_MAGIC
+        ):
+            return DEVICE_INFO_PAGE_ADDR
         # BIN, выписанный add_app_metadata.py, начинается со страницы
         # метаданных: первое слово — магик "APP1" (значение SP векторов
         # таким быть не может — SP всегда 0x2001xxxx).
