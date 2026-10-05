@@ -238,6 +238,13 @@ class _MatrixBackground(QWidget):
         # слой — без принудительного update() центр экрана замирал
         # после первого кадра (отчёт мастера).
         self._overlays: list[QWidget] = []
+        # Колонки отрисовываются в QPixmap один раз (и при ресайзе):
+        # drawText каждый кадр пере-растеризовал глифы на дробной
+        # позиции — хинтинг/антиалиасинг дрожал и движение выглядело
+        # рваным (отчёт мастера «цифры дёргаются»). Кадр = два блита
+        # целой колонки с субпиксельным сдвигом — пиксельно гладко.
+        self._strips: list[QPixmap] = []
+        self._strips_size: tuple[int, int] = (0, 0)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         # PreciseTimer: обычный QTimer на Windows квантуется до ~15 мс
@@ -257,43 +264,74 @@ class _MatrixBackground(QWidget):
             if isValid(widget):
                 widget.update()
 
+    # Базовая линия строки внутри полосы-пиксмапа — с отступом от верха,
+    # чтобы глифы первой строки не обрезались.
+    _STRIP_BASE = 0.75
+
+    def _build_strips(self, sx: float, sy: float) -> None:
+        """Рендерит каждую колонку цифр в статичный QPixmap (высота =
+        _ROWS строк). Вызывается при изменении размера виджета."""
+        dpr = self.devicePixelRatioF()
+        row_step = self._ROW_STEP * sy
+        strip_w = max(60, int(240 * sx))
+        strip_h = int(row_step * (self._ROWS + 1)) + 2
+        self._strips = []
+        for c in range(self._COLS):
+            _duration, _delay, opacity, fsize = (
+                self._COL_STYLE[c % len(self._COL_STYLE)]
+            )
+            pm = QPixmap(int(strip_w * dpr), int(strip_h * dpr))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            color = QColor("#8A8A8A")
+            color.setAlphaF(opacity)
+            p.setPen(color)
+            font = QFont("Courier New")
+            font.setStyleHint(QFont.StyleHint.TypeWriter)
+            font.setPixelSize(max(10, int(fsize * sy)))
+            p.setFont(font)
+            for r, text in enumerate(self._columns[c]):
+                p.drawText(
+                    QPointF(0.0, row_step * (r + self._STRIP_BASE)), text
+                )
+            p.end()
+            self._strips.append(pm)
+
     def paintEvent(self, _event) -> None:  # noqa: N802
         w, h = max(self.width(), 1), max(self.height(), 1)
         sx = w / self._REF_W
         sy = h / self._REF_H
         now = self._elapsed.elapsed() / 1000.0
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        color = QColor("#8A8A8A")
-        font = QFont("Courier New")
-        font.setStyleHint(QFont.StyleHint.TypeWriter)
-        # Полоса колонок центрируется на экране — по краям символов
-        # быть не должно, дождь идёт в середине (отчёт мастера).
-        col_step = 135 * sx
-        x0 = (w - col_step * (self._COLS - 1)) / 2
         row_step = self._ROW_STEP * sy
         # Период чуть больше экрана — заворот строки на верх всегда
         # происходит за пределами видимой области, поэтому скачок
         # невидим и движение выглядит непрерывным.
         span = self._REF_H * sy + row_step
+        if self._strips_size != (w, h):
+            self._strips_size = (w, h)
+            self._build_strips(sx, sy)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        # Полоса колонок центрируется на экране — по краям символов
+        # быть не должно, дождь идёт в середине (отчёт мастера).
+        col_step = 135 * sx
+        x0 = (w - col_step * (self._COLS - 1)) / 2
         for c in range(self._COLS):
-            duration, delay, opacity, fsize = self._COL_STYLE[c % len(self._COL_STYLE)]
+            duration, delay, _opacity, _fsize = (
+                self._COL_STYLE[c % len(self._COL_STYLE)]
+            )
             speed = (self._REF_H * sy) / duration
-            t = now - delay
-            color.setAlphaF(opacity)
-            p.setPen(color)
-            font.setPixelSize(max(10, int(fsize * sy)))
-            p.setFont(font)
+            offset = (speed * (now - delay)) % span
             x = x0 + col_step * c
-            for r, text in enumerate(self._columns[c]):
-                base_y = row_step * r
-                y = (base_y + speed * t) % span - row_step
-                # QPointF, а не целые координаты: drawText(int,int)
-                # округлял базовую линию до пикселя — при медленной
-                # скорости строка «двигалась рывками» по 1 px
-                # (отчёт мастера). Субпиксельная позиция + Antialiasing
-                # дают непрерывное движение.
-                p.drawText(QPointF(x, 60 * sy + y), text)
+            # Полоса ставится дважды с шагом span: верхняя копия — строки,
+            # завернувшиеся за низ экрана. QPointF — субпиксельная
+            # позиция, движение не дискретно по пикселям.
+            y = 60 * sy + offset - row_step * (1 + self._STRIP_BASE)
+            strip = self._strips[c]
+            p.drawPixmap(QPointF(x, y), strip)
+            p.drawPixmap(QPointF(x, y - span), strip)
         p.end()
 
 

@@ -78,7 +78,11 @@ from PySide6.QtWidgets import (
 from models.config import CONFIG_FILE_MAGIC, Config
 from models.id_notes import IdNotes
 from models.translations import _ as tr
-from models.utils import hex_to_int, translate_cyrillic_hex
+from models.utils import (
+    hex_to_int,
+    translate_cyrillic_hex,
+    translate_cyrillic_layout,
+)
 from models.version import VERSION
 from ui.hex_edit import create_data_field_widget
 from ui.id_edit import IdPasteEdit
@@ -722,7 +726,7 @@ class _FrameRow(QWidget):
         row.addWidget(self.dlc)
 
         self.data, data_widget = create_data_field_widget(
-            font, 8, edit_width=34, allow_x=True
+            font, 8, edit_width=44, allow_x=True
         )
         row.addWidget(data_widget)
         # DLC ограничивает количество доступных полей DATA
@@ -865,7 +869,7 @@ class _ValuePage(QWidget):
         line2 = QHBoxLayout()
         line2.addWidget(from_label)
         self.data_from, from_widget = create_data_field_widget(
-            font, 8, edit_width=34, allow_x=True
+            font, 8, edit_width=44, allow_x=True
         )
         line2.addWidget(from_widget)
         line2.addStretch()
@@ -874,7 +878,7 @@ class _ValuePage(QWidget):
         line3 = QHBoxLayout()
         line3.addWidget(to_label)
         self.data_to, to_widget = create_data_field_widget(
-            font, 8, edit_width=34, allow_x=True
+            font, 8, edit_width=44, allow_x=True
         )
         line3.addWidget(to_widget)
         line3.addStretch()
@@ -1116,6 +1120,13 @@ class _ValuePage(QWidget):
             # «01 02») тоже не учитываем — записываем слитно (отчёт
             # мастера).
             translated = translate_cyrillic_hex(text).replace(" ", "")
+            # DLC жёстко ограничивает число байтов: длиннее 2·DLC
+            # hex-знаков сырое значение быть не может — лишние
+            # символы обрезаются, поле «не продолжает запись» (отчёт
+            # мастера).
+            limit = int(self.dlc.value()) * 2
+            if limit > 0 and len(translated) > limit:
+                translated = translated[:limit]
             if translated != text:
                 text = translated
                 self.points_table.blockSignals(True)
@@ -1132,6 +1143,17 @@ class _ValuePage(QWidget):
                 ):
                     ok = False  # вне пределов «ОТ»/«ДО» — красный
         else:
+            if self._kind == "numeric":
+                # Численная величина: кириллица на той же клавише
+                # подменяется латиницей («ю»→«.», «б»→«,», буквы —
+                # hex-цифрами) — вместо красной ячейки получаем
+                # валидное число (отчёт мастера).
+                translated = translate_cyrillic_layout(text)
+                if translated != text:
+                    text = translated
+                    self.points_table.blockSignals(True)
+                    item.setText(text)
+                    self.points_table.blockSignals(False)
             ok = (
                 _parse_axis_value(text) is not None
                 if self._kind == "numeric"
@@ -1334,7 +1356,7 @@ class _ImpulsePage(QWidget):
         data_label.setFixedWidth(56)
         line2.addWidget(data_label)
         self.data, data_widget = create_data_field_widget(
-            font, 8, edit_width=34, allow_x=True
+            font, 8, edit_width=44, allow_x=True
         )
         line2.addWidget(data_widget)
         line2.addStretch()
@@ -1481,9 +1503,14 @@ def _legacy_to_command(cfg: dict[str, Any]) -> list[dict[str, Any]]:
 
 class _CmdFrameRow(QWidget):
     """Строка фрейма команды «Управления» — как строка «Ответа»
-    триггера (отчёт мастера): канал/бит/ID/DLC/DATA (X — байт берётся
-    из кэша команды), RTR, «Пауза перед отправкой», «Пауза между
-    пакетами», «Кол-во», «Пауза до следующего» и ✕."""
+    триггера (отчёт мастера): бит/ID/DLC/DATA (X — байт берётся
+    из кэша команды), RTR, «Пауза между пакетами», «Кол-во»,
+    «Пауза до следующего» и ✕.
+
+    По отчёту мастера канал CAN и «автоматическая запись в кэш»
+    здесь не задаются — их определяет Гибкая логика; «пауза перед
+    отправкой» убрана совсем (поле в сериализации сохранено нулём
+    ради совместимости файлов)."""
 
     def __init__(
         self,
@@ -1495,14 +1522,11 @@ class _CmdFrameRow(QWidget):
         super().__init__(parent)
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
+        row.setSpacing(6)
 
-        self.channel = QComboBox()
-        self.channel.setFont(font)
-        self.channel.addItems(["CAN1", "CAN2"])
-        self.channel.setFixedWidth(76)
-        row.addWidget(self.channel)
-
+        # Порядок колонок — как в строке «Ответ» триггера:
+        # битность, ID, DLC, DATA, RTR … паузы/кол-во, ✕.
+        row.addWidget(QLabel(tr("Бит")))
         self.bit = QComboBox()
         self.bit.setFont(font)
         self.bit.addItem(tr("11 бит"), False)
@@ -1523,7 +1547,7 @@ class _CmdFrameRow(QWidget):
         row.addWidget(self.dlc)
 
         self.data, data_widget = create_data_field_widget(
-            font, 8, edit_width=32, allow_x=True
+            font, 8, edit_width=44, allow_x=True
         )
         row.addWidget(data_widget)
 
@@ -1541,11 +1565,8 @@ class _CmdFrameRow(QWidget):
             spin.setValue(value)
             return spin
 
-        row.addWidget(_small := QLabel(tr("Пауза")))
-        _small.setFont(font)
-        self.delay_before = _ms_spin()
-        row.addWidget(self.delay_before)
-        between_label = QLabel(tr("между"))
+        row.addStretch()
+        between_label = QLabel(tr("Пауза между пакетами"))
         between_label.setFont(font)
         row.addWidget(between_label)
         self.delay_between = _ms_spin()
@@ -1590,8 +1611,8 @@ class _CmdFrameRow(QWidget):
         _set_data_enabled(self.data, self.dlc.value())
 
         for widget in (
-            self.channel, self.bit, self.dlc, self.count,
-            self.delay_before, self.delay_between, self.next_delay,
+            self.bit, self.dlc, self.count,
+            self.delay_between, self.next_delay,
         ):
             if isinstance(widget, QComboBox):
                 widget.currentIndexChanged.connect(on_changed)
@@ -1604,20 +1625,22 @@ class _CmdFrameRow(QWidget):
 
     def read(self) -> dict[str, Any]:
         return {
-            "channel": self.channel.currentIndex(),
+            # Канал и пауза перед отправкой убраны из настройки
+            # (отчёт мастера) — ключи остаются нулевыми для
+            # совместимости формата файла/провода.
+            "channel": 0,
             "extended": bool(self.bit.currentData()),
             "id": self.can_id.text().strip(),
             "dlc": self.dlc.value(),
             "data": _data_to_text(self.data),
             "rtr": self.rtr.isChecked(),
-            "delay_before_send": self.delay_before.value(),
+            "delay_before_send": 0,
             "delay_between": self.delay_between.value(),
             "count": self.count.value(),
             "next_delay": self.next_delay.value(),
         }
 
     def write(self, data: dict[str, Any]) -> None:
-        self.channel.setCurrentIndex(int(data.get("channel", 0) or 0))
         self.bit.setCurrentIndex(1 if data.get("extended") else 0)
         self.can_id.setText(str(data.get("id", "")))
         self.dlc.setValue(int(data.get("dlc", 8) or 8))
@@ -1626,7 +1649,6 @@ class _CmdFrameRow(QWidget):
         _set_data_enabled(
             self.data, 0 if self.rtr.isChecked() else self.dlc.value()
         )
-        self.delay_before.setValue(int(data.get("delay_before_send", 0) or 0))
         self.delay_between.setValue(int(data.get("delay_between", 0) or 0))
         self.count.setValue(max(1, int(data.get("count", 1) or 1)))
         self.next_delay.setValue(int(data.get("next_delay", 0) or 0))
@@ -1634,11 +1656,10 @@ class _CmdFrameRow(QWidget):
 
 class _CommandDialog(QDialog):
     """Настройка команды «Управления» (отчёт мастера): имя + список
-    фреймов «как в триггерах в разделе Ответ» — паузы перед
-    отправкой/между пакетами/до следующего, количество, RTR; блок
-    «Автоматическая запись DATA в кэш» — входящий кадр по маске
-    «от–до» запоминается, и байты «X» во фреймах команды при отправке
-    подставляются из него. Носителей ОЗУ/ПЗУ у команд нет."""
+    фреймов «как в триггерах в разделе Ответ» — пауза между
+    пакетами/до следующего, количество, RTR. Канал CAN и
+    «автоматическая запись DATA в кэш» из этого окна убраны: их
+    определяет Гибкая логика. Носителей ОЗУ/ПЗУ у команд нет."""
 
     def __init__(
         self,
@@ -1649,7 +1670,11 @@ class _CommandDialog(QDialog):
         font = QFont("Segoe UI", 9)
         self.setFont(font)
         self.setWindowTitle(tr("Настройка команды"))
-        self.setMinimumWidth(900)
+        # Шире прежнего: строка фрейма с байтовыми полями и паузами
+        # не влезала в 900 px (отчёт мастера — «все данные не
+        # влезают»).
+        self.setMinimumWidth(1280)
+        self.setMinimumHeight(360)
         config = config or {}
         self.config = dict(config)
 
@@ -1689,65 +1714,6 @@ class _CommandDialog(QDialog):
         frames_box.addLayout(self._frames_layout)
         layout.addWidget(self._frames_group)
 
-        # «Автоматическая запись DATA в кэш» — как в триггерах:
-        # входящий кадр, подходящий под маску «от–до», запоминается;
-        # байты «X» во фреймах команды при отправке подставляются
-        # из последнего записанного (отчёт мастера).
-        self._cache_check = QCheckBox(
-            tr("Автоматическая запись DATA в кэш")
-        )
-        self._cache_check.setFont(font)
-        layout.addWidget(self._cache_check)
-        self._cache_box = QWidget()
-        cache_layout = QVBoxLayout(self._cache_box)
-        cache_layout.setSpacing(4)
-        cache_layout.setContentsMargins(20, 0, 0, 0)
-        cache_line1 = QHBoxLayout()
-        self.cache_channel = QComboBox()
-        self.cache_channel.setFont(font)
-        self.cache_channel.addItem(tr("Любой канал"), 2)
-        self.cache_channel.addItem("CAN1", 0)
-        self.cache_channel.addItem("CAN2", 1)
-        self.cache_channel.setFixedWidth(110)
-        cache_line1.addWidget(self.cache_channel)
-        self.cache_bit = QComboBox()
-        self.cache_bit.setFont(font)
-        self.cache_bit.addItem(tr("11 бит"), False)
-        self.cache_bit.addItem(tr("29 бит"), True)
-        self.cache_bit.setFixedWidth(92)
-        cache_line1.addWidget(self.cache_bit)
-        cache_line1.addWidget(QLabel("ID"))
-        self.cache_id = _HexIdEdit(font)
-        cache_line1.addWidget(self.cache_id)
-        cache_line1.addWidget(QLabel("DLC"))
-        self.cache_dlc = QSpinBox()
-        self.cache_dlc.setFont(font)
-        self.cache_dlc.setRange(1, 8)
-        self.cache_dlc.setValue(8)
-        self.cache_dlc.setFixedWidth(54)
-        cache_line1.addWidget(self.cache_dlc)
-        cache_line1.addStretch()
-        cache_layout.addLayout(cache_line1)
-        from_label = QLabel(tr("DATA от:"))
-        from_label.setFont(font)
-        cache_layout.addWidget(from_label)
-        self.cache_from, from_widget = create_data_field_widget(
-            font, 8, edit_width=32, allow_x=True
-        )
-        cache_layout.addWidget(from_widget)
-        to_label = QLabel(tr("DATA до:"))
-        to_label.setFont(font)
-        cache_layout.addWidget(to_label)
-        self.cache_to, to_widget = create_data_field_widget(
-            font, 8, edit_width=32, allow_x=True
-        )
-        cache_layout.addWidget(to_widget)
-        layout.addWidget(self._cache_box)
-        self._cache_check.toggled.connect(self._cache_box.setVisible)
-        cache_cfg = config.get("cache") or {}
-        self._cache_check.setChecked(bool(cache_cfg.get("enabled")))
-        self._cache_box.setVisible(self._cache_check.isChecked())
-
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel
@@ -1764,16 +1730,6 @@ class _CommandDialog(QDialog):
                 row.write(fr)
         else:
             self._add_frame_row(font)
-        self._write_cache(cache_cfg)
-
-    def _write_cache(self, cache_cfg: dict[str, Any]) -> None:
-        cidx = self.cache_channel.findData(int(cache_cfg.get("channel", 2)))
-        self.cache_channel.setCurrentIndex(cidx if cidx >= 0 else 0)
-        self.cache_bit.setCurrentIndex(1 if cache_cfg.get("extended") else 0)
-        self.cache_id.setText(str(cache_cfg.get("id", "")))
-        self.cache_dlc.setValue(int(cache_cfg.get("dlc", 8) or 8))
-        _text_to_data(self.cache_from, cache_cfg.get("from"))
-        _text_to_data(self.cache_to, cache_cfg.get("to"))
 
     def _add_frame_row(self, font: QFont) -> _CmdFrameRow:
         row = _CmdFrameRow(
@@ -1797,15 +1753,10 @@ class _CommandDialog(QDialog):
             "name": self._name_edit.text().strip(),
             "folder": self.config.get("folder", ""),
             "frames": [r.read() for r in self._frame_rows],
-            "cache": {
-                "enabled": self._cache_check.isChecked(),
-                "channel": self.cache_channel.currentData(),
-                "extended": bool(self.cache_bit.currentData()),
-                "id": self.cache_id.text().strip(),
-                "dlc": self.cache_dlc.value(),
-                "from": _data_to_text(self.cache_from),
-                "to": _data_to_text(self.cache_to),
-            },
+            # Блок автокэша убран из настройки (его роль перешла в
+            # Гибкую логику) — ключ сохранён выключенным ради
+            # совместимости формата файла.
+            "cache": {"enabled": False},
         }
 
     def accept(self) -> None:  # noqa: D102
@@ -2545,21 +2496,28 @@ class _VarColumn(QWidget):
         self._title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         box.addWidget(self._title)
 
+        # Кнопка добавления — НАД таблицей (отчёт мастера).
+        self._add_btn = QPushButton(tr("＋ Добавить переменную"))
+        self._add_btn.setFont(font)
+        self._add_btn.clicked.connect(self._on_add)
+        box.addWidget(self._add_btn)
+
         container = QWidget()
         self._rows_layout = QVBoxLayout(container)
         self._rows_layout.setSpacing(6)
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        # Вторая кнопка «＋» — прямо под последней строкой таблицы
+        # (отчёт мастера): новые переменные вставляются перед ней.
+        self._add_btn_bottom = QPushButton(tr("＋ Добавить переменную"))
+        self._add_btn_bottom.setFont(font)
+        self._add_btn_bottom.clicked.connect(self._on_add)
+        self._rows_layout.addWidget(self._add_btn_bottom)
         self._rows_layout.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(container)
         box.addWidget(scroll, 1)
         layout.addWidget(self._group, 1)
-
-        self._add_btn = QPushButton(tr("＋ Добавить переменную"))
-        self._add_btn.setFont(font)
-        self._add_btn.clicked.connect(self._on_add)
-        layout.addWidget(self._add_btn)
 
     def add_row(self, config: dict[str, Any] | None = None) -> _VariableRow:
         cfg = dict(config or {})
@@ -2579,7 +2537,9 @@ class _VarColumn(QWidget):
         if "storage" not in row.config:
             row.config["storage"] = "ram"
         self._rows.append(row)
-        self._rows_layout.insertWidget(self._rows_layout.count() - 1, row)
+        # Перед нижней кнопкой «＋» и stretch — новая строка
+        # оказывается прямо над кнопкой (отчёт мастера).
+        self._rows_layout.insertWidget(self._rows_layout.count() - 2, row)
         return row
 
     def remove_row(self, row: _VariableRow) -> None:
@@ -2659,7 +2619,8 @@ class _VarColumn(QWidget):
         for row in self._rows:
             self._rows_layout.removeWidget(row)
         for row in self._rows:
-            self._rows_layout.insertWidget(self._rows_layout.count() - 1, row)
+            # Перед нижней кнопкой «＋» и stretch (отчёт мастера).
+            self._rows_layout.insertWidget(self._rows_layout.count() - 2, row)
 
     def configs(self) -> list[dict[str, Any]]:
         return [dict(row.config) for row in self._rows]
@@ -3188,5 +3149,6 @@ class VariablesTab(QWidget):
         )
         for col in (self._read_col, self._ctrl_col, self._aux_col):
             col._add_btn.setText(tr("＋ Добавить переменную"))
+            col._add_btn_bottom.setText(tr("＋ Добавить переменную"))
             for row in col._rows:
                 row._refresh_labels()

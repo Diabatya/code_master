@@ -183,7 +183,7 @@ class _FrameSpec(QWidget):
         layout.addLayout(id_row)
 
         self.data, data_widget = create_data_field_widget(
-            font, 8, edit_width=34, allow_x=True,
+            font, 8, edit_width=42, allow_x=True,
         )
         layout.addWidget(data_widget)
 
@@ -1060,7 +1060,9 @@ class CanGatewayTab(QWidget):
     def remove_program(self, program: _GatewayProgram) -> None:
         if program in self._programs:
             self._programs.remove(program)
-        program.setParent(None)
+        # Без setParent(None): репарент создаёт топлевел-окно и рушит Qt
+        # в обработчике clicked() (отчёт мастера — вылеты по крестику).
+        program.setVisible(False)
         program.deleteLater()
         for p in self._programs:
             p.refresh_title()

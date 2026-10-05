@@ -1,22 +1,24 @@
 /* Маркерное хранилище конца Flash — см. Inc/storage.h для карты и
- * рационала. Порядок областей по адресам:
+ * рационала. Порядок областей по адресам (отчёт мастера):
  *
- *   code_end | FLXH (ГЛ, растёт вверх) | ...зазор... | TRGH (триггеры,
- *   «посередине») | EVLH (журнал, 4 страницы) | VARH (переменные) |
- *   FLASH_END
+ *   code_end | CFGH (настройки приложения, 1 стр.) | FLXH (ГЛ, растёт
+ *   вверх) | ...зазор... | TRGH (триггеры — заканчиваются на центре
+ *   зазора, растут вниз) | EVLH (журнал, 4 стр. — начинается от центра,
+ *   лежит к VARH) | ...зазор... | VARH (переменные) | FLASH_END
  *
  * VARH прижата к верху Flash: каждый новый блоб пишется НИЖЕ прежних
  * поколений — цепочка растёт вниз, прежние поколения остаются историей
  * (и страховкой на обрыв записи: до коммита активна старая область).
- * FLXH зеркально прижата к концу кода и растёт вверх. Когда место для
+ * FLXH прижата к концу страницы CFGH и растёт вверх. Когда место для
  * очередного поколения кончается, область уплотняется: все поколения
- * стираются, цепочка начинается заново с якоря. EVLH всегда стоит ровно
- * под VARH, TRGH свободно плавает в зазоре — при коммите VARH/FLXH
- * пересекающиеся области пересаживаются (TRGH из RAM-копии списка,
- * EVLH дословным копированием страниц).
+ * стираются, цепочка начинается заново с якоря. Центр зазора делит
+ * середину между TRGH и EVLH — при коммите VARH/FLXH пересекающиеся
+ * области пересаживаются (TRGH из RAM-копии списка, EVLH дословным
+ * копированием страниц).
  *
- * Модуль держит только позиции областей и сессию записи блобов
- * VARH/FLXH; сами записи триггеров/журнала живут в своих модулях. */
+ * Модуль держит позиции областей, сессию записи блобов VARH/FLXH и
+ * сервисные функции для CFGH (запись ведёт device_config.c); сами
+ * записи триггеров/журнала живут в своих модулях. */
 
 #include <string.h>
 #include <stddef.h>
@@ -36,7 +38,10 @@ typedef struct {
 } region_t;
 
 static region_t s_var;    /* VARH — цепочка у верхних адресов */
-static region_t s_flex;   /* FLXH — цепочка сразу за кодом */
+static region_t s_flex;   /* FLXH — цепочка сразу за областью CFGH */
+static region_t s_cfg;    /* CFGH — найденная область настроек (чужая
+                           * копия может сидеть не на каноничной
+                           * странице — переезд при росте/усадке кода) */
 static region_t s_trig;   /* TRGH — найденная область триггеров */
 static uint32_t s_evlog;  /* база EVLH (0 — область пока не создана) */
 static uint32_t s_legacy_trig_end; /* легаси TRG2-регион резервируется
@@ -103,9 +108,17 @@ static uint32_t blob_pages(uint32_t payload_len)
          / STORE_FLASH_PAGE;
 }
 
+/* Страница CFGH резервируется за кодом ВСЕГДА (даже когда область ещё
+ * не записана) — «настройки сразу после кода» держат якорь FLXH
+ * стабильным и не дают чужим областям сесть на это место. */
+static uint32_t cfg_end(void)
+{
+  return s_code_end + STORE_CFG_PAGES * STORE_FLASH_PAGE;
+}
+
 static uint32_t flex_end(void)
 {
-  return (s_flex.base != 0U) ? s_flex.end : s_code_end;
+  return (s_flex.base != 0U) ? s_flex.end : cfg_end();
 }
 
 static uint32_t var_base(void)
@@ -113,13 +126,35 @@ static uint32_t var_base(void)
   return (s_var.base != 0U) ? s_var.base : STORE_FLASH_END;
 }
 
-/* Каноничная позиция журнала — ровно под областью переменных.
- * Резервируется даже когда журнал ещё не создан, чтобы триггеры не
- * заняли его место. */
+/* Центр свободного зазора [flex_end, var_base) — точка стыковки TRGH
+ * и EVLH: триггеры заканчиваются на центре, журнал начинается с него.
+ * Центр прижимается вниз так, чтобы [center, center+4p) всегда
+ * влезала до var_base. */
+static uint32_t gap_center(void)
+{
+  uint32_t lo = flex_end();
+  uint32_t hi = var_base();
+  if (hi <= lo) {
+    return lo;
+  }
+  uint32_t mid = lo + ((hi - lo) / 2U);
+  mid &= ~(STORE_FLASH_PAGE - 1U);
+  uint32_t evlog_span = STORE_EVLOG_PAGES * STORE_FLASH_PAGE;
+  if (mid + evlog_span > hi) {
+    mid = (hi >= lo + evlog_span) ? hi - evlog_span : lo;
+  }
+  if (mid < lo) {
+    mid = lo;
+  }
+  return mid;
+}
+
+/* Каноничная позиция журнала — центр зазора («сверху вниз от центра»,
+ * отчёт мастера). Резервируется даже когда журнал ещё не создан, чтобы
+ * триггеры не заняли его место: они живут ниже центра. */
 static uint32_t evlog_base(void)
 {
-  return (s_evlog != 0U) ? s_evlog
-                         : (var_base() - STORE_EVLOG_PAGES * STORE_FLASH_PAGE);
+  return (s_evlog != 0U) ? s_evlog : gap_center();
 }
 
 static uint32_t evlog_end(void)
@@ -164,6 +199,15 @@ void Storage_Init(void)
         s_flex.end = end;
         s_flex.generation = h->generation;
         s_flex.payload_len = h->payload_len;
+      }
+    } else if (header_valid(h, STORE_MAGIC_CFG)) {
+      uint32_t end = page + blob_pages(h->payload_len) * STORE_FLASH_PAGE;
+      if (end <= STORE_FLASH_END
+          && (s_cfg.base == 0U || h->generation >= s_cfg.generation)) {
+        s_cfg.base = page;
+        s_cfg.end = end;
+        s_cfg.generation = h->generation;
+        s_cfg.payload_len = h->payload_len;
       }
     } else if (header_valid(h, STORE_MAGIC_EVLOG)) {
       s_evlog = page;
@@ -215,6 +259,16 @@ uint32_t Storage_CodeEnd(void)
   return s_code_end;
 }
 
+uint32_t Storage_CfgBase(void)
+{
+  return s_code_end;
+}
+
+uint32_t Storage_CfgEnd(void)
+{
+  return cfg_end();
+}
+
 uint32_t Storage_VarBase(void)
 {
   return s_var.base;
@@ -227,7 +281,7 @@ uint32_t Storage_VarEnd(void)
 
 uint32_t Storage_FlexBase(void)
 {
-  return s_code_end;
+  return cfg_end();
 }
 
 uint32_t Storage_FlexEnd(void)
@@ -248,6 +302,11 @@ uint32_t Storage_EvlogEnd(void)
 uint8_t Storage_EvlogFound(void)
 {
   return (s_evlog != 0U) ? 1U : 0U;
+}
+
+uint32_t Storage_EvlogCanonicalBase(void)
+{
+  return gap_center();
 }
 
 uint32_t Storage_TrigBase(void)
@@ -280,7 +339,17 @@ static uint8_t range_busy(uint32_t from, uint32_t to)
   if (from >= to) {
     return 0U;
   }
-  if (s_flex.base != 0U && from < s_flex.end && to > s_code_end) {
+  /* Страница CFGH за кодом зарезервирована всегда — будь область уже
+   * записана или ещё нет. Найденная копия в другом месте (старое
+   * code_end после роста кода) тоже занята до перезаписи. */
+  if (from < cfg_end() && to > s_code_end) {
+    return 1U;
+  }
+  if (s_cfg.base != 0U && s_cfg.base != s_code_end
+      && from < s_cfg.end && to > s_cfg.base) {
+    return 1U;
+  }
+  if (s_flex.base != 0U && from < s_flex.end && to > cfg_end()) {
     return 1U;
   }
   if (s_var.base != 0U && to > s_var.base) {
@@ -322,12 +391,43 @@ static uint8_t range_busy_except_trig(uint32_t from, uint32_t to)
   return busy;
 }
 
+/* Занятость без учёта TRGH и EVLH — они сами пересаживаются при росте
+ * соседей (TRGH из RAM-копии, EVLH дословным копированием). Легаси-
+ * резервы и чужие цепочки поколений при этом считаются занятыми. */
+static uint8_t range_busy_except_trig_evlog(uint32_t from, uint32_t to)
+{
+  uint32_t tb = s_trig.base;
+  uint32_t te = s_trig.end;
+  uint32_t ev = s_evlog;
+  s_trig.base = 0U;
+  s_trig.end = 0U;
+  s_evlog = 0U;
+  uint8_t busy = range_busy(from, to);
+  s_trig.base = tb;
+  s_trig.end = te;
+  s_evlog = ev;
+  return busy;
+}
+
+/* Первая свободная полка под need байт внутри [from, to) — только
+ * «твёрдые» области считаются занятыми (TRGH/EVLH подвижны). */
+static uint32_t find_free_in(uint32_t from, uint32_t to, uint32_t need)
+{
+  for (uint32_t base = from; base + need <= to;
+       base += STORE_FLASH_PAGE) {
+    if (!range_busy_except_trig_evlog(base, base + need)) {
+      return base;
+    }
+  }
+  return 0U;
+}
+
 /* Первая свободная полка под pages страниц — для первичного размещения
  * журнала, если каноничная позиция занята. */
 uint32_t Storage_FindFreeRange(uint32_t pages)
 {
   uint32_t need = pages * STORE_FLASH_PAGE;
-  for (uint32_t base = s_code_end; base + need <= STORE_FLASH_END;
+  for (uint32_t base = cfg_end(); base + need <= STORE_FLASH_END;
        base += STORE_FLASH_PAGE) {
     if (!range_busy(base, base + need)) {
       return base;
@@ -452,108 +552,90 @@ static uint8_t erase_pages(uint32_t from, uint32_t to)
   return 1U;
 }
 
-/* Центр зазора для триггеров — «где-то посередине», выравнивание вниз. */
-static uint32_t middle_base(uint32_t gap_from, uint32_t gap_to,
-                            uint32_t need_pages)
+/* Каноничный центр зазора ПОСЛЕ записи нового блоба [new_from, new_to):
+ * для VAR зазор снизу прижат к flex_end, для FLEX — сверху к var_base. */
+static uint32_t new_gap_center(uint8_t region, uint32_t new_from,
+                             uint32_t new_to)
 {
-  uint32_t need = need_pages * STORE_FLASH_PAGE;
-  if (gap_to < gap_from + need) {
-    return 0U;
+  uint32_t lo = (region == STORE_REGION_VAR) ? flex_end() : new_to;
+  uint32_t hi = (region == STORE_REGION_VAR) ? new_from : var_base();
+  if (hi <= lo) {
+    return lo;
   }
-  return (gap_from + ((gap_to - gap_from - need) / 2U))
-         & ~(STORE_FLASH_PAGE - 1U);
+  uint32_t mid = lo + ((hi - lo) / 2U);
+  mid &= ~(STORE_FLASH_PAGE - 1U);
+  uint32_t span = STORE_EVLOG_PAGES * STORE_FLASH_PAGE;
+  if (mid + span > hi) {
+    mid = (hi >= lo + span) ? hi - span : lo;
+  }
+  if (mid < lo) {
+    mid = lo;
+  }
+  return mid;
 }
 
 /* Освобождает целевой диапазон для новой области: пересекающиеся
  * подвижные регионы (TRGH — из RAM-копии, EVLH — дословным копированием)
- * пересаживаются. */
+ * пересаживаются. Центр зазора пересчитывается по НОВЫМ границам:
+ * EVLH стартует от центра (сверху вниз → вверх по адресам), TRGH
+ * заканчивается на центре (снизу вверх → вниз по адресам). */
 static uint8_t relocate_overlaps(uint8_t region, uint32_t new_from,
                                  uint32_t new_to)
 {
-  if (region == STORE_REGION_VAR) {
-    /* VAR прижата к верху: журнал обязан сидеть прямо под новой
-     * областью, триггеры — ниже журнала. */
-    uint32_t evlog_target = new_from - STORE_EVLOG_PAGES * STORE_FLASH_PAGE;
-    if (evlog_target < flex_end()) {
-      return 0U; /* переменные съели бы всё пространство — отказ */
-    }
-    if (s_trig.base != 0U && s_trig.end > evlog_target) {
-      /* Триггеры наехали на позицию журнала — пересадить в зазор
-       * [flex_end, evlog_target). */
-      uint32_t need_pages = (s_trig.end - s_trig.base) / STORE_FLASH_PAGE;
-      uint32_t trig_new = middle_base(flex_end(), evlog_target, need_pages);
-      if (trig_new == 0U
-          || range_busy_except_trig(trig_new,
-                                    trig_new + need_pages * STORE_FLASH_PAGE)
-          || !Trigger_Relocate(trig_new)) {
+  uint32_t center = new_gap_center(region, new_from, new_to);
+  uint32_t evlog_span = STORE_EVLOG_PAGES * STORE_FLASH_PAGE;
+  uint32_t evlog_target = center; /* EVLH начинается от центра */
+
+  /* 1) Журнал на центр. Если целевая позиция занята триггерами —
+   * пересадить их СНАЧАЛА под центр (триггеры растут вниз от центра);
+   * копия списка в RAM, затереть их страницы нельзя до записи копии. */
+  if (s_evlog != 0U && s_evlog != evlog_target) {
+    if (s_trig.base != 0U
+        && s_trig.base < evlog_target + evlog_span
+        && s_trig.end > evlog_target) {
+      /* Триггеры наехали на цель журнала — под центр: область
+       * заканчивается ровно на evlog_target («снизу вверх от центра»). */
+      uint32_t tneed = s_trig.end - s_trig.base;
+      uint32_t t_lo = (region == STORE_REGION_VAR) ? flex_end() : new_to;
+      uint32_t tbase = (evlog_target >= t_lo + tneed)
+                       ? evlog_target - tneed : 0U;
+      if (tbase == 0U
+          || range_busy_except_trig_evlog(tbase, tbase + tneed)
+          || !Trigger_Relocate(tbase)) {
         return 0U;
       }
-      s_trig.base = trig_new;
-      s_trig.end = trig_new + need_pages * STORE_FLASH_PAGE;
+      s_trig.base = tbase;
+      s_trig.end = tbase + tneed;
     }
-    if (s_evlog != 0U && s_evlog != evlog_target) {
-      if (!EventLog_Relocate(evlog_target)) {
-        return 0U;
-      }
-      s_evlog = evlog_target;
+    if (!EventLog_Relocate(evlog_target)) {
+      return 0U;
     }
-  } else {
-    /* FLXH прижата к концу кода: новая область растёт вверх. Сначала
-     * поднимаем журнал в каноничную позицию под VAR (если его задела
-     * область), потом пересаживаем триггеры в зазор [new_to,
-     * evlog_base) — по старой позиции журнала зазор мог оказаться
-     * нулевым, хотя после подъёма журнала место есть. Триггеры,
-     * сидящие на месте будущего журнала, пересаживаем ДО копирования
-     * EVLH — иначе дословный перенос журнала затрёт их страницы. */
-    uint32_t evlog_target = 0U;
-    if (s_evlog != 0U && s_evlog < new_to) {
-      evlog_target = var_base() - STORE_EVLOG_PAGES * STORE_FLASH_PAGE;
-      if (evlog_target < new_to) {
-        return 0U;
-      }
-      uint32_t evlog_end_target = evlog_target
-          + STORE_EVLOG_PAGES * STORE_FLASH_PAGE;
-      if (s_trig.base != 0U && s_trig.base < evlog_end_target
-          && s_trig.end > evlog_target) {
-        uint32_t need_pages =
-            (s_trig.end - s_trig.base) / STORE_FLASH_PAGE;
-        /* Зазор под триггеры не должен пересекать СТАРУЮ позицию
-         * журнала — записи EVLH ещё не скопированы, область там
-         * живая и служит источником переноса. */
-        uint32_t gap_from = new_to;
-        uint32_t evlog_old_end = s_evlog
-            + STORE_EVLOG_PAGES * STORE_FLASH_PAGE;
-        if (evlog_old_end > gap_from) {
-          gap_from = evlog_old_end;
-        }
-        uint32_t trig_new =
-            middle_base(gap_from, evlog_target, need_pages);
-        if (trig_new == 0U
-            || range_busy_except_trig(
-                trig_new, trig_new + need_pages * STORE_FLASH_PAGE)
-            || !Trigger_Relocate(trig_new)) {
-          return 0U;
-        }
-        s_trig.base = trig_new;
-        s_trig.end = trig_new + need_pages * STORE_FLASH_PAGE;
-      }
-      if (!EventLog_Relocate(evlog_target)) {
-        return 0U;
-      }
-      s_evlog = evlog_target;
+    s_evlog = evlog_target;
+  }
+
+  /* 2) Триггеры, задетые новым блобом, — под центр (заканчиваются на
+   * evlog_base: журнал уже пересажен или встанет туда при Init). */
+  if (s_trig.base != 0U && s_trig.base < new_to && s_trig.end > new_from) {
+    uint32_t tneed = s_trig.end - s_trig.base;
+    uint32_t top = (s_evlog != 0U) ? s_evlog : evlog_base();
+    uint32_t t_lo = (region == STORE_REGION_VAR) ? flex_end() : new_to;
+    uint32_t tbase = (top >= t_lo + tneed) ? top - tneed : 0U;
+    if (tbase != 0U
+        && ((tbase < new_to && tbase + tneed > new_from)
+            || range_busy_except_trig_evlog(tbase, tbase + tneed))) {
+      tbase = 0U;
     }
-    if (s_trig.base != 0U && s_trig.base < new_to) {
-      uint32_t need_pages = (s_trig.end - s_trig.base) / STORE_FLASH_PAGE;
-      uint32_t trig_new = middle_base(new_to, evlog_base(), need_pages);
-      if (trig_new == 0U
-          || range_busy_except_trig(trig_new,
-                                    trig_new + need_pages * STORE_FLASH_PAGE)
-          || !Trigger_Relocate(trig_new)) {
-        return 0U;
-      }
-      s_trig.base = trig_new;
-      s_trig.end = trig_new + need_pages * STORE_FLASH_PAGE;
+    if (tbase == 0U) {
+      /* Не влезает вплотную под центр — любая свободная полка зазора. */
+      uint32_t glo = (region == STORE_REGION_VAR) ? flex_end() : new_to;
+      uint32_t ghi = (region == STORE_REGION_VAR) ? new_from : var_base();
+      tbase = find_free_in(glo, ghi, tneed);
     }
+    if (tbase == 0U || !Trigger_Relocate(tbase)) {
+      return 0U;
+    }
+    s_trig.base = tbase;
+    s_trig.end = tbase + tneed;
   }
   return 1U;
 }
@@ -615,10 +697,12 @@ uint8_t Storage_BeginWrite(uint8_t region, uint32_t payload_len)
   uint8_t fits;
   if (region == STORE_REGION_VAR) {
     uint32_t anchor = (s_var.base != 0U) ? s_var.base : STORE_FLASH_END;
-    fits = (anchor >= need && anchor - need >= s_code_end) ? 1U : 0U;
+    fits = (anchor >= need && anchor - need >= cfg_end()) ? 1U : 0U;
     base = anchor - need;
   } else {
-    base = (s_flex.base != 0U) ? s_flex.end : s_code_end;
+    /* FLXH якорится за областью CFGH (страница настроек сразу после
+     * кода), а не за голым концом кода. */
+    base = (s_flex.base != 0U) ? s_flex.end : cfg_end();
     fits = (base + need <= STORE_FLASH_END) ? 1U : 0U;
   }
   if (fits) {
@@ -632,8 +716,8 @@ uint8_t Storage_BeginWrite(uint8_t region, uint32_t payload_len)
       return 0U;
     }
     base = (region == STORE_REGION_VAR) ? STORE_FLASH_END - need
-                                        : s_code_end;
-    if (base < s_code_end || base + need > STORE_FLASH_END
+                                        : cfg_end();
+    if (base < cfg_end() || base + need > STORE_FLASH_END
         || !prepare_range(region, base, base + need)) {
       return 0U;
     }
@@ -754,4 +838,106 @@ uint8_t Storage_Clear(uint8_t region)
     return 0U;
   }
   return compact_region(region);
+}
+
+/* --- CFGH: настройки приложения сразу за кодом (владелец —
+ * device_config.c) ------------------------------------------------- */
+
+uint32_t Storage_CfgFoundBase(void)
+{
+  return s_cfg.base;
+}
+
+/* Полезная нагрузка новейшего CFGH-поколения в out (до len байт).
+ * 0 — области нет или битый payload_crc. */
+uint8_t Storage_CfgRead(uint8_t *out, uint32_t len)
+{
+  if (s_cfg.base == 0U) {
+    return 0U;
+  }
+  const store_header_t *h = (const store_header_t *)s_cfg.base;
+  uint32_t n = (len < s_cfg.payload_len) ? len : s_cfg.payload_len;
+  memcpy(out, (const uint8_t *)(s_cfg.base + STORE_HEADER_SIZE), n);
+  /* Полный CRC payload из заголовка — контроль целостности читаемого. */
+  if (h->payload_crc != 0U
+      && crc32_of((const uint8_t *)(s_cfg.base + STORE_HEADER_SIZE),
+                  s_cfg.payload_len) != h->payload_crc) {
+    return 0U;
+  }
+  return 1U;
+}
+
+/* Новое поколение настроек — каноничная страница сразу за кодом.
+ * Пишется payload, потом заголовок; чужая копия (старое code_end после
+ * обновления прошивки) стирается после успешной записи. */
+uint8_t Storage_CfgWrite(const uint8_t *payload, uint32_t len)
+{
+  if (payload == NULL || len == 0U || len > STORE_MAX_PAYLOAD) {
+    return 0U;
+  }
+  uint32_t pages = blob_pages(len);
+  if (pages > STORE_CFG_PAGES) {
+    return 0U; /* настройки обязаны влезать в зарезервированную полку */
+  }
+  uint32_t base = s_code_end;
+  uint32_t span = STORE_CFG_PAGES * STORE_FLASH_PAGE;
+  /* Каноничная страница может быть занята найденной копией — тогда она
+   * и есть «старое поколение», стираем её же. Чужих областей там быть
+   * не должно: резерв держит range_busy. */
+  if (s_cfg.base != 0U && s_cfg.base != base) {
+    /* Найденная копия сидит не на каноничной странице (код вырос/
+     * ужался при обновлении): запишем новое поколение на якорь,
+     * старую потом вытрем. */
+  }
+  if (!erase_pages(base, base + span)) {
+    return 0U;
+  }
+  HAL_FLASH_Unlock();
+  uint32_t addr = base + STORE_HEADER_SIZE;
+  for (uint32_t i = 0U; i < len; i += 2U) {
+    uint16_t hw = (uint16_t)payload[i];
+    if (i + 1U < len) {
+      hw |= (uint16_t)((uint16_t)payload[i + 1U] << 8);
+    } else {
+      hw |= 0xFF00U;
+    }
+    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, hw) != HAL_OK) {
+      HAL_FLASH_Lock();
+      return 0U;
+    }
+    addr += 2U;
+  }
+  store_header_t h;
+  memset(&h, 0, sizeof(h));
+  h.magic = STORE_MAGIC_CFG;
+  h.generation = s_cfg.generation + 1U;
+  h.payload_len = len;
+  h.payload_crc = crc32_of(payload, len);
+  h.version = STORE_VERSION;
+  h.region = STORE_REGION_CFG;
+  h.crc8 = crc8((const uint8_t *)&h, offsetof(store_header_t, crc8));
+  const uint16_t *hw = (const uint16_t *)&h;
+  addr = base;
+  for (uint32_t w = 0U; w < sizeof(h) / 2U; w++) {
+    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, hw[w]) != HAL_OK) {
+      HAL_FLASH_Lock();
+      return 0U;
+    }
+    addr += 2U;
+  }
+  HAL_FLASH_Lock();
+  if (memcmp((const void *)base, &h, sizeof(h)) != 0) {
+    return 0U;
+  }
+  /* Переезд: вытесненная копия в другом месте — зомби, вытираем. */
+  uint32_t old_base = s_cfg.base;
+  uint32_t old_end = s_cfg.end;
+  s_cfg.base = base;
+  s_cfg.end = base + span;
+  s_cfg.generation = h.generation;
+  s_cfg.payload_len = len;
+  if (old_base != 0U && old_base != base) {
+    (void)erase_pages(old_base, old_end);
+  }
+  return 1U;
 }

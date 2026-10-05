@@ -400,6 +400,8 @@ class SerialManager(QObject):
         self._config = Config()
         self._auto_reconnect = False
         self._reconnect_timer: QTimer | None = None
+        self._identity_retry_timer: QTimer | None = None
+        self._identity_retries = 0
         self._reconnect_attempts = 0
         self._last_port_name = ""
         self._last_baudrate = 115200
@@ -520,6 +522,11 @@ class SerialManager(QObject):
                 self.connecting.emit()
                 self._device_identified = False
                 self._detect_device_id()
+                if not emulation:
+                    # Имя/серийник/VER1 могли не дочитаться, если МК
+                    # ещё крутил инициализацию — добираем отложенным
+                    # повтором (версия ПО на карточке сразу).
+                    self._schedule_identity_retry()
                 # В полевой лог — какая сборка прошивки реально стоит на
                 # МК (commit + дата сборки): «прошили последней» без неё
                 # не отличить от реально зашитой версии.
@@ -600,6 +607,8 @@ class SerialManager(QObject):
             self._shutdown = True
             self._closing = True
             self._stop_reconnect_timer()
+            if self._identity_retry_timer is not None:
+                self._identity_retry_timer.stop()
             if self._reader is not None:
                 with contextlib.suppress(RuntimeError):
                     self._reader.finished.disconnect(self._on_reader_finished)
@@ -1300,6 +1309,116 @@ class SerialManager(QObject):
         except Exception:  # noqa: S110
             pass
 
+    def _probe_cfg_read(self) -> "tuple[str, str, str]":
+        """CMD_CFG_READ → (имя, серийник, версия VER1). Пустые строки
+        при таймауте/ошибке. Вызывается только под _lock с остановленным
+        читателем."""
+        name = serial = fw_ver = ""
+        cfg_marker = (CMD_CFG_READ | 0x10) & 0xFF
+        # После power cycle/рестарта приложению нужно время на
+        # инициализацию до ответа — одна повторная попытка спасает
+        # от потери имени устройства при спешке первого опроса.
+        for _attempt in range(2):
+            if name:
+                break
+            try:
+                self._port.reset_input_buffer()
+                # Формат нового протокола [cmd][len][payload] — голый
+                # 0xC0 без байта длины вешает парсер МК: он ждёт len,
+                # а потом считает payload_len=0xC0 и поглощает ~190
+                # байт следующих команд (чтения триггеров тонули
+                # в таймаутах и слоты показывались пустыми).
+                self._port.write(bytes((CMD_CFG_READ, 0)))
+            except Exception:  # noqa: BLE001
+                break
+            deadline = time.time() + 0.6
+            buffer = bytearray()
+            while time.time() < deadline:
+                chunk = self._port.read(256)
+                if chunk:
+                    buffer.extend(chunk)
+                    if _scan_for_response(buffer, cfg_marker) and len(buffer) >= 3:
+                        status = buffer[1]
+                        length = buffer[2]
+                        if status != 0:
+                            del buffer[0]
+                            continue
+                        if len(buffer) >= 3 + length:
+                            data = bytes(buffer[3 : 3 + length])
+                            name, serial, fw_ver = _parse_cfg_read_payload(data)
+                            break
+                time.sleep(0.01)
+        return name, serial, fw_ver
+
+    def _schedule_identity_retry(self) -> None:
+        """Первичная идентификация не дала имени/версии (МК мог быть
+        занят стартом — скан маркерного хранилища, миграция страниц).
+        Повторяем CMD_CFG_READ несколько раз позже — иначе «Версия ПО»
+        и имя на карточке появлялись только после захода в настройки
+        и переподключения порта (отчёт мастера)."""
+        if self._identity_retry_timer is None:
+            self._identity_retry_timer = QTimer(self)
+            self._identity_retry_timer.setSingleShot(True)
+            self._identity_retry_timer.timeout.connect(self._retry_identity)
+        self._identity_retries = 4
+        self._identity_retry_timer.start(1200)
+
+    def _retry_identity(self) -> None:
+        """Отложенный повтор CMD_CFG_READ: добирает имя/серийник/VER1,
+        если первый опрос попал в окно инициализации МК."""
+        with self._lock:
+            if self._port is None or self._shutdown:
+                return
+            if self._closing or self._control_session_active:
+                # Идёт вычитка настроек — reader на паузе у сессии.
+                # Переносим попытку, чтобы не перезапустить его посреди
+                # обмена (конфликт за ответы команд).
+                self._identity_retries -= 1
+                if self._identity_retries > 0:
+                    self._identity_retry_timer.start(1500)
+                return
+            got_all = bool(
+                self._config.get("device_fw_version")
+                and self._config.get("device_serial")
+            )
+            if got_all:
+                return
+            self._closing = True
+            self._stop_reader()
+            try:
+                name, serial, fw_ver = self._probe_cfg_read()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Повторная идентификация не удалась: %s", exc)
+                name = serial = fw_ver = ""
+            finally:
+                self._start_reader()
+                self._closing = False
+        bulk: dict[str, object] = {}
+        if name and not self._config.get("device_name"):
+            bulk["device_name"] = name
+        if serial and not self._config.get("device_serial"):
+            bulk["device_serial"] = serial
+            bulk["serial_number"] = serial
+        if fw_ver:
+            # Пустой слот кэша заполняем всегда; свежую запись VER1
+            # тоже обновляем — версия могла смениться после прошивки.
+            bulk["device_fw_version"] = fw_ver
+        if serial and name:
+            port_names = dict(self._config.get("port_names", {}) or {})
+            port_names[serial] = name
+            bulk["port_names"] = port_names
+        if bulk:
+            self._config.set_bulk(bulk)
+            logger.info(
+                "Идентификация добрана повторным опросом: serial=%s fw=%s",
+                serial or "-", fw_ver or "-",
+            )
+            self.connection_changed.emit(True)
+            return
+        self._identity_retries -= 1
+        if self._identity_retries > 0:
+            self._identity_retry_timer.start(1500)
+
     def _detect_device_id(self) -> None:
         """Определяет тип, версию, серийный номер и объём памяти устройства."""
         with self._lock:
@@ -1359,43 +1478,9 @@ class SerialManager(QObject):
                 # CDC-порт как «Устройство с последовательным интерфейсом»
                 # независимо от iProduct — поэтому имя берём с самого МК и
                 # запоминаем в карте серийник→имя для списка портов.
-                device_name = ""
-                cfg_fw_ver = ""
-                cfg_marker = (CMD_CFG_READ | 0x10) & 0xFF
-                # После power cycle/рестарта приложению нужно время на
-                # инициализацию до ответа — одна повторная попытка спасает
-                # от потери имени устройства при спешке первого опроса.
-                for _attempt in range(2):
-                    if device_name:
-                        break
-                    self._port.reset_input_buffer()
-                    # Формат нового протокола [cmd][len][payload] — голый
-                    # 0xC0 без байта длины вешает парсер МК: он ждёт len,
-                    # а потом считает payload_len=0xC0 и поглощает ~190
-                    # байт следующих команд (чтения триггеров тонули
-                    # в таймаутах и слоты показывались пустыми).
-                    self._port.write(bytes((CMD_CFG_READ, 0)))
-                    deadline = time.time() + 0.6
-                    buffer = bytearray()
-                    while time.time() < deadline:
-                        chunk = self._port.read(256)
-                        if chunk:
-                            buffer.extend(chunk)
-                            if _scan_for_response(buffer, cfg_marker) and len(buffer) >= 3:
-                                status = buffer[1]
-                                length = buffer[2]
-                                if status != 0:
-                                    del buffer[0]
-                                    continue
-                                if len(buffer) >= 3 + length:
-                                    data = bytes(buffer[3 : 3 + length])
-                                    device_name, cfg_serial, cfg_fw_ver = (
-                                        _parse_cfg_read_payload(data)
-                                    )
-                                    if cfg_serial:
-                                        device_serial = cfg_serial
-                                    break
-                        time.sleep(0.01)
+                device_name, cfg_serial, cfg_fw_ver = self._probe_cfg_read()
+                if cfg_serial:
+                    device_serial = cfg_serial
 
                 total_memory = memory_kb * 1024 if memory_kb else 65536
                 port_names = dict(self._config.get("port_names", {}) or {})

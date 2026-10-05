@@ -237,7 +237,7 @@ int main(void)
       memcpy(&app_crc, &metadata[12], 4U);
     }
     EventLog_AddEx((uint8_t)EVLOG_VERSION, APP_DEVICE_VERSION,
-                   7U /* версия протокола, как в CMD_SYSTEM_INFO */, app_crc);
+                   11U /* версия протокола, как в CMD_SYSTEM_INFO */, app_crc);
   }
   /* Крах прошлого сеанса — с застеканным PC вместо timestamp: полевой
    * bootloop «не стартует на активной CAN-шине» без JTAG иначе не
@@ -284,6 +284,12 @@ int main(void)
     /* Keep USB/application diagnostics available even when the board's CAN
      * transceiver, pinout or termination prevents CAN initialization. */
   }
+  /* Персистнутые режимы/терминаторы из CFGH — каналы встают в состояние,
+   * заданное оператором, без участия ПК (автономная работа по ТЗ 12.4). */
+  CanBridge_SetTransceiverMode(0U, DeviceConfig_GetCanSilent(0U),
+                               DeviceConfig_GetCanTerm(0U));
+  CanBridge_SetTransceiverMode(1U, DeviceConfig_GetCanSilent(1U),
+                               DeviceConfig_GetCanTerm(1U));
   App_NoteStage(4U);
 
   Protocol_Init(APP_DEVICE_TYPE, APP_DEVICE_VERSION);

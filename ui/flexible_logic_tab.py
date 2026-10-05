@@ -248,14 +248,31 @@ def _close_button(font: QFont, tooltip: str) -> QPushButton:
 
 
 class _ClickableSummary(QLabel):
-    """Строка-сводка события/условия: клик разворачивает редактор."""
+    """Строка-сводка события/условия: клик разворачивает редактор.
+    Пока тип «Не выбрано» — строка обведена голубой рамкой
+    (отчёт мастера)."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        self.setStyleSheet("color: #7C9EFF;")
+        self._unselected = False
+        self._apply_style()
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+
+    def set_unselected(self, on: bool) -> None:
+        """Голубая рамка вокруг «Не выбрано» (отчёт мастера)."""
+        if on == self._unselected:
+            return
+        self._unselected = on
+        self._apply_style()
+
+    def _apply_style(self) -> None:
+        border = (
+            " border: 1px solid #3A7BD5; border-radius: 4px;"
+            " padding: 1px 8px;" if self._unselected else ""
+        )
+        self.setStyleSheet(f"color: #7C9EFF;{border}")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -387,7 +404,7 @@ class _DynEventPage(QWidget):
         self._event_type = event_type
         self._get_tab = get_tab
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
         layout.setContentsMargins(0, 0, 0, 0)
 
         layout.addWidget(_small_label(tr("Переменная:"), font))
@@ -487,7 +504,7 @@ class _StaticEventPage(QWidget):
     def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
         layout.setContentsMargins(0, 0, 0, 0)
 
         layout.addWidget(_small_label(tr("Переменная:"), font))
@@ -531,7 +548,7 @@ class _CondVarPage(QWidget):
     def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(_small_label(tr("Переменная:"), font))
         self.var = _VarCombo(font)
@@ -572,7 +589,7 @@ class _ImpulseVarPage(QWidget):
     ) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(_small_label(tr("Переменная:"), font))
         self.var = _VarCombo(font)
@@ -595,7 +612,7 @@ class _AuxEventPage(QWidget):
     def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
         layout.setContentsMargins(0, 0, 0, 0)
 
         row = QHBoxLayout()
@@ -649,7 +666,7 @@ class _PowerEventPage(QWidget):
     def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
         layout.setContentsMargins(0, 0, 0, 0)
         hint = QLabel(tr(
             "Программа запускается один раз сразу после полной "
@@ -676,7 +693,7 @@ class _FlagEventPage(QWidget):
     def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(_small_label(tr("Переменная:"), font))
         self.var = _VarCombo(font)
@@ -716,7 +733,7 @@ class _FrameEventPage(QWidget):
     def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
         layout.setContentsMargins(0, 0, 0, 0)
 
         row1 = QHBoxLayout()
@@ -764,7 +781,7 @@ class _FrameEventPage(QWidget):
         self._data_label = _small_label("DATA (X — любой байт)", font)
         layout.addWidget(self._data_label)
         self.data, data_widget = create_data_field_widget(
-            font, 8, edit_width=32, allow_x=True
+            font, 8, edit_width=40, allow_x=True
         )
         layout.addWidget(data_widget)
 
@@ -867,7 +884,7 @@ class _AbortEventEditor(QWidget):
         super().__init__(parent)
         self._get_tab = get_tab
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
         layout.setContentsMargins(0, 0, 0, 0)
 
         row = QHBoxLayout()
@@ -967,14 +984,19 @@ class _AbortEventEditor(QWidget):
 
 
 def _detach_item(item, sep) -> None:
-    """Отсоединяет и удаляет пункт события/условия/действия (и его
+    """Скрывает и удаляет пункт события/условия/действия (и его
     разделитель) — выполняется на следующем тике после клика по
-    крестику, см. _remove_event/_remove_cond/_remove_action."""
+    крестику, см. _remove_event/_remove_cond/_remove_action.
+
+    setParent(None) НЕ используем: он делает виджет топлевел-окном,
+    создание/удаление нативного окна рушит Qt на Windows/macOS
+    (отчёт мастера — краш по крестику). hide()+deleteLater()
+    достаточно — layout пересчитает геометрию после DeferredDelete."""
     if isValid(item):
-        item.setParent(None)
+        item.setVisible(False)
         item.deleteLater()
     if sep is not None and isValid(sep):
-        sep.setParent(None)
+        sep.setVisible(False)
         sep.deleteLater()
 
 
@@ -1022,8 +1044,8 @@ class _EventItem(QWidget):
         self._row = row
         self.setStyleSheet(_ITEM_FRAME_STYLE.format(cls="_EventItem"))
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
-        layout.setContentsMargins(6, 4, 6, 6)
+        layout.setSpacing(2)
+        layout.setContentsMargins(6, 2, 6, 4)
 
         # Компактная строка: «Обороты ДВС стали больше 1500» — клик
         # разворачивает редактор с анимацией (отчёт мастера).
@@ -1040,7 +1062,7 @@ class _EventItem(QWidget):
         # программа остаётся одной строкой (отчёт мастера).
         self._editor = QWidget()
         editor_layout = QVBoxLayout(self._editor)
-        editor_layout.setSpacing(4)
+        editor_layout.setSpacing(2)
         editor_layout.setContentsMargins(0, 0, 0, 0)
 
         self._type = QComboBox()
@@ -1190,21 +1212,21 @@ class _EventItem(QWidget):
         if etype == _EVENT_NONE:
             text = tr("Не выбрано")
         elif etype == _EVENT_DYN:
-            # «Динамическая переменная»: имя + состояние из таблицы
-            # привязки, в которое она перешла (отчёт мастера).
+            # «Динамическая переменная»: «Цвет — Красный» — имя +
+            # состояние из таблицы привязки (отчёт мастера).
             name = self._dyn.var.get_name() or "—"
             state = self._dyn.value_combo.currentText().strip()
-            text = f"{name} → {state}".rstrip()
+            text = f"{name} — {state}".rstrip()
         elif etype == _EVENT_NUM:
-            # «Численная переменная»: «Стало больше»/«Стало меньше»
-            # порога (отчёт мастера).
+            # «Численная переменная»: «Обороты стали больше 1500»
+            # (отчёт мастера).
             name = self._num.var.get_name() or "—"
             func = (
-                tr("Стало больше")
+                tr("стали больше")
                 if self._num.direction.currentData() == "gt"
-                else tr("Стало меньше")
+                else tr("стали меньше")
             )
-            text = f"{name}: {func} {self._num.value.text().strip()}".rstrip()
+            text = f"{name} {func} {self._num.value.text().strip()}".rstrip()
         elif etype == _EVENT_IMPULSE:
             # «Импульсная переменная»: событие — «получено»
             # (отчёт мастера).
@@ -1213,13 +1235,13 @@ class _EventItem(QWidget):
                 f"{tr('получено')}"
             )
         elif etype == _EVENT_STATIC:
-            # «Статическая переменная»: имя + флаг «1»/«0»
+            # «Статическая переменная»: «Тормоз 1» / «Тормоз 0»
             # (отчёт мастера).
             name = self._static.var.get_name() or "—"
             func = {
-                "on": "→ 1",
-                "off": "→ 0",
-                "both": tr("→ 1 или 0"),
+                "on": "1",
+                "off": "0",
+                "both": tr("1 или 0"),
             }.get(self._static.edge.currentData(), "")
             text = f"{name} {func}".rstrip()
         elif etype == _EVENT_FLAG:
@@ -1251,6 +1273,7 @@ class _EventItem(QWidget):
             text = tr("Доп канал №{0} {1} {2}").format(
                 self._aux.channel.value(), direction, state
             )
+        self._summary.set_unselected(etype == _EVENT_NONE)
         self._summary.setText(text)
 
 
@@ -1266,8 +1289,8 @@ class _CondItem(QWidget):
         self._row = row
         self.setStyleSheet(_ITEM_FRAME_STYLE.format(cls="_CondItem"))
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
-        layout.setContentsMargins(6, 4, 6, 6)
+        layout.setSpacing(2)
+        layout.setContentsMargins(6, 2, 6, 4)
 
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
@@ -1281,7 +1304,7 @@ class _CondItem(QWidget):
         # Редактор условия сворачивается до строки-сводки (отчёт мастера).
         self._editor = QWidget()
         editor_layout = QVBoxLayout(self._editor)
-        editor_layout.setSpacing(4)
+        editor_layout.setSpacing(2)
         editor_layout.setContentsMargins(0, 0, 0, 0)
 
         self._type = QComboBox()
@@ -1310,7 +1333,7 @@ class _CondItem(QWidget):
 
         static_page = QWidget()
         st_layout = QVBoxLayout(static_page)
-        st_layout.setSpacing(4)
+        st_layout.setSpacing(2)
         st_layout.setContentsMargins(0, 0, 0, 0)
         st_layout.addWidget(_small_label(tr("Переменная:"), font))
         self.st_var = _VarCombo(font)
@@ -1340,7 +1363,7 @@ class _CondItem(QWidget):
 
         aux_page = QWidget()
         aux_layout = QVBoxLayout(aux_page)
-        aux_layout.setSpacing(4)
+        aux_layout.setSpacing(2)
         aux_layout.setContentsMargins(0, 0, 0, 0)
         aux_row = QHBoxLayout()
         aux_row.addWidget(_small_label(tr("Доп канал №"), font))
@@ -1364,7 +1387,7 @@ class _CondItem(QWidget):
         # состояние переменной (отчёт мастера).
         flag_page = QWidget()
         flag_layout = QVBoxLayout(flag_page)
-        flag_layout.setSpacing(4)
+        flag_layout.setSpacing(2)
         flag_layout.setContentsMargins(0, 0, 0, 0)
         flag_layout.addWidget(_small_label(tr("Переменная:"), font))
         self.flag_var = _VarCombo(font)
@@ -1506,8 +1529,8 @@ class _CondItem(QWidget):
     def _update_summary(self, *_args) -> None:
         ctype = self._type.currentData()
         if ctype == _COND_STATIC:
-            # «Дверь открыта (1)» — имя + состояние (отчёт мастера).
-            text = f"{self.st_var.get_name() or '—'} ({self.st_state.currentData()})"
+            # «Дверь открыта 1» — имя + состояние (отчёт мастера).
+            text = f"{self.st_var.get_name() or '—'} {self.st_state.currentData()}"
         elif ctype == _COND_DYN:
             # «Состояние АКПП — Активно» (отчёт мастера).
             text = (
@@ -1545,6 +1568,7 @@ class _CondItem(QWidget):
             )
         else:
             text = tr("Не выбрано")
+        self._summary.set_unselected(ctype == _COND_NONE)
         self._summary.setText(text)
 
 
@@ -1578,8 +1602,8 @@ class _ActionItem(QWidget):
         self._row = row
         self.setStyleSheet(_ITEM_FRAME_STYLE.format(cls="_ActionItem"))
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
-        layout.setContentsMargins(6, 4, 6, 6)
+        layout.setSpacing(2)
+        layout.setContentsMargins(6, 2, 6, 4)
 
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
@@ -1592,7 +1616,7 @@ class _ActionItem(QWidget):
 
         self._editor = QWidget()
         editor_layout = QVBoxLayout(self._editor)
-        editor_layout.setSpacing(4)
+        editor_layout.setSpacing(2)
         editor_layout.setContentsMargins(0, 0, 0, 0)
 
         self._type = QComboBox()
@@ -1607,23 +1631,12 @@ class _ActionItem(QWidget):
         self._type.currentIndexChanged.connect(self._on_type)
         editor_layout.addWidget(self._type)
 
-        self._stack = QStackedWidget()
-        none_label = _small_label(tr("— не выбрано —"), font)
-        self._none = QWidget()
-        QVBoxLayout(self._none).addWidget(none_label)
-        self._stack.addWidget(self._none)
-        self._build_aux_page(font, row._mark_dirty)
-        self._build_var_page(font, row._mark_dirty)
-        self._build_flag_page(font, row._mark_dirty)
-        self._build_frame_page(font, row._mark_dirty)
-        self._build_cache_page(font, row._mark_dirty)
-        editor_layout.addWidget(self._stack)
-
         # Общие параметры действия (отчёт мастера): «Задержка»
-        # выполнения 0–999999 мс и «Прервать если» — событие-
-        # прерыватель, отменяющее действие, пока оно ждёт задержку.
+        # выполнения 0–999999 мс расположена НАД основной командой
+        # (отчёт мастера), «Прервать если» — событие-прерыватель,
+        # отменяющее действие, пока оно ждёт задержку.
         delay_row = QHBoxLayout()
-        delay_row.setContentsMargins(0, 2, 0, 0)
+        delay_row.setContentsMargins(0, 0, 0, 0)
         delay_row.addWidget(_small_label(tr("Задержка"), font))
         self.exec_delay = QSpinBox()
         self.exec_delay.setFont(font)
@@ -1636,6 +1649,18 @@ class _ActionItem(QWidget):
         delay_row.addWidget(self.exec_delay)
         delay_row.addStretch()
         editor_layout.addLayout(delay_row)
+
+        self._stack = QStackedWidget()
+        none_label = _small_label(tr("— не выбрано —"), font)
+        self._none = QWidget()
+        QVBoxLayout(self._none).addWidget(none_label)
+        self._stack.addWidget(self._none)
+        self._build_aux_page(font, row._mark_dirty)
+        self._build_var_page(font, row._mark_dirty)
+        self._build_flag_page(font, row._mark_dirty)
+        self._build_frame_page(font, row._mark_dirty)
+        self._build_cache_page(font, row._mark_dirty)
+        editor_layout.addWidget(self._stack)
         self._abort = _AbortEventEditor(
             font, row._mark_dirty,
             get_tab=lambda: row._tab._variables_tab,
@@ -1661,7 +1686,7 @@ class _ActionItem(QWidget):
         действия и под-страница параметров (отчёт мастера)."""
         page = QWidget()
         pl = QVBoxLayout(page)
-        pl.setSpacing(4)
+        pl.setSpacing(2)
         pl.setContentsMargins(0, 0, 0, 0)
         top = QHBoxLayout()
         top.addWidget(_small_label(tr("Канал №"), font))
@@ -1704,7 +1729,7 @@ class _ActionItem(QWidget):
 
         pulse = QWidget()
         pulse_layout = QVBoxLayout(pulse)
-        pulse_layout.setSpacing(4)
+        pulse_layout.setSpacing(2)
         pulse_layout.setContentsMargins(0, 0, 0, 0)
         pulse_row = QHBoxLayout()
         self.aux_pulse_on = QSpinBox()
@@ -1737,7 +1762,7 @@ class _ActionItem(QWidget):
 
         pwm = QWidget()
         pwm_layout = QVBoxLayout(pwm)
-        pwm_layout.setSpacing(4)
+        pwm_layout.setSpacing(2)
         pwm_layout.setContentsMargins(0, 0, 0, 0)
         pwm_row = QHBoxLayout()
         self.aux_pwm_freq = QSpinBox()
@@ -1756,23 +1781,27 @@ class _ActionItem(QWidget):
         self.aux_pwm_duty.setFixedWidth(80)
         pwm_row.addWidget(_small_label(tr("Заполнение"), font))
         pwm_row.addWidget(self.aux_pwm_duty)
+        # «время включения» с галочкой (отчёт мастера): без галочки
+        # ШИМ работает до команды «Выкл»; с галочкой — указанное
+        # время 1–999999 мс и выключается сам.
+        self.aux_pwm_time_en = QCheckBox(tr("время включения"))
+        self.aux_pwm_time_en.setFont(font)
+        self.aux_pwm_time_en.setToolTip(
+            tr("Снята — ШИМ работает до команды «Выкл»; "
+               "установлена — выключается через указанное время")
+        )
+        pwm_row.addWidget(self.aux_pwm_time_en)
         self.aux_pwm_time = QSpinBox()
         self.aux_pwm_time.setFont(font)
-        self.aux_pwm_time.setRange(0, 999999)
-        self.aux_pwm_time.setValue(0)
+        self.aux_pwm_time.setRange(1, 999999)
+        self.aux_pwm_time.setValue(100)
         self.aux_pwm_time.setSuffix(tr(" мс"))
         self.aux_pwm_time.setFixedWidth(96)
-        self.aux_pwm_time.setToolTip(
-            tr("Время работы ШИМ, 0 — до команды «Выкл»")
-        )
-        pwm_row.addWidget(_small_label(tr("Время"), font))
+        self.aux_pwm_time.setEnabled(False)
         pwm_row.addWidget(self.aux_pwm_time)
         pwm_row.addStretch()
         pwm_layout.addLayout(pwm_row)
-        pwm_hint = QLabel(tr("0 мс — ШИМ работает до команды «Выкл»"))
-        pwm_hint.setFont(font)
-        pwm_hint.setStyleSheet("color: #9A9AA5;")
-        pwm_layout.addWidget(pwm_hint)
+        self.aux_pwm_time_en.toggled.connect(self.aux_pwm_time.setEnabled)
 
         for sub in (plain, pulse, pwm):
             self._aux_stack.addWidget(sub)
@@ -1783,6 +1812,7 @@ class _ActionItem(QWidget):
         self.aux_mode.currentIndexChanged.connect(self._on_aux_mode)
         self.aux_mode.currentIndexChanged.connect(mark_dirty)
         self.aux_delay.valueChanged.connect(mark_dirty)
+        self.aux_pwm_time_en.toggled.connect(mark_dirty)
         for spin in (
             self.aux_pulse_on, self.aux_pulse_off, self.aux_pulse_count,
             self.aux_pwm_freq, self.aux_pwm_duty, self.aux_pwm_time,
@@ -1802,22 +1832,13 @@ class _ActionItem(QWidget):
         мастера)."""
         page = QWidget()
         pl = QVBoxLayout(page)
-        pl.setSpacing(4)
+        pl.setSpacing(2)
         pl.setContentsMargins(0, 0, 0, 0)
         row1 = QHBoxLayout()
         row1.addWidget(_small_label(tr("Команда:"), font))
         self.var = _VarCombo(font)
         row1.addWidget(self.var, 1)
         pl.addLayout(row1)
-        hint = QLabel(tr(
-            "Отправляет фреймы выбранной команды «Управления» — "
-            "с её паузами, количеством и подстановкой байтов «X» "
-            "из автоматически записанного кэша."
-        ))
-        hint.setFont(font)
-        hint.setStyleSheet("color: #9A9AA5;")
-        hint.setWordWrap(True)
-        pl.addWidget(hint)
         pl.addStretch()
         self._stack.addWidget(page)
 
@@ -1830,7 +1851,7 @@ class _ActionItem(QWidget):
         «Включить на …мс» / «Выключить» (отчёт мастера)."""
         page = QWidget()
         pl = QVBoxLayout(page)
-        pl.setSpacing(4)
+        pl.setSpacing(2)
         pl.setContentsMargins(0, 0, 0, 0)
         row1 = QHBoxLayout()
         row1.addWidget(_small_label(tr("Переменная:"), font))
@@ -1874,7 +1895,7 @@ class _ActionItem(QWidget):
         события) + пауза/кол-во/между — ручная рассылка оператором."""
         page = QWidget()
         pl = QVBoxLayout(page)
-        pl.setSpacing(4)
+        pl.setSpacing(2)
         pl.setContentsMargins(0, 0, 0, 0)
         row1 = QHBoxLayout()
         row1.addWidget(_small_label(tr("Канал"), font))
@@ -1902,7 +1923,7 @@ class _ActionItem(QWidget):
         pl.addLayout(row1)
         pl.addWidget(_small_label(tr("DATA (X — из кадра события)"), font))
         self.fr_data, data_widget = create_data_field_widget(
-            font, 8, edit_width=32, allow_x=True
+            font, 8, edit_width=40, allow_x=True
         )
         pl.addWidget(data_widget)
         row2 = QHBoxLayout()
@@ -1951,7 +1972,7 @@ class _ActionItem(QWidget):
         в выбранный канал — как в триггерах."""
         page = QWidget()
         pl = QVBoxLayout(page)
-        pl.setSpacing(4)
+        pl.setSpacing(2)
         pl.setContentsMargins(0, 0, 0, 0)
         row1 = QHBoxLayout()
         row1.addWidget(_small_label(tr("Канал"), font))
@@ -1981,12 +2002,12 @@ class _ActionItem(QWidget):
         pl.addLayout(row1)
         pl.addWidget(_small_label(tr("DATA от:"), font))
         self.cache_from, from_widget = create_data_field_widget(
-            font, 8, edit_width=30, allow_x=True
+            font, 8, edit_width=40, allow_x=True
         )
         pl.addWidget(from_widget)
         pl.addWidget(_small_label(tr("DATA до:"), font))
         self.cache_to, to_widget = create_data_field_widget(
-            font, 8, edit_width=30, allow_x=True
+            font, 8, edit_width=40, allow_x=True
         )
         pl.addWidget(to_widget)
         row2 = QHBoxLayout()
@@ -2032,6 +2053,7 @@ class _ActionItem(QWidget):
 
     def _on_type(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
+        self._update_abort_visibility()
         self._update_summary()
         self._row._mark_dirty()
 
@@ -2040,7 +2062,20 @@ class _ActionItem(QWidget):
         self._aux_stack.setCurrentIndex(
             {"on": 0, "off": 0, "pulse": 1, "pwm": 2}.get(mode, 0)
         )
+        self._update_abort_visibility()
         self._update_summary()
+
+    def _update_abort_visibility(self) -> None:
+        """У «Выкл» доп канала настройки «Прервать если» не нужны —
+        скрываются (отчёт мастера)."""
+        abort = getattr(self, "_abort", None)
+        if abort is None:
+            return
+        hidden = (
+            self._type.currentData() == _ACT_AUX
+            and self.aux_mode.currentData() == "off"
+        )
+        abort.setVisible(not hidden)
 
     def _refresh_pulse_graph(self, *_args) -> None:
         self.aux_pulse_graph.set_params(
@@ -2104,7 +2139,12 @@ class _ActionItem(QWidget):
                 "aux_pulse_count": self.aux_pulse_count.value(),
                 "aux_pwm_freq": self.aux_pwm_freq.value(),
                 "aux_pwm_duty": self.aux_pwm_duty.value(),
-                "aux_pwm_time": self.aux_pwm_time.value(),
+                # Без галочки «время включения» — 0: ШИМ до «Выкл»
+                # (отчёт мастера).
+                "aux_pwm_time": (
+                    self.aux_pwm_time.value()
+                    if self.aux_pwm_time_en.isChecked() else 0
+                ),
             }
         elif atype == _ACT_CACHE:
             result = {
@@ -2126,9 +2166,16 @@ class _ActionItem(QWidget):
         # «Задержка» выполнения и событие-прерыватель «Прервать если».
         if self.exec_delay.value() > 0:
             result["exec_delay"] = self.exec_delay.value()
-        abort = self._abort.read()
-        if abort.get("type") not in (None, "", _EVENT_NONE):
-            result["abort"] = abort
+        # У «Выкл» доп канала прерывание не применяется — скрыто
+        # и в схему не пишется (отчёт мастера).
+        aux_off = (
+            atype == _ACT_AUX
+            and self.aux_mode.currentData() == "off"
+        )
+        if not aux_off:
+            abort = self._abort.read()
+            if abort.get("type") not in (None, "", _EVENT_NONE):
+                result["abort"] = abort
         return result
 
     def write(self, action: dict[str, Any]) -> None:
@@ -2191,9 +2238,9 @@ class _ActionItem(QWidget):
             self.aux_pwm_duty.setValue(
                 int(action.get("aux_pwm_duty", 50) or 50)
             )
-            self.aux_pwm_time.setValue(
-                int(action.get("aux_pwm_time", 0) or 0)
-            )
+            pwm_time = int(action.get("aux_pwm_time", 0) or 0)
+            self.aux_pwm_time_en.setChecked(pwm_time > 0)
+            self.aux_pwm_time.setValue(max(1, pwm_time))
             self._refresh_pulse_graph()
         elif atype == _ACT_CACHE:
             ch = int(action.get("cache_channel", 2) or 0)
@@ -2250,6 +2297,7 @@ class _ActionItem(QWidget):
             text = tr("Кэш")
         else:
             text = tr("Не выбрано")
+        self._summary.set_unselected(atype == _ACT_NONE)
         self._summary.setText(text)
 
 
@@ -2383,7 +2431,7 @@ class RuleRowWidget(QWidget):
         body_layout.addWidget(_connector(tr("ЕСЛИ")), 0)
         ev_layout = QVBoxLayout(self._event_group)
         ev_layout.setSpacing(3)
-        ev_layout.setContentsMargins(8, 10, 8, 8)
+        ev_layout.setContentsMargins(8, 4, 8, 4)
         ev_layout.addWidget(self._add_event_button)
         self._events_layout = QVBoxLayout()
         self._events_layout.setSpacing(1)
@@ -2394,7 +2442,7 @@ class RuleRowWidget(QWidget):
         body_layout.addWidget(_connector(tr("ПРИ")), 0)
         cd_layout = QVBoxLayout(self._cond_group)
         cd_layout.setSpacing(3)
-        cd_layout.setContentsMargins(8, 10, 8, 8)
+        cd_layout.setContentsMargins(8, 4, 8, 4)
         cd_layout.addWidget(self._add_cond_button)
         self._conds_layout = QVBoxLayout()
         self._conds_layout.setSpacing(1)
@@ -2405,7 +2453,7 @@ class RuleRowWidget(QWidget):
         body_layout.addWidget(_connector(tr("ТО")), 0)
         act_layout = QVBoxLayout(self._action_group)
         act_layout.setSpacing(3)
-        act_layout.setContentsMargins(8, 10, 8, 8)
+        act_layout.setContentsMargins(8, 4, 8, 4)
         act_layout.addWidget(self._add_action_button)
         self._actions_layout = QVBoxLayout()
         self._actions_layout.setSpacing(1)
@@ -2927,9 +2975,11 @@ class FlexibleLogicTab(QWidget):
         """Удаляет виджет программы."""
         if widget in self._row_widgets:
             self._row_widgets.remove(widget)
-        # setParent(None) до отложенного deleteLater — снимок полей окна
-        # настроек сразу перестаёт видеть удалённую строку.
-        widget.setParent(None)
+        # Без setParent(None): репарент превращает строку в топлевел-окно
+        # и рушит native-дерево виджетов прямо в обработчике clicked()
+        # (отчёт мастера — вылет по крестику). Скрываем и откладываем
+        # удаление — layout сам заберёт виджет при DeferredDelete.
+        widget.setVisible(False)
         widget.deleteLater()
         self._rule_counters = [0] * len(self._row_widgets)
         self._renumber_rows()

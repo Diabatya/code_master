@@ -168,6 +168,17 @@ void EventLog_Init(void)
   if (Storage_EvlogFound()) {
     s_base = Storage_EvlogBase();
     rescan_ring();
+    /* Каноничная позиция — центр зазора («лог сверху вниз от центра»,
+     * отчёт мастера): область, найденную в другом месте (старая
+     * раскладка «под VARH», сдвинувшийся центр зазора), пересаживаем —
+     * дословное копирование записей сохраняет историю. */
+    uint32_t canonical = Storage_EvlogCanonicalBase();
+    if (s_base != canonical && canonical != 0U
+        && Storage_RangeFree(canonical,
+                             canonical + EVENT_LOG_POOL_PAGES
+                                         * EVENT_LOG_FLASH_PAGE)) {
+      (void)EventLog_Relocate(canonical);
+    }
     /* Легаси-пул 0x0803C000 с живой областью — старые дубликаты:
      * выносим его (стирание + снятие резерва у storage.c). */
     (void)Storage_LegacyEvlogCleanup();
@@ -175,7 +186,7 @@ void EventLog_Init(void)
     return;
   }
 
-  /* Области нет — создаём на каноничной позиции (ровно под VARH) или
+  /* Области нет — создаём на каноничной позиции (центр зазора) или
    * на первой свободной полке, если каноничная занята триггерами. */
   uint32_t base = Storage_EvlogBase();
   if (base == 0U || !Storage_RangeFree(base, base + EVENT_LOG_POOL_PAGES

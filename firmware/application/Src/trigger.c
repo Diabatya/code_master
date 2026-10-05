@@ -299,13 +299,14 @@ void Trigger_Init(void)
     uint32_t gap_hi = Storage_TrigGapEnd();
     uint32_t base = 0U;
     if (gap_lo + pages * TRIGGER_FLASH_PAGE <= gap_hi) {
-      /* Кандидаты — середина и края зазора; обязателен RangeFree:
-       * легаси-пул журнала (0x0803C000) внутри зазора резервирован
-       * до миграции записей в EVLH — сесть на него нельзя. */
+      /* Каноничное место — вплотную под журналом: область заканчивается
+       * на центре зазора («триггеры снизу вверх от центра», отчёт
+       * мастера). Обязателен RangeFree: легаси-пул журнала внутри
+       * зазора резервирован до миграции записей в EVLH. */
       const uint32_t cands[3] = {
+        gap_hi - pages * TRIGGER_FLASH_PAGE,
         (gap_lo + (gap_hi - gap_lo - pages * TRIGGER_FLASH_PAGE) / 2U)
             & ~(TRIGGER_FLASH_PAGE - 1U),
-        gap_hi - pages * TRIGGER_FLASH_PAGE,
         gap_lo,
       };
       for (uint8_t c = 0U; c < 3U; c++) {
@@ -619,8 +620,9 @@ uint8_t Trigger_Commit(uint8_t total)
   uint32_t gap_hi = Storage_TrigGapEnd();
   uint32_t base_mid = 0U;
   if (total != 0U && gap_lo + pages * TRIGGER_FLASH_PAGE <= gap_hi) {
-    base_mid = (gap_lo + (gap_hi - gap_lo - pages * TRIGGER_FLASH_PAGE) / 2U)
-               & ~(TRIGGER_FLASH_PAGE - 1U);
+    /* Канонично область заканчивается на центре зазора — вплотную под
+     * журналом («триггеры снизу вверх от центра», отчёт мастера). */
+    base_mid = gap_hi - pages * TRIGGER_FLASH_PAGE;
   } else if (total != 0U) {
     return 0U; /* зазор не вмещает список — переменные/ГЛ съели место */
   }

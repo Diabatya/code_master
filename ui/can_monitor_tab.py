@@ -2931,6 +2931,12 @@ class CanMonitorTab(QWidget):
         # reset; связь восстанавливает авто-переподключение.
         self._reboot_button = QPushButton(tr("Перезагрузить устройство"))
         self._reboot_button.setFont(compact_font)
+        # Текст «Перезагрузить устройство» обрезался в кнопке по ширине
+        # (отчёт мастера) — задаём минимум по метрикам шрифта + паддинг.
+        fm = self._reboot_button.fontMetrics()
+        self._reboot_button.setMinimumWidth(
+            fm.horizontalAdvance(self._reboot_button.text()) + 24
+        )
         self._reboot_button.setToolTip(
             tr("Перезагрузить STM32 — устройство отключится и вернётся "
                "на связь само")
@@ -3255,6 +3261,16 @@ class CanMonitorTab(QWidget):
         if not self._serial_manager.is_open():
             QMessageBox.warning(
                 self, tr("Внимание"), tr("Устройство не подключено")
+            )
+            return
+        # CMD_SYS_RESET заработал в протоколе v11 (в сборке v10 парсер
+        # отбрасывал маркер 0xD4 до диспетчера — таймаут). Даём
+        # оператору понятную причину вместо сырого «0xD4».
+        if self._serial_manager.device_protocol_version() < 11:
+            QMessageBox.information(
+                self, tr("Информация"),
+                tr("Перезагрузка по команде поддерживается прошивкой "
+                   "версии 1.1.61 и новее.\nОбновите прошивку устройства."),
             )
             return
         try:

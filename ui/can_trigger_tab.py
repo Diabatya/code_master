@@ -213,7 +213,7 @@ class CanTriggerTab(QWidget):
     def _make_data_edits(
         self, font: QFont, allow_x: bool = False
     ) -> tuple[list[QLineEdit], QWidget]:
-        return create_data_field_widget(font, 8, edit_width=36, allow_x=allow_x)
+        return create_data_field_widget(font, 8, edit_width=42, allow_x=allow_x)
 
     def _make_channel_combo(self, font: QFont) -> QComboBox:
         combo = QComboBox()
@@ -498,7 +498,10 @@ class CanTriggerTab(QWidget):
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
-                widget.setParent(None)
+                # Без setParent(None): репарент создаёт топлевел-окно
+                # прямо в обработчике clicked() и рушит Qt (отчёт
+                # мастера — вылеты по крестику).
+                widget.setVisible(False)
                 widget.deleteLater()
         self._update_cond_remove_buttons(recv)
         self._mark_dirty()
@@ -731,11 +734,11 @@ class CanTriggerTab(QWidget):
         if len(block["rows"]) <= 1:
             return
         block["rows"].remove(row)
-        # setParent(None) — строка покидает дерево виджетов сразу, а не
-        # после обработки deleteLater: иначе снимок полей окна настроек
-        # ещё содержал бы удалённую строку и не видел изменения.
-        row["widget"].setParent(None)
-        row["pause_widget"].setParent(None)
+        # Без setParent(None): репарент создаёт топлевел-окно и рушит
+        # Qt в обработчике clicked() — строки просто скрываются и
+        # уходят в deleteLater (снимок полей берётся из block["rows"]).
+        row["widget"].setVisible(False)
+        row["pause_widget"].setVisible(False)
         row["widget"].deleteLater()
         row["pause_widget"].deleteLater()
         self._rebuild_response_rows(block)
@@ -1008,8 +1011,8 @@ class CanTriggerTab(QWidget):
         if len(cache["rows"]) <= 1:
             return
         cache["rows"].remove(row)
-        row["widget"].setParent(None)
-        row["pause_widget"].setParent(None)
+        row["widget"].setVisible(False)
+        row["pause_widget"].setVisible(False)
         row["widget"].deleteLater()
         row["pause_widget"].deleteLater()
         self._rebuild_cache_rows(cache)
@@ -1400,21 +1403,54 @@ class CanTriggerTab(QWidget):
         block["wrapper"] = wrapper
         block["inner"] = inner
         block["delete_holder_layout"] = holder_layout
+        # Фильтр висит на обёртке (Resize) и на внутренних виджетах
+        # (LayoutRequest): перестройка содержимого без смены размера
+        # обёртки раньше оставляла кнопку «Тест» на старой высоте —
+        # она «сползала вниз» до пересоздания блоков (отчёт мастера).
         wrapper.installEventFilter(self)
+        inner.installEventFilter(self)
+        content.installEventFilter(self)
         self._blocks_layout.addWidget(wrapper)
 
     def eventFilter(self, watched: QWidget, event: QEvent) -> bool:  # noqa: N802
-        """Подстраивает крестик удаления под поле Data строки «Приём»."""
-        if event.type() == QEvent.Type.Resize:
+        """Подстраивает крестик/«Тест» под поле Data строки «Приём»."""
+        et = event.type()
+        if et == QEvent.Type.Resize or et == QEvent.Type.LayoutRequest:
             for block in self._blocks:
-                if block.get("wrapper") is watched:
-                    self._align_delete_button(block)
+                if (
+                    block.get("wrapper") is watched
+                    or block.get("inner") is watched
+                    or block.get("content") is watched
+                ):
+                    if et == QEvent.Type.LayoutRequest:
+                        # Во время LayoutRequest геометрия детей ещё
+                        # старая — пересчёт откладываем на конец
+                        # раскладки, иначе маржа фиксирует устаревшую
+                        # позицию поля Data.
+                        self._queue_align_delete_button(block)
+                    else:
+                        self._align_delete_button(block)
                     break
         # False, а не super().eventFilter(): проброс события в
         # watched->event() порождает взаимную рекурсию с фильтром
         # settings_window (~300 вложенных вызовов на событие) —
         # отсюда мерцание кнопки «Сохранить».
         return False
+
+    def _queue_align_delete_button(self, block: dict[str, Any]) -> None:
+        """Отложенное выравнивание — один вызов на вспышку перестроек."""
+        if block.get("_align_queued"):
+            return
+        block["_align_queued"] = True
+
+        def _run() -> None:
+            block["_align_queued"] = False
+            inner = block.get("inner")
+            if inner is None or not isValid(inner):
+                return
+            self._align_delete_button(block)
+
+        QTimer.singleShot(0, _run)
 
     def _align_delete_button(self, block: dict[str, Any]) -> None:
         """Ставит крестик по высоте напротив поля Data в «Приём», а по
@@ -1454,9 +1490,9 @@ class CanTriggerTab(QWidget):
         self._pc_suspended.pop(index)
         host = block.get("wrapper") or block["group"]
         self._blocks_layout.removeWidget(host)
-        # Отсоединяем от дерева сразу — до отложенного deleteLater,
-        # чтобы снимок полей окна настроек не видел удалённый блок.
-        host.setParent(None)
+        # Без setParent(None): репарент создаёт топлевел-окно и рушит
+        # Qt в обработчике clicked() — блок скрыт и удаляется отложенно.
+        host.setVisible(False)
         host.deleteLater()
 
     def _remove_trigger_block(self, block: dict[str, Any]) -> None:

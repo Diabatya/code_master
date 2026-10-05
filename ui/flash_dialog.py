@@ -121,7 +121,8 @@ def _flash_size_for_chip_id(chip_id: int | None) -> str:
 # Маркерное хранилище (storage.c): области не имеют фиксированных
 # адресов — только 20-байтовый заголовок в начале страницы.
 _STORE_PAGE = 2048
-_STORE_MAGICS = (0x56415248, 0x464C5848, 0x45564C48)  # VARH, FLXH, EVLH
+_STORE_MAGICS = (0x56415248, 0x464C5848, 0x45564C48, 0x43464748)
+# VARH, FLXH, EVLH, CFGH (настройки приложения сразу за кодом)
 _STORE_MAX_PAYLOAD = 48 * 1024
 _TRIG_HEADER_MAGIC = 0x54524748  # "TRGH"
 _TRIG_MAGIC_LEGACY = 0x54524732  # "TRG2"
@@ -132,7 +133,7 @@ def _find_storage_regions(blob: bytes, base_addr: int) -> list[tuple[int, bytes]
     """Сканирует дамп Flash постранично и возвращает [(addr, образ)] всех
     валидных маркерных областей хранилища — для восстановления после
     mass erase. TRGH (триггеры) имеет свой 16-байтовый заголовок, остальные
-    области — общий store_header_t (20 Б) с магиком VARH/FLXH/EVLH.
+    области — общий store_header_t (20 Б) с магиком VARH/FLXH/EVLH/CFGH.
     Легаси-пул триггеров (записи TRG2 без заголовка) ищется по своему
     фиксированному адресу и сохраняется целиком."""
     from core.trigger_protocol import crc8

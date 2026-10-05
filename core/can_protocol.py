@@ -87,7 +87,10 @@ EVLOG_FAULT_LR = 17    # timestamp=застеканный LR, channel+code=SCB->
 # CMD_SYSTEM_INFO (payload[1]); меньше — функции нового протокола
 # (stage/commit триггеров, cfg-команды, смена бод-рейта CAN,
 # маркерное хранилище CMD_STORAGE_* с v10) на устройстве отсутствуют.
-EXPECTED_PROTOCOL_VERSION = 10
+# v11: парсер научился пропускать маркеры 0xD4..0xDA (в сборке v10
+# команды CMD_SYS_RESET и CMD_STORAGE_* отбрасывались до диспетчера —
+# reset таймаутил, блобы молча не писались) и регион CFGH.
+EXPECTED_PROTOCOL_VERSION = 11
 
 # Ключи деструктивных команд (протокол v3): прошивка отвергает
 # CMD_CFG_WRITE без трейлера A5 5A, CMD_CFG_FACTORY_RESET без "FCLR" и

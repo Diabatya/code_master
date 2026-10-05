@@ -141,6 +141,22 @@ uint8_t DeviceConfig_Write(const uint8_t *device_name, uint8_t device_name_len,
  * ТЗ 10.3 "Заводские настройки"). Returns 1 on success. */
 uint8_t DeviceConfig_FactoryReset(void);
 
+/* Настройки приложения — блоб CFGH на странице сразу за кодом
+ * (storage.c, маркерное хранилище — отчёт мастера). Содержимое:
+ * скорости CAN + терминаторы + режимы (silent). Пишется целиком. */
+#define DEVICE_APP_CFG_VERSION 1U
+
+typedef struct __attribute__((packed)) {
+  uint16_t can1_baud_kbps;
+  uint16_t can2_baud_kbps;
+  uint8_t  can1_silent;  /* 0 = Normal, 1 = Silent */
+  uint8_t  can1_term;    /* 0/1 — терминатор 120 Ом */
+  uint8_t  can2_silent;
+  uint8_t  can2_term;
+  uint8_t  version;      /* DEVICE_APP_CFG_VERSION */
+  uint8_t  reserved[9];
+} device_app_cfg_t; /* 16 байт — половинками пишется в страницу CFGH */
+
 /* CAN bit rate (kbit/s) configured for channel 0/1 — from the extended
  * record; DEVICE_CONFIG_DEFAULT_BAUD_KBPS when absent/corrupt. */
 uint32_t DeviceConfig_GetCanBaud(uint8_t channel);
@@ -149,6 +165,15 @@ uint32_t DeviceConfig_GetCanBaud(uint8_t channel);
  * config page (main + extended records), keeping name/serial/VID/PID
  * untouched. Returns 1 on success. */
 uint8_t DeviceConfig_SetCanBaud(uint8_t channel, uint32_t baud_kbps);
+
+/* Режим CAN-канала (silent) и терминатор — зеркало CFGH, применяется
+ * к GPIO при старте. */
+uint8_t DeviceConfig_GetCanSilent(uint8_t channel);
+uint8_t DeviceConfig_GetCanTerm(uint8_t channel);
+/* Персистит режим/терминатор канала в область CFGH (запись одной
+ * страницы). Возвращает 1 при успехе. */
+uint8_t DeviceConfig_SetCanMode(uint8_t channel, uint8_t silent,
+                                uint8_t term);
 
 /* Имя триггера по слоту базовой записи (0..TRIGGER_NAME_MAX-1):
  * возвращает указатель на len байт в RAM-зеркале (не терминировано

@@ -5,11 +5,13 @@
 #include <stddef.h>
 #include "main.h"
 #include "device_config.h"
+#include "storage.h"
 
 static device_config_t s_config;
 static device_ext_config_t s_ext_config;
 static trigger_names_t s_trigger_names;
 static device_fw_ver_t s_fw_ver;
+static device_app_cfg_t s_app_cfg; /* зеркало области CFGH за кодом */
 static uint8_t s_config_valid;
 
 static uint8_t crc8(const uint8_t *data, uint32_t len)
@@ -53,6 +55,14 @@ static void load_ext_defaults(device_ext_config_t *cfg)
   cfg->can2_baud_kbps = DEVICE_CONFIG_DEFAULT_BAUD_KBPS;
   cfg->version = DEVICE_EXT_CONFIG_VERSION;
   cfg->crc8 = crc8((const uint8_t *)cfg, offsetof(device_ext_config_t, crc8));
+}
+
+static void load_app_cfg_defaults(device_app_cfg_t *cfg)
+{
+  memset(cfg, 0, sizeof(*cfg));
+  cfg->can1_baud_kbps = DEVICE_CONFIG_DEFAULT_BAUD_KBPS;
+  cfg->can2_baud_kbps = DEVICE_CONFIG_DEFAULT_BAUD_KBPS;
+  cfg->version = DEVICE_APP_CFG_VERSION;
 }
 
 static void load_names_defaults(trigger_names_t *names)
@@ -130,6 +140,25 @@ void DeviceConfig_Init(void)
     memcpy(&s_ext_config, ext, sizeof(s_ext_config));
   } else {
     load_ext_defaults(&s_ext_config);
+  }
+
+  /* Настройки приложения — область CFGH сразу за кодом (маркерное
+   * хранилище, отчёт мастера). При отсутствии области значения берутся
+   * из легаси-записи CEX0 и CFGH создаётся сразу — дальше страница
+   * идентификации настройки CAN не хранит. */
+  load_app_cfg_defaults(&s_app_cfg);
+  if (!Storage_CfgRead((uint8_t *)&s_app_cfg, sizeof(s_app_cfg))
+      || s_app_cfg.version == 0U) {
+    s_app_cfg.can1_baud_kbps = s_ext_config.can1_baud_kbps;
+    s_app_cfg.can2_baud_kbps = s_ext_config.can2_baud_kbps;
+    s_app_cfg.can1_silent = 0U;
+    s_app_cfg.can1_term = 0U;
+    s_app_cfg.can2_silent = 0U;
+    s_app_cfg.can2_term = 0U;
+    s_app_cfg.version = DEVICE_APP_CFG_VERSION;
+    memset(s_app_cfg.reserved, 0, sizeof(s_app_cfg.reserved));
+    (void)Storage_CfgWrite((const uint8_t *)&s_app_cfg,
+                           sizeof(s_app_cfg));
   }
 
   /* Таблица имён триггеров — как и ext-запись, появилась после выхода
@@ -342,8 +371,11 @@ static uint8_t is_supported_can_baud(uint32_t baud_kbps)
 
 uint32_t DeviceConfig_GetCanBaud(uint8_t channel)
 {
-  uint32_t baud = (channel == 0U) ? s_ext_config.can1_baud_kbps
-                                  : s_ext_config.can2_baud_kbps;
+  /* Авторитетный источник — область CFGH (зеркало s_app_cfg); CEX0 в
+   * странице идентификации остаётся совместимым дублем для старых
+   * прошивок после отката. */
+  uint32_t baud = (channel == 0U) ? s_app_cfg.can1_baud_kbps
+                                  : s_app_cfg.can2_baud_kbps;
   /* Даже если ext-запись прошла CRC, но содержит неподдерживаемый бод
    * (повреждение Flash, несовместимая версия) — не скармливаем его
    * configure_bit_timing: иначе CAN не стартует вообще (полевой лог:
@@ -374,10 +406,46 @@ uint8_t DeviceConfig_SetCanBaud(uint8_t channel, uint32_t baud_kbps)
   }
 
   memcpy(&s_ext_config, &new_ext, sizeof(s_ext_config));
+  /* Дублируем скорость в область CFGH за кодом — каноничное место
+   * настроек приложения (маркерное хранилище). */
+  s_app_cfg.can1_baud_kbps = new_ext.can1_baud_kbps;
+  s_app_cfg.can2_baud_kbps = new_ext.can2_baud_kbps;
+  (void)Storage_CfgWrite((const uint8_t *)&s_app_cfg, sizeof(s_app_cfg));
   /* Страница теперь содержит валидную основную запись (пусть и дефолтную,
    * если конфиг был повреждён) — отмечаем её как действительную. */
   s_config_valid = 1U;
   return 1U;
+}
+
+uint8_t DeviceConfig_GetCanSilent(uint8_t channel)
+{
+  return (channel == 0U) ? s_app_cfg.can1_silent : s_app_cfg.can2_silent;
+}
+
+uint8_t DeviceConfig_GetCanTerm(uint8_t channel)
+{
+  return (channel == 0U) ? s_app_cfg.can1_term : s_app_cfg.can2_term;
+}
+
+uint8_t DeviceConfig_SetCanMode(uint8_t channel, uint8_t silent,
+                                uint8_t term)
+{
+  if (channel > 1U) {
+    return 0U;
+  }
+  uint8_t s = silent ? 1U : 0U;
+  uint8_t t = term ? 1U : 0U;
+  uint8_t *silent_p = (channel == 0U) ? &s_app_cfg.can1_silent
+                                      : &s_app_cfg.can2_silent;
+  uint8_t *term_p = (channel == 0U) ? &s_app_cfg.can1_term
+                                    : &s_app_cfg.can2_term;
+  if (*silent_p == s && *term_p == t) {
+    return 1U; /* без изменений — страницу не трогаем */
+  }
+  *silent_p = s;
+  *term_p = t;
+  return Storage_CfgWrite((const uint8_t *)&s_app_cfg,
+                          sizeof(s_app_cfg));
 }
 
 const uint8_t *DeviceConfig_GetTriggerName(uint8_t index, uint8_t *len_out)

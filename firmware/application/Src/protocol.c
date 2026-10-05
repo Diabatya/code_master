@@ -550,6 +550,11 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
         break;
       }
       CanBridge_SetTransceiverMode((uint8_t)(payload[0] - 1U), payload[1], payload[2]);
+      /* Режим и терминатор персистятся в области CFGH за кодом — после
+       * ребута канал встаёт в том же состоянии (настройки приложения
+       * живут на своей маркерной странице, отчёт мастера). */
+      (void)DeviceConfig_SetCanMode((uint8_t)(payload[0] - 1U),
+                                    payload[1], payload[2]);
       send_new_cmd_response(cmd, 0x00U, NULL, 0U);
       break;
     }
@@ -628,7 +633,7 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * версии ПК читают только первые 16 байт. */
       uint8_t out[84] = {
         s_device_version,
-        10U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
+        11U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
              * деструктивных команд; 4 = записи триггеров v3 (90 Б —
              * fire_limit + флаги эха), старым прошивкам хост шлёт 82 Б;
              * 5 = имена триггеров (CMD_TRIGGER_NAME_*) в config-странице;
@@ -642,12 +647,16 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
              * 9 = онлайн-телеметрия нагрузки в хвосте [76..83]:
              * темп главного цикла, %CPU, %RAM (отчёт мастера);
              * 10 = маркерное хранилище CMD_STORAGE_* (0xD5..0xDA):
-             * переменные/ГЛ в камне, области по маркерам */
+             * переменные/ГЛ в камне, области по маркерам;
+             * 11 = приём маркеров расширен до 0xD4..0xDA — в сборке v10
+             * парсер отбрасывал CMD_SYS_RESET и CMD_STORAGE_* до
+             * диспетчера; 11 = эти команды реально исполняются, плюс
+             * CFGH (настройки приложения за кодом) */
         0U,
         1U,
         cfg->reserved[0],
         cfg->reserved[1],
-        10U,
+        11U,
         0U,
       };
       out[7] = DeviceConfig_IsValid();
@@ -1056,8 +1065,13 @@ static uint16_t try_parse_one(void)
     return 1U;
   }
 
-  /* --- New commands (0xC0-0xD3), see PROTOCOL.md Part 2 --- */
-  if (marker >= 0xC0U && marker <= 0xD3U) {
+  /* --- New commands (0xC0-0xDA), see PROTOCOL.md Part 2 --- */
+  /* Верхняя граница 0xDA: CMD_SYS_RESET (0xD4) и CMD_STORAGE_*
+   * (0xD5..0xDA) отсекались парсером до диспетчера — байт считался
+   * мусором, команда уходила в «drop + resync» без ответа. Полевые
+   * симптомы: «Таймаут ответа на команду 0xD4» при перезагрузке и
+   * молча не сохраняющиеся в камень переменные/программы ГЛ. */
+  if (marker >= 0xC0U && marker <= 0xDAU) {
     if (avail < 2U) {
       return wait_more_or_resync();
     }

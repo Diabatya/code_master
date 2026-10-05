@@ -536,6 +536,12 @@ class SettingsWindow(QMainWindow):
         self._progress_scale = 100.0
         self._baseline_signature: tuple = ()
         self._baseline_config: dict = {}
+        # Кэш блобов маркерного хранилища: (serial, region) →
+        # (generation, данные). Повторное «Настроить» на неизменённом
+        # устройстве обходится одной командой STORAGE_INFO вместо
+        # десятков STORAGE_READ (отчёт мастера — «параметры грузятся
+        # долго»).
+        self._blob_cache: dict[tuple[str, int], tuple[int, bytes]] = {}
         # Устройство расходится с открытой конфигурацией — вычитка
         # пропущена, чтобы не затирать работу оператора. «Сохранить»
         # активна: нажатие запишет содержимое экрана поверх устройства.
@@ -1895,13 +1901,28 @@ class SettingsWindow(QMainWindow):
 
     def _upload_config_blobs(self) -> None:
         """Пишет блобы переменных и программ ГЛ в маркерное хранилище
-        МК (CMD_STORAGE_*, протокол v10): переменные — в область VARH у
+        МК (CMD_STORAGE_*, протокол v11 — в сборке v10 парсер ронял
+        эти команды до диспетчера): переменные — в область VARH у
         конца Flash, программы ГЛ — в FLXH за концом кода. Прошивка без
         storage-команд отвечает отказом — сохранение не срываем."""
         try:
-            info = self._serial_manager.read_system_info()
-            if int(info.get("protocol_version", 0)) < 10:
+            proto = self._serial_manager.device_protocol_version()
+            if proto < 11:
+                # Молчаливый пропуск выглядел для оператора как
+                # «переменные и ГЛ не сохранились в камень» (отчёт
+                # мастера) — показываем причину явно.
+                logger.warning(
+                    "Прошивка МК (протокол %s) не умеет хранилище "
+                    "переменных/ГЛ — обновите прошивку устройства",
+                    proto,
+                )
+                show_toast(
+                    self,
+                    tr("Прошивка устройства устарела: переменные и "
+                       "программы ГЛ не записаны — обновите прошивку"),
+                )
                 return
+            serial = str(self._config.get("device_serial") or "")
             var_blob = json.dumps(
                 {
                     "kind": "code_master_variables",
@@ -1920,6 +1941,18 @@ class SettingsWindow(QMainWindow):
                 ensure_ascii=False,
             ).encode("utf-8")
             self._serial_manager.storage_upload(STORAGE_REGION_FLEX, flex_blob)
+            # Кэш блобов обновляем свежей генерацией — следующее
+            # «Настроить» на этом устройстве не перекачивает то, что
+            # мы только что сами туда записали.
+            for region, blob in (
+                (STORAGE_REGION_VAR, var_blob),
+                (STORAGE_REGION_FLEX, flex_blob),
+            ):
+                info = self._serial_manager.storage_info(region)
+                if info is not None:
+                    self._blob_cache[(serial, region)] = (
+                        int(info["gen"]), blob
+                    )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Не удалось записать блобы переменных/ГЛ в МК: %s", exc
@@ -1928,26 +1961,60 @@ class SettingsWindow(QMainWindow):
     def _download_config_blobs(self) -> None:
         """Подтягивает переменные и программы ГЛ из маркерного
         хранилища МК — устройство без файла на ПК отдаёт свою
-        конфигурацию целиком."""
-        info = self._serial_manager.read_system_info()
-        if int(info.get("protocol_version", 0)) < 10:
+        конфигурацию целиком.
+
+        Кэш по generation: если область не менялась с прошлой вычитки
+        (тот же serial+region+gen), тело блога не качаем — «Настроить»
+        на том же устройстве открывается без десятков STORAGE_READ
+        (отчёт мастера — «загрузка параметров долгая»)."""
+        proto = self._serial_manager.device_protocol_version()
+        if proto < 11:
+            logger.info(
+                "Вычитка блобов пропущена: прошивка протокола %s "
+                "не поддерживает CMD_STORAGE_*",
+                proto,
+            )
             return
-        var_data = self._serial_manager.storage_download(STORAGE_REGION_VAR)
-        if var_data:
+        serial = str(self._config.get("device_serial") or "")
+        for region in (STORAGE_REGION_VAR, STORAGE_REGION_FLEX):
+            data = self._download_blob_cached(serial, region)
+            if not data:
+                continue
             try:
-                blob = json.loads(var_data.decode("utf-8"))
+                blob = json.loads(data.decode("utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Блоб хранилища МК (регион %d) не читается: %s",
+                    region, exc,
+                )
+                continue
+            if region == STORAGE_REGION_VAR:
                 self._variables_tab.import_config(
                     blob.get("variables", blob)
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Блоб переменных в МК не читается: %s", exc)
-        flex_data = self._serial_manager.storage_download(STORAGE_REGION_FLEX)
-        if flex_data:
-            try:
-                blob = json.loads(flex_data.decode("utf-8"))
+            else:
                 self._flexible_tab.set_config(blob.get("rules", blob))
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Блоб программ ГЛ в МК не читается: %s", exc)
+
+    def _download_blob_cached(
+        self, serial: str, region: int
+    ) -> bytes | None:
+        """Тело блога области: из кэша по generation или из МК."""
+        info = self._serial_manager.storage_info(region)
+        if info is None or info["len"] == 0:
+            self._blob_cache.pop((serial, region), None)
+            return None
+        key = (serial, region)
+        cached = self._blob_cache.get(key)
+        if cached is not None and cached[0] == info["gen"]:
+            logger.info(
+                "Блоб хранилища region=%d без изменений (gen=%d) — "
+                "вычитка из кэша", region, info["gen"],
+            )
+            return cached[1]
+        data = self._serial_manager.storage_download(region)
+        if data is not None:
+            self._blob_cache[key] = (int(info["gen"]), data)
+        return data
 
     def _factory_reset(self) -> None:
         """Сбрасывает настройки к заводским с подтверждением."""

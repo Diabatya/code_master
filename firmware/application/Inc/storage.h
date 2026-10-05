@@ -4,14 +4,21 @@
  *
  * Карта (по возрастанию адресов):
  *   0x08009000  код приложения (единственный фиксированный регион)
- *   code_end    FLXH — программы гибкой логики, цепочка поколений
- *               «сверху вниз» от конца кода: новый блоб пишется ВЫШЕ
+ *   code_end    CFGH — настройки приложения (скорости/режимы/терминаторы
+ *               CAN): 1 страница, владелец device_config.c, область
+ *               резервируется всегда — «настройки сразу после кода»
+ *               FLXH — программы гибкой логики, цепочка поколений
+ *               «сверху вниз» от CFGH: новый блоб пишется ВЫШЕ
  *               прежних, старые поколения не затираются (история +
  *               power-loss safety — прежняя область жива до коммита)
  *   ... свободный зазор ...
- *               TRGH — триггеры, «посередине», пересаживаются если
- *               переменные или ГЛ наезжают на их страницы
- *               EVLH — журнал событий, 4 страницы ровно под VARH
+ *               TRGH — триггеры, «снизу вверх от центра»: область
+ *               ЗАКАНЧИВАЕТСЯ на середине зазора и растёт в сторону
+ *               FLXH (меньшие адреса)
+ *   center      EVLH — журнал событий, «сверху вниз от центра»:
+ *               НАЧИНАЕТСЯ на середине зазора и лежит к VARH —
+ *               4 страницы [center, center+4p)
+ *   ... свободный зазор ...
  *               VARH — конфигурация переменных, цепочка поколений
  *               «снизу вверх» от конца Flash: новый блоб пишется НИЖЕ
  *               прежних; при исчерпании места область уплотняется —
@@ -19,7 +26,8 @@
  *   0x08040000  FLASH_END
  *
  * VARH/FLXH — непрозрачные для прошивки блобы: содержимое сериализует и
- * разбирает ПК (JSON). Прошивка обеспечивает размещение, атомарный
+ * разбирает ПК (JSON). CFGH — непрозрачный для storage.c блоб настроек,
+ * пишет device_config.c. Прошивка обеспечивает размещение, атомарный
  * коммит (заголовок пишется последним), выбор новейшего поколения по
  * generation при скане и перенос TRGH/EVLH при росте.
  */
@@ -37,9 +45,12 @@ extern "C" {
 #define STORE_MAGIC_VAR   0x56415248UL /* "VARH" */
 #define STORE_MAGIC_EVLOG 0x45564C48UL /* "EVLH" */
 #define STORE_MAGIC_TRIG  0x54524748UL /* "TRGH" (формат trigger.c) */
+#define STORE_MAGIC_CFG   0x43464748UL /* "CFGH" — настройки приложения
+                                        * сразу за кодом (отчёт мастера) */
 
 #define STORE_REGION_FLEX 0U
 #define STORE_REGION_VAR  1U
+#define STORE_REGION_CFG  2U
 
 #define STORE_VERSION        1U
 #define STORE_HEADER_SIZE    20U
@@ -47,6 +58,7 @@ extern "C" {
 #define STORE_FLASH_END      0x08040000UL
 #define STORE_APP_CODE_START 0x08009000UL
 #define STORE_EVLOG_PAGES    4U
+#define STORE_CFG_PAGES      1U /* настройки приложения — 1 страница */
 /* Блоб переменных/ГЛ не может занять весь камень — санити-предел. */
 #define STORE_MAX_PAYLOAD    (48U * 1024U)
 
@@ -66,17 +78,23 @@ typedef struct __attribute__((packed)) {
  * делает (только чтение), безопасен до инициализации IWDG-логики. */
 void Storage_Init(void);
 
-/* Конец кода приложения, округлённый вверх до страницы — якорь FLXH. */
+/* Конец кода приложения, округлённый вверх до страницы. За ним
+ * резервируется страница CFGH (настройки приложения) — якорь FLXH. */
 uint32_t Storage_CodeEnd(void);
+uint32_t Storage_CfgBase(void);   /* = code_end — каноничная страница CFGH */
+uint32_t Storage_CfgEnd(void);    /* = code_end + 1 страница */
 
 /* Текущие позиции областей (0 = область не найдена). */
 uint32_t Storage_VarBase(void);   /* база области переменных */
 uint32_t Storage_VarEnd(void);    /* = STORE_FLASH_END, если область есть */
-uint32_t Storage_FlexBase(void);  /* = code_end */
-uint32_t Storage_FlexEnd(void);   /* code_end + размер области (или code_end) */
-uint32_t Storage_EvlogBase(void); /* база кольца журнала (канонично flex_end) */
+uint32_t Storage_FlexBase(void);  /* = cfg_end */
+uint32_t Storage_FlexEnd(void);   /* cfg_end + размер области (или cfg_end) */
+uint32_t Storage_EvlogBase(void); /* база кольца журнала (канонично центр зазора) */
 uint32_t Storage_EvlogEnd(void);  /* evlog_base + 4 страницы */
 uint8_t  Storage_EvlogFound(void); /* 1 — область EVLH найдена на Flash */
+/* Каноничная позиция EVLH — центр зазора [flex_end, var_base) —
+ * независимо от того, где область реально найдена сейчас. */
+uint32_t Storage_EvlogCanonicalBase(void);
 uint32_t Storage_TrigBase(void);  /* найденная область триггеров (0 = нет) */
 uint32_t Storage_TrigEnd(void);
 
@@ -135,6 +153,16 @@ uint8_t Storage_Commit(uint32_t payload_crc);
 /* Сессия без коммита устаревает через 15 с — висячий сеанс не должен
  * блокировать область навсегда (USB-обрыв посреди записи). */
 void Storage_Poll(void);
+
+/* Настройки приложения (CFGH — владелец device_config.c): чтение
+ * полезной нагрузки новейшего найденного поколения и запись нового
+ * поколения на каноничную страницу за кодом. Write сама стирает
+ * страницу, пишет payload, затем заголовок (gen+1) и убирает
+ * вытесненную копию, найденную в другом месте (переезд при росте
+ * кода). */
+uint8_t  Storage_CfgRead(uint8_t *out, uint32_t len);
+uint8_t  Storage_CfgWrite(const uint8_t *payload, uint32_t len);
+uint32_t Storage_CfgFoundBase(void); /* база найденной области (0 — нет) */
 
 #ifdef __cplusplus
 }
