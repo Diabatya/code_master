@@ -49,6 +49,7 @@ from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, Slot
 from shiboken6 import isValid
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFrame,
@@ -919,8 +920,15 @@ class _AbortEventEditor(QWidget):
             self._stack.addWidget(page)
         layout.addWidget(self._stack)
 
+        # Дерево настроек (тип события + страница параметров) видно
+        # только при включённой галочке «Прервать если»
+        # (отчёт мастера).
+        self._type.setVisible(False)
+        self._stack.setVisible(False)
         self.enable.toggled.connect(self._type.setEnabled)
         self.enable.toggled.connect(self._stack.setEnabled)
+        self.enable.toggled.connect(self._type.setVisible)
+        self.enable.toggled.connect(self._stack.setVisible)
         self.enable.toggled.connect(mark_dirty)
         self._type.currentIndexChanged.connect(self._stack.setCurrentIndex)
         self._type.currentIndexChanged.connect(mark_dirty)
@@ -990,14 +998,42 @@ def _detach_item(item, sep) -> None:
 
     setParent(None) НЕ используем: он делает виджет топлевел-окном,
     создание/удаление нативного окна рушит Qt на Windows/macOS
-    (отчёт мастера — краш по крестику). hide()+deleteLater()
-    достаточно — layout пересчитает геометрию после DeferredDelete."""
+    (отчёт мастера — краш по крестику). Само удаление отложено ещё
+    на один тик после скрытия: отпускание мыши по кнопке-«крестику»
+    внутри item завершается до DeferredDelete — иначе Qt на Windows
+    доставлял release уже скрытому/полуудалённому виджету и
+    приложение падало (повторный отчёт мастера)."""
     if isValid(item):
+        item.setEnabled(False)
+        parent = item.parentWidget()
+        if parent is not None and parent.layout() is not None:
+            parent.layout().removeWidget(item)
         item.setVisible(False)
-        item.deleteLater()
+        QTimer.singleShot(0, item.deleteLater)
     if sep is not None and isValid(sep):
         sep.setVisible(False)
-        sep.deleteLater()
+        QTimer.singleShot(0, sep.deleteLater)
+
+
+def _auto_collapse(item) -> None:
+    """Сворачивает редактор пункта до одной строки-сводки, когда
+    фокус уходит за пределы пункта — после настройки события/
+    условия/действия в программе остаётся одна строка
+    (отчёт мастера)."""
+    app = QApplication.instance()
+    if app is None:
+        return
+
+    def _changed(_old, new) -> None:
+        if not isValid(item):
+            return
+        if item._editor.maximumHeight() == 0:
+            return  # уже свёрнут
+        if new is not None and item.isAncestorOf(new):
+            return  # фокус внутри пункта — редактирование идёт
+        _animate_editor_toggle(item)
+
+    app.focusChanged.connect(_changed)
 
 
 def _animate_editor_toggle(item) -> None:
@@ -1132,6 +1168,9 @@ class _EventItem(QWidget):
             # (отчёт мастера); клик по сводке разворачивает редактор.
             self._editor.setMaximumHeight(0)
         self._update_summary()
+        # После настройки пункт сворачивается в одну строку, когда
+        # фокус уходит за его пределы (отчёт мастера).
+        _auto_collapse(self)
 
     def _toggle_editor(self) -> None:
         """Клик по строке-сводке: развернуть/свернуть редактор
@@ -1437,6 +1476,7 @@ class _CondItem(QWidget):
             self.write(cond)
             self._editor.setMaximumHeight(0)
         self._update_summary()
+        _auto_collapse(self)
 
     def _toggle_editor(self) -> None:
         """Клик по строке-сводке разворачивает/сворачивает редактор."""
@@ -1678,6 +1718,7 @@ class _ActionItem(QWidget):
             self.write(action)
             self._editor.setMaximumHeight(0)
         self._update_summary()
+        _auto_collapse(self)
 
     # ---- страницы настроек -------------------------------------------
 
@@ -2427,37 +2468,39 @@ class RuleRowWidget(QWidget):
         body_layout.setContentsMargins(0, 0, 0, 0)
 
         # ЕСЛИ — События (ИЛИ между событиями); кнопка добавления —
-        # в верхней части колонки (отчёт мастера).
+        # ПОД списком событий (отчёт мастера).
         body_layout.addWidget(_connector(tr("ЕСЛИ")), 0)
         ev_layout = QVBoxLayout(self._event_group)
         ev_layout.setSpacing(3)
         ev_layout.setContentsMargins(8, 4, 8, 4)
-        ev_layout.addWidget(self._add_event_button)
         self._events_layout = QVBoxLayout()
         self._events_layout.setSpacing(1)
         ev_layout.addLayout(self._events_layout, 1)
+        ev_layout.addWidget(self._add_event_button)
         body_layout.addWidget(self._event_group, 1)
 
-        # ПРИ — Условия (И между условиями — выполняются все)
+        # ПРИ — Условия (И между условиями — выполняются все);
+        # кнопка добавления под списком (отчёт мастера).
         body_layout.addWidget(_connector(tr("ПРИ")), 0)
         cd_layout = QVBoxLayout(self._cond_group)
         cd_layout.setSpacing(3)
         cd_layout.setContentsMargins(8, 4, 8, 4)
-        cd_layout.addWidget(self._add_cond_button)
         self._conds_layout = QVBoxLayout()
         self._conds_layout.setSpacing(1)
         cd_layout.addLayout(self._conds_layout, 1)
+        cd_layout.addWidget(self._add_cond_button)
         body_layout.addWidget(self._cond_group, 1)
 
-        # ТО — Действия (выполняются все по порядку)
+        # ТО — Действия (выполняются все по порядку); кнопка
+        # добавления под списком (отчёт мастера).
         body_layout.addWidget(_connector(tr("ТО")), 0)
         act_layout = QVBoxLayout(self._action_group)
         act_layout.setSpacing(3)
         act_layout.setContentsMargins(8, 4, 8, 4)
-        act_layout.addWidget(self._add_action_button)
         self._actions_layout = QVBoxLayout()
         self._actions_layout.setSpacing(1)
         act_layout.addLayout(self._actions_layout, 1)
+        act_layout.addWidget(self._add_action_button)
         body_layout.addWidget(self._action_group, 1)
         layout.addWidget(self._body)
 
@@ -2812,6 +2855,12 @@ class FlexibleLogicTab(QWidget):
         self._serial_manager = serial_manager
         self._config = Config()
         self._rules: list[dict[str, Any]] = []
+        # Снимок РЕАЛЬНО исполняемых программ. Обновляется только
+        # после успешной записи FLXH в МК (commit_runtime), вычитки
+        # из устройства и загрузки конфига при старте — живые правки
+        # полей сюда не попадают, программа отрабатывает по
+        # записанной в камень версии (отчёт мастера).
+        self._runtime_rules: list[dict[str, Any]] = []
         self._rule_counters: list[int] = []
         self._row_widgets: list[RuleRowWidget] = []
         self._internal_rules: list[dict[str, Any]] = []
@@ -2923,6 +2972,15 @@ class FlexibleLogicTab(QWidget):
         if not isinstance(rules, list):
             rules = []
         self._rules = rules
+        # Исполняемый снимок: «flexible_rules_active» — то, что
+        # реально записано/вычитано из МК; на старых конфигах ключа
+        # нет — берём flexible_rules, как было до разделения
+        # (отчёт мастера: программа отрабатывает только после
+        # записи в камень).
+        active = self._config.get("flexible_rules_active")
+        self._runtime_rules = (
+            list(active) if isinstance(active, list) else list(rules)
+        )
         self._rule_counters = [0] * len(rules)
         self._rebuild_rows()
         self._rules_dirty = True
@@ -2946,10 +3004,37 @@ class FlexibleLogicTab(QWidget):
         self._save_config()
         return self._config.get("flexible_rules", [])
 
-    def set_config(self, rules: list[dict[str, Any]]) -> None:
-        """Загружает программы из импортированного профиля."""
+    def set_config(
+        self,
+        rules: list[dict[str, Any]],
+        *,
+        suspend_execution: bool = False,
+    ) -> None:
+        """Загружает программы из импортированного профиля/вычитки МК.
+
+        suspend_execution=True — файл только заполняет поля
+        (импорт .kmc): исполняемый снимок не трогаем, программа
+        начнёт работать после записи в МК. Вычитка с устройства и
+        «Заводские настройки» вызывают без флага — там содержимое
+        и есть то, что в камне."""
         self._config.set("flexible_rules", rules)
+        if not suspend_execution:
+            self._config.set("flexible_rules_active", list(rules))
         self._load_config()
+
+    def commit_runtime(self) -> None:
+        """Фиксирует снимок исполняемой программы — вызывается
+        окном настроек только после успешной записи FLXH-блоба в МК.
+
+        До этого момента живые правки полей меняют только
+        «flexible_rules» (черновик), а исполняется последняя
+        записанная в камень версия (отчёт мастера: ввод цифр в
+        событии численной переменной не должен запускать программу
+        до сохранения)."""
+        self._save_config()
+        self._runtime_rules = self._collect_rules()
+        self._config.set("flexible_rules_active", self._runtime_rules)
+        self._rules_dirty = True
 
     def _rebuild_rows(self) -> None:
         """Пересоздаёт виджеты строк из self._rules."""
@@ -2977,10 +3062,13 @@ class FlexibleLogicTab(QWidget):
             self._row_widgets.remove(widget)
         # Без setParent(None): репарент превращает строку в топлевел-окно
         # и рушит native-дерево виджетов прямо в обработчике clicked()
-        # (отчёт мастера — вылет по крестику). Скрываем и откладываем
-        # удаление — layout сам заберёт виджет при DeferredDelete.
-        widget.setVisible(False)
-        widget.deleteLater()
+        # (отчёт мастера — вылет по крестику). Скрытие и удаление
+        # отложены на следующий тик — release-событие кнопки-«крестика»
+        # должно завершиться до DeferredDelete (повторный отчёт).
+        widget.setEnabled(False)
+        QTimer.singleShot(
+            0, lambda w=widget: _detach_item(w, None)
+        )
         self._rule_counters = [0] * len(self._row_widgets)
         self._renumber_rows()
         self.mark_dirty()
@@ -3100,14 +3188,33 @@ class FlexibleLogicTab(QWidget):
         return ""
 
     def _build_internal_rules(self) -> None:
-        """Формирует внутренний список активных программ."""
+        """Формирует внутренний список активных программ.
+
+        Источник — _runtime_rules (снимок последней записанной в МК
+        конфигурации), а НЕ живые виджеты строк: правки полей не
+        должны мгновенно менять исполняемую программу
+        (отчёт мастера)."""
         self._internal_rules = []
-        self._rule_counters = [0] * len(self._row_widgets)
-        for row_index, row in enumerate(self._row_widgets):
-            rule = row.get_rule()
+        self._rule_counters = [0] * len(self._runtime_rules)
+        for rule_index, rule in enumerate(self._runtime_rules):
             if not rule.get("active", False):
                 continue
-            self._internal_rules.append({"index": row_index, "rule": rule})
+            self._internal_rules.append({"index": rule_index, "rule": rule})
+
+    def _bump_rule_counter(self, rule_index: int) -> None:
+        """Инкремент счётчика срабатываний программы и вывод его в
+        шапку строки. Снимок _runtime_rules мог быть зафиксирован до
+        добавления/удаления строк — виджет по индексу показываем
+        только если он ещё существует."""
+        while len(self._rule_counters) <= rule_index:
+            self._rule_counters.append(0)
+        self._rule_counters[rule_index] += 1
+        if rule_index < len(self._row_widgets) and isValid(
+            self._row_widgets[rule_index]
+        ):
+            self._row_widgets[rule_index].set_counter(
+                self._rule_counters[rule_index]
+            )
 
     @staticmethod
     def _pad_8(data: bytes) -> bytes:
@@ -3611,10 +3718,7 @@ class FlexibleLogicTab(QWidget):
                 self._condition_passed(cond) for cond in conditions
             ):
                 continue
-            self._rule_counters[rule_index] += 1
-            self._row_widgets[rule_index].set_counter(
-                self._rule_counters[rule_index]
-            )
+            self._bump_rule_counter(rule_index)
             actions = rule.get("actions")
             if not isinstance(actions, list) or not actions:
                 actions = [rule.get("action") or {}]
@@ -3670,10 +3774,7 @@ class FlexibleLogicTab(QWidget):
                 self._condition_passed(cond) for cond in conditions
             ):
                 continue
-            self._rule_counters[rule_index] += 1
-            self._row_widgets[rule_index].set_counter(
-                self._rule_counters[rule_index]
-            )
+            self._bump_rule_counter(rule_index)
             actions = rule.get("actions")
             if not isinstance(actions, list) or not actions:
                 actions = [rule.get("action") or {}]
@@ -3849,10 +3950,7 @@ class FlexibleLogicTab(QWidget):
             ):
                 continue
 
-            self._rule_counters[rule_index] += 1
-            self._row_widgets[rule_index].set_counter(
-                self._rule_counters[rule_index]
-            )
+            self._bump_rule_counter(rule_index)
             for action in actions:
                 self._run_actions(rule_index, action, frame)
             logger.info(

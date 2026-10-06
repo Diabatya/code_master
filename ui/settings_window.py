@@ -1777,7 +1777,10 @@ class SettingsWindow(QMainWindow):
             self._trigger_tab.set_config(
                 self._config.get("triggers", []), suspend_execution=True
             )
-            self._flexible_tab.set_config(self._config.get("flexible_rules", []))
+            self._flexible_tab.set_config(
+                self._config.get("flexible_rules", []),
+                suspend_execution=True,
+            )
             if hasattr(self._gateway_tab, "set_config"):
                 self._gateway_tab.set_config(
                     self._config.get("gateway_rules", []),
@@ -1941,6 +1944,11 @@ class SettingsWindow(QMainWindow):
                 ensure_ascii=False,
             ).encode("utf-8")
             self._serial_manager.storage_upload(STORAGE_REGION_FLEX, flex_blob)
+            # Программа ГЛ записана в камень — с этого момента
+            # исполняется именно она; до записи работал старый
+            # снимок, живые правки полей не отрабатывали
+            # (отчёт мастера).
+            self._flexible_tab.commit_runtime()
             # Кэш блобов обновляем свежей генерацией — следующее
             # «Настроить» на этом устройстве не перекачивает то, что
             # мы только что сами туда записали.

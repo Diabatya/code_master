@@ -1360,7 +1360,11 @@ class SerialManager(QObject):
             self._identity_retry_timer = QTimer(self)
             self._identity_retry_timer.setSingleShot(True)
             self._identity_retry_timer.timeout.connect(self._retry_identity)
-        self._identity_retries = 4
+        # После DFU-прошивки МК инициализируется заметно дольше
+        # (миграция/скан маркерного хранилища по всей Flash) — окно
+        # ретраев ~90 с, пока версия/имя не добраны (отчёт мастера:
+        # «Версия ПО» пустая до захода в настройки).
+        self._identity_retries = 60
         self._identity_retry_timer.start(1200)
 
     def _retry_identity(self) -> None:

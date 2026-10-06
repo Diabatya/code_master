@@ -61,7 +61,14 @@ from models.config import Config
 from models.id_notes import IdNotes
 from models.logger import get_logger
 from models.translations import _ as tr
-from models.utils import bytes_to_hex_string, format_data_bytes, hex_to_int, int_to_hex, parse_data_bytes
+from models.utils import (
+    bytes_to_hex_string,
+    format_data_bytes,
+    hex_to_int,
+    int_to_hex,
+    parse_data_bytes,
+    translate_cyrillic_layout,
+)
 from ui.filter_dialog import FilterDialog
 from ui.hex_edit import create_data_field_widget
 from ui.id_edit import IdPasteEdit
@@ -1530,6 +1537,7 @@ class CanChannelMonitor(QWidget):
         self._search_edit.setFixedWidth(160)
         self._search_edit.setFont(font)
         self._search_edit.setPlaceholderText(tr("Поиск по ID или данным…"))
+        self._search_edit.textChanged.connect(self._on_search_text)
         self._search_edit.textChanged.connect(self._apply_search)
 
         # «Скрыть выделенное»: пока зажата — строки выделенных ID не
@@ -1925,6 +1933,18 @@ class CanChannelMonitor(QWidget):
         """Применяет скрытие к одной строке — используется при вставке
         нового ID под активным поиском/«скрыть выделенное»."""
         self._table.setRowHidden(row, not self._is_row_visible(row))
+
+    def _on_search_text(self, text: str) -> None:
+        """Подмена кириллицы латиницей по раскладке клавиатуры —
+        оператор ищет ID в русской раскладке (отчёт мастера)."""
+        translated = translate_cyrillic_layout(text)
+        if translated != text:
+            self._search_edit.blockSignals(True)
+            pos = self._search_edit.cursorPosition()
+            self._search_edit.setText(translated)
+            self._search_edit.setCursorPosition(min(pos, len(translated)))
+            self._search_edit.blockSignals(False)
+            self._apply_search(translated)
 
     def _apply_search(self, text: str = "") -> None:
         for row in range(self._table.rowCount()):

@@ -8,7 +8,6 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     QEasingCurve,
-    QElapsedTimer,
     QPointF,
     QPropertyAnimation,
     QSize,
@@ -188,98 +187,59 @@ def _kod_logo(dark: QColor, orange: QColor, width: int = 100,
 
 
 class _MatrixBackground(QWidget):
-    """Анимированный «матричный» фон по ТЗ мастера: 8 колонок
-    падающих символов, у каждой своя скорость, прозрачность и
-    размер шрифта (глубина). Нижний слой — не перехватывает
-    события мыши (аналог pointer-events: none).
+    """Статичный фон главного экрана по ТЗ мастера: поле хаотичных
+    HEX-байтов («A3 7F …») без анимации — движение убрано по отчёту
+    мастера («анимацию останови»). Нижний слой — не перехватывает
+    события мыши (аналог pointer-events: none)."""
 
-    Каждая строка колонки скроллится НЕЗАВИСИМО и бесконечно
-    (modulo по периоду, который чуть шире экрана — заворот всегда
-    происходит выше видимой области): единый блок-переход «весь
-    столбец телепортируется» убран — именно он дёргал анимацию
-    (отчёт мастера)."""
-
-    # (длительность полного прохода экрана, с; задержка фазы, с;
-    # прозрачность; размер шрифта px).
-    _COL_STYLE = (
-        (150.0, 0.0, 0.60, 34),   # передний план
-        (275.0, 25.0, 0.25, 20),  # дальний план
-        (210.0, 45.0, 0.45, 28),  # средний план
-        (300.0, 10.0, 0.35, 24),  # средне-дальний
-        (190.0, 65.0, 0.55, 32),  # передний план
-    )
     _COLS = 8
     _ROWS = 16
     _ROW_STEP = 45.0
     _REF_W = 1080.0
     _REF_H = 720.0
+    # (прозрачность, размер шрифта px) — чередование «глубины».
+    _COL_STYLE = (
+        (0.60, 34), (0.25, 20), (0.45, 28), (0.35, 24), (0.55, 32),
+    )
+    # Базовая линия строки внутри полосы — с отступом от верха,
+    # чтобы глифы первой строки не обрезались.
+    _STRIP_BASE = 0.75
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
-        # Фон — нижний слой: мышь проходит насквозь (pointer-events: none).
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         rng = random.Random(0xC0DE)
-        # Содержимое колонок генерируется один раз — цифровой «дождь».
+        # Содержимое — хаотичные 16-ричные байты, генерируются один
+        # раз (отчёт мастера).
         self._columns: list[list[str]] = [
             [
                 " ".join(
-                    str(rng.randrange(10))
-                    for _ in range(rng.randrange(1, 6))
+                    f"{rng.randrange(256):02X}"
+                    for _ in range(rng.randrange(1, 5))
                 )
                 for _ in range(self._ROWS)
             ]
             for _ in range(self._COLS)
         ]
-        self._elapsed = QElapsedTimer()
-        self._elapsed.start()
-        # Виджеты поверх матрицы (прозрачная область списка устройств):
-        # Qt не перерисовывает их сам, когда меняется только нижний
-        # слой — без принудительного update() центр экрана замирал
-        # после первого кадра (отчёт мастера).
         self._overlays: list[QWidget] = []
-        # Колонки отрисовываются в QPixmap один раз (и при ресайзе):
-        # drawText каждый кадр пере-растеризовал глифы на дробной
-        # позиции — хинтинг/антиалиасинг дрожал и движение выглядело
-        # рваным (отчёт мастера «цифры дёргаются»). Кадр = два блита
-        # целой колонки с субпиксельным сдвигом — пиксельно гладко.
         self._strips: list[QPixmap] = []
         self._strips_size: tuple[int, int] = (0, 0)
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        # PreciseTimer: обычный QTimer на Windows квантуется до ~15 мс
-        # и кадры приходят пачками «два подряд, потом пауза» — заметные
-        # рывки (отчёт мастера «анимация чисел с рывками»).
-        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._timer.start(16)  # ~60 fps — более плавное движение
 
     def add_overlay(self, widget: QWidget) -> None:
-        """Регистрирует прозрачный виджет поверх матрицы, который
-        нужно перерисовывать вручную на каждом кадре анимации."""
+        """Прозрачные виджеты поверх фона — перерисовываются Qt."""
         self._overlays.append(widget)
 
-    def _tick(self) -> None:
-        self.update()
-        for widget in self._overlays:
-            if isValid(widget):
-                widget.update()
-
-    # Базовая линия строки внутри полосы-пиксмапа — с отступом от верха,
-    # чтобы глифы первой строки не обрезались.
-    _STRIP_BASE = 0.75
-
     def _build_strips(self, sx: float, sy: float) -> None:
-        """Рендерит каждую колонку цифр в статичный QPixmap (высота =
-        _ROWS строк). Вызывается при изменении размера виджета."""
+        """Рендерит каждую колонку байтов в статичный QPixmap
+        (высота = _ROWS строк). Вызывается при изменении размера."""
         dpr = self.devicePixelRatioF()
         row_step = self._ROW_STEP * sy
         strip_w = max(60, int(240 * sx))
         strip_h = int(row_step * (self._ROWS + 1)) + 2
         self._strips = []
         for c in range(self._COLS):
-            _duration, _delay, opacity, fsize = (
-                self._COL_STYLE[c % len(self._COL_STYLE)]
-            )
+            opacity, fsize = self._COL_STYLE[c % len(self._COL_STYLE)]
             pm = QPixmap(int(strip_w * dpr), int(strip_h * dpr))
             pm.setDevicePixelRatio(dpr)
             pm.fill(Qt.GlobalColor.transparent)
@@ -303,35 +263,18 @@ class _MatrixBackground(QWidget):
         w, h = max(self.width(), 1), max(self.height(), 1)
         sx = w / self._REF_W
         sy = h / self._REF_H
-        now = self._elapsed.elapsed() / 1000.0
         row_step = self._ROW_STEP * sy
-        # Период чуть больше экрана — заворот строки на верх всегда
-        # происходит за пределами видимой области, поэтому скачок
-        # невидим и движение выглядит непрерывным.
-        span = self._REF_H * sy + row_step
         if self._strips_size != (w, h):
             self._strips_size = (w, h)
             self._build_strips(sx, sy)
         p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        # Полоса колонок центрируется на экране — по краям символов
-        # быть не должно, дождь идёт в середине (отчёт мастера).
+        # Колонки центрируются на экране — статично, без сдвига
+        # (отчёт мастера: анимация остановлена).
         col_step = 135 * sx
         x0 = (w - col_step * (self._COLS - 1)) / 2
+        y = 60 * sy - row_step * self._STRIP_BASE
         for c in range(self._COLS):
-            duration, delay, _opacity, _fsize = (
-                self._COL_STYLE[c % len(self._COL_STYLE)]
-            )
-            speed = (self._REF_H * sy) / duration
-            offset = (speed * (now - delay)) % span
-            x = x0 + col_step * c
-            # Полоса ставится дважды с шагом span: верхняя копия — строки,
-            # завернувшиеся за низ экрана. QPointF — субпиксельная
-            # позиция, движение не дискретно по пикселям.
-            y = 60 * sy + offset - row_step * (1 + self._STRIP_BASE)
-            strip = self._strips[c]
-            p.drawPixmap(QPointF(x, y), strip)
-            p.drawPixmap(QPointF(x, y - span), strip)
+            p.drawPixmap(QPointF(x0 + col_step * c, y), self._strips[c])
         p.end()
 
 

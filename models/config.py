@@ -165,6 +165,9 @@ class Config:
         "gateway_ignore",
         "ignore_list",
         "flexible_rules",
+        # Снимок исполняемой программы ГЛ — то же зеркало МК, после
+        # обновления приложения его наполнит вычитка с устройства.
+        "flexible_rules_active",
         "logic",
         "analog_ports",
         "can1_speed",

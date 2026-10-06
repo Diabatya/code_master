@@ -1095,7 +1095,13 @@ class FlashWorker(QThread):
                                 exc,
                             )
                         else:
-                            data = build_device_config_page(incoming[0], incoming[1], current_page)
+                            # merge_device_config_page, а не голый
+                            # build_*: VER1 берётся из НОВОГО образа —
+                            # иначе после DFU на устройстве оставалась
+                            # старая/пустая версия и «Версия ПО» на
+                            # карточке не появлялась до захода в
+                            # настройки (отчёт мастера).
+                            data = merge_device_config_page(data, current_page)
                     preserved_segments.append((start, data))
                 segments = preserved_segments
 
@@ -2375,6 +2381,13 @@ class FlashDialog(QDialog):
         self._log(message)
         self._restore_serial_port()
         if success:
+            # Версия на главной карточке — сразу после прошивки, не
+            # дожидаясь пере-энумерации устройства: если VER1 на МК
+            # отсутствовал, повторные опросы дадут пусто, а поле
+            # диалога оператор видел и подтвердил (отчёт мастера).
+            fw = self._fw_version_edit.text().strip()
+            if fw:
+                self._config.set("device_fw_version", fw)
             QMessageBox.information(self, tr("Готово"), message)
         else:
             QMessageBox.critical(self, tr("Ошибка"), message)
