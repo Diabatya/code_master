@@ -1316,9 +1316,9 @@ class SerialManager(QObject):
         name = serial = fw_ver = ""
         cfg_marker = (CMD_CFG_READ | 0x10) & 0xFF
         # После power cycle/рестарта приложению нужно время на
-        # инициализацию до ответа — одна повторная попытка спасает
-        # от потери имени устройства при спешке первого опроса.
-        for _attempt in range(2):
+        # инициализацию до ответа — повторные попытки спасают
+        # от потери имени/версии при спешке первого опроса.
+        for _attempt in range(4):
             if name:
                 break
             try:
@@ -1329,9 +1329,10 @@ class SerialManager(QObject):
                 # байт следующих команд (чтения триггеров тонули
                 # в таймаутах и слоты показывались пустыми).
                 self._port.write(bytes((CMD_CFG_READ, 0)))
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("CFG_READ: запись не удалась: %s", exc)
                 break
-            deadline = time.time() + 0.6
+            deadline = time.time() + 0.8
             buffer = bytearray()
             while time.time() < deadline:
                 chunk = self._port.read(256)
@@ -1348,6 +1349,13 @@ class SerialManager(QObject):
                             name, serial, fw_ver = _parse_cfg_read_payload(data)
                             break
                 time.sleep(0.01)
+        if name or serial or fw_ver:
+            logger.debug(
+                "CFG_READ: имя=%r серийник=%r версия=%r",
+                name, serial, fw_ver,
+            )
+        else:
+            logger.debug("CFG_READ: устройство не ответило (4 попытки)")
         return name, serial, fw_ver
 
     def _schedule_identity_retry(self) -> None:
@@ -1375,11 +1383,11 @@ class SerialManager(QObject):
                 return
             if self._closing or self._control_session_active:
                 # Идёт вычитка настроек — reader на паузе у сессии.
-                # Переносим попытку, чтобы не перезапустить его посреди
-                # обмена (конфликт за ответы команд).
-                self._identity_retries -= 1
-                if self._identity_retries > 0:
-                    self._identity_retry_timer.start(1500)
+                # Переносим попытку БЕЗ расхода бюджета: длинный sync
+                # (49 слотов триггеров + блобы) держит сессию десятки
+                # секунд, и все ретраи сгорали на deferral'ах — версия
+                # ПО так и не появлялась (отчёт мастера).
+                self._identity_retry_timer.start(1500)
                 return
             got_all = bool(
                 self._config.get("device_fw_version")
@@ -1418,10 +1426,20 @@ class SerialManager(QObject):
                 serial or "-", fw_ver or "-",
             )
             self.connection_changed.emit(True)
-            return
+            # Стоп — только когда версия ПО реально добрана: иначе
+            # зонд, вернувший имя/серийник без хвоста VER1 (таймаут,
+            # переinit МК), завершал ретраи навсегда и «Версия ПО»
+            # появлялась лишь после захода в настройки (отчёт мастера).
+            if self._config.get("device_fw_version"):
+                return
         self._identity_retries -= 1
         if self._identity_retries > 0:
             self._identity_retry_timer.start(1500)
+        else:
+            logger.warning(
+                "Идентификация: версия ПО (VER1) не получена за %d попыток",
+                60,
+            )
 
     def _detect_device_id(self) -> None:
         """Определяет тип, версию, серийный номер и объём памяти устройства."""

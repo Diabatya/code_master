@@ -74,9 +74,10 @@ class Bootloader:
 
     # Windows держит «Cannot configure port / PermissionError(13,
     # ERROR_GEN_FAILURE)» заметно дольше пары секунд после
-    # пере-энумерации CDC-устройства — окно повторов расширено
-    # (отчёт мастера: обновление через CDC падало с этой ошибкой).
-    OPEN_RETRIES = 40
+    # пере-энумерации CDC-устройства — окно повторов ~30 с
+    # (повторный отчёт мастера: обновление через CDC падало с этой
+    # ошибкой даже при 10-секундном окне).
+    OPEN_RETRIES = 120
     OPEN_RETRY_DELAY = 0.25
 
     @classmethod
@@ -262,12 +263,26 @@ class Bootloader:
         записать флаг 0xDEADBEEF по адресу 0x20004FF0 и выполнить NVIC_SystemReset().
         """
         magic = self.REBOOT_TO_BOOTLOADER_MAGIC
-        self.port.reset_output_buffer()
-        self.port.write(magic)
-        self.port.flush()
+        # Порт может умереть прямо между открытием и записью (устройство
+        # уже перезагружается/отключено): reset_output_buffer/write на
+        # мёртвом хендле дают PermissionError(13) — в этом случае просто
+        # идём ждать bootloader-порт, устройство уже ушло на перезагрузку
+        # (отчёт мастера: «Cannot configure port … устройство не
+        # работает» при обновлении по CDC).
+        try:
+            self.port.reset_output_buffer()
+            self.port.write(magic)
+            self.port.flush()
+        except (serial.SerialException, OSError) as exc:
+            logger.warning(
+                "Команда перезагрузки не ушла (%s) — порт уже недоступен, "
+                "жду появления bootloader-устройства",
+                exc,
+            )
+            return
         logger.info("Команда перезагрузки в bootloader отправлена (%d байт)", len(magic))
 
-    def wait_for_bootloader_port(self, timeout: float = 10.0) -> None:
+    def wait_for_bootloader_port(self, timeout: float = 20.0) -> None:
         """Ждёт появления bootloader-порта (VID=0483, PID=5741) после reset."""
         logger.info("Ожидание появления bootloader-порта...")
         start = time.time()

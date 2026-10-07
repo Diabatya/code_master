@@ -96,6 +96,35 @@ _EVENT_FLAG = "flag"
 _COND_FLAG = "flag"
 _ACT_FLAG = "flag"
 
+# «Кэш переменная» (отчёт мастера): два буфера на переменную —
+# скрытый буфер 1 (ОЗУ, непрерывный захват кадров диапазона ID) и
+# буфер 2 (ОЗУ/ПЗУ — выбирается в настройке переменной). События:
+# «Приход DATA КЭШ» (фронт захвата кадра в буфер 1 на выбранном
+# канале), «Записалась КЭШ переменная» (запись в привязанный кэш —
+# захват в буфер 1 или перенос в буфер 2), «Стирание КЭШ
+# переменной» (привязанный буфер обнулился). Условия: «Записан
+# КЭШ»/«Не записан КЭШ» — по содержимому буфера 2. Действия:
+# «Записать КЭШ» (буфер 1 → буфер 2, буфер 1 обнуляется),
+# «Отправить КЭШ» (буфер 2 → CAN1/CAN2, кол-во + пауза),
+# «Стереть КЭШ» (буфер 2 = 0).
+_EVENT_CACHEVAR = "cachevar"
+_COND_CACHEVAR = "cachevar"
+_ACT_CACHEVAR = "cachevar"
+# Под-операции событий/условий/действий кэш-переменной.
+_CACHE_OP_RX = "rx"          # приход кадра диапазона → буфер 1
+_CACHE_OP_WRITTEN = "written"  # произошла запись в кэш
+_CACHE_OP_ERASED = "erased"    # привязанный буфер обнулился
+_CACHE_OP_FILLED = "filled"    # условие «Записан КЭШ»
+_CACHE_OP_EMPTY = "empty"      # условие «Не записан КЭШ»
+_CACHE_OP_COMMIT = "commit"    # действие «Записать КЭШ»
+_CACHE_OP_SEND = "send"        # действие «Отправить КЭШ»
+_CACHE_OP_ERASE = "erase"      # действие «Стереть КЭШ»
+
+# «Программа (имя) начала работать» — событие-фронт: срабатывает,
+# когда указанная программа ГЛ прошла фазу событий и перешла к
+# условиям (отчёт мастера). Саму себя программа слушать не может.
+_EVENT_PROGRAM = "program"
+
 _COND_NONE = "none"
 _COND_STATIC = "static"
 _COND_DYN = "dyn"
@@ -863,6 +892,146 @@ class _FrameEventPage(QWidget):
         self.fire_limit.setValue(max(1, limit))
 
 
+class _CacheVarEventPage(QWidget):
+    """Событие «Кэш переменная» (отчёт мастера): три функции —
+    «Приход DATA КЭШ» (кадр из диапазона переменной пришёл на
+    выбранном канале и записан в скрытый буфер 1), «Записалась КЭШ
+    переменная» (в привязанный кэш произошла запись данных),
+    «Стирание КЭШ переменной» (привязанный буфер обнулился).
+    Канал CAN1/CAN2 выбирается только у «Прихода»."""
+
+    def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(2)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(_small_label(tr("Переменная:"), font))
+        self.var = _VarCombo(font)
+        layout.addWidget(self.var)
+        row = QHBoxLayout()
+        row.addWidget(_small_label(tr("Событие:"), font))
+        self.op = QComboBox()
+        self.op.setFont(font)
+        self.op.addItem(tr("Приход DATA КЭШ"), _CACHE_OP_RX)
+        self.op.addItem(
+            tr("Записалась КЭШ переменная"), _CACHE_OP_WRITTEN
+        )
+        self.op.addItem(
+            tr("Стирание КЭШ переменной"), _CACHE_OP_ERASED
+        )
+        row.addWidget(self.op)
+        self.channel = QComboBox()
+        self.channel.setFont(font)
+        self.channel.addItem("CAN1", 1)
+        self.channel.addItem("CAN2", 2)
+        self.channel.setFixedWidth(80)
+        row.addWidget(self.channel)
+        row.addStretch()
+        layout.addLayout(row)
+        layout.addStretch()
+
+        self.var.currentIndexChanged.connect(mark_dirty)
+        self.op.currentIndexChanged.connect(mark_dirty)
+        self.channel.currentIndexChanged.connect(mark_dirty)
+        self.op.currentIndexChanged.connect(self._update_channel)
+        self._update_channel()
+
+    def _update_channel(self, *_args) -> None:
+        # «из какого CAN получаем» спрашиваем только у прихода DATA
+        # (отчёт мастера).
+        self.channel.setVisible(self.op.currentData() == _CACHE_OP_RX)
+
+    def read(self) -> dict[str, Any]:
+        return {
+            "type": _EVENT_CACHEVAR,
+            "var": self.var.get_name(),
+            "cache_op": self.op.currentData(),
+            "channel": int(self.channel.currentData()),
+        }
+
+    def write(self, event: dict[str, Any]) -> None:
+        self.var.set_name(str(event.get("var", "")))
+        oidx = self.op.findData(event.get("cache_op", _CACHE_OP_RX))
+        self.op.setCurrentIndex(oidx if oidx >= 0 else 0)
+        cidx = self.channel.findData(int(event.get("channel", 1) or 1))
+        self.channel.setCurrentIndex(cidx if cidx >= 0 else 0)
+        self._update_channel()
+
+
+class _ProgramEventPage(QWidget):
+    """Событие «Программа (имя) начала работать» (отчёт мастера):
+    срабатывает, когда выбранная программа ГЛ прошла фазу событий и
+    перешла к своим условиям. Список — имена всех программ вкладки."""
+
+    def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(2)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(_small_label(tr("Программа:"), font))
+        self.var = _VarCombo(font)
+        layout.addWidget(self.var)
+        hint = QLabel(tr(
+            "Срабатывает, когда выбранная программа перешла "
+            "от событий к условиям — дальше выполняются только "
+            "условия этой программы."
+        ))
+        hint.setFont(font)
+        hint.setStyleSheet("color: #9A9AA5;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch()
+        self.var.currentIndexChanged.connect(mark_dirty)
+
+    def read(self) -> dict[str, Any]:
+        return {
+            "type": _EVENT_PROGRAM,
+            "var": self.var.get_name(),
+        }
+
+    def write(self, event: dict[str, Any]) -> None:
+        self.var.set_name(str(event.get("var", "")))
+
+
+class _CacheVarCondPage(QWidget):
+    """Условие «Кэш переменная» (отчёт мастера): «Записан КЭШ» —
+    буфер 2 переменной содержит данные (не нули); «Не записан КЭШ» —
+    буфер 2 пуст/нулевой."""
+
+    def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(2)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(_small_label(tr("Переменная:"), font))
+        self.var = _VarCombo(font)
+        layout.addWidget(self.var)
+        row = QHBoxLayout()
+        row.addWidget(_small_label(tr("Состояние:"), font))
+        self.state = QComboBox()
+        self.state.setFont(font)
+        self.state.addItem(tr("Записан КЭШ"), _CACHE_OP_FILLED)
+        self.state.addItem(tr("Не записан КЭШ"), _CACHE_OP_EMPTY)
+        row.addWidget(self.state)
+        row.addStretch()
+        layout.addLayout(row)
+        layout.addStretch()
+        self.var.currentIndexChanged.connect(mark_dirty)
+        self.state.currentIndexChanged.connect(mark_dirty)
+
+    def read(self) -> dict[str, Any]:
+        return {
+            "type": _COND_CACHEVAR,
+            "var": self.var.get_name(),
+            "cache_op": self.state.currentData(),
+        }
+
+    def write(self, cond: dict[str, Any]) -> None:
+        self.var.set_name(str(cond.get("var", "")))
+        sidx = self.state.findData(cond.get("cache_op", _CACHE_OP_FILLED))
+        self.state.setCurrentIndex(sidx if sidx >= 0 else 0)
+
+
 class _AbortEventEditor(QWidget):
     """«Прервать если» — событие-прерыватель действия (отчёт
     мастера): те же виды событий, кроме «Включение устройства» —
@@ -1004,6 +1173,19 @@ def _detach_item(item, sep) -> None:
     доставлял release уже скрытому/полуудалённому виджету и
     приложение падало (повторный отчёт мастера)."""
     if isValid(item):
+        # Анимация свёртки могла быть в полёте (фокус-аут при клике по
+        # крестику): бегущая QPropertyAnimation по «maximumHeight»
+        # удалённого редактора роняет Qt на Windows — глушим её и
+        # отложенные обработчики до deleteLater (повторный отчёт).
+        anim = getattr(item, "_editor_anim", None)
+        if anim is not None:
+            old_cb = getattr(item, "_anim_finished_cb", None)
+            if old_cb is not None:
+                with contextlib.suppress(RuntimeError, TypeError):
+                    anim.finished.disconnect(old_cb)
+                item._anim_finished_cb = None
+            with contextlib.suppress(RuntimeError):
+                anim.stop()
         item.setEnabled(False)
         parent = item.parentWidget()
         if parent is not None and parent.layout() is not None:
@@ -1024,16 +1206,30 @@ def _auto_collapse(item) -> None:
     if app is None:
         return
 
-    def _changed(_old, new) -> None:
-        if not isValid(item):
-            return
-        if item._editor.maximumHeight() == 0:
-            return  # уже свёрнут
-        if new is not None and item.isAncestorOf(new):
-            return  # фокус внутри пункта — редактирование идёт
-        _animate_editor_toggle(item)
+    holder = {"conn": None}
 
-    app.focusChanged.connect(_changed)
+    def _changed(_old, new) -> None:
+        try:
+            if not isValid(item):
+                # Пункт удалён — отписываемся, иначе замыкания копятся
+                # на app.focusChanged навсегда (утечка обработчиков).
+                conn = holder["conn"]
+                if conn is not None:
+                    with contextlib.suppress(RuntimeError, TypeError):
+                        app.focusChanged.disconnect(conn)
+                    holder["conn"] = None
+                return
+            if item._editor.maximumHeight() == 0:
+                return  # уже свёрнут
+            if new is not None and isValid(new) and item.isAncestorOf(new):
+                return  # фокус внутри пункта — редактирование идёт
+            _animate_editor_toggle(item)
+        except RuntimeError:
+            # «new» мог быть уже разрушен к моменту доставки сигнала —
+            # не роняем приложение на гонке удаления (отчёт мастера).
+            pass
+
+    holder["conn"] = app.focusChanged.connect(_changed)
 
 
 def _animate_editor_toggle(item) -> None:
@@ -1114,6 +1310,12 @@ class _EventItem(QWidget):
         self._type.addItem(tr("Переменная"), _EVENT_FLAG)
         self._type.addItem(tr("Фрейм"), _EVENT_FRAME)
         self._type.addItem(tr("Включение устройства"), _EVENT_POWER)
+        # «Кэш переменная» и «Программа начала работать» —
+        # новые виды событий (отчёт мастера).
+        self._type.addItem(tr("Кэш переменная"), _EVENT_CACHEVAR)
+        self._type.addItem(
+            tr("Программа начала работать"), _EVENT_PROGRAM
+        )
         self._type.currentIndexChanged.connect(self._on_type)
         editor_layout.addWidget(self._type)
 
@@ -1134,10 +1336,12 @@ class _EventItem(QWidget):
         self._flag = _FlagEventPage(font, row._mark_dirty)
         self._frame = _FrameEventPage(font, row._mark_dirty)
         self._power = _PowerEventPage(font, row._mark_dirty)
+        self._cachevar = _CacheVarEventPage(font, row._mark_dirty)
+        self._program = _ProgramEventPage(font, row._mark_dirty)
         for page in (
             self._none, self._static, self._dyn, self._num,
             self._impulse, self._aux, self._flag, self._frame,
-            self._power,
+            self._power, self._cachevar, self._program,
         ):
             self._stack.addWidget(page)
         editor_layout.addWidget(self._stack)
@@ -1151,7 +1355,8 @@ class _EventItem(QWidget):
         # Сводка обновляется при любом изменении полей события.
         for page in (
             self._dyn, self._num, self._impulse,
-            self._static, self._aux, self._flag, self._frame
+            self._static, self._aux, self._flag, self._frame,
+            self._cachevar, self._program,
         ):
             for child in page.findChildren(QWidget):
                 if isinstance(child, QComboBox):
@@ -1200,6 +1405,8 @@ class _EventItem(QWidget):
             _EVENT_FLAG: self._flag,
             _EVENT_FRAME: self._frame,
             _EVENT_POWER: self._power,
+            _EVENT_CACHEVAR: self._cachevar,
+            _EVENT_PROGRAM: self._program,
         }
         return pages[etype].read()
 
@@ -1219,6 +1426,8 @@ class _EventItem(QWidget):
             _EVENT_FLAG: self._flag,
             _EVENT_FRAME: self._frame,
             _EVENT_POWER: self._power,
+            _EVENT_CACHEVAR: self._cachevar,
+            _EVENT_PROGRAM: self._program,
         }.get(etype)
         if page is not None:
             page.write(event)
@@ -1236,11 +1445,22 @@ class _EventItem(QWidget):
         # «Переменная» — именованные биты из третьей колонки
         # «Переменных» (вид «Переменная» — отчёт мастера).
         flags = tab.variable_names("aux", "flag") if tab else []
+        # «Кэш переменная» — имена переменных вида «Кэш переменная»
+        # из колонки «Чтение» (отчёт мастера).
+        cache = tab.variable_names("read", "cache") if tab else []
         self._dyn.var.set_names(dyn, tr("— не выбрано —"))
         self._num.var.set_names(num, tr("— не выбрано —"))
         self._impulse.var.set_names(imp, tr("— не выбрано —"))
         self._static.var.set_names(st, tr("— не выбрано —"))
         self._flag.var.set_names(flags, tr("— не выбрано —"))
+        self._cachevar.var.set_names(cache, tr("— не выбрано —"))
+        # «Программа начала работать» — имена всех программ вкладки,
+        # кроме содержащей это событие (сама себя слушать не может).
+        programs = [
+            n for n in self._row._tab._program_names()
+            if n and n != self._row._name_edit.text().strip()
+        ]
+        self._program.var.set_names(programs, tr("— не выбрано —"))
         # Список состояний «Динамической переменной» подтягивается
         # из её таблицы привязки (отчёт мастера).
         self._dyn.refresh_binding_names()
@@ -1300,6 +1520,25 @@ class _EventItem(QWidget):
                 text = f"ID {can_id}" if can_id else tr("Фрейм")
         elif etype == _EVENT_POWER:
             text = tr("Включение устройства")
+        elif etype == _EVENT_CACHEVAR:
+            # «Кэш переменная»: «Приход DATA КЭШ (имя) CAN1» /
+            # «Записалась КЭШ (имя)» / «Стирание КЭШ (имя)»
+            # (отчёт мастера).
+            name = self._cachevar.var.get_name() or "—"
+            op = self._cachevar.op.currentData()
+            if op == _CACHE_OP_RX:
+                text = tr("Приход DATA КЭШ {0} {1}").format(
+                    name, self._cachevar.channel.currentText()
+                )
+            elif op == _CACHE_OP_WRITTEN:
+                text = tr("Записалась КЭШ {0}").format(name)
+            else:
+                text = tr("Стирание КЭШ {0}").format(name)
+        elif etype == _EVENT_PROGRAM:
+            # «Программа (имя) начала работать» (отчёт мастера).
+            text = tr("Программа «{0}» начала работать").format(
+                self._program.var.get_name() or "—"
+            )
         else:
             direction = (
                 tr("вход") if self._aux.direction.currentData() == "in"
@@ -1357,6 +1596,9 @@ class _CondItem(QWidget):
         self._type.addItem(tr("Импульсная переменная"), _COND_IMPULSE)
         self._type.addItem(tr("Доп канал"), _COND_AUX)
         self._type.addItem(tr("Переменная"), _COND_FLAG)
+        # «Кэш переменная» — «Записан/Не записан КЭШ» по буферу 2
+        # (отчёт мастера).
+        self._type.addItem(tr("Кэш переменная"), _COND_CACHEVAR)
         self._type.currentIndexChanged.connect(self._on_type)
         editor_layout.addWidget(self._type)
 
@@ -1439,9 +1681,13 @@ class _CondItem(QWidget):
         flag_layout.addWidget(self.flag_state)
         flag_layout.addStretch()
 
+        cachevar_page = _CacheVarCondPage(font, row._mark_dirty)
+        self.cv_var = cachevar_page.var
+        self.cv_state = cachevar_page.state
+
         for page in (
             none_page, static_page, dyn_page, num_page,
-            impulse_page, aux_page, flag_page
+            impulse_page, aux_page, flag_page, cachevar_page
         ):
             self._stack.addWidget(page)
         editor_layout.addWidget(self._stack)
@@ -1463,6 +1709,8 @@ class _CondItem(QWidget):
         self.aux_state.currentIndexChanged.connect(self._update_summary)
         self.flag_var.currentIndexChanged.connect(self._update_summary)
         self.flag_state.currentIndexChanged.connect(self._update_summary)
+        self.cv_var.currentIndexChanged.connect(self._update_summary)
+        self.cv_state.currentIndexChanged.connect(self._update_summary)
         self.flag_var.currentIndexChanged.connect(row._mark_dirty)
         self.flag_state.currentIndexChanged.connect(row._mark_dirty)
         self.st_var.currentIndexChanged.connect(row._mark_dirty)
@@ -1521,6 +1769,12 @@ class _CondItem(QWidget):
                 "var": self.flag_var.get_name(),
                 "state": self.flag_state.currentData(),
             }
+        if ctype == _COND_CACHEVAR:
+            return {
+                "type": _COND_CACHEVAR,
+                "var": self.cv_var.get_name(),
+                "cache_op": self.cv_state.currentData(),
+            }
         return {"type": _COND_NONE}
 
     def write(self, cond: dict[str, Any]) -> None:
@@ -1549,6 +1803,12 @@ class _CondItem(QWidget):
             self.flag_var.set_name(str(cond.get("var", "")))
             sidx = self.flag_state.findData(int(cond.get("state", 1) or 0))
             self.flag_state.setCurrentIndex(sidx if sidx >= 0 else 0)
+        elif ctype == _COND_CACHEVAR:
+            self.cv_var.set_name(str(cond.get("var", "")))
+            sidx = self.cv_state.findData(
+                cond.get("cache_op", _CACHE_OP_FILLED)
+            )
+            self.cv_state.setCurrentIndex(sidx if sidx >= 0 else 0)
 
     def refresh_variables(self) -> None:
         tab = self._row._tab._variables_tab
@@ -1560,11 +1820,13 @@ class _CondItem(QWidget):
         imp = tab.variable_names("read", "impulse") if tab else []
         st = tab.variable_names("read", "static") if tab else []
         flags = tab.variable_names("aux", "flag") if tab else []
+        cache = tab.variable_names("read", "cache") if tab else []
         self.st_var.set_names(st, tr("— не выбрано —"))
         self.dyn_var.set_names(dyn, tr("— не выбрано —"))
         self.num_var.set_names(num, tr("— не выбрано —"))
         self.imp_var.set_names(imp, tr("— не выбрано —"))
         self.flag_var.set_names(flags, tr("— не выбрано —"))
+        self.cv_var.set_names(cache, tr("— не выбрано —"))
 
     def _update_summary(self, *_args) -> None:
         ctype = self._type.currentData()
@@ -1606,6 +1868,12 @@ class _CondItem(QWidget):
                 f"{self.flag_var.get_name() or '—'} "
                 f"{self.flag_state.currentData()}"
             )
+        elif ctype == _COND_CACHEVAR:
+            # «Записан КЭШ имя» / «Не записан КЭШ имя» (отчёт мастера).
+            text = tr("{0} {1}").format(
+                self.cv_state.currentText(),
+                self.cv_var.get_name() or "—",
+            )
         else:
             text = tr("Не выбрано")
         self._summary.set_unselected(ctype == _COND_NONE)
@@ -1630,7 +1898,7 @@ class _ActionItem(QWidget):
     выполняются все по порядку (отчёт мастера)."""
 
     _PAGES = (_ACT_NONE, _ACT_AUX, _ACT_VAR, _ACT_FLAG, _ACT_FRAME,
-              _ACT_CACHE)
+              _ACT_CACHE, _ACT_CACHEVAR)
 
     def __init__(
         self,
@@ -1668,6 +1936,9 @@ class _ActionItem(QWidget):
         self._type.addItem(tr("Переменные"), _ACT_FLAG)
         self._type.addItem(tr("Отправить фрейм"), _ACT_FRAME)
         self._type.addItem(tr("Запись DATA в кэш"), _ACT_CACHE)
+        # «Кэш переменная» — Записать/Отправить/Стереть буфер 2
+        # (отчёт мастера).
+        self._type.addItem(tr("Кэш переменная"), _ACT_CACHEVAR)
         self._type.currentIndexChanged.connect(self._on_type)
         editor_layout.addWidget(self._type)
 
@@ -1700,6 +1971,7 @@ class _ActionItem(QWidget):
         self._build_flag_page(font, row._mark_dirty)
         self._build_frame_page(font, row._mark_dirty)
         self._build_cache_page(font, row._mark_dirty)
+        self._build_cachevar_page(font, row._mark_dirty)
         editor_layout.addWidget(self._stack)
         self._abort = _AbortEventEditor(
             font, row._mark_dirty,
@@ -2086,6 +2358,73 @@ class _ActionItem(QWidget):
         self.cache_delay.valueChanged.connect(mark_dirty)
         self.cache_count.valueChanged.connect(mark_dirty)
 
+    def _build_cachevar_page(self, font: QFont, mark_dirty) -> None:
+        """«Кэш переменная» (отчёт мастера): «Записать КЭШ» — кадр из
+        скрытого буфера 1 переносится в буфер 2, буфер 1 обнуляется;
+        «Отправить КЭШ» — кадр буфера 2 уходит в CAN1/CAN2 заданное
+        число раз с паузой; «Стереть КЭШ» — буфер 2 обнуляется."""
+        page = QWidget()
+        pl = QVBoxLayout(page)
+        pl.setSpacing(2)
+        pl.setContentsMargins(0, 0, 0, 0)
+        row1 = QHBoxLayout()
+        row1.addWidget(_small_label(tr("Переменная:"), font))
+        self.cv_var = _VarCombo(font)
+        row1.addWidget(self.cv_var, 1)
+        pl.addLayout(row1)
+        row2 = QHBoxLayout()
+        row2.addWidget(_small_label(tr("Действие:"), font))
+        self.cv_op = QComboBox()
+        self.cv_op.setFont(font)
+        self.cv_op.addItem(tr("Записать КЭШ"), _CACHE_OP_COMMIT)
+        self.cv_op.addItem(tr("Отправить КЭШ"), _CACHE_OP_SEND)
+        self.cv_op.addItem(tr("Стереть КЭШ"), _CACHE_OP_ERASE)
+        row2.addWidget(self.cv_op)
+        row2.addStretch()
+        pl.addLayout(row2)
+        # Параметры отправки — только у «Отправить КЭШ»
+        # (отчёт мастера: куда, количество, пауза между).
+        self.cv_send_row = QWidget()
+        send_row = QHBoxLayout(self.cv_send_row)
+        send_row.setContentsMargins(0, 0, 0, 0)
+        send_row.addWidget(_small_label(tr("Канал"), font))
+        self.cv_channel = QComboBox()
+        self.cv_channel.setFont(font)
+        self.cv_channel.addItems(["CAN1", "CAN2"])
+        send_row.addWidget(self.cv_channel)
+        send_row.addWidget(_small_label(tr("Кол-во"), font))
+        self.cv_count = QSpinBox()
+        self.cv_count.setFont(font)
+        self.cv_count.setRange(1, 100)
+        self.cv_count.setValue(1)
+        self.cv_count.setFixedWidth(60)
+        send_row.addWidget(self.cv_count)
+        send_row.addWidget(_small_label(tr("Пауза"), font))
+        self.cv_pause = QSpinBox()
+        self.cv_pause.setFont(font)
+        self.cv_pause.setRange(0, 9999)
+        self.cv_pause.setSuffix(tr(" мс"))
+        self.cv_pause.setFixedWidth(86)
+        send_row.addWidget(self.cv_pause)
+        send_row.addStretch()
+        pl.addWidget(self.cv_send_row)
+        pl.addStretch()
+        self._stack.addWidget(page)
+
+        self.cv_var.currentIndexChanged.connect(mark_dirty)
+        self.cv_var.currentIndexChanged.connect(self._update_summary)
+        self.cv_op.currentIndexChanged.connect(mark_dirty)
+        self.cv_op.currentIndexChanged.connect(self._update_summary)
+        self.cv_op.currentIndexChanged.connect(
+            lambda _i: self.cv_send_row.setVisible(
+                self.cv_op.currentData() == _CACHE_OP_SEND
+            )
+        )
+        self.cv_channel.currentIndexChanged.connect(mark_dirty)
+        self.cv_count.valueChanged.connect(mark_dirty)
+        self.cv_pause.valueChanged.connect(mark_dirty)
+        self.cv_send_row.setVisible(False)
+
     # ---- обработчики ---------------------------------------------------
 
     def _toggle_editor(self) -> None:
@@ -2134,6 +2473,10 @@ class _ActionItem(QWidget):
         self.var.set_names(ctrl, tr("— не выбрано —"))
         flags = tab.variable_names("aux", "flag") if tab else []
         self.flag_var.set_names(flags, tr("— не выбрано —"))
+        # «Кэш переменная» — имена кэш-переменных из «Чтения»
+        # (отчёт мастера).
+        cache = tab.variable_names("read", "cache") if tab else []
+        self.cv_var.set_names(cache, tr("— не выбрано —"))
         self._abort.refresh_variables()
 
     # ---- схема -----------------------------------------------------------
@@ -2201,6 +2544,19 @@ class _ActionItem(QWidget):
                 "cache_delay": self.cache_delay.value(),
                 "cache_count": self.cache_count.value(),
             }
+        elif atype == _ACT_CACHEVAR:
+            # «Кэш переменная»: Записать (буфер 1 → буфер 2) /
+            # Отправить (буфер 2 → CAN) / Стереть (буфер 2 = 0)
+            # (отчёт мастера). Ключи с префиксом cv_ — чтобы не
+            # пересекаться с действием «Запись DATA в кэш».
+            result = {
+                "type": _ACT_CACHEVAR,
+                "cachevar": self.cv_var.get_name(),
+                "cv_op": self.cv_op.currentData(),
+                "cv_channel": self.cv_channel.currentIndex(),
+                "cv_count": self.cv_count.value(),
+                "cv_pause": self.cv_pause.value(),
+            }
         else:
             result = {"type": _ACT_NONE}
         # Общие параметры любого действия (отчёт мастера):
@@ -2224,7 +2580,9 @@ class _ActionItem(QWidget):
         часть старого объединённого блока; тип угадывается по ключам."""
         atype = action.get("type")
         if atype not in self._PAGES:
-            if action.get("aux_enabled"):
+            if action.get("cv_op"):
+                atype = _ACT_CACHEVAR
+            elif action.get("aux_enabled"):
                 atype = _ACT_AUX
             elif action.get("frame_enabled"):
                 atype = _ACT_FRAME
@@ -2299,6 +2657,22 @@ class _ActionItem(QWidget):
             )
             self.cache_delay.setValue(int(action.get("cache_delay", 0) or 0))
             self.cache_count.setValue(int(action.get("cache_count", 1) or 1))
+        elif atype == _ACT_CACHEVAR:
+            self.cv_var.set_name(str(action.get("cachevar", "")))
+            oidx = self.cv_op.findData(
+                action.get("cv_op", _CACHE_OP_COMMIT)
+            )
+            self.cv_op.setCurrentIndex(oidx if oidx >= 0 else 0)
+            self.cv_channel.setCurrentIndex(
+                int(action.get("cv_channel", 0) or 0)
+            )
+            self.cv_count.setValue(
+                max(1, int(action.get("cv_count", 1) or 1))
+            )
+            self.cv_pause.setValue(int(action.get("cv_pause", 0) or 0))
+            self.cv_send_row.setVisible(
+                self.cv_op.currentData() == _CACHE_OP_SEND
+            )
         # Общие параметры действия (отчёт мастера).
         self.exec_delay.setValue(int(action.get("exec_delay", 0) or 0))
         self._abort.write(action.get("abort"))
@@ -2336,6 +2710,13 @@ class _ActionItem(QWidget):
             text = tr("Фрейм")
         elif atype == _ACT_CACHE:
             text = tr("Кэш")
+        elif atype == _ACT_CACHEVAR:
+            # «Записать КЭШ имя» / «Отправить КЭШ имя» /
+            # «Стереть КЭШ имя» (отчёт мастера).
+            text = tr("{0} {1}").format(
+                self.cv_op.currentText(),
+                self.cv_var.get_name() or "—",
+            )
         else:
             text = tr("Не выбрано")
         self._summary.set_unselected(atype == _ACT_NONE)
@@ -2907,6 +3288,30 @@ class FlexibleLogicTab(QWidget):
         # (байты «X» во фреймах команды при отправке подставляются
         # из него — отчёт мастера).
         self._cmd_caches: dict[str, bytes] = {}
+        # «Кэш переменная» (отчёт мастера): имя → два буфера.
+        # buf1 — скрытый буфер ОЗУ: каждый кадр из диапазона ID
+        # переменной перезаписывает его (оператор его не видит и не
+        # настраивает). buf2 — операторский буфер (ОЗУ/ПЗУ — по
+        # настройке переменной), заполняется действием «Записать
+        # КЭШ», читается условиями «Записан/Не записан».
+        # Буфер — {"id", "data", "extended", "channel"} или None.
+        self._cache_bufs: dict[str, dict[str, Any]] = {}
+        # Фронты кэш-событий текущего тика: (имя, канал) — приход
+        # кадра в диапазон; (имя, "written"/"erased") — запись/стирание.
+        self._cache_rx_edges: set[tuple[str, int]] = set()
+        self._cache_edges: set[tuple[str, str]] = set()
+        # Каналы, на которых события «Приход DATA КЭШ» ждут каждую
+        # переменную — захват в буфер 1 ведётся только там (камень
+        # «непрерывно анализирует» выбранные каналы — отчёт мастера).
+        # Переменной без такого события — захват на любом канале.
+        self._cache_watch: dict[str, set[int]] = {}
+        # «Программа начала работать»: заголовок → номер тика, когда
+        # программа прошла фазу событий; _program_event_seen —
+        # (программа, событие, имя) → последний обработанный тик,
+        # чтобы один старт не стрелял слушателю дважды.
+        self._tick = 0
+        self._program_started_seq: dict[str, int] = {}
+        self._program_event_seen: dict[tuple[int, int, str], int] = {}
         # «Сработок на DATA» событий-фреймов:
         # (программа, событие) → (last_data, n).
         self._event_fire: dict[tuple[int, int], tuple[bytes | None, int]] = {}
@@ -2922,7 +3327,17 @@ class FlexibleLogicTab(QWidget):
         """Привязывает вкладку «Переменные» — списки имён и описания
         фреймов для исполнения (вызывается окном настроек)."""
         self._variables_tab = variables_tab
+        self._restore_cache_bufs()
         self._refresh_variable_lists()
+
+    def _program_names(self) -> list[str]:
+        """Имена всех программ вкладки — список для события
+        «Программа (имя) начала работать» (отчёт мастера)."""
+        return [
+            str(row._name_edit.text()).strip()
+            for row in self._row_widgets
+            if str(row._name_edit.text()).strip()
+        ]
 
     def _refresh_variable_lists(self) -> None:
         for row in self._row_widgets:
@@ -3174,6 +3589,142 @@ class FlexibleLogicTab(QWidget):
                 )
         return changed
 
+    def _capture_cache_vars(
+        self, frame: dict[str, Any], frame_id: int, data: bytes
+    ) -> None:
+        """«Кэш переменная»: каждый кадр с ID в диапазоне «от–до»
+        переменной перезаписывает её скрытый буфер 1 (всегда ОЗУ —
+        оператор его не видит и не настраивает) — аналог аппаратного
+        «камень непрерывно анализирует приходящие пакеты»
+        (отчёт мастера). Захват ведётся на каналах, выбранных в
+        событиях «Приход DATA КЭШ»; если таких событий нет — на
+        любом канале."""
+        channel = int(frame.get("channel", 1) or 1)
+        extended = bool(frame.get("extended", frame_id > 0x7FF))
+        for var in self._variable_defs():
+            if var.get("type") != "cache":
+                continue
+            name = str(var.get("name", "")).strip()
+            if not name:
+                continue
+            lo = hex_to_int(str(var.get("id_from", "")))
+            hi = hex_to_int(str(var.get("id_to", "")))
+            if lo is None:
+                continue
+            if hi is None:
+                hi = lo
+            if not (lo <= frame_id <= hi):
+                continue
+            if bool(var.get("extended")) != extended:
+                continue
+            watched = self._cache_watch.get(name)
+            if watched is not None and channel not in watched:
+                continue
+            bufs = self._cache_bufs.setdefault(
+                name, {"buf1": None, "buf2": None}
+            )
+            bufs["buf1"] = {
+                "id": frame_id,
+                "data": bytes(data),
+                "extended": extended,
+                "channel": channel,
+            }
+            # Фронт «Приход DATA КЭШ» по каналу + фронт «Записалась» —
+            # запись в привязанный кэш произошла (отчёт мастера).
+            self._cache_rx_edges.add((name, channel))
+            self._cache_edges.add((name, _CACHE_OP_WRITTEN))
+
+    def _cache_buf2_filled(self, name: str) -> bool:
+        """Буфер 2 переменной содержит данные (не пуст и не нули) —
+        условия «Записан/Не записан КЭШ» (отчёт мастера)."""
+        buf = (self._cache_bufs.get(name) or {}).get("buf2")
+        return bool(buf) and any(bytes(buf.get("data", b"")))
+
+    def _run_cachevar_action(
+        self, name: str, action: dict[str, Any]
+    ) -> None:
+        """Действия «Кэш переменная» (отчёт мастера): «Записать КЭШ»
+        — кадр буфера 1 переносится в буфер 2, буфер 1 обнуляется;
+        «Отправить КЭШ» — кадр буфера 2 уходит в CAN1/CAN2 N раз с
+        паузой; «Стереть КЭШ» — буфер 2 обнуляется. Запись/стирание —
+        фронты для событий «Записалась»/«Стирание»."""
+        bufs = self._cache_bufs.setdefault(
+            name, {"buf1": None, "buf2": None}
+        )
+        op = str(action.get("cv_op", _CACHE_OP_COMMIT))
+        if op == _CACHE_OP_COMMIT:
+            bufs["buf2"] = bufs["buf1"]
+            bufs["buf1"] = None
+            self._cache_edges.add((name, _CACHE_OP_WRITTEN))
+            if bufs["buf2"] is None:
+                # Записывать было нечего — буфер 2 фактически обнулился.
+                self._cache_edges.add((name, _CACHE_OP_ERASED))
+            self._persist_cache_bufs()
+            self._fire_aux_events()
+        elif op == _CACHE_OP_SEND:
+            buf = bufs.get("buf2")
+            if not buf:
+                return
+            count = max(1, int(action.get("cv_count", 1) or 1))
+            pause = int(action.get("cv_pause", 0) or 0)
+            channel = int(action.get("cv_channel", 0) or 0) + 1
+            for n in range(count):
+                self._send_frame(
+                    channel, int(buf["id"]),
+                    bytes(buf.get("data", b"")), n * pause,
+                )
+        elif op == _CACHE_OP_ERASE:
+            bufs["buf2"] = None
+            self._cache_edges.add((name, _CACHE_OP_ERASED))
+            self._persist_cache_bufs()
+            self._fire_aux_events()
+
+    def _persist_cache_bufs(self) -> None:
+        """Буфер 2 кэш-переменных с носителем «ПЗУ» сохраняется в
+        общий конфиг — переживает перезапуск приложения и питание
+        (отчёт мастера)."""
+        if self._variables_tab is None:
+            return
+        saved: dict[str, dict[str, Any]] = {}
+        for cfg in self._variables_tab.export_config().get("read") or []:
+            if cfg.get("type") != "cache":
+                continue
+            name = str(cfg.get("name", "")).strip()
+            if not name or cfg.get("storage") != "rom":
+                continue
+            buf = (self._cache_bufs.get(name) or {}).get("buf2")
+            if buf:
+                saved[name] = {
+                    "id": int(buf["id"]),
+                    "data": bytes(buf.get("data", b"")).hex(),
+                    "extended": bool(buf.get("extended")),
+                    "channel": int(buf.get("channel", 0) or 0),
+                }
+        self._config.set("cache_var_bufs", saved)
+
+    def _restore_cache_bufs(self) -> None:
+        """Поднимает сохранённые ПЗУ-буферы 2 кэш-переменных."""
+        if self._variables_tab is None:
+            return
+        for cfg in self._variables_tab.export_config().get("read") or []:
+            if cfg.get("type") != "cache" or cfg.get("storage") != "rom":
+                continue
+            name = str(cfg.get("name", "")).strip()
+            saved = (self._config.get("cache_var_bufs") or {}).get(name)
+            if not name or not isinstance(saved, dict):
+                continue
+            try:
+                data = bytes.fromhex(str(saved.get("data", "")))
+            except ValueError:
+                continue
+            self._cache_bufs.setdefault(name, {"buf1": None, "buf2": None})
+            self._cache_bufs[name]["buf2"] = {
+                "id": int(saved.get("id", 0) or 0),
+                "data": data,
+                "extended": bool(saved.get("extended")),
+                "channel": int(saved.get("channel", 0) or 0),
+            }
+
     @staticmethod
     def _dyn_binding_name(points: Any, raw: int) -> str:
         """Имя привязки «Динамической переменной» по сырому значению
@@ -3196,9 +3747,28 @@ class FlexibleLogicTab(QWidget):
         (отчёт мастера)."""
         self._internal_rules = []
         self._rule_counters = [0] * len(self._runtime_rules)
+        # Каналы захвата «Кэш переменных»: событие «Приход DATA КЭШ»
+        # выбирает CAN1/CAN2 — буфер 1 пополняется только на нём
+        # (отчёт мастера).
+        self._cache_watch = {}
         for rule_index, rule in enumerate(self._runtime_rules):
             if not rule.get("active", False):
                 continue
+            events = rule.get("events")
+            if not isinstance(events, list) or not events:
+                events = [rule.get("event") or {}]
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                if (
+                    event.get("type") == _EVENT_CACHEVAR
+                    and event.get("cache_op", _CACHE_OP_RX) == _CACHE_OP_RX
+                ):
+                    name = str(event.get("var", "")).strip()
+                    if name:
+                        self._cache_watch.setdefault(name, set()).add(
+                            int(event.get("channel", 1) or 1)
+                        )
             self._internal_rules.append({"index": rule_index, "rule": rule})
 
     def _bump_rule_counter(self, rule_index: int) -> None:
@@ -3283,6 +3853,17 @@ class FlexibleLogicTab(QWidget):
             # ОЗУ/ПЗУ (отчёт мастера).
             state = self._flag_states.get(str(cond.get("var", "")).strip(), 0)
             return state == int(cond.get("state", 1))
+        if ctype == _COND_CACHEVAR:
+            # «Записан/Не записан КЭШ» — по содержимому буфера 2
+            # переменной (отчёт мастера).
+            name = str(cond.get("var", "")).strip()
+            filled = self._cache_buf2_filled(name)
+            return (
+                filled
+                if str(cond.get("cache_op", _CACHE_OP_FILLED))
+                == _CACHE_OP_FILLED
+                else not filled
+            )
         return True  # «Нет» — не блокирует.
 
     def _update_cache(self, rule_index: int, action: dict[str, Any], frame: dict[str, Any]) -> None:
@@ -3636,6 +4217,14 @@ class FlexibleLogicTab(QWidget):
                         channel, cached["id"], cached["data"], delay * (n + 1)
                     )
 
+        # 5. «Кэш переменная»: Записать (буфер 1 → буфер 2) /
+        #    Отправить (буфер 2 → CAN) / Стереть (буфер 2 = 0)
+        #    (отчёт мастера).
+        if action.get("cv_op"):
+            cv_name = str(action.get("cachevar", "")).strip()
+            if cv_name:
+                self._run_cachevar_action(cv_name, action)
+
     def _set_flag(
         self, name: str, value: int, pulse_ms: int = 0
     ) -> None:
@@ -3700,6 +4289,11 @@ class FlexibleLogicTab(QWidget):
             self._build_internal_rules()
             self._rules_dirty = False
         self._restore_flag_states()
+        # Отдельный тик: повторное «включение устройства» (реконнект)
+        # должно заново стартовать слушателей «Программа начала
+        # работать» — иначе seq совпал бы с прошлым и событие
+        # отфильтровалось как уже увиденное.
+        self._tick += 1
         dummy_frame = {"id": 0, "channel": 0, "data": b"", "extended": False}
         for internal in self._internal_rules:
             rule_index = internal["index"]
@@ -3711,6 +4305,12 @@ class FlexibleLogicTab(QWidget):
                 e.get("type") == _EVENT_POWER for e in events
             ):
                 continue
+            title = str(rule.get("title", "")).strip()
+            if title:
+                # «Включение устройства» — событие прошло, программа
+                # перешла к условиям: фиксируем для событий
+                # «Программа начала работать» (отчёт мастера).
+                self._program_started_seq[title] = self._tick
             conditions = rule.get("conditions")
             if not isinstance(conditions, list) or not conditions:
                 conditions = [rule.get("condition") or {}]
@@ -3747,6 +4347,10 @@ class FlexibleLogicTab(QWidget):
         if self._rules_dirty:
             self._build_internal_rules()
             self._rules_dirty = False
+        # Отдельный тик: два подряд старта одной программы между
+        # кадрами должны оба доходить до слушателей «Программа
+        # начала работать».
+        self._tick += 1
         dummy_frame = {"id": 0, "channel": 0, "data": b"", "extended": False}
         # События-прерыватели отложенных действий реагируют и на
         # смену состояний (доп. каналы, биты «Переменная»).
@@ -3762,7 +4366,20 @@ class FlexibleLogicTab(QWidget):
                 conditions = [rule.get("condition") or {}]
             fired = False
             for sub_index, event in enumerate(events):
-                if event.get("type") in (_EVENT_AUX, _EVENT_FLAG) and self._event_fired(
+                etype = event.get("type")
+                # Здесь проходят только события-фронты состояний:
+                # доп. каналы, биты «Переменная», запись/стирание
+                # кэш-переменных и старт программ (отчёт мастера).
+                # «Приход DATA КЭШ» и кадровые события привязаны к
+                # реальному кадру — здесь не проверяются.
+                if etype == _EVENT_CACHEVAR:
+                    if event.get("cache_op") not in (
+                        _CACHE_OP_WRITTEN, _CACHE_OP_ERASED
+                    ):
+                        continue
+                elif etype not in (_EVENT_AUX, _EVENT_FLAG, _EVENT_PROGRAM):
+                    continue
+                if self._event_fired(
                     rule_index, sub_index, event, dummy_frame,
                     b"", {},
                 ):
@@ -3770,6 +4387,9 @@ class FlexibleLogicTab(QWidget):
                     break
             if not fired:
                 continue
+            title = str(rule.get("title", "")).strip()
+            if title:
+                self._program_started_seq[title] = self._tick
             if not all(
                 self._condition_passed(cond) for cond in conditions
             ):
@@ -3878,6 +4498,40 @@ class FlexibleLogicTab(QWidget):
             fired = flag and not self._aux_flags.get(key, False)
             self._aux_flags[key] = flag
             return fired
+        if etype == _EVENT_CACHEVAR:
+            # «Кэш переменная» (отчёт мастера): фронты — приход кадра
+            # в диапазон на выбранном канале / запись в привязанный
+            # кэш / обнуление привязанного буфера.
+            name = str(event.get("var", "")).strip()
+            if not name:
+                return False
+            op = str(event.get("cache_op", _CACHE_OP_RX))
+            if op == _CACHE_OP_RX:
+                channel = int(event.get("channel", 1) or 1)
+                return (name, channel) in self._cache_rx_edges
+            return (name, op) in self._cache_edges
+        if etype == _EVENT_PROGRAM:
+            # «Программа (имя) начала работать»: целевая программа
+            # прошла фазу событий на этом или прошлом тике — каждый
+            # её старт доезжает до слушателя ровно один раз
+            # (отчёт мастера). Сама себя программа не слушает.
+            prog = str(event.get("var", "")).strip()
+            if not prog:
+                return False
+            if 0 <= rule_index < len(self._runtime_rules):
+                own = str(
+                    self._runtime_rules[rule_index].get("title", "")
+                ).strip()
+                if own and own == prog:
+                    return False
+            seq = self._program_started_seq.get(prog)
+            if seq is None:
+                return False
+            key = (rule_index, sub_index, prog)
+            if self._program_event_seen.get(key, -1) >= seq:
+                return False
+            self._program_event_seen[key] = seq
+            return True
         return False
 
     def process_frame(self, frame: dict[str, Any]) -> None:
@@ -3898,9 +4552,22 @@ class FlexibleLogicTab(QWidget):
         frame_id = int(frame["id"])
         frame_data = self._pad_8(bytes(frame["data"]))
 
+        # Новый тик рантайма: фронты кэш-событий прошлого кадра
+        # отработаны, список «программа начала работать» начинаем
+        # заново (слушатели видят старт на этом же кадре; программа,
+        # стоящая РАНЬШЕ целевой в списке, ловит старт на следующем
+        # кадре через _program_event_seen — без двойных срабатываний).
+        self._tick += 1
+        self._cache_rx_edges.clear()
+        self._cache_edges.clear()
+
         # Сначала состояние переменных — от него зависят и события,
         # и условия ПРИ.
         changed_static = self._update_variable_states(frame_id, frame_data)
+        # Буфер 1 «Кэш переменных» — непрерывный захват кадров
+        # диапазона, независимо от срабатывания программ
+        # (отчёт мастера).
+        self._capture_cache_vars(frame, frame_id, frame_data)
         # События-прерыватели отложенных действий («Прервать если» —
         # отчёт мастера) реагируют на этот кадр и смену состояний.
         self._check_pending_aborts(frame, frame_data, changed_static)
@@ -3943,6 +4610,13 @@ class FlexibleLogicTab(QWidget):
 
             if not fired:
                 continue
+            # Программа перешла из «Событий» к «Условиям» — фиксируем
+            # для событий «Программа (имя) начала работать»
+            # (отчёт мастера). До проверки условий — переход уже
+            # состоялся независимо от их результата.
+            title = str(rule.get("title", "")).strip()
+            if title:
+                self._program_started_seq[title] = self._tick
             # Несколько условий объединены по И: должны
             # выполняться все (отчёт мастера).
             if not all(

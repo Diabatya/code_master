@@ -1161,11 +1161,41 @@ class SettingsWindow(QMainWindow):
                     exc,
                 )
             self._mark_clean()
+        # Версия ПО (VER1) могла не успеть добраться быстрым зондом при
+        # подключении — добираем здесь через надёжный request_control:
+        # именно этот путь «лечил» карточку после захода в настройки
+        # (отчёт мастера), теперь срабатывает и при авто-вычитке.
+        if not self._config.get("device_fw_version"):
+            try:
+                self._fetch_device_fw_version()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("CFG_READ при вычитке не дал версию: %s", exc)
         # PC-исполняемые триггеры «сработка после старта устройства»
         # стреляют один раз на подключение — ПОСЛЕ вычитки, чтобы флаги
         # device_managed уже отражали реальное распределение (иначе ПК
         # продублировал бы ответ, который шлёт сам МК).
         self._trigger_tab.on_device_session_started()
+
+    def _fetch_device_fw_version(self) -> None:
+        """Добирает имя/серийник/версию ПО через CMD_CFG_READ
+        (нормальная сессия с логированием — в отличие от сырого зонда
+        при подключении)."""
+        from core.serial_manager import _parse_cfg_read_payload
+
+        from core.can_protocol import CMD_CFG_READ
+
+        resp = self._serial_manager.request_control(CMD_CFG_READ)
+        name, serial, fw_ver = _parse_cfg_read_payload(resp)
+        bulk: dict[str, object] = {}
+        if fw_ver:
+            bulk["device_fw_version"] = fw_ver
+        if name and not self._config.get("device_name"):
+            bulk["device_name"] = name
+        if serial and not self._config.get("device_serial"):
+            bulk["device_serial"] = serial
+            bulk["serial_number"] = serial
+        if bulk:
+            self._config.set_bulk(bulk)
 
     def showEvent(self, event) -> None:  # noqa: N802
         """При показе окна обновляет только лейблы имени/серийника.
@@ -1718,6 +1748,18 @@ class SettingsWindow(QMainWindow):
             payload, file_name, file_serial = unpack_config_file(Path(path).read_bytes())
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось загрузить: {0}").format(exc))
+            return
+
+        # Файл переменных («Config Variable») в том же KMCFG-контейнере,
+        # но с другим kind — отдаём вкладке «Переменные», иначе payload
+        # ушёл бы в Config программы и потерялся.
+        if payload.get("kind") == "codemaster_config_info":
+            if not self._variables_tab.load_payload(payload):
+                QMessageBox.warning(
+                    self, tr("Конфигурация"),
+                    tr("Это файл переменных — загрузите его кнопкой "
+                       "«Загрузить переменные»."),
+                )
             return
 
         # Сверяем файл с подключённым устройством только по типу

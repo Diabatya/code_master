@@ -75,11 +75,17 @@ static uint8_t crc8(const uint8_t *data, uint32_t len)
 
 static uint32_t crc32_of(const uint8_t *data, uint32_t len)
 {
+  /* Совместим с zlib.crc32 (CRC-32/ISO-HDLC): рефлективный полином
+   * 0xEDB88320, init/xorout 0xFFFFFFFF — ПК считает именно им.
+   * Раньше здесь был MSB-first вариант (полином 0x04C11DB7): COMMIT
+   * отклонялся статусом 0x02, заголовок области не записывался —
+   * payload лежал на Flash, но область была невидима (отчёт мастера:
+   * переменные «сохранены», после перезапуска не читаются). */
   uint32_t crc = 0xFFFFFFFFUL;
   for (uint32_t i = 0; i < len; i++) {
     crc ^= data[i];
     for (uint8_t bit = 0; bit < 8U; bit++) {
-      crc = (crc & 0x80000000UL) ? (crc << 1) ^ 0x04C11DB7UL : crc << 1;
+      crc = (crc & 1U) ? (crc >> 1) ^ 0xEDB88320UL : crc >> 1;
     }
   }
   return crc ^ 0xFFFFFFFFUL;

@@ -76,7 +76,12 @@ from PySide6.QtWidgets import (
 )
 
 from core.can_protocol import pack_can_frame
-from models.config import CONFIG_FILE_MAGIC, Config
+from models.config import (
+    CONFIG_FILE_MAGIC,
+    Config,
+    pack_config_file,
+    unpack_config_file,
+)
 from models.id_notes import IdNotes
 from models.translations import _ as tr
 from models.utils import (
@@ -92,6 +97,7 @@ _TYPE_STATIC = "static"
 _TYPE_DYNAMIC = "dynamic"      # «Численная переменная» (переименована)
 _TYPE_DYNCACHE = "dyn_cache"   # новый вид «Динамическая переменная»
 _TYPE_IMPULSE = "impulse"      # «Импульсная переменная» — вспышка 0.5 с
+_TYPE_CACHE = "cache"          # «Кэш переменная» — буферы 1 (ОЗУ) и 2 (ОЗУ/ПЗУ)
 # «Управление» больше не содержит видов переменных — только команды
 # и папки/подпапки для их группировки (отчёт мастера).
 _TYPE_COMMAND = "command"
@@ -117,7 +123,7 @@ def _tokens_match(tokens: list[str], data: bytes) -> bool:
 # ВНУТРИ файла, имя свободное.
 _CONFIG_INFO_KIND = "codemaster_config_info"
 _CONFIG_INFO_VERSION = 2
-_CONFIG_INFO_NAME = "Config Variable.json"
+_CONFIG_INFO_NAME = "Config Variable.kmc"
 
 
 def _config_info_dir() -> str:
@@ -1472,6 +1478,139 @@ class _ImpulsePage(QWidget):
         _text_to_data(self.data, config.get("data"))
 
 
+class _CachePage(QWidget):
+    """Страница «Кэш переменная» (отчёт мастера): диапазон
+    CAN-идентификаторов «от»–«до». Камень непрерывно ловит кадры из
+    диапазона в скрытый буфер 1 (всегда ОЗУ — оператор его не видит
+    и не настраивает); действие ГЛ «Записать КЭШ» переносит кадр в
+    буфер 2 — носитель буфера 2 выбирается в шапке (ОЗУ/ПЗУ).
+    Онлайн-строка показывает DATA последнего кадра диапазона, как
+    только введён ID."""
+
+    def __init__(
+        self,
+        font: QFont,
+        get_tab,
+        get_row=None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._get_tab = get_tab
+        self._get_row = get_row
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        hint = QLabel(tr(
+            "Диапазон ID «от–до»: каждый кадр с ID в этих пределах "
+            "автоматически записывается в буфер 1 (ОЗУ, скрытый — "
+            "он не настраивается). Действие Гибкой логики «Записать "
+            "КЭШ» переносит кадр из буфера 1 в буфер 2 и обнуляет "
+            "буфер 1; носитель буфера 2 выбирается выше (ОЗУ/ПЗУ). "
+            "Имя переменной используется в Гибкой логике."
+        ))
+        hint.setFont(font)
+        hint.setWordWrap(True)
+        _selectable(hint)
+        layout.addWidget(hint)
+
+        line1 = QHBoxLayout()
+        line1.addWidget(QLabel(tr("ID от:")))
+        self.id_from = _HexIdEdit(font, "0C0")
+        line1.addWidget(self.id_from)
+        line1.addWidget(QLabel(tr("до:")))
+        self.id_to = _HexIdEdit(font, "0CF")
+        line1.addWidget(self.id_to)
+        self.bit = QComboBox()
+        self.bit.setFont(font)
+        self.bit.addItem(tr("11 бит"), False)
+        self.bit.addItem(tr("29 бит"), True)
+        self.bit.setFixedWidth(92)
+        self.bit.setToolTip(tr("Разрядность CAN-идентификатора"))
+        line1.addWidget(self.bit)
+        line1.addStretch()
+        layout.addLayout(line1)
+
+        # Онлайн-DATA последнего кадра из диапазона «от–до»
+        # (отчёт мастера: «при вводе id выводи онлайн поле data»).
+        self.live_id_label = QLabel("—")
+        self.live_id_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        self.live_id_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.live_id_label.setStyleSheet(
+            "color: #7C9EFF; border: 1px solid #45455A;"
+            " border-radius: 6px; padding: 2px 8px;"
+        )
+        self.live_id_label.setToolTip(
+            tr("ID последнего кадра из диапазона на шине")
+        )
+        _selectable(self.live_id_label)
+        self.live_data_label = QLabel("—")
+        self.live_data_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        self.live_data_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.live_data_label.setStyleSheet(
+            "color: #4CAF50; border: 1px solid #45455A;"
+            " border-radius: 6px; padding: 2px 10px;"
+        )
+        self.live_data_label.setToolTip(
+            tr("Онлайн-данные последнего кадра из диапазона на шине")
+        )
+        _selectable(self.live_data_label)
+        live_row = QHBoxLayout()
+        live_row.addStretch()
+        live_row.addWidget(self.live_id_label)
+        live_row.addWidget(self.live_data_label)
+        live_row.addWidget(
+            _clipboard_buttons(self.live_data_label, font, None)
+        )
+        live_row.addStretch()
+        layout.addLayout(live_row)
+        layout.addStretch(1)
+
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(100)
+        self._live_timer.timeout.connect(self._update_live_label)
+        self._live_timer.start()
+        self.id_from.textChanged.connect(self._update_live_label)
+        self.id_to.textChanged.connect(self._update_live_label)
+        self.bit.currentIndexChanged.connect(self._update_live_label)
+
+    def _update_live_label(self, *_args) -> None:
+        tab = self._get_tab() if self._get_tab is not None else None
+        lo = hex_to_int(self.id_from.text())
+        hi = hex_to_int(self.id_to.text())
+        if hi is None:
+            hi = lo
+        hit = (
+            None
+            if lo is None or hi is None or tab is None
+            else tab.live_frame_range(
+                lo, hi, bool(self.bit.currentData())
+            )
+        )
+        if hit is None:
+            self.live_id_label.setText("—")
+            self.live_data_label.setText("—")
+            return
+        fid, data = hit
+        self.live_id_label.setText(f"{fid:X}")
+        self.live_data_label.setText(
+            " ".join(f"{b:02X}" for b in data)
+        )
+
+    def read(self) -> dict[str, Any]:
+        return {
+            "id_from": self.id_from.text().strip(),
+            "id_to": self.id_to.text().strip(),
+            "extended": bool(self.bit.currentData()),
+        }
+
+    def write(self, config: dict[str, Any]) -> None:
+        self.id_from.setText(str(config.get("id_from", "")))
+        self.id_to.setText(str(config.get("id_to", "")))
+        self.bit.setCurrentIndex(1 if config.get("extended") else 0)
+        self._update_live_label()
+
+
 def _legacy_to_command(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     """Переводит переменную «Управления» старого формата (статическая/
     численная/динамическая/импульсная) в команду(ы) нового вида
@@ -1911,6 +2050,10 @@ class VariableDialog(QDialog):
         self._type_combo.addItem(tr("Численная переменная"), _TYPE_DYNAMIC)
         self._type_combo.addItem(tr("Динамическая переменная"), _TYPE_DYNCACHE)
         self._type_combo.addItem(tr("Импульсная переменная"), _TYPE_IMPULSE)
+        # «Кэш переменная» — диапазон ID, два буфера (скрытый ОЗУ +
+        # операторский ОЗУ/ПЗУ), события/условия/действия в ГЛ
+        # (отчёт мастера).
+        self._type_combo.addItem(tr("Кэш переменная"), _TYPE_CACHE)
         self._type_combo.currentIndexChanged.connect(self._on_type_changed)
         head.addWidget(self._type_combo)
         head.addSpacing(16)
@@ -1982,10 +2125,14 @@ class VariableDialog(QDialog):
         self._impulse_page = _ImpulsePage(
             font, get_tab=lambda: self._var_tab, get_row=lambda: self._row
         )
+        self._cache_page = _CachePage(
+            font, get_tab=lambda: self._var_tab, get_row=lambda: self._row
+        )
         self._stack.addWidget(self._static_page)
         self._stack.addWidget(self._num_page)
         self._stack.addWidget(self._dyn_page)
         self._stack.addWidget(self._impulse_page)
+        self._stack.addWidget(self._cache_page)
         layout.addWidget(self._stack, 1)
 
         buttons = QDialogButtonBox(
@@ -2099,6 +2246,10 @@ class VariableDialog(QDialog):
                 tr("{0} Байт").format(count)
             )
             return
+        if self._type_combo.currentData() == _TYPE_CACHE:
+            # Буфер 2 держит целый кадр — 8 байт + служебные поля.
+            self._storage_size_label.setText(tr("Буфер 2: 8 Байт"))
+            return
         page = self._active_value_page()
         if page is None:
             self._storage_size_label.setText("")
@@ -2117,6 +2268,7 @@ class VariableDialog(QDialog):
             tr("например, «Обороты ДВС»") if index == 1
             else tr("например, «Состояние АКПП»") if index == 2
             else tr("например, «Нажатие кнопки»") if index == 3
+            else tr("например, «Кэш пакетов»") if index == 4
             else tr("например, «Дверь водителя»")
         )
         self._name_edit.setPlaceholderText(example)
@@ -2138,11 +2290,25 @@ class VariableDialog(QDialog):
         # на 0.5 с, а не состояние) — весь выбор носителя скрывается,
         # а не просто «Не хранить» (отчёт мастера).
         is_impulse = index == 3
+        # «Кэш переменная»: выбор ОЗУ/ПЗУ остаётся — он задаёт носитель
+        # БУФЕРА 2 (буфер 1 всегда ОЗУ и оператором не настраивается);
+        # галочка «в бит/в байт» здесь не применима (отчёт мастера).
+        is_cache = index == 4
         for widget in (
-            self._storage_label, self._cache_bit_check,
+            self._storage_label,
             self._ram_radio, self._rom_radio,
         ):
             widget.setVisible(not is_impulse)
+        self._cache_bit_check.setVisible(not is_impulse and not is_cache)
+        if is_cache:
+            # Радио-кнопки были заблокированы снятой галочкой —
+            # для кэш-переменной носитель выбирается напрямую.
+            self._ram_radio.setEnabled(True)
+            self._rom_radio.setEnabled(True)
+        else:
+            enabled = self._cache_bit_check.isChecked()
+            self._ram_radio.setEnabled(enabled)
+            self._rom_radio.setEnabled(enabled)
         # «Не хранить» был виден только у импульсной — теперь у неё
         # скрыта вся группа носителя, этот вариант больше нигде не нужен.
         self._none_radio.setVisible(False)
@@ -2164,6 +2330,8 @@ class VariableDialog(QDialog):
             idx = 2
         elif var_type == _TYPE_IMPULSE:
             idx = 3
+        elif var_type == _TYPE_CACHE:
+            idx = 4
         else:
             var_type = _TYPE_DYNAMIC
             idx = 1
@@ -2176,6 +2344,8 @@ class VariableDialog(QDialog):
                 self._add_frame_row(None)
         elif var_type == _TYPE_IMPULSE:
             self._impulse_page.write(config)
+        elif var_type == _TYPE_CACHE:
+            self._cache_page.write(config)
         else:
             page = self._num_page if var_type == _TYPE_DYNAMIC else self._dyn_page
             page.write(config)
@@ -2190,6 +2360,27 @@ class VariableDialog(QDialog):
                 errors.append(tr("ID — шестнадцатеричное число"))
             if not self._impulse_page.bytes_used():
                 errors.append(tr("DATA — заполните хотя бы один байт"))
+            if errors:
+                QMessageBox.warning(
+                    self,
+                    tr("Проверка переменной"),
+                    tr("Исправьте поля: {0}").format(", ".join(errors)),
+                )
+                return
+            self.accept()
+            return
+        if self._type_combo.currentData() == _TYPE_CACHE:
+            # «Кэш переменная»: оба конца диапазона — валидные HEX-ID,
+            # «от» не больше «до» (пустое «до» = одно значение «от»).
+            errors = []
+            lo = hex_to_int(self._cache_page.id_from.text())
+            hi = hex_to_int(self._cache_page.id_to.text())
+            if lo is None:
+                errors.append(tr("ID от — шестнадцатеричное число"))
+            if self._cache_page.id_to.text().strip() and hi is None:
+                errors.append(tr("ID до — шестнадцатеричное число"))
+            if lo is not None and hi is not None and lo > hi:
+                errors.append(tr("ID «от» больше ID «до»"))
             if errors:
                 QMessageBox.warning(
                     self,
@@ -2247,6 +2438,11 @@ class VariableDialog(QDialog):
             base.update(
                 {"type": _TYPE_IMPULSE},
                 **self._impulse_page.read(),
+            )
+        elif var_type == _TYPE_CACHE:
+            base.update(
+                {"type": _TYPE_CACHE},
+                **self._cache_page.read(),
             )
         else:
             base.update(
@@ -2600,6 +2796,19 @@ class _VariableRow(QFrame):
                 ).rstrip(" ·")
             )
             return
+        if cfg_type == _TYPE_CACHE:
+            # «Кэш переменная»: метка диапазона + носитель буфера 2
+            # (буфер 1 — скрытый ОЗУ, оператору не показывается).
+            lo = str(self.config.get("id_from", "")).strip() or "—"
+            hi = str(self.config.get("id_to", "")).strip() or lo
+            storage = self.config.get("storage", "ram")
+            self._state_label.setText(
+                tr("КЭШ {0}–{1} · {2}").format(
+                    lo, hi,
+                    tr("ОЗУ") if storage == "ram" else tr("ПЗУ"),
+                )
+            )
+            return
         self._state_label.setText(
             "0.00"
             if cfg_type in (_TYPE_DYNAMIC, _TYPE_DYNCACHE)
@@ -2744,7 +2953,7 @@ class _VarColumn(QWidget):
     # (отчёт мастера).
     _TYPE_ORDER = {
         _TYPE_STATIC: 0, _TYPE_DYNAMIC: 1,
-        _TYPE_DYNCACHE: 2, _TYPE_IMPULSE: 3,
+        _TYPE_DYNCACHE: 2, _TYPE_IMPULSE: 3, _TYPE_CACHE: 4,
     }
 
     def sort_rows(self) -> None:
@@ -2790,8 +2999,11 @@ class VariablesTab(QWidget):
         self._config = Config()
         self._serial_manager = serial_manager
         # Последний кадр по каждому ID на шине — онлайн-строки DATA
-        # в таблицах настройки переменных (отчёт мастера).
-        self._last_frames: dict[int, tuple[bool, bytes]] = {}
+        # в таблицах настройки переменных (отчёт мастера). Третий
+        # элемент — глобальный номер кадра для «последний в
+        # диапазоне» (Кэш переменная).
+        self._last_frames: dict[int, tuple[bool, bytes, int]] = {}
+        self._frame_seq = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -2887,7 +3099,11 @@ class VariablesTab(QWidget):
                 continue
             data = bytes(frame.get("data", b""))
             ext = bool(frame.get("extended", False))
-            self._last_frames[fid] = (ext, data)
+            # Глобальный номер кадра хранится в записи — для поиска
+            # ПОСЛЕДНЕГО кадра диапазона «Кэш переменной»
+            # (live_frame_range); seq пачки между вызовами не монотонен.
+            self._frame_seq += 1
+            self._last_frames[fid] = (ext, data, self._frame_seq)
             latest[(fid, ext)] = (seq, data)
         if not latest:
             return
@@ -2941,6 +3157,29 @@ class VariablesTab(QWidget):
                         str(cfg.get("data", "")).split(), hit[1]
                     ):
                         row.pulse()
+                    continue
+                if var_type == _TYPE_CACHE:
+                    # «Кэш переменная»: в строке — DATA последнего
+                    # кадра из диапазона ID «от–до» (отчёт мастера).
+                    lo = hex_to_int(str(cfg.get("id_from", "")))
+                    hi = hex_to_int(str(cfg.get("id_to", "")))
+                    if lo is None:
+                        continue
+                    if hi is None:
+                        hi = lo
+                    best_seq = -1
+                    best_data: bytes | None = None
+                    for (fid, _ext), (seq, data) in latest.items():
+                        if lo <= fid <= hi and seq > best_seq:
+                            best_seq = seq
+                            best_data = data
+                    if best_data is not None:
+                        row.set_live_value(
+                            0.0,
+                            text=" ".join(
+                                f"{b:02X}" for b in best_data[:8]
+                            ),
+                        )
                     continue
                 if var_type not in (_TYPE_DYNAMIC, _TYPE_DYNCACHE):
                     continue
@@ -3019,6 +3258,25 @@ class VariablesTab(QWidget):
         if entry is None:
             return None
         return entry[1]
+
+    def live_frame_range(
+        self, lo: int, hi: int, extended: bool = False
+    ) -> tuple[int, bytes] | None:
+        """Последний кадр на шине с ID в диапазоне [lo; hi] —
+        онлайн-строка «Кэш переменной» (отчёт мастера: «при вводе id
+        выводи онлайн поле data»). Разрядность фильтрует только когда
+        у записи она реально совпадает — иначе кадр есть, а DATA пустая
+        (та же логика, что у live_frame)."""
+        best: tuple[int, int, bytes] | None = None  # (seq, fid, data)
+        for fid, entry in self._last_frames.items():
+            if not (lo <= fid <= hi):
+                continue
+            ext, data, seq = entry
+            if best is None or seq > best[0]:
+                best = (seq, fid, data)
+        if best is None:
+            return None
+        return best[1], best[2]
 
     # ---- списки переменных для Гибкой логики -------------------------
 
@@ -3200,7 +3458,7 @@ class VariablesTab(QWidget):
             self,
             tr("Сохранить переменные"),
             f"{start_dir}/{self._file_prefix()}{_CONFIG_INFO_NAME}",
-            "Config Variable (*.json)",
+            "Config Variable (*.kmc)",
         )
         if not path:
             return
@@ -3213,10 +3471,19 @@ class VariablesTab(QWidget):
             "variables": self.export_config(),
             "id_notes": IdNotes().export_all(),
         }
+        # Файл переменных — тот же бинарный контейнер KMCFG, что и
+        # общий конфиг программы: идентичность в заголовке + CRC32
+        # (отчёт мастера: «файлы обеих конфигураций должны быть в
+        # формате BIN»).
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=1)
-        except OSError as exc:
+            raw = pack_config_file(
+                payload,
+                str(payload.get("device_name")
+                    or payload.get("device_type_name") or ""),
+                str(payload.get("device_serial") or ""),
+            )
+            Path(path).write_bytes(raw)
+        except (OSError, ValueError) as exc:
             QMessageBox.warning(
                 self, tr("Ошибка"), tr("Не удалось сохранить файл: {0}")
                 .format(exc)
@@ -3233,7 +3500,7 @@ class VariablesTab(QWidget):
             self,
             tr("Загрузить переменные"),
             start_dir,
-            "Config Variable (*.json);;" + tr("Все файлы (*)"),
+            "Config Variable (*.kmc *.json);;" + tr("Все файлы (*)"),
         )
         if not path:
             return
@@ -3247,15 +3514,27 @@ class VariablesTab(QWidget):
             )
             return
         # Верификация вида конфига по СОДЕРЖИМОМУ, не по имени файла:
-        # бинарный .kmc или JSON с ключами программы → это «Config
-        # Program», отдаём общей загрузке (отчёт мастера).
+        # бинарный .kmc распаковываем и смотрим kind payload'а — «Config
+        # Variable» (codemaster_config_info) принимаем, «Config Program»
+        # отдаём общей загрузке окна настроек (отчёт мастера).
         if raw.startswith(CONFIG_FILE_MAGIC):
-            self._route_program_file(path)
-            return
-        try:
-            payload: Any = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            payload = None
+            try:
+                payload, _name, _serial = unpack_config_file(raw)
+            except (ValueError, KeyError, UnicodeDecodeError,
+                    json.JSONDecodeError) as exc:
+                QMessageBox.warning(
+                    self, tr("Config Variable"),
+                    tr("Файл повреждён: {0}").format(exc),
+                )
+                return
+            if payload.get("kind") != _CONFIG_INFO_KIND:
+                self._route_program_file(path)
+                return
+        else:
+            try:
+                payload: Any = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                payload = None
         if (
             isinstance(payload, dict)
             and payload.get("kind") != _CONFIG_INFO_KIND
@@ -3265,18 +3544,28 @@ class VariablesTab(QWidget):
             return
         # Чужой формат / битый файл / несовместимая версия — только
         # предупреждение, приложение продолжает работать.
+        if not self.load_payload(payload, warn_format=True):
+            return
+
+    def load_payload(self, payload: Any, warn_format: bool = False) -> bool:
+        """Прогружает payload файла «Config Variable» (общий код
+        проверок kind/format/устройства). Вызывается и из загрузчика
+        общего конфига, когда оператор подал этот файл в «Загрузить
+        конфигурацию» — иначе payload переменных ушёл бы в Config
+        программы и потерялся."""
         if (
             not isinstance(payload, dict)
             or payload.get("kind") != _CONFIG_INFO_KIND
             or payload.get("format") not in (1, _CONFIG_INFO_VERSION)
         ):
-            QMessageBox.warning(
-                self,
-                tr("Config Variable"),
-                tr("Файл не является конфигурацией переменных или "
-                   "несовместим с версией приложения"),
-            )
-            return
+            if warn_format:
+                QMessageBox.warning(
+                    self,
+                    tr("Config Variable"),
+                    tr("Файл не является конфигурацией переменных или "
+                       "несовместим с версией приложения"),
+                )
+            return False
         # Верификация устройства: конфиг чужого МК не прогружаем.
         if not self._device_matches(payload):
             QMessageBox.warning(
@@ -3285,7 +3574,7 @@ class VariablesTab(QWidget):
                 tr("Файл записан для другого устройства — "
                    "загрузка отменена"),
             )
-            return
+            return False
         variables = payload.get("variables") or {}
         if isinstance(variables, dict):
             self.import_config(variables)
@@ -3293,6 +3582,7 @@ class VariablesTab(QWidget):
         if isinstance(notes, dict):
             IdNotes().import_all(notes)
         self.loaded.emit()
+        return True
 
     def retranslate_ui(self) -> None:
         self._title.setText(tr("Переменные"))

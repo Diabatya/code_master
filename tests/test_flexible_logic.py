@@ -186,3 +186,191 @@ def test_aux_event_fires_on_state_change(tab) -> None:
     tab._aux_states[1] = 1
     tab._fire_aux_events()  # канал включился — фронт
     assert sent, "событие «Доп канал активен» не сработало"
+
+
+class _FakeVariablesTab:
+    """Стаб вкладки «Переменные» для кэш-переменных — только то,
+    что читает рантайм ГЛ (export_config/set_flag_live)."""
+
+    def __init__(self, read: list[dict[str, Any]] | None = None) -> None:
+        self._read = read or []
+
+    def export_config(self) -> dict[str, Any]:
+        return {"read": self._read, "control": [], "aux": []}
+
+    def variable_names(
+        self, column: str, var_type: Any = None
+    ) -> list[str]:
+        data = self.export_config()
+        names = []
+        for cfg in data.get(column) or []:
+            if var_type is None or cfg.get("type") == var_type:
+                names.append(str(cfg.get("name", "")).strip())
+        return names
+
+    def set_flag_live(self, _name: str, _value: int) -> None:
+        pass
+
+
+_CACHE_VAR = {
+    "type": "cache", "name": "КЭШ1",
+    "id_from": "100", "id_to": "1FF",
+    "extended": False, "storage": "ram",
+}
+
+
+def _rx_frame(can_id: int = 0x150, channel: int = 1,
+              data: bytes = b"\x11\x22") -> dict[str, Any]:
+    return {"id": can_id, "channel": channel, "data": data,
+            "extended": False, "rtr": False}
+
+
+def test_cache_var_capture_and_events(tab) -> None:
+    """«Кэш переменная»: кадр из диапазона ID «от–до» пишется в
+    буфер 1 (ОЗУ) и ставит фронты «Приход DATA КЭШ»/«Записалась»;
+    вне диапазона или на невыбранном канале — тишина."""
+    sent: list[bytes] = []
+    tab._serial_manager.send_data = sent.append
+    tab._variables_tab = _FakeVariablesTab([_CACHE_VAR])
+    tab.set_config([{
+        "title": "CAP", "active": True,
+        "events": [{
+            "type": "cachevar", "var": "КЭШ1",
+            "cache_op": "rx", "channel": 1,
+        }],
+        "conditions": [{"type": "none"}],
+        "action": {
+            "frame_enabled": True, "channel": 0, "id": "777",
+            "dlc": 1, "data": "AA", "count": 1,
+        },
+    }])
+    # Канал 2 — событие «Приход DATA КЭШ» настроено на CAN1.
+    tab.process_frame(_rx_frame(channel=2))
+    assert sent == []
+    assert not (tab._cache_bufs.get("КЭШ1") or {}).get("buf1"), \
+        "захват ограничен каналами событий «Приход DATA КЭШ»"
+    # Канал 1, ID в диапазоне — захват в буфер 1 + событие.
+    tab.process_frame(_rx_frame(channel=1, data=b"\xAA\xBB"))
+    assert sent, "событие «Приход DATA КЭШ» не сработало"
+    buf1 = tab._cache_bufs["КЭШ1"]["buf1"]
+    assert buf1["id"] == 0x150 and bytes(buf1["data"])[:2] == b"\xAA\xBB"
+    # Следующий кадр диапазона перезаписывает буфер 1.
+    tab.process_frame(_rx_frame(can_id=0x1AB, data=b"\x01"))
+    assert tab._cache_bufs["КЭШ1"]["buf1"]["id"] == 0x1AB
+    # Вне диапазона — буфер 1 не трогаем.
+    tab.process_frame(_rx_frame(can_id=0x300, data=b"\xFF"))
+    assert tab._cache_bufs["КЭШ1"]["buf1"]["id"] == 0x1AB
+
+
+def test_cache_var_commit_condition_erase(tab) -> None:
+    """«Записать КЭШ» переносит буфер 1 → 2 и обнуляет буфер 1;
+    условия «Записан/Не записан КЭШ» читают буфер 2; «Стереть КЭШ»
+    обнуляет буфер 2 и ставит фронт «Стирание»."""
+    tab._variables_tab = _FakeVariablesTab([_CACHE_VAR])
+    tab.set_config([{
+        "title": "W", "active": True,
+        "events": [{
+            "type": "cachevar", "var": "КЭШ1",
+            "cache_op": "rx", "channel": 1,
+        }],
+        "conditions": [{"type": "none"}],
+        "actions": [{
+            "type": "cachevar", "cachevar": "КЭШ1", "cv_op": "commit",
+        }],
+    }])
+    cond_filled = {"type": "cachevar", "var": "КЭШ1",
+                   "cache_op": "filled"}
+    cond_empty = {"type": "cachevar", "var": "КЭШ1",
+                  "cache_op": "empty"}
+    assert tab._condition_passed(cond_empty)
+    assert not tab._condition_passed(cond_filled)
+    # Приход кадра → захват в буфер 1 + действие «Записать КЭШ».
+    tab.process_frame(_rx_frame(data=b"\x55"))
+    assert tab._cache_bufs["КЭШ1"]["buf1"] is None
+    buf2 = tab._cache_bufs["КЭШ1"]["buf2"]
+    assert buf2 is not None and bytes(buf2["data"])[:1] == b"\x55"
+    assert tab._condition_passed(cond_filled)
+    assert not tab._condition_passed(cond_empty)
+    # «Стереть КЭШ» — буфер 2 обнуляется, условия переворачиваются.
+    tab._run_cachevar_action("КЭШ1", {"cv_op": "erase"})
+    assert tab._cache_bufs["КЭШ1"]["buf2"] is None
+    assert tab._condition_passed(cond_empty)
+
+
+def test_cache_var_send_and_schema_roundtrip(tab) -> None:
+    """«Отправить КЭШ» шлёт кадр буфера 2 в выбранный CAN N раз;
+    схемы события/условия/действия «Кэш переменная» переживают
+    set_config → get_config."""
+    sent: list[bytes] = []
+    tab._serial_manager.send_data = sent.append
+    tab._variables_tab = _FakeVariablesTab([_CACHE_VAR])
+    tab._cache_bufs["КЭШ1"] = {
+        "buf1": None,
+        "buf2": {"id": 0x150, "data": b"\xDE\xAD",
+                 "extended": False, "channel": 1},
+    }
+    rule = {
+        "title": "SEND", "active": True,
+        "events": [_frame_event("123")],
+        "conditions": [{
+            "type": "cachevar", "var": "КЭШ1", "cache_op": "filled",
+        }],
+        "actions": [{
+            "type": "cachevar", "cachevar": "КЭШ1",
+            "cv_op": "send", "cv_channel": 1,
+            "cv_count": 3, "cv_pause": 0,
+        }],
+    }
+    tab.set_config([rule])
+    out = tab.get_config()
+    assert out[0]["events"][0]["type"] == "frame"
+    cond = out[0]["conditions"][0]
+    assert cond["type"] == "cachevar" and cond["cache_op"] == "filled"
+    act = out[0]["actions"][0]
+    assert act["type"] == "cachevar" and act["cv_op"] == "send"
+    assert act["cachevar"] == "КЭШ1" and act["cv_count"] == 3
+    tab.process_frame(_rx_frame(can_id=0x123))
+    assert len(sent) == 3, "«Отправить КЭШ» должен отправить 3 кадра"
+
+
+def test_program_started_event(tab) -> None:
+    """Событие «Программа (имя) начала работать»: целевая программа
+    прошла фазу событий → слушатель переходит к своим условиям;
+    программа не слушает саму себя; старт доезжает один раз."""
+    sent: list[bytes] = []
+    tab._serial_manager.send_data = sent.append
+    tab.set_config([
+        {
+            "title": "A", "active": True,
+            "events": [_frame_event("123")],
+            "conditions": [{"type": "none"}],
+            "actions": [],
+        },
+        {
+            "title": "B", "active": True,
+            "events": [{"type": "program", "var": "A"}],
+            "conditions": [{"type": "none"}],
+            "actions": [{
+                "frame_enabled": True, "channel": 0, "id": "777",
+                "dlc": 1, "data": "AA", "count": 1,
+            }],
+        },
+        {
+            # Самослушание запрещено — C слушает C.
+            "title": "C", "active": True,
+            "events": [{"type": "program", "var": "C"}],
+            "conditions": [{"type": "none"}],
+            "actions": [{
+                "frame_enabled": True, "channel": 0, "id": "888",
+                "dlc": 1, "data": "BB", "count": 1,
+            }],
+        },
+    ])
+    tab.process_frame(_rx_frame(can_id=0x123))
+    assert len(sent) == 1, "B должна стартовать на старте A"
+    # Повторный проход по тому же старту не перезапускает B.
+    tab._fire_aux_events()
+    assert len(sent) == 1
+    # Новый старт A — B срабатывает снова.
+    tab.process_frame(_rx_frame(can_id=0x123, data=b"\x99"))
+    assert len(sent) == 2
