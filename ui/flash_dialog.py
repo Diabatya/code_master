@@ -2354,10 +2354,33 @@ class FlashDialog(QDialog):
         self._port_was_open = False
         try:
             logger.info("Восстановление SerialManager после операции")
+            port = self._config.get("port", "")
+            # После CDC-прошивки устройство пере-энумерируется и имя COM
+            # меняется (COM32 → COM34): открытие старого имени падает
+            # FileNotFoundError, а auto_reconnect потом долбит мёртвый
+            # порт (отчёт мастера). Ждём коротко application PID 5740 и
+            # берём РЕАЛЬНЫЙ порт устройства.
+            app_port = Bootloader.find_device_port(
+                Bootloader.USB_VID, Bootloader.USB_APPLICATION_PID, timeout=6.0
+            )
+            if app_port:
+                port = app_port
+                self._config.set("port", port)
+            elif Bootloader.find_device_port(
+                Bootloader.USB_VID, Bootloader.USB_BOOTLOADER_PID
+            ):
+                # Устройство осталось в бутлоадере (прошивка не завершена)
+                # — не открываем его как приложение: карточка честно
+                # покажет «режим прошивки», а реконнект не будет долбить
+                # несуществующий COM.
+                logger.warning(
+                    "Устройство осталось в режиме bootloader — приложение пока недоступно"
+                )
+                return
             # auto_reconnect обязателен: open_port по умолчанию сбрасывает
             # флаг — после флеш-операции обрыв связи не переподключался.
             self._serial_manager.open_port(
-                self._config.get("port", ""),
+                port,
                 self._config.get("baudrate", 115200),
                 emulation=self._config.get("emulation", False),
                 auto_reconnect=True,

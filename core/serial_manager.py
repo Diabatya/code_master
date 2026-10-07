@@ -1717,6 +1717,15 @@ class SerialManager(QObject):
             if alt:
                 logger.info("Устройство пере-энумеровано на другой порт: %s -> %s", port_name, alt)
                 port_name = alt
+            else:
+                # Устройства на шине вообще нет (вышло в bootloader,
+                # выдернуто из USB) — open_port по мёртвому имени только
+                # засоряет лог FileNotFoundError; просто ждём дальше.
+                logger.debug(
+                    "Порт %s отсутствует, устройство не найдено — жду дальше", port_name,
+                )
+                self._schedule_reconnect()
+                return
         logger.info("Попытка автоматического переподключения к %s", port_name)
         if self.open_port(port_name, self._last_baudrate, self._last_emulation, self._auto_reconnect):
             logger.info("Автоматическое переподключение к %s успешно", port_name)

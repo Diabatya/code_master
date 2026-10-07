@@ -526,6 +526,10 @@ class SettingsWindow(QMainWindow):
         self._loading = False
         self._refresh_pending = False
         self._sync_in_progress = False
+        # Повторный вход в сброс, пока устройство ребутится после
+        # CMD_CFG_FACTORY_RESET, — запрещаем (отчёт мастера — при
+        # заводском сбросе приложение иногда закрывалось).
+        self._reset_in_progress = False
         # Окно закрывается: отложенная вычитка (singleShot 400 мс после
         # connect) на закрытом окне не нужна — она писала состояние МК в
         # config.json уже на выходе из приложения.
@@ -1076,6 +1080,11 @@ class SettingsWindow(QMainWindow):
             return
         # Связь восстановлена — вернуть кнопке состояние по снимку полей.
         self._mark_dirty()
+        # Имя/серийник/версия могли доехать поздним ретраем
+        # идентификации (он эмитит connection_changed повторно) —
+        # обновляем метки шапки сразу, не дожидаясь переоткрытия окна
+        # (отчёт мастера: прочерки до захода в настройки).
+        self._update_device_info(query_device=False)
         if self._config.get("emulation", False):
             self._hide_loading_overlay()
             return
@@ -2067,22 +2076,113 @@ class SettingsWindow(QMainWindow):
         return data
 
     def _factory_reset(self) -> None:
-        """Сбрасывает настройки к заводским с подтверждением."""
+        """Три варианта сброса (отчёт мастера): конфигурация,
+        переменные или всё устройство целиком."""
+        if self._reset_in_progress:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("Заводские настройки"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(tr("Что сбросить?"))
+        box.addButton(
+            tr("Сбросить конфигурацию"), QMessageBox.ButtonRole.AcceptRole
+        )
+        box.addButton(
+            tr("Сбросить переменные"), QMessageBox.ButtonRole.ActionRole
+        )
+        box.addButton(
+            tr("Сбросить всё устройство"), QMessageBox.ButtonRole.DestructiveRole
+        )
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        role = box.buttonRole(clicked) if clicked is not None else None
+        self._reset_in_progress = True
+        try:
+            if role == QMessageBox.ButtonRole.AcceptRole:
+                self._reset_config_only()
+            elif role == QMessageBox.ButtonRole.ActionRole:
+                self._reset_variables_only()
+            elif role == QMessageBox.ButtonRole.DestructiveRole:
+                self._reset_everything()
+        finally:
+            self._reset_in_progress = False
+
+    def _device_connected(self) -> bool:
+        return (
+            self._serial_manager.is_open()
+            and not self._config.get("emulation", False)
+        )
+
+    def _reset_variables_only(self) -> None:
+        """Стирает только переменные: область VARH в МК и строки
+        вкладки «Переменные» на ПК. Конфигурация не трогается."""
+        if self._device_connected():
+            try:
+                self._serial_manager.storage_clear(STORAGE_REGION_VAR)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.critical(
+                    self,
+                    tr("Ошибка"),
+                    tr("Устройство не подтвердило сброс переменных: {0}").format(exc),
+                )
+                return
+            serial = str(self._config.get("device_serial") or "")
+            self._blob_cache.pop((serial, STORAGE_REGION_VAR), None)
+        self._variables_tab.import_config({})
+        self._mark_dirty()
+        show_toast(self, tr("Переменные сброшены"))
+
+    def _reset_config_only(self) -> None:
+        """Сбрасывает конфигурацию без переменных: настройки окна —
+        к значениям по умолчанию, в МК стирается область гибкой логики
+        (FLXH) и записывается пустой набор триггеров. Область VARH не
+        трогаем."""
+        try:
+            if self._device_connected():
+                try:
+                    self._serial_manager.storage_clear(STORAGE_REGION_FLEX)
+                    serial = str(self._config.get("device_serial") or "")
+                    self._blob_cache.pop((serial, STORAGE_REGION_FLEX), None)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Стирание области гибкой логики не подтверждено: %s", exc
+                    )
+            self._config.reset_to_defaults()
+            self._config.save()
+            self._trigger_tab.set_config(self._config.get("triggers", []))
+            self._flexible_tab.set_config(self._config.get("flexible_rules", []))
+            if hasattr(self._gateway_tab, "set_config"):
+                self._gateway_tab.set_config(
+                    self._config.get("gateway_rules", []),
+                    self._config.get("gateway_ignore", []),
+                )
+            # Поля отличаются от состояния МК — «Сохранить» активна.
+            self._mark_dirty()
+            show_toast(self, tr("Конфигурация сброшена"))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self, tr("Ошибка"), tr("Не удалось сбросить: {0}").format(exc)
+            )
+
+    def _reset_everything(self) -> None:
+        """Полный заводской сброс: CMD_CFG_FACTORY_RESET стирает в МК
+        страницу конфигурации и всё хранилище, прошивка перезагружается.
+        На ПК сбрасываются настройки, триггеры, гибкая логика, шлюз
+        и переменные."""
         answer = QMessageBox.question(
             self,
             tr("Заводские настройки"),
-            tr("Вернуть все настройки к значениям по умолчанию?"),
+            tr("Стереть устройство целиком: конфигурацию, переменные, "
+               "триггеры и гибкую логику?"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            # Сначала стираем само устройство: страницу конфигурации и
-            # хранилище триггеров во Flash (прошивка перезагружается
-            # после команды — соединение может кратковременно пропасть).
             device_reset = False
-            if self._serial_manager.is_open() and not self._config.get("emulation", False):
+            if self._device_connected():
                 try:
                     # Ключ "FCLR" обязателен для прошивки с протоколом
                     # v3 — голый 0xC2 она отвергает как возможный фантом
@@ -2091,13 +2191,17 @@ class SettingsWindow(QMainWindow):
                     device_reset = True
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("CMD_CFG_FACTORY_RESET не подтверждён устройством: %s", exc)
+                if device_reset:
+                    # Прошивка уходит в ребут: закрываем порт сразу и
+                    # чисто — reader не споткнётся о мёртвый дескриптор
+                    # (PermissionError 13), авто-переподключение начнётся
+                    # без ожидания таймаута.
+                    self._serial_manager.expect_reboot()
+            self._blob_cache.clear()
             self._config.reset_to_defaults()
             self._config.save()
             self._trigger_tab.set_config(self._config.get("triggers", []))
             self._flexible_tab.set_config(self._config.get("flexible_rules", []))
-            # «Заводские настройки» стирают и переменные — МК чистит
-            # весь пак хранилища (страницы переменных входят в него),
-            # на ПК сбрасываем строки вкладки (отчёт мастера).
             self._variables_tab.import_config({})
             if hasattr(self._gateway_tab, "set_config"):
                 self._gateway_tab.set_config(
@@ -2105,12 +2209,8 @@ class SettingsWindow(QMainWindow):
                     self._config.get("gateway_ignore", []),
                 )
             if device_reset:
-                # Устройство подтвердило сброс — его состояние равно
-                # показанным значениям по умолчанию: это новый эталон.
                 self._mark_clean()
             else:
-                # Устройство сброс не подтвердило — показанные поля
-                # отличаются от его состояния: «Сохранить» активна.
                 self._mark_dirty()
             show_toast(self, tr("Настройки сброшены"))
         except Exception as exc:  # noqa: BLE001

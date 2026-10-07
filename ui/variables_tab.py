@@ -68,6 +68,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStackedWidget,
     QStyle,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
@@ -85,6 +86,7 @@ from models.config import (
 from models.id_notes import IdNotes
 from models.translations import _ as tr
 from models.utils import (
+    CYRILLIC_LAYOUT_MAP,
     hex_to_int,
     translate_cyrillic_hex,
     translate_cyrillic_layout,
@@ -133,9 +135,12 @@ def _config_info_dir() -> str:
 
 class _HexIdEdit(IdPasteEdit):
     """Поле CAN ID с валидацией HEX как в триггерах: верхний регистр,
-    до 8 знаков, зелёный текст — валидный ID, красный — мусор."""
+    до 8 знаков, зелёный текст — валидный ID, красный — мусор или
+    значение вне выбранной разрядности (11/29 бит — отчёт мастера)."""
 
     _HEX_RE = re.compile(r"^[0-9A-F]{0,8}$")
+    _MAX_11BIT = 0x7FF
+    _MAX_29BIT = 0x1FFFFFFF
 
     def __init__(self, font: QFont, placeholder: str = "ID") -> None:
         super().__init__()
@@ -145,12 +150,27 @@ class _HexIdEdit(IdPasteEdit):
         self.setFixedWidth(110)
         self.setMaxLength(8)
         self.setPlaceholderText(placeholder)
+        # По умолчанию комбобоксы битности стоят на «11 бит».
+        self._max_id = self._MAX_11BIT
         self.setValidator(
             QRegularExpressionValidator(
                 QRegularExpression(r"[0-9A-Fa-f]{0,8}")
             )
         )
         self.textChanged.connect(self._restyle)
+
+    def set_extended(self, extended: bool) -> None:
+        """Выбранная разрядность ID: 29 бит → ≤0x1FFFFFFF,
+        11 бит → ≤0x7FF. Введённое значение не режется — вылезающее
+        за пределы красится красным и ловится проверкой диалога
+        (отчёт мастера: при 11 бит принимался 29-битный ID)."""
+        self._max_id = self._MAX_29BIT if extended else self._MAX_11BIT
+        self._restyle(self.text())
+
+    def is_within_width(self) -> bool:
+        """Введённый ID лежит в выбранной разрядности."""
+        value = hex_to_int(self.text())
+        return value is not None and value <= self._max_id
 
     def _restyle(self, text: str) -> None:
         upper = text.upper()
@@ -163,10 +183,88 @@ class _HexIdEdit(IdPasteEdit):
         if not text:
             self.setStyleSheet("")
             return
-        if not self._HEX_RE.match(text) or hex_to_int(text) is None:
+        value = hex_to_int(text)
+        if (
+            not self._HEX_RE.match(text)
+            or value is None
+            or value > self._max_id
+        ):
             self.setStyleSheet("color: #F44336;")
         else:
             self.setStyleSheet("color: #4CAF50;")
+
+
+class _BindingCellEdit(QLineEdit):
+    """Редактор ячейки таблицы привязки: кириллица, набранная без
+    переключения раскладки, подменяется символом той же клавиши
+    латинской раскладки СРАЗУ при вводе и при вставке из буфера
+    (отчёт мастера: в таблицах привязки подмена не работала — она
+    срабатывала только после завершения редактирования ячейки).
+
+    ``allowed`` — необязательный набор допустимых символов ПОСЛЕ
+    подмены: «фыв» в HEX-ячейке даёт «ad» («ы»→«s» не hex —
+    отбрасывается)."""
+
+    def __init__(self, parent=None, allowed: str | None = None) -> None:
+        super().__init__(parent)
+        self._allowed = set(allowed) if allowed else None
+
+    def _insert_mapped(self, text: str) -> None:
+        mapped = translate_cyrillic_layout(text)
+        if self._allowed is not None:
+            mapped = "".join(ch for ch in mapped if ch in self._allowed)
+        if mapped:
+            self.insert(mapped)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        text = event.text()
+        if text and any(ch in CYRILLIC_LAYOUT_MAP for ch in text):
+            self._insert_mapped(text)
+            return
+        if text and self._allowed is not None:
+            filtered = "".join(ch for ch in text if ch in self._allowed)
+            if filtered != text:
+                if filtered:
+                    self.insert(filtered)
+                return
+        super().keyPressEvent(event)
+
+    def insertFromMimeData(self, source) -> None:  # noqa: N802
+        if source.hasText():
+            self._insert_mapped(source.text())
+            return
+        super().insertFromMimeData(source)
+
+
+class _BindingCellDelegate(QStyledItemDelegate):
+    """Делегат колонки таблицы привязки — выдаёт редактор с живой
+    подменой раскладки (см. _BindingCellEdit)."""
+
+    def __init__(self, allowed: str | None = None, parent=None) -> None:
+        super().__init__(parent)
+        self._allowed = allowed
+
+    def createEditor(self, parent, option, index):  # noqa: N802
+        return _BindingCellEdit(parent, self._allowed)
+
+
+def _bind_id_width(bit_combo: QComboBox, *edits: _HexIdEdit) -> None:
+    """Подвязывает комбобокс «11/29 бит» к полям ID: при смене
+    разрядности предел обновляется сразу во всех полях (отчёт
+    мастера: выбрано 11 бит, а 29-битный ID вводился)."""
+
+    def _apply(_index: int = 0) -> None:
+        data = bit_combo.currentData()
+        # Комбобоксы со строковыми пунктами («11 Бит»/«29 Бит» в ГЛ)
+        # не несут data — разрядность берём по индексу.
+        extended = bool(data) if data is not None else (
+            bit_combo.currentIndex() == 1
+        )
+        for edit in edits:
+            edit.set_extended(extended)
+
+    bit_combo.currentIndexChanged.connect(_apply)
+    _apply()
 
 
 def _data_tokens(edits: list[QLineEdit]) -> list[str]:
@@ -735,6 +833,7 @@ class _FrameRow(QWidget):
         self.bit.setFixedWidth(92)
         self.bit.setToolTip(tr("Разрядность CAN-идентификатора"))
         row.addWidget(self.bit)
+        _bind_id_width(self.bit, self.can_id)
 
         self.dlc = QSpinBox()
         self.dlc.setFont(font)
@@ -868,6 +967,7 @@ class _ValuePage(QWidget):
         self.bit.setFixedWidth(92)
         self.bit.setToolTip(tr("Разрядность CAN-идентификатора"))
         line1.addWidget(self.bit)
+        _bind_id_width(self.bit, self.can_id)
         line1.addWidget(QLabel("DLC:"))
         self.dlc = QSpinBox()
         self.dlc.setFont(font)
@@ -1004,6 +1104,18 @@ class _ValuePage(QWidget):
         )
         self.points_table.horizontalHeader().setStretchLastSection(True)
         self.points_table.setFixedWidth(300)
+        # Живая подмена кириллицы в ячейках: колонка «Значение DATA» —
+        # только HEX-символы после подмены раскладки; у «Численной»
+        # колонка «Величина» — цифры и разделители (отчёт мастера:
+        # подмена в таблицах привязки не работала). Имена состояний
+        # «Динамической» — свободный текст, не трогаем.
+        self.points_table.setItemDelegateForColumn(
+            0, _BindingCellDelegate("0123456789ABCDEFabcdef ", self)
+        )
+        if kind == "numeric":
+            self.points_table.setItemDelegateForColumn(
+                1, _BindingCellDelegate("0123456789.,+-eE", self)
+            )
         self.points_table.itemChanged.connect(self._on_point_item_changed)
         left.addWidget(self.points_table, 1)
         buttons = QHBoxLayout()
@@ -1367,6 +1479,7 @@ class _ImpulsePage(QWidget):
         self.bit.setFixedWidth(92)
         self.bit.setToolTip(tr("Разрядность CAN-идентификатора"))
         line1.addWidget(self.bit)
+        _bind_id_width(self.bit, self.can_id)
         line1.addWidget(QLabel("DLC:"))
         self.dlc = QSpinBox()
         self.dlc.setFont(font)
@@ -1528,6 +1641,7 @@ class _CachePage(QWidget):
         self.bit.setFixedWidth(92)
         self.bit.setToolTip(tr("Разрядность CAN-идентификатора"))
         line1.addWidget(self.bit)
+        _bind_id_width(self.bit, self.id_from, self.id_to)
         line1.addStretch()
         layout.addLayout(line1)
 
@@ -1703,6 +1817,7 @@ class _CmdFrameRow(QWidget):
         row.addWidget(QLabel("ID"))
         self.can_id = _HexIdEdit(font)
         row.addWidget(self.can_id)
+        _bind_id_width(self.bit, self.can_id)
 
         row.addWidget(QLabel("DLC"))
         self.dlc = QSpinBox()
@@ -1872,10 +1987,10 @@ class _CommandDialog(QDialog):
         font = QFont("Segoe UI", 9)
         self.setFont(font)
         self.setWindowTitle(tr("Настройка команды"))
-        # Шире прежнего: строка фрейма с байтовыми полями и паузами
-        # не влезала в 900 px (отчёт мастера — «все данные не
-        # влезают»).
-        self.setMinimumWidth(1280)
+        # Шире и выше прежнего: строка фрейма с байтовыми полями,
+        # онлайн-DATA и паузами не влезала (отчёт мастера — «символы
+        # и поля не влезают, таблицу выше и шире»).
+        self.setMinimumSize(1440, 560)
         config = config or {}
         self.config = dict(config)
         # Вкладка «Переменные» — источник онлайн-кадров шины для
@@ -1920,7 +2035,9 @@ class _CommandDialog(QDialog):
         # полями записи»).
         self._frames_layout.addStretch(1)
         frames_box.addLayout(self._frames_layout)
-        layout.addWidget(self._frames_group)
+        # Секция фреймов тянется и по вертикали — строк не пережимает
+        # при добавлении (отчёт мастера).
+        layout.addWidget(self._frames_group, 1)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -2002,6 +2119,22 @@ class _CommandDialog(QDialog):
                 tr("Добавьте хотя бы один фрейм с заполненным ID."),
             )
             return
+        # ID за пределами выбранной разрядности (11 бит → ≤7FF,
+        # 29 бит → ≤1FFFFFFF) — не даём сохранить (отчёт мастера).
+        for row in self._frame_rows:
+            if row.can_id.text().strip() and not row.can_id.is_within_width():
+                QMessageBox.warning(
+                    self,
+                    tr("Команда"),
+                    tr(
+                        "ID {0} не помещается в {1} бит — исправьте "
+                        "значение или разрядность."
+                    ).format(
+                        row.can_id.text().strip(),
+                        "29" if row.bit.currentData() else "11",
+                    ),
+                )
+                return
         self.config = self.current_config()
         super().accept()
 
@@ -2358,6 +2491,8 @@ class VariableDialog(QDialog):
             errors: list[str] = []
             if hex_to_int(self._impulse_page.can_id.text()) is None:
                 errors.append(tr("ID — шестнадцатеричное число"))
+            elif not self._impulse_page.can_id.is_within_width():
+                errors.append(tr("ID не помещается в выбранную разрядность"))
             if not self._impulse_page.bytes_used():
                 errors.append(tr("DATA — заполните хотя бы один байт"))
             if errors:
@@ -2379,6 +2514,10 @@ class VariableDialog(QDialog):
                 errors.append(tr("ID от — шестнадцатеричное число"))
             if self._cache_page.id_to.text().strip() and hi is None:
                 errors.append(tr("ID до — шестнадцатеричное число"))
+            if lo is not None and not self._cache_page.id_from.is_within_width():
+                errors.append(tr("ID от не помещается в выбранную разрядность"))
+            if hi is not None and not self._cache_page.id_to.is_within_width():
+                errors.append(tr("ID до не помещается в выбранную разрядность"))
             if lo is not None and hi is not None and lo > hi:
                 errors.append(tr("ID «от» больше ID «до»"))
             if errors:
@@ -2390,11 +2529,33 @@ class VariableDialog(QDialog):
                 return
             self.accept()
             return
+        if self._type_combo.currentData() == _TYPE_STATIC:
+            # Разрядность ID по каждому фрейму (отчёт мастера:
+            # при «11 бит» принимался 29-битный ID).
+            for row in self._frame_rows:
+                if (
+                    row.can_id.text().strip()
+                    and not row.can_id.is_within_width()
+                ):
+                    QMessageBox.warning(
+                        self,
+                        tr("Проверка переменной"),
+                        tr(
+                            "ID {0} не помещается в {1} бит — исправьте "
+                            "значение или разрядность."
+                        ).format(
+                            row.can_id.text().strip(),
+                            "29" if row.bit.currentData() else "11",
+                        ),
+                    )
+                    return
         page = self._active_value_page()
         if page is not None:
             errors = []
             if hex_to_int(page.can_id.text()) is None:
                 errors.append(tr("ID — шестнадцатеричное число"))
+            elif not page.can_id.is_within_width():
+                errors.append(tr("ID не помещается в выбранную разрядность"))
             if not page.bytes_used():
                 errors.append(tr("DATA от — заполните хотя бы один байт"))
             if page._kind == "numeric":

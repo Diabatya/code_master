@@ -386,22 +386,64 @@ class Bootloader:
                 "Порт отвалился во время стирания (%s) — жду пере-энумерацию устройства",
                 exc,
             )
-            self.wait_for_bootloader_port(timeout=15.0)
-            self.sync(retries=5)
+            self._recover_port()
             logger.info("Связь восстановлена после стирания")
             return
         if response != ACK:
             raise BootloaderError(f"Ошибка стирания (ответ 0x{response:02X})")
 
+    def _recover_port(self) -> None:
+        """Восстанавливает связь с бутлоадером после отвала USB CDC.
+
+        STM32F1 глушит USB на время длинных flash-операций, Windows
+        гоняет устройство через пере-энумерацию — открытый хендл порта
+        умирает с PermissionError(13)/ERROR_GEN_FAILURE посередине
+        команды. Закрываем труп, ждём возврата bootloader-порта (он
+        может появиться под ДРУГИМ именем COM) и синхронизируемся
+        заново. Для UART-адаптеров (порт не наш) — просто переоткрываем
+        тот же порт.
+        """
+        with contextlib.suppress(Exception):
+            self.port.close()
+        info = self._port_info()
+        if info is None or info.vid == self.USB_VID:
+            self.wait_for_bootloader_port(timeout=15.0)
+        else:
+            self._open_port_with_retry()
+        # Порт мог умереть посередине команды — бутлоадер ждёт остаток
+        # кадра (адрес: 5 байт, данные: до 258). Выливаем запас 0x7F:
+        # они добьют любой недописанный кадр (контрольная сумма не
+        # сойдётся → NACK → бутлоадер вернётся в ожидание команды),
+        # а попавшие в command-режим 0x7F ответят ACK — их снимет
+        # reset_input_buffer внутри sync().
+        with contextlib.suppress(Exception):
+            self.port.write(bytes([0x7F]) * 300)
+            time.sleep(0.05)
+        self.sync(retries=5)
+        logger.info("Связь с бутлоадером восстановлена")
+
     def erase(self, extended: bool = True) -> None:
         """Выполняет массовое стирание памяти (осторожно — сносит bootloader!)."""
         logger.warning("Выполняется массовое стирание памяти STM32 (bootloader будет стёрт)")
-        if extended:
-            self._send_command(0x44)
-            self.port.write(bytes([0xFF, 0xFF, 0x00]))
-        else:
-            self._send_command(0x43)
-            self.port.write(bytes([0xFF, 0x00]))
+        try:
+            if extended:
+                self._send_command(0x44)
+                self.port.write(bytes([0xFF, 0xFF, 0x00]))
+            else:
+                self._send_command(0x43)
+                self.port.write(bytes([0xFF, 0x00]))
+        except (serial.SerialException, OSError):
+            # Порт умер на отправке команды — команда могла не уйти;
+            # восстанавливаем связь и посылаем стирание повторно
+            # (повторное стирание тех же страниц безвредно).
+            logger.warning("Порт отвалился на команде стирания — восстанавливаю связь")
+            self._recover_port()
+            if extended:
+                self._send_command(0x44)
+                self.port.write(bytes([0xFF, 0xFF, 0x00]))
+            else:
+                self._send_command(0x43)
+                self.port.write(bytes([0xFF, 0x00]))
 
         self._wait_erase_ack(5.0)
         logger.info("Массовое стирание завершено")
@@ -465,8 +507,14 @@ class Bootloader:
             checksum ^= b
         payload.append(checksum)
 
-        self._send_command(0x44)
-        self.port.write(bytes(payload))
+        try:
+            self._send_command(0x44)
+            self.port.write(bytes(payload))
+        except (serial.SerialException, OSError):
+            logger.warning("Порт отвалился на команде стирания страниц — восстанавливаю связь")
+            self._recover_port()
+            self._send_command(0x44)
+            self.port.write(bytes(payload))
         self._wait_erase_ack(30.0)
         logger.info("Стирание страниц завершено")
 
@@ -548,7 +596,17 @@ class Bootloader:
             block = data[offset : offset + self.BLOCK_SIZE]
             if skip_blank and all(b == 0xFF for b in block):
                 continue
-            read_back = self.read_memory(address + offset, len(block))
+            try:
+                read_back = self.read_memory(address + offset, len(block))
+            except (serial.SerialException, OSError) as exc:
+                # Отвал USB CDC и на верификации — восстанавливаем связь
+                # и читаем тот же блок повторно.
+                logger.warning(
+                    "Порт отвалился при верификации 0x%08X (%s) — восстанавливаю связь",
+                    address + offset, exc,
+                )
+                self._recover_port()
+                read_back = self.read_memory(address + offset, len(block))
             if read_back != block:
                 logger.warning("BL verify: mismatch at 0x%08X", address + offset)
                 return False
@@ -677,6 +735,28 @@ class Bootloader:
                             f"Ошибка записи блока 0x{block_addr:08X} ({len(block)} байт): {exc}"
                         ) from exc
                     time.sleep(0.1)
+                except (serial.SerialException, OSError) as exc:
+                    # Порт умер посередине записи (пере-энумерация USB CDC
+                    # на Windows — PermissionError(13)/ERROR_GEN_FAILURE).
+                    # Ждём возврата bootloader-порта, синхронизируемся и
+                    # пишем ЭТОТ ЖЕ блок заново — запись идемпотентна,
+                    # страница уже стёрта (отчёт мастера).
+                    logger.warning(
+                        "Порт отвалился при записи блока 0x%08X (%s) — восстанавливаю связь",
+                        block_addr, exc,
+                    )
+                    if attempt == self.MAX_RETRIES - 1:
+                        raise BootloaderError(
+                            f"Ошибка записи блока 0x{block_addr:08X}: порт недоступен ({exc})"
+                        ) from exc
+                    try:
+                        self._recover_port()
+                    except Exception as rec_exc:  # noqa: BLE001
+                        if attempt == self.MAX_RETRIES - 2:
+                            raise BootloaderError(
+                                f"Блок 0x{block_addr:08X}: связь не восстановлена ({rec_exc})"
+                            ) from rec_exc
+                        logger.warning("Восстановление порта не удалось: %s", rec_exc)
             written += len(block)
             if self._progress_callback:
                 self._progress_callback(min(100, int(written / total * 100)))

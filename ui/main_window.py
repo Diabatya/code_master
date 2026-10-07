@@ -725,6 +725,9 @@ class MainWindow(QMainWindow):
         self._cards_layout.setSpacing(10)
         self._cards_layout.addStretch()
         self._cards_signature: tuple = ()
+        # Порты, к которым уже пробовали автоподключиться — не долбим
+        # open_port каждые 1.5с, если попытка провалилась.
+        self._auto_connect_tried: set[str] = set()
         self._cards_scroll = QScrollArea()
         self._cards_scroll.setWidgetResizable(True)
         self._cards_scroll.setWidget(self._cards_box)
@@ -1168,6 +1171,29 @@ class MainWindow(QMainWindow):
         if signature == self._cards_signature:
             return
         self._cards_signature = signature
+        self._auto_connect_tried &= {str(d["port"]) for d in devices}
+        # Автоподключение к единственному application-устройству: без
+        # него карточка стоит с прочерками (порт не открыт), а имя,
+        # серийник и версия ПО появлялись только после захода в
+        # настройки, которые порт открывали (отчёт мастера). Пока
+        # открыт модальный диалог (прошивка и т.п.) порт не трогаем —
+        # Bootloader сам его занимает и открывать параллельно нельзя.
+        app_devices = [d for d in devices if not d["bootloader"]]
+        if (
+            connected_port is None
+            and not selecting
+            and len(app_devices) == 1
+            and QApplication.activeModalWidget() is None
+        ):
+            port = str(app_devices[0]["port"])
+            if port not in self._auto_connect_tried:
+                self._auto_connect_tried.add(port)
+                logger.info("Автоподключение к устройству %s", port)
+                self._connect_port(port)
+                connected_port = (
+                    self._serial_manager.current_port_name()
+                    if self._serial_manager.is_open() else None
+                )
         while self._cards_layout.count() > 1:
             item = self._cards_layout.takeAt(0)
             widget = item.widget()

@@ -73,7 +73,7 @@ from models.translations import _ as tr
 from models.utils import hex_to_int
 from ui.hex_edit import create_data_field_widget
 from ui.ui_utils import setup_button
-from ui.variables_tab import _HexIdEdit, _tokens_match
+from ui.variables_tab import _HexIdEdit, _bind_id_width, _tokens_match
 
 logger = get_logger(__name__)
 
@@ -604,6 +604,62 @@ class _CondVarPage(QWidget):
         self.value.textChanged.connect(mark_dirty)
 
 
+class _DynCondPage(QWidget):
+    """Условие «Динамическая переменная»: имя переменной + состояние
+    из её таблицы привязки (отчёт мастера: список состояний в условии
+    не показывался). Пустое состояние — легаси-семантика «Активно»
+    (истинно, пока переменная в любом именованном состоянии)."""
+
+    def __init__(
+        self,
+        font: QFont,
+        mark_dirty,
+        get_tab=None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._get_tab = get_tab
+        layout = QVBoxLayout(self)
+        layout.setSpacing(2)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(_small_label(tr("Переменная:"), font))
+        self.var = _VarCombo(font)
+        layout.addWidget(self.var)
+        layout.addWidget(_small_label(tr("Состояние:"), font))
+        self.state = QComboBox()
+        self.state.setFont(font)
+        # Редактируемый — состояние могло сохраниться, когда переменная
+        # была удалена и список пуст: значение не теряется.
+        self.state.setEditable(True)
+        layout.addWidget(self.state)
+        layout.addStretch()
+        self.var.currentIndexChanged.connect(mark_dirty)
+        self.var.currentIndexChanged.connect(
+            lambda *_a: self.refresh_binding_names()
+        )
+        self.state.currentTextChanged.connect(mark_dirty)
+
+    def refresh_binding_names(self) -> None:
+        """Состояния — реальные имена из таблицы привязки выбранной
+        «Динамической переменной» (как у события — отчёт мастера)."""
+        current = self.state.currentText()
+        tab = self._get_tab() if self._get_tab is not None else None
+        names = (
+            tab.variable_binding_names("read", self.var.get_name())
+            if tab and self.var.get_name()
+            else []
+        )
+        self.state.blockSignals(True)
+        self.state.clear()
+        self.state.addItems(names)
+        idx = self.state.findText(current)
+        if idx >= 0:
+            self.state.setCurrentIndex(idx)
+        else:
+            self.state.setEditText(current)
+        self.state.blockSignals(False)
+
+
 class _ImpulseVarPage(QWidget):
     """Страница «Импульсная переменная» — имя переменной + подпись
     смысла: в событиях «получено» (срабатывает на каждый импульс —
@@ -788,6 +844,7 @@ class _FrameEventPage(QWidget):
         row2.addWidget(_small_label("ID", font))
         self.can_id = _HexIdEdit(font)
         row2.addWidget(self.can_id)
+        _bind_id_width(self.bit, self.can_id)
         row2.addWidget(_small_label("DLC", font))
         self.dlc = QSpinBox()
         self.dlc.setFont(font)
@@ -1186,6 +1243,22 @@ def _detach_item(item, sep) -> None:
                 item._anim_finished_cb = None
             with contextlib.suppress(RuntimeError):
                 anim.stop()
+        # Отписываем авто-свёртку СРАЗУ: между отложенным detach и
+        # deleteLater обработчик focusChanged ещё жив и мог бы
+        # перезапустить анимацию на полуудалённом пункте
+        # (повторный отчёт мастера — вылет по крестику).
+        app = QApplication.instance()
+        conn = getattr(item, "_focus_conn", None)
+        if app is not None and conn is not None:
+            with contextlib.suppress(RuntimeError, TypeError):
+                app.focusChanged.disconnect(conn)
+        item._focus_conn = None
+        # Открытый выпадающий список комбобокса внутри пункта закрываем
+        # до скрытия родителя — иначе попап остаётся сиротой поверх
+        # окна, а его отложенное закрытие трогает мёртвые виджеты.
+        with contextlib.suppress(RuntimeError):
+            for combo in item.findChildren(QComboBox):
+                combo.hidePopup()
         item.setEnabled(False)
         parent = item.parentWidget()
         if parent is not None and parent.layout() is not None:
@@ -1218,11 +1291,29 @@ def _auto_collapse(item) -> None:
                     with contextlib.suppress(RuntimeError, TypeError):
                         app.focusChanged.disconnect(conn)
                     holder["conn"] = None
+                    item._focus_conn = None
                 return
             if item._editor.maximumHeight() == 0:
                 return  # уже свёрнут
+            # Выпадающий список комбобокса внутри пункта — это всё ещё
+            # редактирование: попап — отдельное окно, focusChanged
+            # при его открытии даёт «фокус ушёл» (отчёт мастера:
+            # дерево сворачивалось на промежуточных шагах настройки).
+            popup = QApplication.activePopupWidget()
+            if popup is not None and isValid(popup):
+                owner = popup.parentWidget() or popup
+                if isValid(owner) and (
+                    item.isAncestorOf(owner) or item.isAncestorOf(popup)
+                ):
+                    return
             if new is not None and isValid(new) and item.isAncestorOf(new):
                 return  # фокус внутри пункта — редактирование идёт
+            # В одну строку сворачивается только ПОЛНОСТЬЮ настроенный
+            # пункт: пока обязательные поля пустые, дерево настройки
+            # остаётся развёрнутым (отчёт мастера).
+            complete = getattr(item, "is_complete", None)
+            if callable(complete) and not complete():
+                return
             _animate_editor_toggle(item)
         except RuntimeError:
             # «new» мог быть уже разрушен к моменту доставки сигнала —
@@ -1230,6 +1321,7 @@ def _auto_collapse(item) -> None:
             pass
 
     holder["conn"] = app.focusChanged.connect(_changed)
+    item._focus_conn = holder["conn"]
 
 
 def _animate_editor_toggle(item) -> None:
@@ -1381,6 +1473,43 @@ class _EventItem(QWidget):
         """Клик по строке-сводке: развернуть/свернуть редактор
         с анимацией высоты (отчёт мастера)."""
         _animate_editor_toggle(self)
+
+    def is_complete(self) -> bool:
+        """Событие настроено целиком — только тогда редактору можно
+        сворачиваться в одну строку по уходу фокуса (отчёт мастера:
+        дерево схлопывалось на промежуточных шагах настройки)."""
+        etype = self._type.currentData()
+        if etype == _EVENT_NONE:
+            return False
+        if etype == _EVENT_IMPULSE:
+            return bool(self._impulse.var.get_name())
+        if etype == _EVENT_DYN:
+            return bool(
+                self._dyn.var.get_name()
+                and self._dyn.value_combo
+                and self._dyn.value_combo.currentText().strip()
+            )
+        if etype == _EVENT_NUM:
+            return bool(
+                self._num.var.get_name()
+                and self._num.value
+                and self._num.value.text().strip()
+            )
+        if etype == _EVENT_STATIC:
+            return bool(self._static.var.get_name())
+        if etype == _EVENT_FLAG:
+            return bool(self._flag.var.get_name())
+        if etype == _EVENT_FRAME:
+            return bool(self._frame.rtr.isChecked()) or (
+                hex_to_int(self._frame.can_id.text()) is not None
+            )
+        if etype == _EVENT_CACHEVAR:
+            return bool(self._cachevar.var.get_name())
+        if etype == _EVENT_PROGRAM:
+            return bool(self._program.var.get_name())
+        # «Включение устройства» и «Доп канал» — полей выбора нет или
+        # у всех значения по умолчанию.
+        return True
 
     def _on_type(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
@@ -1627,17 +1756,20 @@ class _CondItem(QWidget):
         st_layout.addWidget(self.st_state)
         st_layout.addStretch()
 
-        # Условие «Динамическая переменная» — имя + «Активно»
-        # (истинно, пока переменная находится в одном из состояний
-        # таблицы привязки — отчёт мастера). У «Численной» остаются
-        # «Больше/Меньше/Равно» + порог.
-        dyn_page = _ImpulseVarPage(
-            font, row._mark_dirty, caption=tr("Активно")
+        # Условие «Динамическая переменная» — имя + состояние из
+        # таблицы привязки переменной (отчёт мастера: состояния не
+        # показывались — был только вариант «Активно»). У «Численной»
+        # остаются «Больше/Меньше/Равно» + порог.
+        dyn_page = _DynCondPage(
+            font, row._mark_dirty,
+            get_tab=lambda: row._tab._variables_tab,
         )
         num_page = _CondVarPage(font, row._mark_dirty)
         impulse_page = _ImpulseVarPage(font, row._mark_dirty)
         self.imp_var = impulse_page.var
         self.dyn_var = dyn_page.var
+        self.dyn_state = dyn_page.state
+        self._dyn_page = dyn_page
         self.num_var = num_page.var
         self.num_op = num_page.op
         self.num_value = num_page.value
@@ -1701,6 +1833,7 @@ class _CondItem(QWidget):
         self.st_var.currentIndexChanged.connect(self._update_summary)
         self.st_state.currentIndexChanged.connect(self._update_summary)
         self.dyn_var.currentIndexChanged.connect(self._update_summary)
+        self.dyn_state.currentTextChanged.connect(self._update_summary)
         self.num_var.currentIndexChanged.connect(self._update_summary)
         self.num_op.currentIndexChanged.connect(self._update_summary)
         self.num_value.textChanged.connect(self._update_summary)
@@ -1730,6 +1863,28 @@ class _CondItem(QWidget):
         """Клик по строке-сводке разворачивает/сворачивает редактор."""
         _animate_editor_toggle(self)
 
+    def is_complete(self) -> bool:
+        """Условие настроено целиком — только тогда редактору можно
+        сворачиваться в одну строку (отчёт мастера)."""
+        ctype = self._type.currentData()
+        if ctype == _COND_NONE:
+            return False
+        if ctype == _COND_STATIC:
+            return bool(self.st_var.get_name())
+        if ctype == _COND_DYN:
+            return bool(self.dyn_var.get_name())
+        if ctype == _COND_NUM:
+            return bool(
+                self.num_var.get_name() and self.num_value.text().strip()
+            )
+        if ctype == _COND_IMPULSE:
+            return bool(self.imp_var.get_name())
+        if ctype == _COND_FLAG:
+            return bool(self.flag_var.get_name())
+        if ctype == _COND_CACHEVAR:
+            return bool(self.cv_var.get_name())
+        return True  # «Доп канал» — все поля имеют значения по умолчанию
+
     def _on_type(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
         self._update_summary()
@@ -1744,9 +1899,14 @@ class _CondItem(QWidget):
                 "state": self.st_state.currentData(),
             }
         if ctype == _COND_DYN:
-            # «Активно» — без порога: истинно, пока переменная в одном
-            # из состояний таблицы привязки (отчёт мастера).
-            return {"type": _COND_DYN, "var": self.dyn_var.get_name()}
+            # Состояние из таблицы привязки: «имя == состояние».
+            # Пустое состояние — легаси «Активно»: истинно, пока
+            # переменная в любом именованном состоянии.
+            return {
+                "type": _COND_DYN,
+                "var": self.dyn_var.get_name(),
+                "state": self.dyn_state.currentText().strip(),
+            }
         if ctype == _COND_NUM:
             return {
                 "type": ctype,
@@ -1788,6 +1948,14 @@ class _CondItem(QWidget):
             self.st_state.setCurrentIndex(sidx if sidx >= 0 else 0)
         elif ctype == _COND_DYN:
             self.dyn_var.set_name(str(cond.get("var", "")))
+            self._dyn_page.refresh_binding_names()
+            saved_state = str(cond.get("state", ""))
+            if saved_state:
+                sidx = self.dyn_state.findText(saved_state)
+                if sidx >= 0:
+                    self.dyn_state.setCurrentIndex(sidx)
+                else:
+                    self.dyn_state.setEditText(saved_state)
         elif ctype == _COND_NUM:
             self.num_var.set_name(str(cond.get("var", "")))
             oidx = self.num_op.findData(cond.get("op", "gt"))
@@ -1827,6 +1995,9 @@ class _CondItem(QWidget):
         self.imp_var.set_names(imp, tr("— не выбрано —"))
         self.flag_var.set_names(flags, tr("— не выбрано —"))
         self.cv_var.set_names(cache, tr("— не выбрано —"))
+        # Состояния «Динамической переменной» — из её таблицы привязки
+        # (отчёт мастера: список состояний в условии был пуст).
+        self._dyn_page.refresh_binding_names()
 
     def _update_summary(self, *_args) -> None:
         ctype = self._type.currentData()
@@ -1834,10 +2005,11 @@ class _CondItem(QWidget):
             # «Дверь открыта 1» — имя + состояние (отчёт мастера).
             text = f"{self.st_var.get_name() or '—'} {self.st_state.currentData()}"
         elif ctype == _COND_DYN:
-            # «Состояние АКПП — Активно» (отчёт мастера).
-            text = (
-                f"{self.dyn_var.get_name() or '—'} {tr('Активно')}"
-            )
+            # «Коробка — Драйв» — имя + состояние из таблицы привязки;
+            # без состояния — «Активно» (отчёт мастера).
+            name = self.dyn_var.get_name() or "—"
+            state = self.dyn_state.currentText().strip()
+            text = f"{name} — {state}" if state else f"{name} {tr('Активно')}"
         elif ctype == _COND_NUM:
             # «Обороты ДВС меньше 1500».
             op = {
@@ -2225,6 +2397,7 @@ class _ActionItem(QWidget):
         row1.addWidget(_small_label("ID", font))
         self.fr_id = _HexIdEdit(font)
         row1.addWidget(self.fr_id)
+        _bind_id_width(self.fr_bit, self.fr_id)
         row1.addWidget(_small_label("DLC", font))
         self.fr_dlc = QSpinBox()
         self.fr_dlc.setFont(font)
@@ -2304,6 +2477,7 @@ class _ActionItem(QWidget):
         row1.addWidget(_small_label("ID", font))
         self.cache_id = _HexIdEdit(font)
         row1.addWidget(self.cache_id)
+        _bind_id_width(self.cache_bit, self.cache_id)
         row1.addWidget(_small_label("DLC", font))
         self.cache_dlc = QSpinBox()
         self.cache_dlc.setFont(font)
@@ -2430,6 +2604,24 @@ class _ActionItem(QWidget):
     def _toggle_editor(self) -> None:
         """Клик по строке-сводке разворачивает/сворачивает редактор."""
         _animate_editor_toggle(self)
+
+    def is_complete(self) -> bool:
+        """Действие настроено целиком — только тогда редактору можно
+        сворачиваться в одну строку (отчёт мастера)."""
+        atype = self._type.currentData()
+        if atype == _ACT_NONE:
+            return False
+        if atype == _ACT_VAR:
+            return bool(self.var.get_name())
+        if atype == _ACT_FLAG:
+            return bool(self.flag_var.get_name())
+        if atype == _ACT_FRAME:
+            return hex_to_int(self.fr_id.text()) is not None
+        if atype == _ACT_CACHE:
+            return hex_to_int(self.cache_id.text()) is not None
+        if atype == _ACT_CACHEVAR:
+            return bool(self.cv_var.get_name())
+        return True  # «Доп канал» — все поля имеют значения по умолчанию
 
     def _on_type(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
@@ -3815,10 +4007,16 @@ class FlexibleLogicTab(QWidget):
             state = self._static_states.get(str(cond.get("var", "")), 0)
             return state == int(cond.get("state", 1))
         if ctype == _COND_DYN:
-            # «Активно»: переменная сейчас находится в одном из
-            # состояний таблицы привязки (сырое значение кэша
-            # совпало с именованной точкой — отчёт мастера).
-            return bool(self._dyn_values.get(str(cond.get("var", ""))))
+            # Состояние из таблицы привязки выбрано — истинно, пока
+            # переменная находится именно в нём (отчёт мастера:
+            # условия списком из таблицы привязки). Пустое состояние —
+            # легаси «Активно»: переменная в любом именованном
+            # состоянии.
+            current = self._dyn_values.get(str(cond.get("var", "")))
+            state = str(cond.get("state", "")).strip()
+            if state:
+                return str(current) == state
+            return bool(current)
         if ctype == _COND_NUM:
             value = self._dyn_values.get(str(cond.get("var", "")))
             if value is None:
