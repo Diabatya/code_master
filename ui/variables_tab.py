@@ -37,6 +37,7 @@ import contextlib
 import json
 import re
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from PySide6.QtCore import (
@@ -205,9 +206,18 @@ class _BindingCellEdit(QLineEdit):
     подмены: «фыв» в HEX-ячейке даёт «ad» («ы»→«s» не hex —
     отбрасывается)."""
 
-    def __init__(self, parent=None, allowed: str | None = None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        allowed: str | None = None,
+        max_len: int | None = None,
+    ) -> None:
         super().__init__(parent)
         self._allowed = set(allowed) if allowed else None
+        if max_len is not None:
+            # Длина ячейки: «Значение DATA» — один байт, максимум
+            # два hex-символа (отчёт мастера).
+            self.setMaxLength(max_len)
 
     def _insert_mapped(self, text: str) -> None:
         mapped = translate_cyrillic_layout(text)
@@ -218,10 +228,17 @@ class _BindingCellEdit(QLineEdit):
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         text = event.text()
-        if text and any(ch in CYRILLIC_LAYOUT_MAP for ch in text):
+        # Служебные клавиши (Backspace/Delete/Tab/стрелки, Ctrl+C/V …)
+        # не имеют печатного текста или дают управляющий символ — их
+        # фильтр раскладки глушил: стирание в ячейке не работало
+        # (отчёт мастера). Пропускаем в базовый QLineEdit как есть.
+        if not text or not all(ch.isprintable() for ch in text):
+            super().keyPressEvent(event)
+            return
+        if any(ch in CYRILLIC_LAYOUT_MAP for ch in text):
             self._insert_mapped(text)
             return
-        if text and self._allowed is not None:
+        if self._allowed is not None:
             filtered = "".join(ch for ch in text if ch in self._allowed)
             if filtered != text:
                 if filtered:
@@ -240,12 +257,21 @@ class _BindingCellDelegate(QStyledItemDelegate):
     """Делегат колонки таблицы привязки — выдаёт редактор с живой
     подменой раскладки (см. _BindingCellEdit)."""
 
-    def __init__(self, allowed: str | None = None, parent=None) -> None:
+    def __init__(
+        self,
+        allowed: str | None = None,
+        parent=None,
+        max_len: int | Callable[[], int] | None = None,
+    ) -> None:
         super().__init__(parent)
         self._allowed = allowed
+        self._max_len = max_len
 
     def createEditor(self, parent, option, index):  # noqa: N802
-        return _BindingCellEdit(parent, self._allowed)
+        limit = (
+            self._max_len() if callable(self._max_len) else self._max_len
+        )
+        return _BindingCellEdit(parent, self._allowed, limit)
 
 
 def _bind_id_width(bit_combo: QComboBox, *edits: _HexIdEdit) -> None:
@@ -356,6 +382,27 @@ def _autofill_x_on_id(
             for edit in edits:
                 if edit.isEnabled() and not edit.text().strip():
                     edit.setText("X")
+
+    id_edit.textChanged.connect(_fill)
+
+
+def _autofill_00_on_id(
+    id_edit: QLineEdit, *edit_groups: list[QLineEdit]
+) -> None:
+    """После ввода ID поля DATA фрейма команды заполняются «00»
+    (отчёт мастера — в управлении байты должны быть конкретными,
+    а не «X»). Срабатывает один раз на непустой ID; уже заполненные
+    поля не трогает."""
+    filled = {"done": False}
+
+    def _fill(text: str) -> None:
+        if filled["done"] or not text.strip():
+            return
+        filled["done"] = True
+        for edits in edit_groups:
+            for edit in edits:
+                if edit.isEnabled() and not edit.text().strip():
+                    edit.setText("00")
 
     id_edit.textChanged.connect(_fill)
 
@@ -1109,8 +1156,20 @@ class _ValuePage(QWidget):
         # колонка «Величина» — цифры и разделители (отчёт мастера:
         # подмена в таблицах привязки не работала). Имена состояний
         # «Динамической» — свободный текст, не трогаем.
+        # DATA-ячейка: у «Динамической» точка — один байт (максимум
+        # 2 hex-символа — отчёт мастера); у «Численной» значение может
+        # быть многобайтовым — предел DLC·2, как при коммите.
         self.points_table.setItemDelegateForColumn(
-            0, _BindingCellDelegate("0123456789ABCDEFabcdef ", self)
+            0,
+            _BindingCellDelegate(
+                "0123456789ABCDEFabcdef ",
+                self,
+                max_len=(
+                    (lambda: max(2, int(self.dlc.value()) * 2))
+                    if kind == "numeric"
+                    else 2
+                ),
+            ),
         )
         if kind == "numeric":
             self.points_table.setItemDelegateForColumn(
@@ -1800,7 +1859,36 @@ class _CmdFrameRow(QWidget):
     ) -> None:
         super().__init__(parent)
         self._get_tab = get_tab
-        row = QHBoxLayout(self)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(2)
+
+        # Онлайн-строка DATA кадра с этим ID — ВЫНЕСЕНА НАВЕРХ,
+        # над полями ввода (отчёт мастера: «онлайн поле контроля
+        # введённого ID вынеси выше»): при вводе ID сразу видно,
+        # что реально летает на шине.
+        live_row = QHBoxLayout()
+        live_row.setContentsMargins(0, 0, 0, 0)
+        live_row.setSpacing(4)
+        live_title = QLabel(tr("Онлайн:"))
+        live_title.setFont(font)
+        live_row.addWidget(live_title)
+        self.live_label = QLabel("—")
+        self.live_label.setFont(QFont("Consolas", 8))
+        self.live_label.setStyleSheet("color: #7C9EFF;")
+        # 8 байт «AA BB …» в Consolas 8 ≈ 130 px — 96 резало строку
+        # (отчёт мастера: онлайн-DATA не помещалась).
+        self.live_label.setMinimumWidth(140)
+        self.live_label.setToolTip(
+            tr("Онлайн-данные кадра с этим ID на шине")
+        )
+        _selectable(self.live_label)
+        live_row.addWidget(self.live_label)
+        # Clipboard-кнопки создаются после self.data — виджет ниже.
+        live_row.addStretch()
+        box.addLayout(live_row)
+
+        row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
 
@@ -1837,23 +1925,9 @@ class _CmdFrameRow(QWidget):
         self.rtr.setToolTip(tr("Remote Transmission Request"))
         row.addWidget(self.rtr)
 
-        # Онлайн-строка DATA кадра с этим ID + кнопки
-        # копировать/вставить — как в строке «Ответ» триггера и в
-        # статической переменной (отчёт мастера: «при вводе ID
-        # выводи поле DATA онлайн»).
-        self.live_label = QLabel("—")
-        self.live_label.setFont(QFont("Consolas", 8))
-        self.live_label.setStyleSheet("color: #7C9EFF;")
-        # 8 байт «AA BB …» в Consolas 8 ≈ 130 px — 96 резало строку
-        # (отчёт мастера: онлайн-DATA не помещалась).
-        self.live_label.setMinimumWidth(140)
-        self.live_label.setToolTip(
-            tr("Онлайн-данные кадра с этим ID на шине")
-        )
-        _selectable(self.live_label)
-        row.addWidget(self.live_label)
-        row.addWidget(
-            _clipboard_buttons(self.live_label, font, self.data)
+        # Кнопки «копировать/вставить» — в верхнюю онлайн-строку.
+        live_row.insertWidget(
+            2, _clipboard_buttons(self.live_label, font, self.data)
         )
 
         def _ms_spin(value: int = 0) -> QSpinBox:
@@ -1880,12 +1954,6 @@ class _CmdFrameRow(QWidget):
         self.count.setValue(1)
         self.count.setFixedWidth(58)
         row.addWidget(self.count)
-        next_label = QLabel(tr("до след."))
-        next_label.setFont(font)
-        next_label.setToolTip(tr("Пауза до следующего фрейма команды"))
-        row.addWidget(next_label)
-        self.next_delay = _ms_spin()
-        row.addWidget(self.next_delay)
 
         remove = QPushButton()
         remove.setIcon(
@@ -1897,6 +1965,26 @@ class _CmdFrameRow(QWidget):
         remove.setToolTip(tr("Удалить фрейм"))
         remove.clicked.connect(lambda: on_remove(self))
         row.addWidget(remove)
+        box.addLayout(row)
+
+        # «Пауза до следующего фрейма» — по центру МЕЖДУ строками
+        # фреймов (отчёт мастера). У последней строки скрывается через
+        # set_next_pause_visible().
+        self.next_delay = _ms_spin()
+        self._next_row = QWidget()
+        next_row = QHBoxLayout(self._next_row)
+        next_row.setContentsMargins(0, 0, 0, 0)
+        next_row.addStretch()
+        next_label = QLabel(tr("Пауза до следующего фрейма"))
+        next_label.setFont(font)
+        next_row.addWidget(next_label)
+        next_row.addWidget(self.next_delay)
+        next_row.addStretch()
+        box.addWidget(self._next_row)
+
+        # После ввода ID поля DATA заполняются «00» — фрейм команды
+        # шлёт конкретные байты, не подстановку (отчёт мастера).
+        _autofill_00_on_id(self.can_id, self.data)
 
         self.dlc.valueChanged.connect(
             lambda v: _set_data_enabled(
@@ -1925,6 +2013,11 @@ class _CmdFrameRow(QWidget):
         # Мгновенный опрос онлайн-DATA при вводе ID/битности.
         self.can_id.textChanged.connect(self.update_live)
         self.bit.currentIndexChanged.connect(self.update_live)
+
+    def set_next_pause_visible(self, visible: bool) -> None:
+        """Строка «Пауза до следующего фрейма» видна только между
+        строками — у последнего фрейма скрыта (отчёт мастера)."""
+        self._next_row.setVisible(visible)
 
     def update_live(self) -> None:
         """Онлайн-DATA кадра с текущим ID — опрашивается таймером
@@ -2021,8 +2114,14 @@ class _CommandDialog(QDialog):
         frames_title.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         frames_head.addWidget(frames_title)
         frames_head.addStretch()
-        add_frame = QPushButton("＋")
-        add_frame.setFont(font)
+        # ASCII «+» белым: fullwidth «＋» на Windows не покрывается
+        # Segoe UI и рендерился синим прямоугольником-заглушкой
+        # (отчёт мастера: «кнопка просто синяя, замени на белый +»).
+        add_frame = QPushButton("+")
+        add_frame.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        add_frame.setStyleSheet(
+            "QPushButton { color: #FFFFFF; padding-bottom: 2px; }"
+        )
         add_frame.setFixedSize(28, 28)
         add_frame.setToolTip(tr("Добавить фрейм"))
         add_frame.clicked.connect(lambda: self._add_frame_row(font))
@@ -2073,8 +2172,15 @@ class _CommandDialog(QDialog):
         self._frames_layout.insertWidget(
             self._frames_layout.count() - 1, row
         )
+        self._update_pause_rows()
         row.update_live()
         return row
+
+    def _update_pause_rows(self) -> None:
+        """«Пауза до следующего фрейма» показывается по центру МЕЖДУ
+        строками — у последней строки скрыта (отчёт мастера)."""
+        for i, row in enumerate(self._frame_rows):
+            row.set_next_pause_visible(i < len(self._frame_rows) - 1)
 
     def _refresh_live(self) -> None:
         """Опрос онлайн-DATA всех строк фреймов (таймер диалога)."""
@@ -2086,6 +2192,7 @@ class _CommandDialog(QDialog):
             self._frame_rows.remove(row)
         self._frames_layout.removeWidget(row)
         row.deleteLater()
+        self._update_pause_rows()
 
     def current_config(self) -> dict[str, Any]:
         """Снимок полей без валидации — частичный ввод тоже

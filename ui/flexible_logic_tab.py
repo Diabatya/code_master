@@ -2099,25 +2099,9 @@ class _ActionItem(QWidget):
         editor_layout.setSpacing(2)
         editor_layout.setContentsMargins(0, 0, 0, 0)
 
-        self._type = QComboBox()
-        self._type.setFont(font)
-        # «Не выбрано» — позиция нового действия (отчёт мастера).
-        self._type.addItem(tr("Не выбрано"), _ACT_NONE)
-        self._type.addItem(tr("Доп канал"), _ACT_AUX)
-        self._type.addItem(tr("Переменные управления"), _ACT_VAR)
-        self._type.addItem(tr("Переменные"), _ACT_FLAG)
-        self._type.addItem(tr("Отправить фрейм"), _ACT_FRAME)
-        self._type.addItem(tr("Запись DATA в кэш"), _ACT_CACHE)
-        # «Кэш переменная» — Записать/Отправить/Стереть буфер 2
-        # (отчёт мастера).
-        self._type.addItem(tr("Кэш переменная"), _ACT_CACHEVAR)
-        self._type.currentIndexChanged.connect(self._on_type)
-        editor_layout.addWidget(self._type)
-
-        # Общие параметры действия (отчёт мастера): «Задержка»
-        # выполнения 0–999999 мс расположена НАД основной командой
-        # (отчёт мастера), «Прервать если» — событие-прерыватель,
-        # отменяющее действие, пока оно ждёт задержку.
+        # «Задержка» выполнения 0–999999 мс — ВЫШЕ выбора основного
+        # действия (отчёт мастера: «паузу перед выполнением поставь
+        # выше выбора основного действия»).
         delay_row = QHBoxLayout()
         delay_row.setContentsMargins(0, 0, 0, 0)
         delay_row.addWidget(_small_label(tr("Задержка"), font))
@@ -2132,6 +2116,21 @@ class _ActionItem(QWidget):
         delay_row.addWidget(self.exec_delay)
         delay_row.addStretch()
         editor_layout.addLayout(delay_row)
+
+        self._type = QComboBox()
+        self._type.setFont(font)
+        # «Не выбрано» — позиция нового действия (отчёт мастера).
+        self._type.addItem(tr("Не выбрано"), _ACT_NONE)
+        self._type.addItem(tr("Доп канал"), _ACT_AUX)
+        self._type.addItem(tr("Переменные управления"), _ACT_VAR)
+        self._type.addItem(tr("Переменные"), _ACT_FLAG)
+        self._type.addItem(tr("Отправить фрейм"), _ACT_FRAME)
+        self._type.addItem(tr("Запись DATA в кэш"), _ACT_CACHE)
+        # «Кэш переменная» — Записать/Отправить/Стереть буфер 2
+        # (отчёт мастера).
+        self._type.addItem(tr("Кэш переменная"), _ACT_CACHEVAR)
+        self._type.currentIndexChanged.connect(self._on_type)
+        editor_layout.addWidget(self._type)
 
         self._stack = QStackedWidget()
         none_label = _small_label(tr("— не выбрано —"), font)
@@ -2929,6 +2928,7 @@ class RuleRowWidget(QWidget):
         super().__init__(tab)
         self._tab = tab
         self._rule = rule or {}
+        self._focus_conn = None  # отписка — в _detach_item
         self._create_widgets()
         self._build_layout()
         self._load_rule()
@@ -3042,7 +3042,7 @@ class RuleRowWidget(QWidget):
 
         # ЕСЛИ — События (ИЛИ между событиями); кнопка добавления —
         # ПОД списком событий (отчёт мастера).
-        body_layout.addWidget(_connector(tr("ЕСЛИ")), 0)
+        body_layout.addWidget(_connector(tr("ЕСЛИ")), 0, Qt.AlignmentFlag.AlignTop)
         ev_layout = QVBoxLayout(self._event_group)
         ev_layout.setSpacing(3)
         ev_layout.setContentsMargins(8, 4, 8, 4)
@@ -3050,11 +3050,14 @@ class RuleRowWidget(QWidget):
         self._events_layout.setSpacing(1)
         ev_layout.addLayout(self._events_layout, 1)
         ev_layout.addWidget(self._add_event_button)
-        body_layout.addWidget(self._event_group, 1)
+        # Колонки прижаты к верху программы: короткая колонка не
+        # растягивает рамку в высоту самой длинной (отчёт мастера —
+        # «окно программы минимальное по высоте»).
+        body_layout.addWidget(self._event_group, 1, Qt.AlignmentFlag.AlignTop)
 
         # ПРИ — Условия (И между условиями — выполняются все);
         # кнопка добавления под списком (отчёт мастера).
-        body_layout.addWidget(_connector(tr("ПРИ")), 0)
+        body_layout.addWidget(_connector(tr("ПРИ")), 0, Qt.AlignmentFlag.AlignTop)
         cd_layout = QVBoxLayout(self._cond_group)
         cd_layout.setSpacing(3)
         cd_layout.setContentsMargins(8, 4, 8, 4)
@@ -3062,11 +3065,11 @@ class RuleRowWidget(QWidget):
         self._conds_layout.setSpacing(1)
         cd_layout.addLayout(self._conds_layout, 1)
         cd_layout.addWidget(self._add_cond_button)
-        body_layout.addWidget(self._cond_group, 1)
+        body_layout.addWidget(self._cond_group, 1, Qt.AlignmentFlag.AlignTop)
 
         # ТО — Действия (выполняются все по порядку); кнопка
         # добавления под списком (отчёт мастера).
-        body_layout.addWidget(_connector(tr("ТО")), 0)
+        body_layout.addWidget(_connector(tr("ТО")), 0, Qt.AlignmentFlag.AlignTop)
         act_layout = QVBoxLayout(self._action_group)
         act_layout.setSpacing(3)
         act_layout.setContentsMargins(8, 4, 8, 4)
@@ -3074,7 +3077,7 @@ class RuleRowWidget(QWidget):
         self._actions_layout.setSpacing(1)
         act_layout.addLayout(self._actions_layout, 1)
         act_layout.addWidget(self._add_action_button)
-        body_layout.addWidget(self._action_group, 1)
+        body_layout.addWidget(self._action_group, 1, Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self._body)
 
     # ---- переменные из вкладки «Переменные» ----------------------------

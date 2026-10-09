@@ -414,11 +414,24 @@ class Bootloader:
         # кадра (адрес: 5 байт, данные: до 258). Выливаем запас 0x7F:
         # они добьют любой недописанный кадр (контрольная сумма не
         # сойдётся → NACK → бутлоадер вернётся в ожидание команды),
-        # а попавшие в command-режим 0x7F ответят ACK — их снимет
-        # reset_input_buffer внутри sync().
+        # а попавшие в command-режим 0x7F дадут NACK-пары.
         with contextlib.suppress(Exception):
             self.port.write(bytes([0x7F]) * 300)
             time.sleep(0.05)
+        # Запасные 0x7F могли породить пачку NACK (0x1F) в ответ — они
+        # доезжают по CDC с задержкой и попадали в ответы следующих
+        # команд как фантомные отказы (отчёт мастера). Дочитываем
+        # до тишины перед синхронизацией.
+        with contextlib.suppress(Exception):
+            prev_timeout = self.port.timeout
+            try:
+                self.port.timeout = 0.05
+                for _ in range(8):
+                    if not self.port.read(256):
+                        break
+                    time.sleep(0.02)
+            finally:
+                self.port.timeout = prev_timeout
         self.sync(retries=5)
         logger.info("Связь с бутлоадером восстановлена")
 
@@ -730,6 +743,24 @@ class Bootloader:
                     break
                 except BootloaderError as exc:
                     logger.warning("Повтор записи блока 0x%08X: %s", block_addr, exc)
+                    # NACK (0x1F) после восстановления связи: первый
+                    # проход мог записать блок полностью, а ACK умер
+                    # вместе с портом. На STM32F1 повторное
+                    # программирование тех же полуслов без стирания —
+                    # PGERR → NACK. Если блок уже лежит во flash как
+                    # надо — считаем записанным (отчёт мастера:
+                    # «Ошибка записи блока 0x… (ответ 0x1F)»).
+                    try:
+                        if self.read_memory(block_addr, len(block)) == block:
+                            logger.info(
+                                "Блок 0x%08X уже записан корректно — принят по read-back",
+                                block_addr,
+                            )
+                            break
+                    except (serial.SerialException, OSError, BootloaderError):
+                        # Чтение тоже упало — ниже стандартный путь
+                        # восстановления порта через retry.
+                        pass
                     if attempt == self.MAX_RETRIES - 1:
                         raise BootloaderError(
                             f"Ошибка записи блока 0x{block_addr:08X} ({len(block)} байт): {exc}"

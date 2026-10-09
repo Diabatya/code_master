@@ -2097,16 +2097,29 @@ class SettingsWindow(QMainWindow):
         box.exec()
         clicked = box.clickedButton()
         role = box.buttonRole(clicked) if clicked is not None else None
-        self._reset_in_progress = True
-        try:
-            if role == QMessageBox.ButtonRole.AcceptRole:
-                self._reset_config_only()
-            elif role == QMessageBox.ButtonRole.ActionRole:
-                self._reset_variables_only()
-            elif role == QMessageBox.ButtonRole.DestructiveRole:
-                self._reset_everything()
-        finally:
-            self._reset_in_progress = False
+        # Сам сброс — на следующий тик цикла событий: массовая
+        # перестройка вкладок (триггеры/ГЛ/переменные) прямо внутри
+        # обработчика клика по кнопке QMessageBox роняла приложение
+        # на Windows (отчёт мастера).
+        if role == QMessageBox.ButtonRole.AcceptRole:
+            action = self._reset_config_only
+        elif role == QMessageBox.ButtonRole.ActionRole:
+            action = self._reset_variables_only
+        elif role == QMessageBox.ButtonRole.DestructiveRole:
+            action = self._reset_everything
+        else:
+            return
+
+        def _run() -> None:
+            if self._reset_in_progress or not isValid(self):
+                return
+            self._reset_in_progress = True
+            try:
+                action()
+            finally:
+                self._reset_in_progress = False
+
+        QTimer.singleShot(0, _run)
 
     def _device_connected(self) -> bool:
         return (
@@ -2136,18 +2149,9 @@ class SettingsWindow(QMainWindow):
     def _reset_config_only(self) -> None:
         """Сбрасывает конфигурацию без переменных: настройки окна —
         к значениям по умолчанию, в МК стирается область гибкой логики
-        (FLXH) и записывается пустой набор триггеров. Область VARH не
-        трогаем."""
+        (FLXH) и записывается пустой набор триггеров (отчёт мастера:
+        «ГЛ сбросилась, а триггеры остались»). Область VARH не трогаем."""
         try:
-            if self._device_connected():
-                try:
-                    self._serial_manager.storage_clear(STORAGE_REGION_FLEX)
-                    serial = str(self._config.get("device_serial") or "")
-                    self._blob_cache.pop((serial, STORAGE_REGION_FLEX), None)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Стирание области гибкой логики не подтверждено: %s", exc
-                    )
             self._config.reset_to_defaults()
             self._config.save()
             self._trigger_tab.set_config(self._config.get("triggers", []))
@@ -2157,6 +2161,23 @@ class SettingsWindow(QMainWindow):
                     self._config.get("gateway_rules", []),
                     self._config.get("gateway_ignore", []),
                 )
+            if self._device_connected():
+                # Пустой набор триггеров на устройство — иначе МК
+                # продолжал отвечать по старым правилам (отчёт мастера).
+                try:
+                    self._trigger_tab.write_to_device()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Стирание триггеров устройства не подтверждено: %s", exc
+                    )
+                try:
+                    self._serial_manager.storage_clear(STORAGE_REGION_FLEX)
+                    serial = str(self._config.get("device_serial") or "")
+                    self._blob_cache.pop((serial, STORAGE_REGION_FLEX), None)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Стирание области гибкой логики не подтверждено: %s", exc
+                    )
             # Поля отличаются от состояния МК — «Сохранить» активна.
             self._mark_dirty()
             show_toast(self, tr("Конфигурация сброшена"))

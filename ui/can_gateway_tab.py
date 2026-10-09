@@ -574,8 +574,11 @@ class _SubCurveBlock(QWidget):
         self.table = _BindTable(font, self._on_table_changed)
         table_row.addWidget(self.table, 1)
         table_btns = QVBoxLayout()
-        add_btn = QPushButton("＋")
-        add_btn.setFont(font)
+        add_btn = QPushButton("+")
+        add_btn.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        add_btn.setStyleSheet(
+            "QPushButton { color: #FFFFFF; padding-bottom: 2px; }"
+        )
         add_btn.setFixedSize(24, 24)
         add_btn.setToolTip(tr("Добавить точку привязки"))
         add_btn.clicked.connect(self.table.add_row)

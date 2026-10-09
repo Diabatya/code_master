@@ -1187,9 +1187,16 @@ class MainWindow(QMainWindow):
         ):
             port = str(app_devices[0]["port"])
             if port not in self._auto_connect_tried:
-                self._auto_connect_tried.add(port)
                 logger.info("Автоподключение к устройству %s", port)
-                self._connect_port(port)
+                if self._connect_port(port):
+                    self._auto_connect_tried.add(port)
+                else:
+                    # Порт виден в comports(), но ещё не готов (Windows
+                    # держит его закрытым пару секунд при пере-энумерации
+                    # после DFU→CDC) — пробуем снова на следующем тике,
+                    # иначе карточка так и висела бы с прочерками до
+                    # захода в настройки (отчёт мастера).
+                    self._auto_connect_tried.discard(port)
                 connected_port = (
                     self._serial_manager.current_port_name()
                     if self._serial_manager.is_open() else None
