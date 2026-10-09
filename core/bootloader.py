@@ -19,6 +19,7 @@ except Exception:  # noqa: BLE001
         return []
 
 from core.firmware_utils import (
+    extract_flash_page,
     guess_firmware_base,
     load_firmware_bytes,
     trim_to_application_region,
@@ -879,12 +880,19 @@ class Bootloader:
             info_seg = firmware[:DEVICE_CONFIG_PAGE_SIZE]
             code = b""
         else:
-            info_rel = DEVICE_INFO_PAGE_ADDR - base_address
-            if 0 <= info_rel < len(firmware):
-                info_seg = firmware[info_rel : info_rel + DEVICE_CONFIG_PAGE_SIZE]
-            meta_rel = APP_METADATA_PAGE_ADDR - base_address
-            if 0 <= meta_rel < len(firmware):
-                meta_seg = firmware[meta_rel : meta_rel + APP_METADATA_PAGE_SIZE]
+            # Образ может начинаться в середине страницы: релизный
+            # CDC-образ начинается с VER1 по 0x08008400 — середина
+            # info-страницы. Выровненный срез такой случай терял, и
+            # «Версия ПО» после прошивки старой прошивкой не менялась
+            # (отчёт мастера).
+            info_seg = extract_flash_page(
+                firmware, base_address,
+                DEVICE_INFO_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE,
+            )
+            meta_seg = extract_flash_page(
+                firmware, base_address,
+                APP_METADATA_PAGE_ADDR, APP_METADATA_PAGE_SIZE,
+            )
             if base_address < APPLICATION_BASE_ADDR:
                 cut = APPLICATION_BASE_ADDR - base_address
                 code_addr = APPLICATION_BASE_ADDR

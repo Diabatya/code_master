@@ -2162,6 +2162,23 @@ class SettingsWindow(QMainWindow):
                     self._config.get("gateway_ignore", []),
                 )
             if self._device_connected():
+                # До цикла записи прогоняем отложенные удаления сами:
+                # write_to_device вызывает QApplication.processEvents()
+                # внутри control_session — и DeferredDelete старых
+                # виджетов триггеров/ГЛ срабатывал посреди остановленного
+                # reader'а, задевая focusChanged/анимации на полуживых
+                # виджетах. На Windows это роняло приложение нативно,
+                # без traceback (повторный отчёт мастера).
+                # Цикл: _detach_item вызывает deleteLater через
+                # singleShot(0) — это таймер, а не DeferredDelete, он
+                # срабатывает на следующем проходе и ставит новый
+                # DeferredDelete — поэтому дренаж повторяем, пока
+                # очередь не опустеет.
+                for _drain in range(4):
+                    QApplication.processEvents()
+                    QApplication.sendPostedEvents(
+                        None, QEvent.Type.DeferredDelete
+                    )
                 # Пустой набор триггеров на устройство — иначе МК
                 # продолжал отвечать по старым правилам (отчёт мастера).
                 try:

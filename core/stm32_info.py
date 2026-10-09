@@ -198,14 +198,64 @@ def merge_device_config_page(incoming_page: bytes, existing_page: bytes) -> byte
     """Сохраняет аппаратные поля существующей config-страницы при
     обновлении. Версионная запись VER1 берётся из НОВОГО образа —
     иначе после прошивки на карточке оставалась бы старая версия
-    (или пусто), а релизная прошивка несёт свою (отчёт мастера)."""
-    incoming = parse_device_config(incoming_page)
-    if incoming is None:
-        return incoming_page
-    ver = parse_device_fw_version(incoming_page)
-    return build_device_config_page(
-        incoming[0], incoming[1], existing_page, fw_version=ver
+    (или пусто), а релизная прошивка несёт свою (отчёт мастера).
+
+    Оверлей не-0xFF байтов образа поверх существующей страницы:
+    релизный CDC-образ несёт только VER1 (CFG0 в него не пишется),
+    поэтому требование валидного CFG0 у образа отбрасывало версию —
+    идентичность устройства при этом затиралась стёртой страницей
+    (отчёт мастера: «прошил старой версией — показывает последнюю»)."""
+    merged = bytearray(
+        existing_page[:DEVICE_CONFIG_PAGE_SIZE]
+        if existing_page
+        else b"\xFF" * DEVICE_CONFIG_PAGE_SIZE
     )
+    if len(merged) < DEVICE_CONFIG_PAGE_SIZE:
+        merged.extend(b"\xFF" * (DEVICE_CONFIG_PAGE_SIZE - len(merged)))
+    incoming_cfg = parse_device_config(incoming_page)
+    for off in range(0, DEVICE_CONFIG_PAGE_SIZE, DEVICE_CONFIG_RECORD_SIZE):
+        block = incoming_page[off : off + DEVICE_CONFIG_RECORD_SIZE]
+        if len(block) < DEVICE_CONFIG_RECORD_SIZE:
+            break
+        # VER1 по легаси-смещению 32 переносится ниже в актуальное
+        # смещение 1024 — оверлей по старому адресу попал бы в область
+        # имён триггеров (TNM0) и испортил бы их записи.
+        if (
+            off == DEVICE_CONFIG_VER_OFFSET_LEGACY
+            and int.from_bytes(block[:4], "little") == DEVICE_CONFIG_VER_MAGIC
+        ):
+            continue
+        for i, byte in enumerate(block):
+            if byte != 0xFF:
+                merged[off + i] = byte
+    existing = parse_device_config(existing_page) if existing_page else None
+    merged_cfg = parse_device_config(bytes(merged))
+    if existing is not None and merged_cfg is not None and (
+        incoming_cfg is not None
+        and merged_cfg[2:4] != existing[2:4]
+    ):
+        # VID/PID — аппаратная идентичность USB-интерфейса: образ
+        # собран инструментом без данных устройства и мог принести
+        # дефолтные VID/PID — восстанавливаем из старой страницы.
+        merged[25:27] = int(existing[2]).to_bytes(2, "little")
+        merged[27:29] = int(existing[3]).to_bytes(2, "little")
+        merged[31] = device_config_crc8(bytes(merged[:31]))
+    # Версию образа нормализуем в актуальное смещение VER1 (образы до
+    # переноса хранили её по offset 32 — теперь там имена триггеров).
+    ver = parse_device_fw_version(incoming_page)
+    if ver is not None:
+        enc = ver.encode("ascii", errors="ignore")[:DEVICE_CONFIG_VERSION_MAX]
+        vrec = bytearray(32)
+        vrec[0:4] = DEVICE_CONFIG_VER_MAGIC.to_bytes(4, "little")
+        vrec[4] = len(enc)
+        vrec[5 : 5 + DEVICE_CONFIG_VERSION_MAX] = enc.ljust(
+            DEVICE_CONFIG_VERSION_MAX, b"\x00"
+        )
+        vrec[31] = device_config_crc8(bytes(vrec[:31]))
+        merged[
+            DEVICE_CONFIG_VER_OFFSET : DEVICE_CONFIG_VER_OFFSET + 32
+        ] = vrec
+    return bytes(merged)
 
 
 def build_app_metadata(image: bytes) -> bytes:

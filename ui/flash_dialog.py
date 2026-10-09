@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
 from core.bootloader import Bootloader
 from core.firmware_utils import (
     _save_intel_hex,
+    extract_flash_page,
     guess_firmware_base,
     load_firmware_bytes,
     trim_to_application_region,
@@ -85,6 +86,7 @@ from core.stm32_info import (
     build_device_config_page,
     merge_device_config_page,
     parse_device_config,
+    parse_device_fw_version,
     parse_legacy_device_config,
 )
 from models.config import Config
@@ -110,6 +112,31 @@ DEVICE_TYPES: list[tuple[int, str]] = [
     (DEVICE_TYPE_ANALOG, "2 CAN +"),
     (DEVICE_TYPE_CAN_FD, "2 CAN FD"),
 ]
+
+
+def _firmware_image_version(file_path: str) -> str | None:
+    """Версия ПО из VER1-записи образа прошивки.
+
+    Релизные образы «2 CAN DFU/CDC» несут версионную запись на
+    странице идентификации устройства (0x08008400). Читаем её до
+    прошивки, чтобы поле «Версия ПО» и карточка после записи
+    показывали версию ОБРАЗА — в том числе при откате на старую
+    прошивку (отчёт мастера)."""
+    try:
+        data, base = load_firmware_bytes(file_path)
+    except Exception:  # noqa: BLE001
+        return None
+    if not data:
+        return None
+    if not base:
+        base = guess_firmware_base(data)
+    page = extract_flash_page(
+        data, base, DEVICE_CONFIG_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE
+    )
+    if page is None:
+        return None
+    return parse_device_fw_version(page)
+
 
 def _flash_size_for_chip_id(chip_id: int | None) -> str:
     """Возвращает строку с размером флеш-памяти по chip ID или 'Неизвестно'."""
@@ -2118,6 +2145,7 @@ class FlashDialog(QDialog):
                 continue
             self._files_list.addItem(f)
         self._update_log_file()
+        self._sync_fw_version_from_files()
 
     def _on_move_up(self) -> None:
         row = self._files_list.currentRow()
@@ -2136,6 +2164,23 @@ class FlashDialog(QDialog):
     def _on_remove(self) -> None:
         for item in self._files_list.selectedItems():
             self._files_list.takeItem(self._files_list.row(item))
+        self._sync_fw_version_from_files()
+
+    def _sync_fw_version_from_files(self) -> None:
+        """Подставляет в поле «Версия ПО» версию из VER1-записи
+        выбранного образа — релизный файл несёт свою версию, и она
+        же должна уйти в камень и на карточку после прошивки
+        (отчёт мастера: после прошивки старой версией на главном
+        экране оставалась последняя)."""
+        for i in range(self._files_list.count()):
+            item = self._files_list.item(i)
+            if item is None:
+                continue
+            ver = _firmware_image_version(item.text())
+            if ver:
+                if self._fw_version_edit.text().strip() != ver:
+                    self._fw_version_edit.setText(ver)
+                return
 
     def _collect_files_for_flash(self) -> list[str]:
         """Возвращает список файлов для прошивки.
@@ -2189,8 +2234,17 @@ class FlashDialog(QDialog):
         if firmware_offset < 0 or firmware_offset + len(data) > flash_size:
             raise ValueError(tr("Прошивка не помещается в выбранный размер Flash"))
 
+        # Версия образа (VER1) важнее поля: при откате на старую
+        # прошивку поле могло остаться заполненным свежим релизом
+        # (отчёт мастера: карточка показывала последнюю версию вместо
+        # прошитой).
         page = build_device_config_page(
-            name, serial, fw_version=self._fw_version_edit.text().strip() or None
+            name, serial,
+            fw_version=(
+                _firmware_image_version(file_path)
+                or self._fw_version_edit.text().strip()
+                or None
+            ),
         )
         # Запоминаем имя для списка портов и шапки настроек: после прошивки
         # устройство пере-энумерируется с iSerial = serial. Без обновления
@@ -2303,6 +2357,15 @@ class FlashDialog(QDialog):
         if not self._warn_base_address_mismatch(method, prepared):
             return
 
+        # Запоминаем версию, которую реально несут прошиваемые образы:
+        # после записи карточка должна показать её, а не номер
+        # последнего релиза приложения (откат на старую прошивку —
+        # отчёт мастера).
+        self._last_flashed_version = None
+        for f in prepared:
+            ver = _firmware_image_version(f)
+            if ver:
+                self._last_flashed_version = ver
         logger.info("Старт прошивки: метод=%s, файлы=%s", method, prepared)
         self._release_serial_port(method)
         self._flash_button.setEnabled(False)
@@ -2408,7 +2471,10 @@ class FlashDialog(QDialog):
             # дожидаясь пере-энумерации устройства: если VER1 на МК
             # отсутствовал, повторные опросы дадут пусто, а поле
             # диалога оператор видел и подтвердил (отчёт мастера).
-            fw = self._fw_version_edit.text().strip()
+            fw = (
+                getattr(self, "_last_flashed_version", None)
+                or self._fw_version_edit.text().strip()
+            )
             if fw:
                 self._config.set("device_fw_version", fw)
             QMessageBox.information(self, tr("Готово"), message)

@@ -163,6 +163,18 @@ def _set_data_enabled(edits: list[QLineEdit], count: int) -> None:
             edit.setEnabled(True)
 
 
+def _to_int(value: Any, default: int = 0) -> int:
+    """int() с терпимостью к легаси-строкам («on»/«off») и None —
+    старые конфиги хранили состояние строками и роняли write()
+    загрузки программы (полевой отчёт)."""
+    if isinstance(value, str):
+        value = {"on": 1, "off": 0}.get(value.strip().lower(), value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _tokens_to_text(edits: list[QLineEdit]) -> str:
     tokens = [e.text().strip().upper() for e in edits]
     while tokens and tokens[-1] == "":
@@ -739,7 +751,7 @@ class _AuxEventPage(QWidget):
         didx = self.direction.findData(event.get("direction", "in"))
         self.direction.setCurrentIndex(didx if didx >= 0 else 0)
         self.channel.setValue(int(event.get("channel", 1) or 1))
-        sidx = self.state.findData(int(event.get("state", 1) or 0))
+        sidx = self.state.findData(_to_int(event.get("state", 1) or 0))
         self.state.setCurrentIndex(sidx if sidx >= 0 else 0)
 
 
@@ -806,7 +818,7 @@ class _FlagEventPage(QWidget):
 
     def write(self, event: dict[str, Any]) -> None:
         self.var.set_name(str(event.get("var", "")))
-        eidx = self.edge.findData(int(event.get("state", 1) or 0))
+        eidx = self.edge.findData(_to_int(event.get("state", 1) or 0))
         self.edge.setCurrentIndex(eidx if eidx >= 0 else 0)
 
 
@@ -1293,7 +1305,9 @@ def _auto_collapse(item) -> None:
                     holder["conn"] = None
                     item._focus_conn = None
                 return
-            if item._editor.maximumHeight() == 0:
+            if not getattr(
+                item, "_editor_open", item._editor.maximumHeight() != 0
+            ):
                 return  # уже свёрнут
             # Выпадающий список комбобокса внутри пункта — это всё ещё
             # редактирование: попап — отдельное окно, focusChanged
@@ -1330,12 +1344,21 @@ def _animate_editor_toggle(item) -> None:
     Обработчик finished() хранится в атрибуте, чтобы disconnect()
     реально снимал старую лямбду: иначе они копятся и выстреливают по
     уже удалённому редактору (падение приложения при закрытии условия).
+
+    Состояние «раскрыт» — явный флаг, а не текущая высота: прерванная
+    посередине анимация оставляла maximumHeight на малом ненулевом
+    значении, и следующий клик по сводке трактовал уже свёрнутый
+    пункт как раскрытый — сворачивал в ноль вместо разворачивания
+    (отчёт мастера: «при повторном нажатии дерево не открывается»).
     """
     editor = item._editor
     anim = item._editor_anim
-    expanded = editor.maximumHeight() != 0
+    expanded = bool(
+        getattr(item, "_editor_open", editor.maximumHeight() != 0)
+    )
     end = 0 if expanded else max(1, editor.sizeHint().height())
     final = 0 if expanded else 16777215
+    item._editor_open = not expanded
     old = getattr(item, "_anim_finished_cb", None)
     if old is not None:
         with contextlib.suppress(RuntimeError, TypeError):
@@ -1443,6 +1466,7 @@ class _EventItem(QWidget):
         )
         self._editor_anim.setDuration(160)
         self._editor_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._editor_open = True
 
         # Сводка обновляется при любом изменении полей события.
         for page in (
@@ -1464,6 +1488,7 @@ class _EventItem(QWidget):
             # Запрограммированное событие — свёрнуто до одной строки
             # (отчёт мастера); клик по сводке разворачивает редактор.
             self._editor.setMaximumHeight(0)
+            self._editor_open = False
         self._update_summary()
         # После настройки пункт сворачивается в одну строку, когда
         # фокус уходит за его пределы (отчёт мастера).
@@ -1829,6 +1854,7 @@ class _CondItem(QWidget):
         )
         self._editor_anim.setDuration(160)
         self._editor_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._editor_open = True
 
         self.st_var.currentIndexChanged.connect(self._update_summary)
         self.st_state.currentIndexChanged.connect(self._update_summary)
@@ -1856,6 +1882,7 @@ class _CondItem(QWidget):
         if cond is not None:
             self.write(cond)
             self._editor.setMaximumHeight(0)
+            self._editor_open = False
         self._update_summary()
         _auto_collapse(self)
 
@@ -1944,7 +1971,7 @@ class _CondItem(QWidget):
         self._stack.setCurrentIndex(self._type.currentIndex())
         if ctype == _COND_STATIC:
             self.st_var.set_name(str(cond.get("var", "")))
-            sidx = self.st_state.findData(int(cond.get("state", 1)))
+            sidx = self.st_state.findData(_to_int(cond.get("state", 1), 1))
             self.st_state.setCurrentIndex(sidx if sidx >= 0 else 0)
         elif ctype == _COND_DYN:
             self.dyn_var.set_name(str(cond.get("var", "")))
@@ -1965,11 +1992,11 @@ class _CondItem(QWidget):
             self.imp_var.set_name(str(cond.get("var", "")))
         elif ctype == _COND_AUX:
             self.aux_channel.setValue(int(cond.get("channel", 1) or 1))
-            sidx = self.aux_state.findData(int(cond.get("state", 1) or 0))
+            sidx = self.aux_state.findData(_to_int(cond.get("state", 1) or 0))
             self.aux_state.setCurrentIndex(sidx if sidx >= 0 else 0)
         elif ctype == _COND_FLAG:
             self.flag_var.set_name(str(cond.get("var", "")))
-            sidx = self.flag_state.findData(int(cond.get("state", 1) or 0))
+            sidx = self.flag_state.findData(_to_int(cond.get("state", 1) or 0))
             self.flag_state.setCurrentIndex(sidx if sidx >= 0 else 0)
         elif ctype == _COND_CACHEVAR:
             self.cv_var.set_name(str(cond.get("var", "")))
@@ -2156,10 +2183,12 @@ class _ActionItem(QWidget):
         )
         self._editor_anim.setDuration(160)
         self._editor_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._editor_open = True
 
         if action is not None:
             self.write(action)
             self._editor.setMaximumHeight(0)
+            self._editor_open = False
         self._update_summary()
         _auto_collapse(self)
 
@@ -2453,83 +2482,33 @@ class _ActionItem(QWidget):
         _set_data_enabled(self.fr_data, self.fr_dlc.value())
 
     def _build_cache_page(self, font: QFont, mark_dirty) -> None:
-        """«Запись DATA в кэш»: маска кадра-источника + приём/отправка
-        в выбранный канал — как в триггерах."""
+        """«Запись DATA в кэш»: переносит захваченный кадр выбранной
+        кэш-переменной из буфера 1 в буфер 2. Настроек CAN-пакета
+        здесь нет — CAN ID и байты «от–до» задаются в редакторе
+        самой переменной (отчёт мастера)."""
         page = QWidget()
         pl = QVBoxLayout(page)
         pl.setSpacing(2)
         pl.setContentsMargins(0, 0, 0, 0)
+        hint = QLabel(tr(
+            "Записывает последний кадр выбранной кэш-переменной "
+            "в её буфер 2. CAN ID и байты настраиваются в редакторе "
+            "переменной (вкладка «Переменные»)."
+        ))
+        hint.setFont(font)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #9A9AA5;")
+        pl.addWidget(hint)
         row1 = QHBoxLayout()
-        row1.addWidget(_small_label(tr("Канал"), font))
-        self.cache_channel = QComboBox()
-        self.cache_channel.setFont(font)
-        for i, name in enumerate(_CHANNELS_ANY):
-            self.cache_channel.addItem(name or tr(_ANY_CHANNEL_TEXT), i)
-        self.cache_channel.setFixedWidth(120)
-        row1.addWidget(self.cache_channel)
-        row1.addWidget(_small_label(tr("Бит"), font))
-        self.cache_bit = QComboBox()
-        self.cache_bit.setFont(font)
-        self.cache_bit.addItems(_BIT_RATES)
-        self.cache_bit.setFixedWidth(92)
-        row1.addWidget(self.cache_bit)
-        row1.addWidget(_small_label("ID", font))
-        self.cache_id = _HexIdEdit(font)
-        row1.addWidget(self.cache_id)
-        _bind_id_width(self.cache_bit, self.cache_id)
-        row1.addWidget(_small_label("DLC", font))
-        self.cache_dlc = QSpinBox()
-        self.cache_dlc.setFont(font)
-        self.cache_dlc.setRange(1, 8)
-        self.cache_dlc.setValue(8)
-        self.cache_dlc.setFixedWidth(54)
-        row1.addWidget(self.cache_dlc)
-        row1.addStretch()
+        row1.addWidget(_small_label(tr("Переменная:"), font))
+        self.cache_var = _VarCombo(font)
+        row1.addWidget(self.cache_var, 1)
         pl.addLayout(row1)
-        pl.addWidget(_small_label(tr("DATA от:"), font))
-        self.cache_from, from_widget = create_data_field_widget(
-            font, 8, edit_width=40, allow_x=True
-        )
-        pl.addWidget(from_widget)
-        pl.addWidget(_small_label(tr("DATA до:"), font))
-        self.cache_to, to_widget = create_data_field_widget(
-            font, 8, edit_width=40, allow_x=True
-        )
-        pl.addWidget(to_widget)
-        row2 = QHBoxLayout()
-        row2.addWidget(_small_label(tr("Отправить в"), font))
-        self.cache_tx_channel = QComboBox()
-        self.cache_tx_channel.setFont(font)
-        self.cache_tx_channel.addItems(["CAN1", "CAN2"])
-        row2.addWidget(self.cache_tx_channel)
-        row2.addWidget(_small_label(tr("Пауза"), font))
-        self.cache_delay = QSpinBox()
-        self.cache_delay.setRange(0, 9999)
-        self.cache_delay.setSuffix(tr(" мс"))
-        self.cache_delay.setFont(font)
-        self.cache_delay.setFixedWidth(86)
-        row2.addWidget(self.cache_delay)
-        row2.addWidget(_small_label(tr("Кол-во"), font))
-        self.cache_count = QSpinBox()
-        self.cache_count.setRange(1, 100)
-        self.cache_count.setValue(1)
-        self.cache_count.setFont(font)
-        self.cache_count.setFixedWidth(60)
-        row2.addWidget(self.cache_count)
-        row2.addStretch()
-        pl.addLayout(row2)
         pl.addStretch()
         self._stack.addWidget(page)
 
-        self.cache_channel.currentIndexChanged.connect(mark_dirty)
-        self.cache_bit.currentIndexChanged.connect(mark_dirty)
-        self.cache_id.textChanged.connect(mark_dirty)
-        self.cache_dlc.valueChanged.connect(mark_dirty)
-        for edit in (*self.cache_from, *self.cache_to):
-            edit.textChanged.connect(mark_dirty)
-        self.cache_tx_channel.currentIndexChanged.connect(mark_dirty)
-        self.cache_delay.valueChanged.connect(mark_dirty)
-        self.cache_count.valueChanged.connect(mark_dirty)
+        self.cache_var.currentIndexChanged.connect(mark_dirty)
+        self.cache_var.currentIndexChanged.connect(self._update_summary)
 
     def _build_cachevar_page(self, font: QFont, mark_dirty) -> None:
         """«Кэш переменная» (отчёт мастера): «Записать КЭШ» — кадр из
@@ -2617,7 +2596,7 @@ class _ActionItem(QWidget):
         if atype == _ACT_FRAME:
             return hex_to_int(self.fr_id.text()) is not None
         if atype == _ACT_CACHE:
-            return hex_to_int(self.cache_id.text()) is not None
+            return bool(self.cache_var.get_name())
         if atype == _ACT_CACHEVAR:
             return bool(self.cv_var.get_name())
         return True  # «Доп канал» — все поля имеют значения по умолчанию
@@ -2668,6 +2647,8 @@ class _ActionItem(QWidget):
         # (отчёт мастера).
         cache = tab.variable_names("read", "cache") if tab else []
         self.cv_var.set_names(cache, tr("— не выбрано —"))
+        # «Запись DATA в кэш» — та же кэш-переменная (отчёт мастера).
+        self.cache_var.set_names(cache, tr("— не выбрано —"))
         self._abort.refresh_variables()
 
     # ---- схема -----------------------------------------------------------
@@ -2722,18 +2703,13 @@ class _ActionItem(QWidget):
                 ),
             }
         elif atype == _ACT_CACHE:
+            # «Запись DATA в кэш»: только выбор кэш-переменной —
+            # CAN ID и байты задаются в редакторе переменной
+            # (отчёт мастера).
             result = {
                 "type": _ACT_CACHE,
                 "cache_enabled": True,
-                "cache_channel": self.cache_channel.currentData(),
-                "cache_extended": self.cache_bit.currentIndex() == 1,
-                "cache_id": self.cache_id.text().strip(),
-                "cache_dlc": self.cache_dlc.value(),
-                "cache_from": _tokens_to_text(self.cache_from),
-                "cache_to": _tokens_to_text(self.cache_to),
-                "cache_tx_channel": self.cache_tx_channel.currentIndex(),
-                "cache_delay": self.cache_delay.value(),
-                "cache_count": self.cache_count.value(),
+                "cachevar": self.cache_var.get_name(),
             }
         elif atype == _ACT_CACHEVAR:
             # «Кэш переменная»: Записать (буфер 1 → буфер 2) /
@@ -2833,21 +2809,9 @@ class _ActionItem(QWidget):
             self.aux_pwm_time.setValue(max(1, pwm_time))
             self._refresh_pulse_graph()
         elif atype == _ACT_CACHE:
-            ch = int(action.get("cache_channel", 2) or 0)
-            cidx = self.cache_channel.findData(ch)
-            self.cache_channel.setCurrentIndex(cidx if cidx >= 0 else 2)
-            self.cache_bit.setCurrentIndex(
-                1 if action.get("cache_extended") else 0
-            )
-            self.cache_id.setText(str(action.get("cache_id", "")))
-            self.cache_dlc.setValue(int(action.get("cache_dlc", 8) or 8))
-            _text_to_tokens(self.cache_from, action.get("cache_from"))
-            _text_to_tokens(self.cache_to, action.get("cache_to"))
-            self.cache_tx_channel.setCurrentIndex(
-                int(action.get("cache_tx_channel", 0) or 0)
-            )
-            self.cache_delay.setValue(int(action.get("cache_delay", 0) or 0))
-            self.cache_count.setValue(int(action.get("cache_count", 1) or 1))
+            # Легаси: у старого действия были свои настройки кадра —
+            # при открытии показываем только переменную (если была).
+            self.cache_var.set_name(str(action.get("cachevar", "")))
         elif atype == _ACT_CACHEVAR:
             self.cv_var.set_name(str(action.get("cachevar", "")))
             oidx = self.cv_op.findData(
@@ -2900,7 +2864,9 @@ class _ActionItem(QWidget):
         elif atype == _ACT_FRAME:
             text = tr("Фрейм")
         elif atype == _ACT_CACHE:
-            text = tr("Кэш")
+            text = tr("Запись DATA в кэш {0}").format(
+                self.cache_var.get_name() or "—"
+            )
         elif atype == _ACT_CACHEVAR:
             # «Записать КЭШ имя» / «Отправить КЭШ имя» /
             # «Стереть КЭШ имя» (отчёт мастера).
@@ -3787,8 +3753,8 @@ class FlexibleLogicTab(QWidget):
     def _capture_cache_vars(
         self, frame: dict[str, Any], frame_id: int, data: bytes
     ) -> None:
-        """«Кэш переменная»: каждый кадр с ID в диапазоне «от–до»
-        переменной перезаписывает её скрытый буфер 1 (всегда ОЗУ —
+        """«Кэш переменная»: каждый кадр с ID переменной складывает
+        выбранные байты «от–до» в её скрытый буфер 1 (всегда ОЗУ —
         оператор его не видит и не настраивает) — аналог аппаратного
         «камень непрерывно анализирует приходящие пакеты»
         (отчёт мастера). Захват ведётся на каналах, выбранных в
@@ -3802,25 +3768,25 @@ class FlexibleLogicTab(QWidget):
             name = str(var.get("name", "")).strip()
             if not name:
                 continue
-            lo = hex_to_int(str(var.get("id_from", "")))
-            hi = hex_to_int(str(var.get("id_to", "")))
-            if lo is None:
-                continue
-            if hi is None:
-                hi = lo
-            if not (lo <= frame_id <= hi):
+            # Новая схема — один ID («id»); легаси — диапазон
+            # «id_from/id_to» (берём нижнюю границу).
+            fid = hex_to_int(str(var.get("id") or var.get("id_from", "")))
+            if fid is None or fid != frame_id:
                 continue
             if bool(var.get("extended")) != extended:
                 continue
             watched = self._cache_watch.get(name)
             if watched is not None and channel not in watched:
                 continue
+            # Позиции «от»/«до» задаются с 1, включительно.
+            lo = max(0, int(var.get("byte_from", 1) or 1) - 1)
+            hi = min(8, int(var.get("byte_to", 8) or 8))
             bufs = self._cache_bufs.setdefault(
                 name, {"buf1": None, "buf2": None}
             )
             bufs["buf1"] = {
                 "id": frame_id,
-                "data": bytes(data),
+                "data": bytes(data)[lo:hi],
                 "extended": extended,
                 "channel": channel,
             }
@@ -4008,7 +3974,7 @@ class FlexibleLogicTab(QWidget):
         ctype = cond.get("type", _COND_NONE)
         if ctype == _COND_STATIC:
             state = self._static_states.get(str(cond.get("var", "")), 0)
-            return state == int(cond.get("state", 1))
+            return state == _to_int(cond.get("state", 1), 1)
         if ctype == _COND_DYN:
             # Состояние из таблицы привязки выбрано — истинно, пока
             # переменная находится именно в нём (отчёт мастера:
@@ -4048,12 +4014,12 @@ class FlexibleLogicTab(QWidget):
             # «Доп канал N активен» — ПК-зеркало команд CMD_AUX_SET.
             ch = int(cond.get("channel", 1) or 1)
             state = self._aux_states.get(ch, 0)
-            return state == int(cond.get("state", 1))
+            return state == _to_int(cond.get("state", 1), 1)
         if ctype == _COND_FLAG:
             # «Переменная N» — текущее состояние именованного бита
             # ОЗУ/ПЗУ (отчёт мастера).
             state = self._flag_states.get(str(cond.get("var", "")).strip(), 0)
-            return state == int(cond.get("state", 1))
+            return state == _to_int(cond.get("state", 1), 1)
         if ctype == _COND_CACHEVAR:
             # «Записан/Не записан КЭШ» — по содержимому буфера 2
             # переменной (отчёт мастера).
@@ -4249,7 +4215,7 @@ class FlexibleLogicTab(QWidget):
             )
         if etype == _EVENT_FLAG:
             name = str(abort.get("var", "")).strip()
-            return self._flag_states.get(name, 0) == int(
+            return self._flag_states.get(name, 0) == _to_int(
                 abort.get("state", 1) or 0
             )
         if etype == _EVENT_STATIC:
@@ -4405,18 +4371,28 @@ class FlexibleLogicTab(QWidget):
             else:
                 fire_aux()
 
-        # 4. Кэш: уходит последний сохранённый кадр (как в триггерах —
-        #    строка без заполненного кэша пропускается).
+        # 4. «Запись DATA в кэш»: захваченный кадр кэш-переменной
+        #    переносится из буфера 1 в буфер 2 — настройки CAN-пакета
+        #    живут в редакторе переменной (отчёт мастера). Старые
+        #    программы с собственной маской кадра у действия — легаси:
+        #    уходит последний сохранённый кадр, как в триггерах.
         if action.get("cache_enabled"):
-            cached = self._fl_cache.get(rule_index)
-            if cached is not None:
-                count = max(1, int(action.get("cache_count", 1) or 1))
-                delay = int(action.get("cache_delay", 0) or 0)
-                channel = int(action.get("cache_tx_channel", 0)) + 1
-                for n in range(count):
-                    self._send_frame(
-                        channel, cached["id"], cached["data"], delay * (n + 1)
-                    )
+            cv_name = str(action.get("cachevar", "")).strip()
+            if cv_name:
+                self._run_cachevar_action(
+                    cv_name, {"cv_op": _CACHE_OP_COMMIT}
+                )
+            else:
+                cached = self._fl_cache.get(rule_index)
+                if cached is not None:
+                    count = max(1, int(action.get("cache_count", 1) or 1))
+                    delay = int(action.get("cache_delay", 0) or 0)
+                    channel = int(action.get("cache_tx_channel", 0)) + 1
+                    for n in range(count):
+                        self._send_frame(
+                            channel, cached["id"], cached["data"],
+                            delay * (n + 1),
+                        )
 
         # 5. «Кэш переменная»: Записать (буфер 1 → буфер 2) /
         #    Отправить (буфер 2 → CAN) / Стереть (буфер 2 = 0)
@@ -4682,7 +4658,7 @@ class FlexibleLogicTab(QWidget):
             # «Переменная» (бит ОЗУ/ПЗУ): фронт «Стала 1»/«Стала 0»
             # зафиксирован в _flag_edges текущего тика (отчёт мастера).
             name = str(event.get("var", "")).strip()
-            return self._flag_edges.get(name) == int(
+            return self._flag_edges.get(name) == _to_int(
                 event.get("state", 1) or 0
             )
         if etype == _EVENT_POWER:
@@ -4693,7 +4669,7 @@ class FlexibleLogicTab(QWidget):
             # Фронт состояния доп. канала по ПК-зеркалу CMD_AUX_SET:
             # «активен»/«не активен» стреляет на переходе уровня.
             ch = int(event.get("channel", 1) or 1)
-            want = int(event.get("state", 1) or 0)
+            want = _to_int(event.get("state", 1) or 0)
             flag = self._aux_states.get(ch, 0) == want
             key = (rule_index, sub_index, ch)
             fired = flag and not self._aux_flags.get(key, False)

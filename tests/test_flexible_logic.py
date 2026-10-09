@@ -214,7 +214,15 @@ class _FakeVariablesTab:
 
 _CACHE_VAR = {
     "type": "cache", "name": "КЭШ1",
-    "id_from": "100", "id_to": "1FF",
+    "id": "150", "byte_from": 1, "byte_to": 2,
+    "extended": False, "storage": "ram",
+}
+
+# Легаси-схема «ID от–до» — при загрузке сжимается до нижней
+# границы диапазона.
+_CACHE_VAR_LEGACY = {
+    "type": "cache", "name": "КЭШЛ",
+    "id_from": "160", "id_to": "1FF",
     "extended": False, "storage": "ram",
 }
 
@@ -226,12 +234,14 @@ def _rx_frame(can_id: int = 0x150, channel: int = 1,
 
 
 def test_cache_var_capture_and_events(tab) -> None:
-    """«Кэш переменная»: кадр из диапазона ID «от–до» пишется в
-    буфер 1 (ОЗУ) и ставит фронты «Приход DATA КЭШ»/«Записалась»;
-    вне диапазона или на невыбранном канале — тишина."""
+    """«Кэш переменная»: кадр с ID переменной пишет выбранные байты
+    «от–до» в буфер 1 (ОЗУ) и ставит фронты «Приход DATA КЭШ»/
+    «Записалась»; другой ID или невыбранный канал — тишина."""
     sent: list[bytes] = []
     tab._serial_manager.send_data = sent.append
-    tab._variables_tab = _FakeVariablesTab([_CACHE_VAR])
+    tab._variables_tab = _FakeVariablesTab(
+        [_CACHE_VAR, _CACHE_VAR_LEGACY]
+    )
     tab.set_config([{
         "title": "CAP", "active": True,
         "events": [{
@@ -249,17 +259,23 @@ def test_cache_var_capture_and_events(tab) -> None:
     assert sent == []
     assert not (tab._cache_bufs.get("КЭШ1") or {}).get("buf1"), \
         "захват ограничен каналами событий «Приход DATA КЭШ»"
-    # Канал 1, ID в диапазоне — захват в буфер 1 + событие.
+    # Канал 1, нужный ID — захват байт «от–до» в буфер 1 + событие.
     tab.process_frame(_rx_frame(channel=1, data=b"\xAA\xBB"))
     assert sent, "событие «Приход DATA КЭШ» не сработало"
     buf1 = tab._cache_bufs["КЭШ1"]["buf1"]
-    assert buf1["id"] == 0x150 and bytes(buf1["data"])[:2] == b"\xAA\xBB"
-    # Следующий кадр диапазона перезаписывает буфер 1.
-    tab.process_frame(_rx_frame(can_id=0x1AB, data=b"\x01"))
-    assert tab._cache_bufs["КЭШ1"]["buf1"]["id"] == 0x1AB
-    # Вне диапазона — буфер 1 не трогаем.
+    assert buf1["id"] == 0x150 and bytes(buf1["data"]) == b"\xAA\xBB"
+    # Следующий кадр того же ID перезаписывает буфер 1.
+    tab.process_frame(_rx_frame(data=b"\x01\x02\x03"))
+    assert bytes(tab._cache_bufs["КЭШ1"]["buf1"]["data"]) == b"\x01\x02"
+    # Другой ID — буфер 1 не трогаем.
     tab.process_frame(_rx_frame(can_id=0x300, data=b"\xFF"))
-    assert tab._cache_bufs["КЭШ1"]["buf1"]["id"] == 0x1AB
+    assert bytes(tab._cache_bufs["КЭШ1"]["buf1"]["data"]) == b"\x01\x02"
+    # Легаси-переменная «ID от–до» захватывает нижнюю границу.
+    tab.process_frame(_rx_frame(can_id=0x160, data=b"\x77"))
+    assert tab._cache_bufs["КЭШЛ"]["buf1"]["id"] == 0x160
+    # …но не середину диапазона — схемы «от–до» больше нет.
+    tab.process_frame(_rx_frame(can_id=0x1AA, data=b"\x88"))
+    assert tab._cache_bufs["КЭШЛ"]["buf1"]["id"] == 0x160
 
 
 def test_cache_var_commit_condition_erase(tab) -> None:

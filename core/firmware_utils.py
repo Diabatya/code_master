@@ -153,20 +153,28 @@ def guess_firmware_base(data: bytes) -> int:
         APP_METADATA_PAGE_ADDR,
         BOOTLOADER_BASE_ADDR,
         BOOTLOADER_SIZE,
+        DEVICE_CONFIG_MAGIC,
         DEVICE_CONFIG_VER_MAGIC,
         DEVICE_CONFIG_VER_OFFSET,
         DEVICE_INFO_PAGE_ADDR,
     )
 
     if len(data) >= 8:
-        # BIN «2 CAN CDC» (make_full_image.py --cdc-bin) начинается со
-        # страницы данных устройства: имя/серийник не пишутся (0xFF),
-        # но версионная запись VER1 на смещении 1024 всегда есть —
-        # признак страницы идентификации у начала файла. Без этой
-        # проверки .bin ошибочно принимался за application-образ со
-        # смещением +0x1000: страница VER1 никогда не записывалась,
-        # и «Версия ПО» после обновления через CDC оставалась пустой
-        # (отчёт мастера).
+        # BIN «2 CAN CDC» (make_full_image.py --cdc-bin) начинается с
+        # версионной записи VER1 — intelhex отсекает ведущие 0xFF
+        # страницы, поэтому база файла 0x08008400, середина страницы
+        # идентификации (отчёт мастера: «Версия ПО» после CDC-обновления
+        # не менялась — страница не записывалась вовсе).
+        if int.from_bytes(data[0:4], "little") == DEVICE_CONFIG_VER_MAGIC:
+            return DEVICE_INFO_PAGE_ADDR + DEVICE_CONFIG_VER_OFFSET
+        # .bin config-страницы (диалог «Запись конфигурации») — база
+        # 0x08008000, первое слово — магия CFG0.
+        if int.from_bytes(data[0:4], "little") == DEVICE_CONFIG_MAGIC:
+            return DEVICE_INFO_PAGE_ADDR
+        # BIN, начинающийся с полной страницы данных устройства:
+        # имя/серийник не пишутся (0xFF), но версионная запись VER1
+        # на смещении 1024 всегда есть — признак страницы
+        # идентификации у начала файла.
         if (
             len(data) >= DEVICE_CONFIG_VER_OFFSET + 4
             and int.from_bytes(
@@ -207,6 +215,30 @@ def trim_to_application_region(data: bytes, base: int) -> tuple[bytes, int]:
     if len(data) <= cut:
         return b"", base
     return data[cut:], DEVICE_INFO_PAGE_ADDR
+
+
+def extract_flash_page(
+    data: bytes, base: int, page_addr: int, page_size: int
+) -> bytes | None:
+    """Часть образа, попадающая на страницу [page_addr, page_addr+size).
+
+    Образ может начинаться в середине страницы: релизный CDC-образ
+    «2 CAN CDC» начинается с VER1 по 0x08008400 — середина страницы
+    идентификации. Срез вида data[page_addr - base : ...] такой случай
+    терял, и версионная запись никогда не доезжала до МК (отчёт
+    мастера). Покрытые байты раскладываются по смещениям страницы,
+    непокрытые остаются 0xFF — при merge они трактуются как «не
+    записывать», и идентичность устройства сохраняется."""
+    rel_lo = page_addr - base
+    rel_hi = rel_lo + page_size
+    src_lo = max(0, rel_lo)
+    src_hi = min(len(data), rel_hi)
+    if src_hi <= src_lo:
+        return None
+    page = bytearray(b"\xFF" * page_size)
+    dst = max(0, -rel_lo)
+    page[dst : dst + src_hi - src_lo] = data[src_lo:src_hi]
+    return bytes(page)
 
 
 def validate_application_vector(data: bytes, base_address: int) -> tuple[bool, str]:
