@@ -194,6 +194,30 @@ def parse_legacy_device_config(page: bytes) -> tuple[str, str] | None:
     )
 
 
+def seed_device_config_page(pages: list[bytes]) -> bytes | None:
+    """Ищет идентичность устройства среди прочитанных страниц — базу
+    для merge_device_config_page, когда на новой странице валидного
+    CFG0 нет (DFU-заливка без config-страницы, старая раскладка).
+
+    Первая валидная CFG0-запись возвращается как есть; при её
+    отсутствии первый легаси-формат (GUI name@8/serial@18)
+    преобразуется в страницу CFG0. Иначе на стёртой/неписанной
+    странице серийник терялся и USB отдавал UID-строку вроде
+    «48E851863846» вместо заданного оператором номера
+    (отчёт мастера)."""
+    for page in pages:
+        if page and parse_device_config(page) is not None:
+            return page
+    for page in pages:
+        if not page:
+            continue
+        legacy = parse_legacy_device_config(page)
+        if legacy is not None:
+            name, serial = legacy
+            return build_device_config_page(name, serial)
+    return None
+
+
 def merge_device_config_page(incoming_page: bytes, existing_page: bytes) -> bytes:
     """Сохраняет аппаратные поля существующей config-страницы при
     обновлении. Версионная запись VER1 берётся из НОВОГО образа —

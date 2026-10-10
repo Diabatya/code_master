@@ -33,8 +33,11 @@ from core.stm32_info import (
     DEVICE_CONFIG_PAGE_ADDR_LEGACY,
     DEVICE_CONFIG_PAGE_SIZE,
     DEVICE_INFO_PAGE_ADDR,
+    LEGACY_CONFIG_PAGE_ADDR,
     build_app_metadata,
     merge_device_config_page,
+    parse_device_config,
+    seed_device_config_page,
 )
 from models.logger import get_logger
 
@@ -919,9 +922,31 @@ class Bootloader:
 
         # Страница идентификации из образа объединяется с существующей:
         # имя/serial/VID/PID устройства сохраняются, версионная запись
-        # VER1 берётся из нового образа (отчёт мастера).
+        # VER1 берётся из нового образа (отчёт мастера). Если на новой
+        # странице CFG0 ещё никогда не было (старая раскладка/DFU-заливка
+        # без страницы), идентичность поднимается с легаси-адресов —
+        # иначе серийник терялся и USB отдавал UID-строку вроде
+        # «48E851863846» (отчёт мастера).
         if info_seg is not None and any(b != 0xFF for b in info_seg):
             existing = self.read_memory(DEVICE_INFO_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE)
+            candidates = [existing]
+            if parse_device_config(existing) is None:
+                for addr in (
+                    DEVICE_CONFIG_PAGE_ADDR_LEGACY,
+                    LEGACY_CONFIG_PAGE_ADDR,
+                ):
+                    try:
+                        candidates.append(
+                            self.read_memory(addr, DEVICE_CONFIG_PAGE_SIZE)
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "Легаси-страница идентичности 0x%08X не прочитана: %s",
+                            addr, exc,
+                        )
+            seed = seed_device_config_page(candidates)
+            if seed is not None:
+                existing = seed
             info_seg = merge_device_config_page(info_seg, existing)
             logger.info("Страница идентификации объединена с существующей (VID/PID сохранены)")
         elif info_seg is not None:

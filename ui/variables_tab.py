@@ -1674,12 +1674,8 @@ class _CachePage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         hint = QLabel(tr(
-            "Один CAN ID и байты «от–до» внутри его пакета: каждый "
-            "кадр с этим ID автоматически записывается в буфер 1 "
-            "(ОЗУ, скрытый — он не настраивается). Действие Гибкой "
-            "логики «Записать КЭШ» переносит кадр из буфера 1 в буфер "
-            "2 и обнуляет буфер 1; носитель буфера 2 выбирается выше "
-            "(ОЗУ/ПЗУ). Имя переменной используется в Гибкой логике."
+            "Кэш переменная будет автоматически записывать по команде "
+            "в Гибкой логике (Действия-Записать Кэш переменную)"
         ))
         hint.setFont(font)
         hint.setWordWrap(True)
@@ -1720,6 +1716,38 @@ class _CachePage(QWidget):
         )
         line1.addStretch()
         layout.addLayout(line1)
+
+        # DATA «от»/«до» — пределы анализа по байтам (отчёт мастера):
+        # кадр с нужным ID берётся в буфер 1, только если каждый
+        # заданный байт лежит в своих рамках «от»–«до». «X»/пустое
+        # поле — байт в анализе не учитывается. В буфер 1 всё равно
+        # переписываются все байты выбранного диапазона «от–до».
+        line2 = QHBoxLayout()
+        from_label = QLabel(tr("DATA от:"))
+        from_label.setFont(font)
+        from_label.setFixedWidth(56)
+        line2.addWidget(from_label)
+        self.data_from, from_widget = create_data_field_widget(
+            font, 8, edit_width=44, allow_x=True
+        )
+        line2.addWidget(from_widget)
+        line2.addStretch()
+        layout.addLayout(line2)
+
+        line3 = QHBoxLayout()
+        to_label = QLabel(tr("DATA до:"))
+        to_label.setFont(font)
+        to_label.setFixedWidth(56)
+        line3.addWidget(to_label)
+        self.data_to, to_widget = create_data_field_widget(
+            font, 8, edit_width=44, allow_x=True
+        )
+        line3.addWidget(to_widget)
+        line3.addStretch()
+        layout.addLayout(line3)
+        # После ввода ID поля DATA «от»/«до» заполняются «X» —
+        # пока рамки не заданы, кадр берётся целиком (отчёт мастера).
+        _autofill_x_on_id(self.can_id, self.data_from, self.data_to)
 
         # Онлайн-DATA последнего кадра с этим ID — выбранные байты
         # «от–до» (отчёт мастера: «при вводе id выводи онлайн поле data»).
@@ -1795,6 +1823,8 @@ class _CachePage(QWidget):
             "byte_from": self.byte_from.value(),
             "byte_to": self.byte_to.value(),
             "extended": bool(self.bit.currentData()),
+            "data_from": _data_to_text(self.data_from),
+            "data_to": _data_to_text(self.data_to),
         }
 
     def write(self, config: dict[str, Any]) -> None:
@@ -1807,6 +1837,8 @@ class _CachePage(QWidget):
         self.byte_from.setValue(int(config.get("byte_from", 1) or 1))
         self.byte_to.setValue(int(config.get("byte_to", 8) or 8))
         self.bit.setCurrentIndex(1 if config.get("extended") else 0)
+        _text_to_data(self.data_from, config.get("data_from"))
+        _text_to_data(self.data_to, config.get("data_to"))
         self._update_live_label()
 
 
@@ -2520,14 +2552,9 @@ class VariableDialog(QDialog):
             )
             return
         if self._type_combo.currentData() == _TYPE_CACHE:
-            # Буфер 2 держит выбранные байты «от–до» пакета.
-            count = max(
-                1, self._cache_page.byte_to.value()
-                - self._cache_page.byte_from.value() + 1
-            )
-            self._storage_size_label.setText(
-                tr("Буфер 2: {0} Байт").format(count)
-            )
+            # У кэш-переменной метка буфера не выводится
+            # (отчёт мастера: «убери надпись "Буфер 2: 8 Байт"»).
+            self._storage_size_label.setText("")
             return
         page = self._active_value_page()
         if page is None:

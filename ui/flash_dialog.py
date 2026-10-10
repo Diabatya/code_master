@@ -75,6 +75,7 @@ from core.stm32_info import (
     BOOTLOADER_BASE_ADDR,
     CHIP_FLASH_SIZE_KB,
     DEVICE_CONFIG_PAGE_ADDR,
+    DEVICE_CONFIG_PAGE_ADDR_LEGACY,
     DEVICE_CONFIG_PAGE_SIZE,
     DEVICE_CONFIG_NAME_MAX,
     FLASH_END_ADDR,
@@ -88,6 +89,7 @@ from core.stm32_info import (
     parse_device_config,
     parse_device_fw_version,
     parse_legacy_device_config,
+    seed_device_config_page,
 )
 from models.config import Config
 from models.version import VERSION
@@ -865,9 +867,50 @@ class FlashWorker(QThread):
                 if flash is None:
                     return False, tr("Адрес 0x%08X вне flash") % base
                 self._config.set("total_memory", int(flash.length))
-                if base == DEVICE_CONFIG_PAGE_ADDR and len(data) >= DEVICE_CONFIG_PAGE_SIZE:
-                    existing = bytes(target_obj.read_memory_block8(base, DEVICE_CONFIG_PAGE_SIZE))
-                    data = merge_device_config_page(data, existing)
+                # Любое перекрытие страницы идентификации (даже
+                # 0xFF-прослойкой разреженного образа): sector erase
+                # сносит её целиком, поэтому пишем полную страницу,
+                # объединённую с содержимым устройства — иначе
+                # VER1-фрагмент релизного образа затирал CFG0, и
+                # серийник превращался в UID-строку (отчёт мастера).
+                info = extract_flash_page(
+                    data, base,
+                    DEVICE_CONFIG_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE,
+                )
+                if info is not None:
+                    existing = bytes(
+                        target_obj.read_memory_block8(
+                            DEVICE_CONFIG_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE
+                        )
+                    )
+                    if parse_device_config(existing) is None:
+                        candidates = [existing]
+                        for addr in (
+                            DEVICE_CONFIG_PAGE_ADDR_LEGACY,
+                            LEGACY_CONFIG_PAGE_ADDR,
+                        ):
+                            with contextlib.suppress(Exception):
+                                candidates.append(
+                                    bytes(target_obj.read_memory_block8(
+                                        addr, DEVICE_CONFIG_PAGE_SIZE
+                                    ))
+                                )
+                        seed = seed_device_config_page(candidates)
+                        if seed is not None:
+                            existing = seed
+                    merged = merge_device_config_page(info, existing)
+                    new_base = min(base, DEVICE_CONFIG_PAGE_ADDR)
+                    new_end = max(
+                        base + len(data),
+                        DEVICE_CONFIG_PAGE_ADDR + DEVICE_CONFIG_PAGE_SIZE,
+                    )
+                    buf = bytearray(b"\xFF" * (new_end - new_base))
+                    buf[base - new_base : base - new_base + len(data)] = data
+                    buf[
+                        DEVICE_CONFIG_PAGE_ADDR - new_base : DEVICE_CONFIG_PAGE_ADDR
+                        - new_base + DEVICE_CONFIG_PAGE_SIZE
+                    ] = merged
+                    data, base = bytes(buf), new_base
                 builder = FlashBuilder(flash)
                 builder.add_data(base, data)
                 builder.program(chip_erase="sector")
@@ -892,9 +935,47 @@ class FlashWorker(QThread):
             jlink.open()
             jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
             jlink.connect(target=target, interface="SWD")
-            if base == DEVICE_CONFIG_PAGE_ADDR and len(data) >= DEVICE_CONFIG_PAGE_SIZE:
-                existing = bytes(jlink.memory_read(base, DEVICE_CONFIG_PAGE_SIZE))
-                data = merge_device_config_page(data, existing)
+            # Как в ST-Link-пути: перекрытие страницы идентификации
+            # объединяем с содержимым устройства и пишем целиком —
+            # иначе VER1-фрагмент затирал CFG0 (серийник → UID-строка).
+            info = extract_flash_page(
+                data, base,
+                DEVICE_CONFIG_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE,
+            )
+            if info is not None:
+                existing = bytes(
+                    jlink.memory_read(
+                        DEVICE_CONFIG_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE
+                    )
+                )
+                if parse_device_config(existing) is None:
+                    candidates = [existing]
+                    for addr in (
+                        DEVICE_CONFIG_PAGE_ADDR_LEGACY,
+                        LEGACY_CONFIG_PAGE_ADDR,
+                    ):
+                        with contextlib.suppress(Exception):
+                            candidates.append(
+                                bytes(jlink.memory_read(
+                                    addr, DEVICE_CONFIG_PAGE_SIZE
+                                ))
+                            )
+                    seed = seed_device_config_page(candidates)
+                    if seed is not None:
+                        existing = seed
+                merged = merge_device_config_page(info, existing)
+                new_base = min(base, DEVICE_CONFIG_PAGE_ADDR)
+                new_end = max(
+                    base + len(data),
+                    DEVICE_CONFIG_PAGE_ADDR + DEVICE_CONFIG_PAGE_SIZE,
+                )
+                buf = bytearray(b"\xFF" * (new_end - new_base))
+                buf[base - new_base : base - new_base + len(data)] = data
+                buf[
+                    DEVICE_CONFIG_PAGE_ADDR - new_base : DEVICE_CONFIG_PAGE_ADDR
+                    - new_base + DEVICE_CONFIG_PAGE_SIZE
+                ] = merged
+                data, base = bytes(buf), new_base
             flash_size = STM32_FLASH_SIZES.get(target, 256) * 1024
             if base == BOOTLOADER_BASE_ADDR and len(data) >= flash_size:
                 jlink.erase()
@@ -1107,30 +1188,80 @@ class FlashWorker(QThread):
 
             with DfuDevice(dev) as dfu:
                 # Конфиг-запись должна сохранить VID/PID, reserved и будущие
-                # поля страницы. Сначала читаем только 2-КБ страницу, затем
-                # объединяем её с новым именем/serial и лишь после этого стираем.
-                preserved_segments = []
+                # поля страницы. Любую часть образа, накрывающую страницу
+                # идентификации, вырезаем и пишем ОДНОЙ объединённой
+                # страницей: релизный образ несёт только VER1-фрагмент
+                # по 0x08008400 — его запись как есть после mass erase
+                # стирала CFG0 (имя/серийник), и USB падал в UID-строку
+                # вроде «48E851863846» (отчёт мастера).
+                info_lo = DEVICE_CONFIG_PAGE_ADDR
+                info_hi = info_lo + DEVICE_CONFIG_PAGE_SIZE
+                code_segments: list[tuple[int, bytes]] = []
+                info_fragments: list[bytes] = []
                 for start, data in segments:
-                    incoming = parse_device_config(data)
-                    if start == DEVICE_CONFIG_PAGE_ADDR and len(data) >= DEVICE_CONFIG_PAGE_SIZE and incoming:
-                        try:
-                            current_page = dfu.upload(start, DEVICE_CONFIG_PAGE_SIZE)
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning(
-                                "Не удалось прочитать старую config-страницу DFU, "
-                                "записываю валидную страницу по умолчанию: %s",
-                                exc,
-                            )
-                        else:
-                            # merge_device_config_page, а не голый
-                            # build_*: VER1 берётся из НОВОГО образа —
-                            # иначе после DFU на устройстве оставалась
-                            # старая/пустая версия и «Версия ПО» на
-                            # карточке не появлялась до захода в
-                            # настройки (отчёт мастера).
-                            data = merge_device_config_page(data, current_page)
-                    preserved_segments.append((start, data))
-                segments = preserved_segments
+                    page = extract_flash_page(
+                        data, start, info_lo, DEVICE_CONFIG_PAGE_SIZE
+                    )
+                    if page is not None and any(b != 0xFF for b in page):
+                        info_fragments.append(page)
+                    if start < info_lo:
+                        code_segments.append((start, data[: info_lo - start]))
+                    if start + len(data) > info_hi:
+                        code_segments.append((info_hi, data[info_hi - start:]))
+                segments = code_segments
+                if info_fragments:
+                    incoming = bytearray(
+                        b"\xFF" * DEVICE_CONFIG_PAGE_SIZE
+                    )
+                    for frag in info_fragments:
+                        for i, byte in enumerate(frag):
+                            if byte != 0xFF:
+                                incoming[i] = byte
+                    try:
+                        current_page = dfu.upload(
+                            info_lo, DEVICE_CONFIG_PAGE_SIZE
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Не удалось прочитать старую config-страницу DFU, "
+                            "записываю валидную страницу по умолчанию: %s",
+                            exc,
+                        )
+                        current_page = b""
+                    # На устройстве валидного CFG0 может ещё не быть
+                    # (старая раскладка) — идентичность поднимаем с
+                    # легаси-адресов, иначе серийник терялся.
+                    candidates = [current_page]
+                    if parse_device_config(current_page) is None:
+                        for addr in (
+                            DEVICE_CONFIG_PAGE_ADDR_LEGACY,
+                            LEGACY_CONFIG_PAGE_ADDR,
+                        ):
+                            try:
+                                candidates.append(
+                                    bytes(dfu.upload(addr, DEVICE_CONFIG_PAGE_SIZE))
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.debug(
+                                    "Легаси-страница 0x%08X не прочитана: %s",
+                                    addr, exc,
+                                )
+                    seed = seed_device_config_page(candidates)
+                    if seed is not None:
+                        current_page = seed
+                    # merge_device_config_page, а не голый build_*:
+                    # VER1 берётся из НОВОГО образа — иначе после DFU
+                    # на устройстве оставалась старая/пустая версия и
+                    # «Версия ПО» на карточке не появлялась до захода в
+                    # настройки (отчёт мастера).
+                    segments.append(
+                        (
+                            info_lo,
+                            merge_device_config_page(
+                                bytes(incoming), current_page
+                            ),
+                        )
+                    )
 
                 if app_touched:
                     # UPDATE_STARTED: гасим magic метаданных до стирания —

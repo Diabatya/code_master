@@ -2127,6 +2127,26 @@ class SettingsWindow(QMainWindow):
             and not self._config.get("emulation", False)
         )
 
+    @staticmethod
+    def _drain_deferred() -> None:
+        """Прогоняет отложенные удаления виджетов до конца.
+
+        Перестройка вкладок (триггеры/ГЛ/переменные) ставит в очередь
+        deleteLater — напрямую и через QTimer.singleShot(0) в
+        _detach_item. Если эти DeferredDelete сработают посреди
+        QApplication.processEvents() внутри serial-сессии
+        (write_to_device, опрос CAN-статистики), Qt на Windows падает
+        нативно, без traceback (отчёт мастера — вылеты после
+        заводского сброса). singleShot(0) — таймер, а не
+        DeferredDelete: он срабатывает на одном проходе и ставит
+        новый deleteLater — поэтому цикл повторяем, пока очередь
+        не опустеет."""
+        for _ in range(6):
+            QApplication.processEvents()
+            QApplication.sendPostedEvents(
+                None, QEvent.Type.DeferredDelete
+            )
+
     def _reset_variables_only(self) -> None:
         """Стирает только переменные: область VARH в МК и строки
         вкладки «Переменные» на ПК. Конфигурация не трогается."""
@@ -2143,6 +2163,10 @@ class SettingsWindow(QMainWindow):
             serial = str(self._config.get("device_serial") or "")
             self._blob_cache.pop((serial, STORAGE_REGION_VAR), None)
         self._variables_tab.import_config({})
+        # deleteLater строк переменных не должны сработать посреди
+        # serial-сессии (опрос CAN-статистики вызывает processEvents
+        # каждую секунду) — дренируем сразу (отчёт мастера — вылет).
+        self._drain_deferred()
         self._mark_dirty()
         show_toast(self, tr("Переменные сброшены"))
 
@@ -2169,16 +2193,7 @@ class SettingsWindow(QMainWindow):
                 # reader'а, задевая focusChanged/анимации на полуживых
                 # виджетах. На Windows это роняло приложение нативно,
                 # без traceback (повторный отчёт мастера).
-                # Цикл: _detach_item вызывает deleteLater через
-                # singleShot(0) — это таймер, а не DeferredDelete, он
-                # срабатывает на следующем проходе и ставит новый
-                # DeferredDelete — поэтому дренаж повторяем, пока
-                # очередь не опустеет.
-                for _drain in range(4):
-                    QApplication.processEvents()
-                    QApplication.sendPostedEvents(
-                        None, QEvent.Type.DeferredDelete
-                    )
+                self._drain_deferred()
                 # Пустой набор триггеров на устройство — иначе МК
                 # продолжал отвечать по старым правилам (отчёт мастера).
                 try:
@@ -2195,6 +2210,12 @@ class SettingsWindow(QMainWindow):
                     logger.warning(
                         "Стирание области гибкой логики не подтверждено: %s", exc
                     )
+            # deleteLater из перестройки вкладок и синхронизации
+            # write_to_device дренируем до возврата в цикл событий —
+            # опрос CAN-статистики вызывает processEvents каждую
+            # секунду, и DeferredDelete внутри serial-сессии ронял
+            # приложение через ~1–3 с после сброса (отчёт мастера).
+            self._drain_deferred()
             # Поля отличаются от состояния МК — «Сохранить» активна.
             self._mark_dirty()
             show_toast(self, tr("Конфигурация сброшена"))
@@ -2246,6 +2267,12 @@ class SettingsWindow(QMainWindow):
                     self._config.get("gateway_rules", []),
                     self._config.get("gateway_ignore", []),
                 )
+            # deleteLater из перестройки всех вкладок дренируем до
+            # возврата в цикл событий — DeferredDelete посреди
+            # processEvents в serial-сессии (опрос статистики,
+            # переподключение после ребута) ронял приложение
+            # (отчёт мастера — вылет после «сброса всего»).
+            self._drain_deferred()
             if device_reset:
                 self._mark_clean()
             else:

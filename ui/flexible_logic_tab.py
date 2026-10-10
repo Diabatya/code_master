@@ -192,6 +192,16 @@ def _text_to_tokens(edits: list[QLineEdit], text: Any) -> None:
         edit.setText(tokens[i].upper() if i < len(tokens) else "")
 
 
+def _split_tokens(text: Any) -> list[str]:
+    """Строка/список токенов DATA из конфига → список 'AA'/'X'."""
+    if isinstance(text, (list, tuple)):
+        return [str(t).strip().upper() for t in text]
+    return [
+        t.strip().upper()
+        for t in str(text or "").replace(",", " ").split()
+    ]
+
+
 def _tokens_range_match(lo: list[str], hi: list[str], data: bytes) -> bool:
     """Проверка «От–До»: «»/«X» — байт игнорируется."""
     for i in range(max(len(lo), len(hi))):
@@ -891,14 +901,15 @@ class _FrameEventPage(QWidget):
         self.fire_check = QCheckBox(tr("Количество сработок до смены DATA"))
         self.fire_check.setFont(font)
         self.fire_check.setToolTip(
-            tr("Отработать N кадров с одинаковой Data и молчать до смены "
-               "содержимого; новая Data запускает счёт заново")
+            tr("Отработать не более N кадров с одинаковой Data и молчать "
+               "до смены содержимого; новая Data запускает счёт заново. "
+               "Без галочки каждый пришедший пакет — новая команда")
         )
         row3.addWidget(self.fire_check)
         self.fire_limit = QSpinBox()
         self.fire_limit.setFont(font)
-        self.fire_limit.setRange(1, 99)
-        self.fire_limit.setValue(1)
+        self.fire_limit.setRange(2, 99)
+        self.fire_limit.setValue(2)
         self.fire_limit.setFixedWidth(64)
         self.fire_limit.setEnabled(False)
         row3.addWidget(self.fire_limit)
@@ -955,10 +966,12 @@ class _FrameEventPage(QWidget):
         _set_data_enabled(
             self.data, 0 if self.rtr.isChecked() else self.dlc.value()
         )
-        limit = int(event.get("fire_limit", 1) or 0)
-        # Старые конфиги: явный fire_limit ≥ 1 → галочка включена.
-        self.fire_check.setChecked(limit > 0)
-        self.fire_limit.setValue(max(1, limit))
+        limit = int(event.get("fire_limit", 0) or 0)
+        # Конфиги без ключа — без ограничения; fire_limit 2+ →
+        # галочка включена (1 трактуется как «без ограничения» —
+        # раньше дефолт молча включал галочку, отчёт мастера).
+        self.fire_check.setChecked(limit > 1)
+        self.fire_limit.setValue(max(2, limit))
 
 
 class _CacheVarEventPage(QWidget):
@@ -1246,25 +1259,32 @@ def _detach_item(item, sep) -> None:
         # крестику): бегущая QPropertyAnimation по «maximumHeight»
         # удалённого редактора роняет Qt на Windows — глушим её и
         # отложенные обработчики до deleteLater (повторный отчёт).
-        anim = getattr(item, "_editor_anim", None)
-        if anim is not None:
-            old_cb = getattr(item, "_anim_finished_cb", None)
-            if old_cb is not None:
-                with contextlib.suppress(RuntimeError, TypeError):
-                    anim.finished.disconnect(old_cb)
-                item._anim_finished_cb = None
-            with contextlib.suppress(RuntimeError):
-                anim.stop()
-        # Отписываем авто-свёртку СРАЗУ: между отложенным detach и
-        # deleteLater обработчик focusChanged ещё жив и мог бы
-        # перезапустить анимацию на полуудалённом пункте
-        # (повторный отчёт мастера — вылет по крестику).
+        # То же проделываем со ВСЕМИ вложенными пунктами: строка
+        # программы удаляется целиком, а её события/условия/действия
+        # держат свои focusChanged-коннекты и анимации — живые
+        # обработчики стреляли в мёртвые виджеты при заводском
+        # сбросе (повторный отчёт мастера — вылет приложения).
         app = QApplication.instance()
-        conn = getattr(item, "_focus_conn", None)
-        if app is not None and conn is not None:
-            with contextlib.suppress(RuntimeError, TypeError):
-                app.focusChanged.disconnect(conn)
-        item._focus_conn = None
+        for w in (item, *item.findChildren(QWidget)):
+            anim = getattr(w, "_editor_anim", None)
+            if anim is not None:
+                old_cb = getattr(w, "_anim_finished_cb", None)
+                if old_cb is not None:
+                    with contextlib.suppress(RuntimeError, TypeError):
+                        anim.finished.disconnect(old_cb)
+                    w._anim_finished_cb = None
+                with contextlib.suppress(RuntimeError):
+                    anim.stop()
+            # Отписываем авто-свёртку СРАЗУ: между отложенным detach и
+            # deleteLater обработчик focusChanged ещё жив и мог бы
+            # перезапустить анимацию на полуудалённом пункте
+            # (повторный отчёт мастера — вылет по крестику).
+            conn = getattr(w, "_focus_conn", None)
+            if app is not None and conn is not None:
+                with contextlib.suppress(RuntimeError, TypeError):
+                    app.focusChanged.disconnect(conn)
+            if hasattr(w, "_focus_conn"):
+                w._focus_conn = None
         # Открытый выпадающий список комбобокса внутри пункта закрываем
         # до скрытия родителя — иначе попап остаётся сиротой поверх
         # окна, а его отложенное закрытие трогает мёртвые виджеты.
@@ -3212,7 +3232,7 @@ class RuleRowWidget(QWidget):
             "id": str(rule.get("id", "")),
             "dlc": 8,
             "data": " ".join(data_tokens),
-            "fire_limit": int(rule.get("fire_limit", 1) or 1),
+            "fire_limit": int(rule.get("fire_limit", 0) or 0),
         }
         migrated["condition"] = {"type": _COND_NONE}
         migrated["action"] = {
@@ -3476,6 +3496,12 @@ class FlexibleLogicTab(QWidget):
         # «Сработок на DATA» событий-фреймов:
         # (программа, событие) → (last_data, n).
         self._event_fire: dict[tuple[int, int], tuple[bytes | None, int]] = {}
+        # Незавершённые отложенные действия по программе: пока
+        # программа отрабатывает («Задержка»/«Прервать если»), тот же
+        # пакет — хвост старой команды, а не новое событие. Как только
+        # программа отработала, повторный пакет с той же DATA —
+        # снова команда к действиям (отчёт мастера).
+        self._rule_busy: dict[int, int] = {}
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(600)
@@ -3515,6 +3541,21 @@ class FlexibleLogicTab(QWidget):
         self._rows_layout = QVBoxLayout(self._rows_widget)
         self._rows_layout.setSpacing(10)
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        # Кнопка добавления — в конце списка программ (отчёт мастера:
+        # «кнопку "Добавить программу" устанавливай под уже
+        # добавленную программу»). Ряды вставляются перед ней,
+        # stretch — последним элементом.
+        self._add_button = QPushButton(tr("＋ Добавить программу"))
+        setup_button(self._add_button, bold=True, height=34)
+        self._add_button.setMinimumWidth(240)
+        self._add_button.clicked.connect(self._on_add)
+        add_wrap = QWidget()
+        add_row = QHBoxLayout(add_wrap)
+        add_row.setContentsMargins(0, 0, 0, 0)
+        add_row.addStretch()
+        add_row.addWidget(self._add_button)
+        add_row.addStretch()
+        self._rows_layout.addWidget(add_wrap)
         self._rows_layout.addStretch()
 
         self._scroll = QScrollArea()
@@ -3524,22 +3565,10 @@ class FlexibleLogicTab(QWidget):
             "QScrollArea { border: none; background: transparent; }"
         )
 
-        self._add_button = QPushButton(tr("＋ Добавить программу"))
-        setup_button(self._add_button, bold=True, height=34)
-        self._add_button.setMinimumWidth(240)
-        self._add_button.clicked.connect(self._on_add)
-
     def _build_layout(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
-
-        top = QHBoxLayout()
-        top.addStretch()
-        top.addWidget(self._add_button)
-        top.addStretch()
-        layout.addLayout(top)
-
         layout.addWidget(self._scroll, 1)
 
     def _load_config(self) -> None:
@@ -3628,7 +3657,11 @@ class FlexibleLogicTab(QWidget):
         """Добавляет виджет программы в конец списка."""
         row = RuleRowWidget(self, rule)
         self._row_widgets.append(row)
-        self._rows_layout.insertWidget(self._rows_layout.count() - 1, row)
+        # Перед кнопкой «Добавить программу» и stretch (отчёт
+        # мастера: кнопка — под последней программой).
+        self._rows_layout.insertWidget(
+            max(0, self._rows_layout.count() - 2), row
+        )
         self._renumber_rows()
         return row
 
@@ -3660,6 +3693,10 @@ class FlexibleLogicTab(QWidget):
         row.refresh_variables()
         self._rule_counters.append(0)
         self.mark_dirty()
+        # Кнопка внутри скролла — новая программа должна быть видна.
+        self._scroll.verticalScrollBar().setValue(
+            self._scroll.verticalScrollBar().maximum()
+        )
 
     # ---- исполнение -------------------------------------------------
 
@@ -3778,7 +3815,17 @@ class FlexibleLogicTab(QWidget):
             watched = self._cache_watch.get(name)
             if watched is not None and channel not in watched:
                 continue
-            # Позиции «от»/«до» задаются с 1, включительно.
+            # Пределы анализа DATA «от»/«до» (отчёт мастера): заданный
+            # байт должен лежать в своих рамках; «X»/пустое поле —
+            # байт не учитывается. Без рамок кадр берётся любой.
+            lo_tok = _split_tokens(var.get("data_from"))
+            hi_tok = _split_tokens(var.get("data_to"))
+            if not _tokens_range_match(lo_tok, hi_tok, bytes(data)):
+                continue
+            # Позиции «от»/«до» задаются с 1, включительно. Каждый
+            # подошедший кадр ПЕРЕЗАПИСЫВАЕТ выбранные байты буфера 1
+            # — повторный пакет с теми же данными тоже считается
+            # новой командой (отчёт мастера).
             lo = max(0, int(var.get("byte_from", 1) or 1) - 1)
             hi = min(8, int(var.get("byte_to", 8) or 8))
             bufs = self._cache_bufs.setdefault(
@@ -4178,10 +4225,17 @@ class FlexibleLogicTab(QWidget):
             "frame": dict(frame),
             "abort": abort if has_abort else None,
             "aborted": False,
+            "busy": delay > 0,
         }
         if has_abort:
             self._pending_actions.append(entry)
         if delay > 0:
+            # Программа занята до исполнения отложенного действия —
+            # повторный пакет с той же DATA в это время не
+            # перезапускает её (отчёт мастера).
+            self._rule_busy[rule_index] = (
+                self._rule_busy.get(rule_index, 0) + 1
+            )
             QTimer.singleShot(
                 delay, lambda e=entry: self._execute_scheduled(e)
             )
@@ -4191,6 +4245,9 @@ class FlexibleLogicTab(QWidget):
     def _execute_scheduled(self, entry: dict[str, Any]) -> None:
         """Таймер «Задержки» дотикал — проверяем прерыватель и
         исполняем."""
+        ri = int(entry.get("rule_index", -1))
+        if entry.get("busy") and self._rule_busy.get(ri, 0) > 0:
+            self._rule_busy[ri] -= 1
         if entry in self._pending_actions:
             self._pending_actions.remove(entry)
         if entry["aborted"]:
@@ -4595,23 +4652,34 @@ class FlexibleLogicTab(QWidget):
         if etype == _EVENT_FRAME:
             if not self._frame_event_matches(event, frame):
                 return False
-            # «Количество сработок до смены DATA» (галочка — как в
-            # триггерах): 0 = без ограничения, каждый подошедший
-            # кадр запускает программу; N>0 — одинаковый поток
-            # перезапускает программу не более N раз, новая DATA —
-            # заново. Счётчик ведётся по (программа, событие).
-            limit = int(event.get("fire_limit", 1) or 0)
-            if limit <= 0:
-                return True
             key = (rule_index, sub_index)
             last, count = self._event_fire.get(key, (None, 0))
             if last != frame_data:
                 last, count = frame_data, 0
-            fired = count < limit
-            if fired:
-                count += 1
-            self._event_fire[key] = (last, count)
-            return fired
+            if count >= 1 and self._rule_busy.get(rule_index, 0) > 0:
+                # Программа ещё отрабатывает прошлый запуск
+                # (отложенные действия): повторный пакет с той же
+                # DATA — хвост старой команды, не новое событие.
+                # Смена DATA — новая команда даже на занятой
+                # программе. Как только программа отработала,
+                # пакет с той же DATA снова принимается как команда
+                # (отчёт мастера).
+                self._event_fire[key] = (last, count)
+                return False
+            # «Количество сработок до смены DATA» (галочка — как в
+            # триггерах): лимит больше 1 — одинаковый поток
+            # перезапускает программу не более N раз, новая DATA —
+            # заново. Лимит 0/1 — без ограничения: каждый пришедший
+            # пакет — новая команда, как только программа отработала
+            # (отчёт мастера). Дефолт write() раньше молча включал
+            # галочку и писал 1 — отсюда «только 1 раз до смены
+            # DATA» во всех программах.
+            limit = int(event.get("fire_limit", 1) or 0)
+            if limit > 1 and count >= limit:
+                self._event_fire[key] = (last, count)
+                return False
+            self._event_fire[key] = (last, count + 1)
+            return True
         if etype == _EVENT_STATIC:
             name = str(event.get("var", "")).strip()
             if name not in changed_static:
