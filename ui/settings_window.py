@@ -2140,9 +2140,15 @@ class SettingsWindow(QMainWindow):
         заводского сброса). singleShot(0) — таймер, а не
         DeferredDelete: он срабатывает на одном проходе и ставит
         новый deleteLater — поэтому цикл повторяем, пока очередь
-        не опустеет."""
+        не опустеет. Важно: processEvents() здесь НЕЛЬЗЯ — он
+        исполняет и повторяющиеся таймеры опроса статистики, чей
+        control_session сам вызывает processEvents повторно, и
+        вложенная обработка исполняла DeferredDelete посреди
+        serial-ожидания (та же авария). sendPostedEvents(Timer)
+        доставляет только ОТЛОЖЕННЫЕ singleShot(0)-события —
+        повторяющиеся таймеры так не стреляют."""
         for _ in range(6):
-            QApplication.processEvents()
+            QApplication.sendPostedEvents(None, QEvent.Type.Timer)
             QApplication.sendPostedEvents(
                 None, QEvent.Type.DeferredDelete
             )

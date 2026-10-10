@@ -291,8 +291,10 @@ def _close_button(font: QFont, tooltip: str) -> QPushButton:
     button.setToolTip(tooltip)
     button.setCursor(Qt.CursorShape.PointingHandCursor)
     button.setStyleSheet(
+        # padding-bottom приподнимает глиф ✕ — в строке крестик
+        # сидел ниже её визуального центра (отчёт мастера).
         "QPushButton { color: #7C9EFF; border: none;"
-        " background: transparent; padding: 0; }"
+        " background: transparent; padding: 0 0 2px 0; }"
         "QPushButton:hover { color: #AEC6FF; }"
         "QPushButton:pressed { color: #5A7FD5; }"
     )
@@ -1397,6 +1399,24 @@ def _animate_editor_toggle(item) -> None:
     anim.start()
 
 
+def _popup_type_selector(item) -> None:
+    """Клик по голубой строке «Не выбрано» — список функций комбобокса
+    открывается СРАЗУ: промежуточная строка выбора функции внутри
+    дерева лишняя, оператор выбирает вид из выпадающего дерева по
+    первому клику (отчёт мастера)."""
+    if not getattr(item, "_editor_open", False):
+        return
+    combo = getattr(item, "_type", None)
+    if combo is None or not isValid(combo) or combo.currentIndex() != 0:
+        return
+
+    def _popup() -> None:
+        if isValid(combo):
+            combo.showPopup()
+
+    QTimer.singleShot(0, _popup)
+
+
 class _EventItem(QWidget):
     """Одно событие программы: компактная строка «имя · функция»,
     выбор типа события, страница настроек и крестик удаления
@@ -1516,8 +1536,10 @@ class _EventItem(QWidget):
 
     def _toggle_editor(self) -> None:
         """Клик по строке-сводке: развернуть/свернуть редактор
-        с анимацией высоты (отчёт мастера)."""
+        с анимацией высоты (отчёт мастера). На «Не выбрано» список
+        функций открывается сразу."""
         _animate_editor_toggle(self)
+        _popup_type_selector(self)
 
     def is_complete(self) -> bool:
         """Событие настроено целиком — только тогда редактору можно
@@ -1907,8 +1929,10 @@ class _CondItem(QWidget):
         _auto_collapse(self)
 
     def _toggle_editor(self) -> None:
-        """Клик по строке-сводке разворачивает/сворачивает редактор."""
+        """Клик по строке-сводке разворачивает/сворачивает редактор.
+        На «Не выбрано» список функций открывается сразу."""
         _animate_editor_toggle(self)
+        _popup_type_selector(self)
 
     def is_complete(self) -> bool:
         """Условие настроено целиком — только тогда редактору можно
@@ -2600,8 +2624,10 @@ class _ActionItem(QWidget):
     # ---- обработчики ---------------------------------------------------
 
     def _toggle_editor(self) -> None:
-        """Клик по строке-сводке разворачивает/сворачивает редактор."""
+        """Клик по строке-сводке разворачивает/сворачивает редактор.
+        На «Не выбрано» список функций открывается сразу."""
         _animate_editor_toggle(self)
+        _popup_type_selector(self)
 
     def is_complete(self) -> bool:
         """Действие настроено целиком — только тогда редактору можно
@@ -2938,13 +2964,18 @@ class RuleRowWidget(QWidget):
         self._name_edit.setPlaceholderText(tr("Программа"))
         self._name_edit.setClearButtonEnabled(True)
         self._name_edit.textChanged.connect(self._mark_dirty)
-        # Сворачивание — нижним подчёркиванием, как кнопка
-        # минимизации в окнах Windows (отчёт мастера).
-        self._collapse_button = QPushButton("_")
+        # Сворачивание — серая стрелка «вверх» (отчёт мастера:
+        # подчёркивание выглядело белой точкой на кнопке). В свёрнутом
+        # состоянии стрелка переворачивается «вниз».
+        self._collapse_button = QPushButton("▲")
         self._collapse_button.setFont(
-            QFont("Segoe UI", 10, QFont.Weight.Bold)
+            QFont("Segoe UI", 9, QFont.Weight.Bold)
         )
-        self._collapse_button.setFixedWidth(30)
+        self._collapse_button.setFixedSize(30, 24)
+        self._collapse_button.setStyleSheet(
+            "QPushButton { color: #9A9AA5; }"
+            "QPushButton:hover { color: #C0C0C8; }"
+        )
         self._collapse_button.setToolTip(tr("Свернуть программу"))
         self._collapse_button.clicked.connect(self._toggle_collapsed)
         # Крестик закрытия — голубой, как у событий/условий/действий
@@ -3303,6 +3334,7 @@ class RuleRowWidget(QWidget):
         collapsed = not self._body.isHidden()
         self._body.setVisible(not collapsed)
         self._summary_label.setVisible(collapsed)
+        self._collapse_button.setText("▼" if collapsed else "▲")
         self._collapse_button.setToolTip(
             tr("Развернуть программу") if collapsed
             else tr("Свернуть программу")
@@ -3822,18 +3854,16 @@ class FlexibleLogicTab(QWidget):
             hi_tok = _split_tokens(var.get("data_to"))
             if not _tokens_range_match(lo_tok, hi_tok, bytes(data)):
                 continue
-            # Позиции «от»/«до» задаются с 1, включительно. Каждый
-            # подошедший кадр ПЕРЕЗАПИСЫВАЕТ выбранные байты буфера 1
-            # — повторный пакет с теми же данными тоже считается
-            # новой командой (отчёт мастера).
-            lo = max(0, int(var.get("byte_from", 1) or 1) - 1)
-            hi = min(8, int(var.get("byte_to", 8) or 8))
+            # Кадр берётся в буфер 1 ЦЕЛИКОМ — отдельной настройки
+            # байтов «от–до» больше нет (отчёт мастера). Каждый
+            # подошедший кадр ПЕРЕЗАПИСЫВАЕТ буфер 1 — повторный пакет
+            # с теми же данными тоже считается новой командой.
             bufs = self._cache_bufs.setdefault(
                 name, {"buf1": None, "buf2": None}
             )
             bufs["buf1"] = {
                 "id": frame_id,
-                "data": bytes(data)[lo:hi],
+                "data": bytes(data),
                 "extended": extended,
                 "channel": channel,
             }
@@ -3867,6 +3897,7 @@ class FlexibleLogicTab(QWidget):
             if bufs["buf2"] is None:
                 # Записывать было нечего — буфер 2 фактически обнулился.
                 self._cache_edges.add((name, _CACHE_OP_ERASED))
+            self._push_cache_live(name)
             self._persist_cache_bufs()
             self._fire_aux_events()
         elif op == _CACHE_OP_SEND:
@@ -3884,8 +3915,21 @@ class FlexibleLogicTab(QWidget):
         elif op == _CACHE_OP_ERASE:
             bufs["buf2"] = None
             self._cache_edges.add((name, _CACHE_OP_ERASED))
+            self._push_cache_live(name)
             self._persist_cache_bufs()
             self._fire_aux_events()
+
+    def _push_cache_live(self, name: str) -> None:
+        """Статус «Кэш переменной» в главном окне переменных: записанное
+        значение буфера 2 → данные (или имя из таблицы привязки
+        динамической переменной); пусто → прочерки (отчёт мастера)."""
+        if self._variables_tab is None:
+            return
+        buf = (self._cache_bufs.get(name) or {}).get("buf2")
+        self._variables_tab.set_cache_live(
+            name,
+            bytes(buf.get("data", b"")) if buf else None,
+        )
 
     def _persist_cache_bufs(self) -> None:
         """Буфер 2 кэш-переменных с носителем «ПЗУ» сохраняется в
@@ -3932,6 +3976,9 @@ class FlexibleLogicTab(QWidget):
                 "extended": bool(saved.get("extended")),
                 "channel": int(saved.get("channel", 0) or 0),
             }
+            # Строка переменной сразу показывает восстановленное из
+            # ПЗУ значение — до записи в этом сеансе (отчёт мастера).
+            self._push_cache_live(name)
 
     @staticmethod
     def _dyn_binding_name(points: Any, raw: int) -> str:

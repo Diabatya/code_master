@@ -2555,7 +2555,7 @@ class FlashDialog(QDialog):
             # порт (отчёт мастера). Ждём коротко application PID 5740 и
             # берём РЕАЛЬНЫЙ порт устройства.
             app_port = Bootloader.find_device_port(
-                Bootloader.USB_VID, Bootloader.USB_APPLICATION_PID, timeout=6.0
+                Bootloader.USB_VID, Bootloader.USB_APPLICATION_PID, timeout=8.0
             )
             if app_port:
                 port = app_port
@@ -2563,16 +2563,22 @@ class FlashDialog(QDialog):
             elif Bootloader.find_device_port(
                 Bootloader.USB_VID, Bootloader.USB_BOOTLOADER_PID
             ):
-                # Устройство осталось в бутлоадере (прошивка не завершена)
-                # — не открываем его как приложение: карточка честно
-                # покажет «режим прошивки», а реконнект не будет долбить
-                # несуществующий COM.
+                # Устройство ещё в режиме bootloader — GO/пере-энумерация
+                # не завершились. Раньше выходили молча: SerialManager
+                # оставался _shutdown, app-порт так и не подхватывался —
+                # оператору приходилось перетыкать USB (отчёт мастера).
+                # Вместо выхода ниже открываем старое имя с
+                # auto_reconnect: цикл _do_reconnect сам найдёт
+                # application-порт по PID 5740, как только Windows
+                # закончит энумерацию.
                 logger.warning(
-                    "Устройство осталось в режиме bootloader — приложение пока недоступно"
+                    "Устройство пока в режиме bootloader — реконнект "
+                    "вооружён, ждём application-порт"
                 )
-                return
             # auto_reconnect обязателен: open_port по умолчанию сбрасывает
             # флаг — после флеш-операции обрыв связи не переподключался.
+            # Даже при неудачном open_port (старый COM ещё не поднялся)
+            # exception-путь планирует _do_reconnect — реконнект живёт.
             self._serial_manager.open_port(
                 port,
                 self._config.get("baudrate", 115200),

@@ -724,6 +724,9 @@ class MainWindow(QMainWindow):
         self._cards_layout.setContentsMargins(0, 0, 0, 0)
         self._cards_layout.setSpacing(10)
         self._cards_layout.addStretch()
+        # Скрытый контейнер для снятых карточек устройств — вместо
+        # deleteLater (см. _refresh_device_cards).
+        self._card_graveyard: QWidget | None = None
         self._cards_signature: tuple = ()
         # Порты, к которым уже пробовали автоподключиться — не долбим
         # open_port каждые 1.5с, если попытка провалилась.
@@ -1205,7 +1208,18 @@ class MainWindow(QMainWindow):
             item = self._cards_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
-                widget.deleteLater()
+                # deleteLater опасен: перестройка вызывается из
+                # heartbeat-таймера, который стреляет посреди
+                # processEvents() serial-опроса статистики — Deferred
+                # Delete срабатывал внутри чужой рамки и нативно ронял
+                # приложение на Windows (отчёт мастера — вылеты после
+                # заводского сброса). Прячем на «кладбище» — виджеты
+                # умрут вместе с окном.
+                widget.hide()
+                if self._card_graveyard is None:
+                    self._card_graveyard = QWidget()
+                    self._card_graveyard.hide()
+                widget.setParent(self._card_graveyard)
         port_names = self._config.get("port_names", {}) or {}
         for d in devices:
             connected = connected_port == d["port"]

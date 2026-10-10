@@ -1651,13 +1651,13 @@ class _ImpulsePage(QWidget):
 
 
 class _CachePage(QWidget):
-    """Страница «Кэш переменная» (отчёт мастера): один CAN ID и
-    диапазон байтов «от»–«до» внутри его пакета. Камень непрерывно
-    ловит кадры с этим ID в скрытый буфер 1 (всегда ОЗУ — оператор
-    его не видит и не настраивает); действие ГЛ «Записать КЭШ»
-    переносит кадр в буфер 2 — носитель буфера 2 выбирается в шапке
-    (ОЗУ/ПЗУ). Онлайн-строка показывает выбранные байты последнего
-    кадра, как только введён ID."""
+    """Страница «Кэш переменная» (отчёт мастера): один CAN ID,
+    кадр захватывается целиком. Камень непрерывно ловит кадры с
+    этим ID в скрытый буфер 1 (всегда ОЗУ — оператор его не видит
+    и не настраивает); действие ГЛ «Записать КЭШ» переносит кадр
+    в буфер 2 — носитель буфера 2 выбирается в шапке (ОЗУ/ПЗУ).
+    Онлайн-строка показывает DATA последнего кадра, как только
+    введён ID."""
 
     def __init__(
         self,
@@ -1694,34 +1694,14 @@ class _CachePage(QWidget):
         self.bit.setToolTip(tr("Разрядность CAN-идентификатора"))
         line1.addWidget(self.bit)
         _bind_id_width(self.bit, self.can_id)
-        line1.addWidget(QLabel(tr("Байты от:")))
-        self.byte_from = QSpinBox()
-        self.byte_from.setFont(font)
-        self.byte_from.setRange(1, 8)
-        self.byte_from.setFixedWidth(54)
-        line1.addWidget(self.byte_from)
-        line1.addWidget(QLabel(tr("до:")))
-        self.byte_to = QSpinBox()
-        self.byte_to.setFont(font)
-        self.byte_to.setRange(1, 8)
-        self.byte_to.setValue(8)
-        self.byte_to.setFixedWidth(54)
-        line1.addWidget(self.byte_to)
-        # «от» не может быть больше «до» и наоборот.
-        self.byte_from.valueChanged.connect(
-            lambda v: self.byte_to.setValue(max(v, self.byte_to.value()))
-        )
-        self.byte_to.valueChanged.connect(
-            lambda v: self.byte_from.setValue(min(v, self.byte_from.value()))
-        )
         line1.addStretch()
         layout.addLayout(line1)
 
         # DATA «от»/«до» — пределы анализа по байтам (отчёт мастера):
         # кадр с нужным ID берётся в буфер 1, только если каждый
         # заданный байт лежит в своих рамках «от»–«до». «X»/пустое
-        # поле — байт в анализе не учитывается. В буфер 1 всё равно
-        # переписываются все байты выбранного диапазона «от–до».
+        # поле — байт в анализе не учитывается. В буфер 1 переписывается
+        # весь кадр целиком — отдельной настройки байтов «от–до» нет.
         line2 = QHBoxLayout()
         from_label = QLabel(tr("DATA от:"))
         from_label.setFont(font)
@@ -1789,16 +1769,11 @@ class _CachePage(QWidget):
         self._live_timer.timeout.connect(self._update_live_label)
         self._live_timer.start()
         self.can_id.textChanged.connect(self._update_live_label)
-        self.byte_from.valueChanged.connect(self._update_live_label)
-        self.byte_to.valueChanged.connect(self._update_live_label)
         self.bit.currentIndexChanged.connect(self._update_live_label)
 
     def byte_slice(self, data: bytes) -> bytes:
-        """Выбранные байты пакета — позиции «от»/«до» с 1,
-        включительно."""
-        lo = max(1, self.byte_from.value()) - 1
-        hi = min(8, self.byte_to.value())
-        return bytes(data)[lo:hi]
+        """Байты пакета для буфера 1 — кадр берётся целиком."""
+        return bytes(data)
 
     def _update_live_label(self, *_args) -> None:
         tab = self._get_tab() if self._get_tab is not None else None
@@ -1820,8 +1795,6 @@ class _CachePage(QWidget):
     def read(self) -> dict[str, Any]:
         return {
             "id": self.can_id.text().strip(),
-            "byte_from": self.byte_from.value(),
-            "byte_to": self.byte_to.value(),
             "extended": bool(self.bit.currentData()),
             "data_from": _data_to_text(self.data_from),
             "data_to": _data_to_text(self.data_to),
@@ -1829,13 +1802,11 @@ class _CachePage(QWidget):
 
     def write(self, config: dict[str, Any]) -> None:
         # Легаси-схема «ID от–до»: диапазон кадров сжимается до одного
-        # ID — берём нижнюю границу; байтовый диапазон по умолчанию —
-        # весь кадр (отчёт мастера: один ID + байты «от–до»).
+        # ID — берём нижнюю границу; байтовый диапазон «от–до» убран —
+        # кадр захватывается целиком (отчёт мастера).
         self.can_id.setText(
             str(config.get("id", "") or config.get("id_from", ""))
         )
-        self.byte_from.setValue(int(config.get("byte_from", 1) or 1))
-        self.byte_to.setValue(int(config.get("byte_to", 8) or 8))
         self.bit.setCurrentIndex(1 if config.get("extended") else 0)
         _text_to_data(self.data_from, config.get("data_from"))
         _text_to_data(self.data_to, config.get("data_to"))
@@ -2425,13 +2396,6 @@ class VariableDialog(QDialog):
         )
         self._cache_page = _CachePage(
             font, get_tab=lambda: self._var_tab, get_row=lambda: self._row
-        )
-        # «Буфер 2: N Байт» следует за байтовым диапазоном кэша.
-        self._cache_page.byte_from.valueChanged.connect(
-            self._refresh_storage_size
-        )
-        self._cache_page.byte_to.valueChanged.connect(
-            self._refresh_storage_size
         )
         self._stack.addWidget(self._static_page)
         self._stack.addWidget(self._num_page)
@@ -3123,20 +3087,22 @@ class _VariableRow(QFrame):
             )
             return
         if cfg_type == _TYPE_CACHE:
-            # «Кэш переменная»: ID + байты «от–до» + носитель буфера 2
-            # (буфер 1 — скрытый ОЗУ, оператору не показывается).
-            can_id = (
-                str(self.config.get("id", "") or self.config.get("id_from", ""))
-                .strip() or "—"
+            # «Кэш переменная»: до записи — прочерки; после записи в
+            # Гибкой логике («Записать Кэш переменную») — записанные
+            # данные, либо имя из таблицы привязки динамической
+            # переменной, если значение совпало (отчёт мастера).
+            tab = getattr(self._column, "_tab", None)
+            name = str(self.config.get("name", "")).strip()
+            data = (
+                tab._cache_values.get(name)
+                if tab is not None and name else None
             )
-            lo = int(self.config.get("byte_from", 1) or 1)
-            hi = int(self.config.get("byte_to", 8) or 8)
-            storage = self.config.get("storage", "ram")
+            if data is None:
+                self._state_label.setText("—")
+                return
+            bound = tab.cache_binding_name(data) if tab is not None else ""
             self._state_label.setText(
-                tr("КЭШ {0} · байты {1}–{2} · {3}").format(
-                    can_id, lo, hi,
-                    tr("ОЗУ") if storage == "ram" else tr("ПЗУ"),
-                )
+                bound or " ".join(f"{b:02X}" for b in data)
             )
             return
         self._state_label.setText(
@@ -3334,6 +3300,10 @@ class VariablesTab(QWidget):
         # диапазоне» (Кэш переменная).
         self._last_frames: dict[int, tuple[bool, bytes, int]] = {}
         self._frame_seq = 0
+        # Записанные значения «Кэш переменных» (буфер 2) — имя →
+        # байты. Гибкая логика присылает set_cache_live() при записи/
+        # стирании; строка показывает данные или прочерки.
+        self._cache_values: dict[str, bytes | None] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -3489,26 +3459,9 @@ class VariablesTab(QWidget):
                         row.pulse()
                     continue
                 if var_type == _TYPE_CACHE:
-                    # «Кэш переменная»: в строке — выбранные байты
-                    # «от–до» последнего кадра с этим ID
-                    # (отчёт мастера: один ID + байты). Разрядность
-                    # не фильтруем — как live_frame.
-                    fid = hex_to_int(
-                        str(cfg.get("id") or cfg.get("id_from", ""))
-                    )
-                    if fid is None:
-                        continue
-                    entry = self._last_frames.get(fid)
-                    if entry is None:
-                        continue
-                    lo = max(0, int(cfg.get("byte_from", 1) or 1) - 1)
-                    hi = min(8, int(cfg.get("byte_to", 8) or 8))
-                    row.set_live_value(
-                        0.0,
-                        text=" ".join(
-                            f"{b:02X}" for b in entry[1][lo:hi]
-                        ),
-                    )
+                    # «Кэш переменная»: строка показывает записанное в
+                    # буфер 2 значение (set_cache_live из ГЛ), а не
+                    # последний кадр шины (отчёт мастера).
                     continue
                 if var_type not in (_TYPE_DYNAMIC, _TYPE_DYNCACHE):
                     continue
@@ -3572,6 +3525,53 @@ class VariablesTab(QWidget):
                 cfg.get("name", "").strip() == name
             ):
                 row.set_live_value(float(value), text=str(int(value)))
+
+    def set_cache_live(self, name: str, data: bytes | None) -> None:
+        """Записанное значение «Кэш переменной» из Гибкой логики
+        (действие «Записать Кэш переменную» перенесло буфер 1 → 2;
+        «Стереть КЭШ» — None). Строка переменной показывает сырые
+        байты либо имя из таблицы привязки «Динамической переменной»,
+        если значение совпало (отчёт мастера); до первой записи и
+        после стирания — прочерки."""
+        name = str(name).strip()
+        if not name:
+            return
+        self._cache_values[name] = bytes(data) if data is not None else None
+        for col in (self._read_col, self._ctrl_col, self._aux_col):
+            for row in list(getattr(col, "_rows", [])):
+                cfg = row.config
+                if cfg.get("type") == _TYPE_CACHE and (
+                    cfg.get("name", "").strip() == name
+                ):
+                    row._refresh_labels()
+
+    def cache_binding_name(self, data: bytes) -> str:
+        """Имя из таблицы привязки «Динамической переменной», если
+        данные буфера по её позициям байт «DATA» совпали со значением
+        точки привязки (отчёт мастера). Пусто — если ни одна
+        привязка не подошла."""
+        for cfg in self._read_col.configs():
+            if cfg.get("type") != _TYPE_DYNCACHE:
+                continue
+            points = cfg.get("points") or []
+            used = cfg.get("bytes") or []
+            if not points or not used:
+                continue
+            raw = 0
+            for i in used:
+                if i >= len(data):
+                    break
+                # Порядок байт — как у «Динамической переменной»:
+                # старший первым (big-endian конкатенация).
+                raw = (raw << 8) | data[i]
+            else:
+                for point in points:
+                    try:
+                        if int(point[0]) == raw:
+                            return str(point[1])
+                    except (TypeError, ValueError, IndexError):
+                        continue
+        return ""
 
     def live_frame(
         self, frame_id: int, extended: bool = False
@@ -3661,6 +3661,10 @@ class VariablesTab(QWidget):
 
     def import_config(self, data: dict[str, Any]) -> None:
         """Прогружает переменные из словаря конфигурации (файл)."""
+        # Записанные значения «Кэш переменных» относятся к набору
+        # переменных — при сбросе/загрузке другого файла статусы
+        # возвращаются к прочеркам (отчёт мастера).
+        self._cache_values.clear()
         self._read_col.clear()
         self._ctrl_col.clear()
         self._aux_col.clear()

@@ -211,10 +211,13 @@ class _FakeVariablesTab:
     def set_flag_live(self, _name: str, _value: int) -> None:
         pass
 
+    def set_cache_live(self, _name: str, _data) -> None:
+        pass
+
 
 _CACHE_VAR = {
     "type": "cache", "name": "КЭШ1",
-    "id": "150", "byte_from": 1, "byte_to": 2,
+    "id": "150",
     "extended": False, "storage": "ram",
 }
 
@@ -259,17 +262,20 @@ def test_cache_var_capture_and_events(tab) -> None:
     assert sent == []
     assert not (tab._cache_bufs.get("КЭШ1") or {}).get("buf1"), \
         "захват ограничен каналами событий «Приход DATA КЭШ»"
-    # Канал 1, нужный ID — захват байт «от–до» в буфер 1 + событие.
+    # Канал 1, нужный ID — кадр целиком (8 байт с паддингом) в
+    # буфер 1 + событие.
     tab.process_frame(_rx_frame(channel=1, data=b"\xAA\xBB"))
     assert sent, "событие «Приход DATA КЭШ» не сработало"
     buf1 = tab._cache_bufs["КЭШ1"]["buf1"]
-    assert buf1["id"] == 0x150 and bytes(buf1["data"]) == b"\xAA\xBB"
-    # Следующий кадр того же ID перезаписывает буфер 1.
+    assert buf1["id"] == 0x150
+    assert bytes(buf1["data"])[:2] == b"\xAA\xBB"
+    # Следующий кадр того же ID перезаписывает буфер 1 целиком —
+    # настройки байтов «от–до» больше нет (отчёт мастера).
     tab.process_frame(_rx_frame(data=b"\x01\x02\x03"))
-    assert bytes(tab._cache_bufs["КЭШ1"]["buf1"]["data"]) == b"\x01\x02"
+    assert bytes(tab._cache_bufs["КЭШ1"]["buf1"]["data"])[:3] == b"\x01\x02\x03"
     # Другой ID — буфер 1 не трогаем.
     tab.process_frame(_rx_frame(can_id=0x300, data=b"\xFF"))
-    assert bytes(tab._cache_bufs["КЭШ1"]["buf1"]["data"]) == b"\x01\x02"
+    assert bytes(tab._cache_bufs["КЭШ1"]["buf1"]["data"])[:3] == b"\x01\x02\x03"
     # Легаси-переменная «ID от–до» захватывает нижнюю границу.
     tab.process_frame(_rx_frame(can_id=0x160, data=b"\x77"))
     assert tab._cache_bufs["КЭШЛ"]["buf1"]["id"] == 0x160
