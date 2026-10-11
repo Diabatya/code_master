@@ -64,6 +64,7 @@ from ui.id_edit import IdPasteEdit
 from ui.memory_indicator import MemoryIndicator
 from ui.packet_clipboard import create_clipboard_buttons
 from ui.toast import show_toast
+from ui.ui_utils import retire
 
 _CHECK_ICON = str((Path(__file__).parent.parent / "assets" / "icons" / "check.svg").resolve())
 
@@ -501,8 +502,7 @@ class CanTriggerTab(QWidget):
                 # Без setParent(None): репарент создаёт топлевел-окно
                 # прямо в обработчике clicked() и рушит Qt (отчёт
                 # мастера — вылеты по крестику).
-                widget.setVisible(False)
-                widget.deleteLater()
+                retire(widget)
         self._update_cond_remove_buttons(recv)
         self._mark_dirty()
 
@@ -737,10 +737,8 @@ class CanTriggerTab(QWidget):
         # Без setParent(None): репарент создаёт топлевел-окно и рушит
         # Qt в обработчике clicked() — строки просто скрываются и
         # уходят в deleteLater (снимок полей берётся из block["rows"]).
-        row["widget"].setVisible(False)
-        row["pause_widget"].setVisible(False)
-        row["widget"].deleteLater()
-        row["pause_widget"].deleteLater()
+        retire(row["widget"])
+        retire(row["pause_widget"])
         self._rebuild_response_rows(block)
         self._update_response_buttons(block)
 
@@ -1011,10 +1009,8 @@ class CanTriggerTab(QWidget):
         if len(cache["rows"]) <= 1:
             return
         cache["rows"].remove(row)
-        row["widget"].setVisible(False)
-        row["pause_widget"].setVisible(False)
-        row["widget"].deleteLater()
-        row["pause_widget"].deleteLater()
+        retire(row["widget"])
+        retire(row["pause_widget"])
         self._rebuild_cache_rows(cache)
         self._update_cache_buttons(cache)
 
@@ -1492,8 +1488,7 @@ class CanTriggerTab(QWidget):
         self._blocks_layout.removeWidget(host)
         # Без setParent(None): репарент создаёт топлевел-окно и рушит
         # Qt в обработчике clicked() — блок скрыт и удаляется отложенно.
-        host.setVisible(False)
-        host.deleteLater()
+        retire(host)
 
     def _remove_trigger_block(self, block: dict[str, Any]) -> None:
         """Удаляет блок триггера из UI и из будущей записи в устройство."""

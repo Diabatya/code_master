@@ -27,6 +27,7 @@ from models.translations import _ as tr
 from models.utils import hex_to_int, int_to_hex, parse_data_bytes
 from ui.hex_edit import create_data_field_widget
 from ui.id_edit import IdPasteEdit
+from ui.ui_utils import retire
 
 logger = get_logger(__name__)
 
@@ -339,7 +340,7 @@ class LogicTab(QWidget):
 
     def _remove_row(self, group: QGroupBox, row: QWidget) -> None:
         group._rows_layout.removeWidget(row)
-        row.deleteLater()
+        retire(row)
         self._compact_layout(group._rows_layout)
 
     def _compact_layout(self, layout: QVBoxLayout) -> None:
@@ -365,7 +366,7 @@ class LogicTab(QWidget):
         for i in range(group._rows_layout.count() - 1, -1, -1):
             widget = group._rows_layout.itemAt(i).widget()
             if widget is not None:
-                widget.deleteLater()
+                retire(widget)
         self._compact_layout(group._rows_layout)
         for row_data in data.get("rows", []):
             row = _LogicRow(self._font)

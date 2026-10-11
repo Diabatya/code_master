@@ -95,6 +95,7 @@ from models.utils import (
 from models.version import VERSION
 from ui.hex_edit import create_data_field_widget
 from ui.id_edit import IdPasteEdit
+from ui.ui_utils import retire
 
 _TYPE_STATIC = "static"
 _TYPE_DYNAMIC = "dynamic"      # «Численная переменная» (переименована)
@@ -289,6 +290,18 @@ def _bind_id_width(bit_combo: QComboBox, *edits: _HexIdEdit) -> None:
         for edit in edits:
             edit.set_extended(extended)
 
+    def _auto_extend(text: str) -> None:
+        """Введённый ID длиннее 3 hex-знаков (больше 0x7FF) —
+        разрядность сама переключается на 29 бит (отчёт мастера)."""
+        digits = [ch for ch in text.strip() if ch in "0123456789abcdefABCDEF"]
+        if len(digits) <= 3:
+            return
+        if bit_combo.currentIndex() != 1:
+            bit_combo.setCurrentIndex(1)
+
+    for edit in edits:
+        edit.textChanged.connect(_auto_extend)
+
     bit_combo.currentIndexChanged.connect(_apply)
     _apply()
 
@@ -449,15 +462,21 @@ def _clipboard_buttons(
     label: QLabel,
     font: QFont,
     target_edits: list | None = None,
+    frame_fields: dict | None = None,
+    copy_online: bool = False,
 ) -> QWidget:
     """Иконки «копировать» + «вставить» рядом с онлайн-строкой DATA
     (значки как в триггерах — отчёт мастера).
 
-    Копирование — вся строка целиком в буфер (выделить мышью можно и
-    так — кнопка ускоряет «скопировать всё»). Вставка — разложить
-    байты из буфера по полям DATA настройки переменной (target_edits);
-    полный пакет «ID=.. DLC=.. DATA=..» тоже принимается — берётся
-    только часть DATA."""
+    ``copy_online=True`` — в буфер идёт вся онлайн-строка DATA
+    целиком (отчёт мастера: «копируется только первый байт»);
+    иначе — символы, введённые оператором в поля DATA.
+
+    Вставка — разложить байты из буфера по полям DATA настройки
+    переменной (target_edits). Полный пакет «ID=.. DLC=.. DATA=..»
+    принимается целиком: при заданном ``frame_fields`` (id/bit/dlc)
+    заполняются и поля фрейма, а не только DATA (отчёт мастера:
+    «вставляй все данные вместе с ID и DLC»)."""
     widget = QWidget()
     row = QHBoxLayout(widget)
     row.setContentsMargins(0, 0, 0, 0)
@@ -469,16 +488,25 @@ def _clipboard_buttons(
     )
 
     def _do_copy() -> None:
-        # Копируем СИМВОЛЫ, введённые оператором в поля DATA,
-        # а не онлайн-кадр с шины (отчёт мастера). Если полей
-        # нет — fallback на текст онлайн-строки.
-        if target_edits:
+        # Текст может быть HTML (побайтовая подсветка X/значение) —
+        # в буфер идёт сохранённая «плоская» строка.
+        online = (
+            str(label.property("live_plain") or "").strip()
+            or label.text().strip()
+        )
+        if copy_online:
+            # Вся онлайн-строка DATA разом — для вставки в таблицу
+            # привязки/поля настройки (отчёт мастера).
+            text = online
+        elif target_edits:
+            # Копируем СИМВОЛЫ, введённые оператором в поля DATA,
+            # а не онлайн-кадр с шины (отчёт мастера).
             text = " ".join(
                 e.text().strip().upper()
                 for e in target_edits if e.text().strip()
             )
         else:
-            text = label.text().strip()
+            text = online
         if text and text != "—":
             QApplication.clipboard().setText(text)
 
@@ -497,8 +525,32 @@ def _clipboard_buttons(
             text = QApplication.clipboard().text().strip()
             if not text:
                 return
-            # Полный пакет «ID=.. DATA=..» — берём только DATA.
+            # Полный пакет «ID=.. DLC=.. DATA=..» — поля фрейма идут
+            # в свои настройки, DATA — в байтовые поля (отчёт мастера:
+            # при вставке всего фрейма подставлялись только байты).
             if "=" in text:
+                if frame_fields:
+                    id_match = re.search(
+                        r"ID\s*=\s*(0[xX])?([0-9A-Fa-f]+)", text
+                    )
+                    if id_match is not None:
+                        id_edit = frame_fields.get("id")
+                        if id_edit is not None:
+                            id_edit.setText(id_match.group(2).upper())
+                    dlc_match = re.search(r"DLC\s*=\s*(\d+)", text)
+                    if dlc_match is not None:
+                        dlc_spin = frame_fields.get("dlc")
+                        if dlc_spin is not None:
+                            dlc_spin.setValue(
+                                max(0, min(8, int(dlc_match.group(1))))
+                            )
+                    rtr_match = re.search(r"RTR\s*=\s*(\w+)", text)
+                    rtr_check = frame_fields.get("rtr")
+                    if rtr_match is not None and rtr_check is not None:
+                        rtr_check.setChecked(
+                            rtr_match.group(1).strip().lower()
+                            in ("1", "true", "да", "rtr")
+                        )
                 match = re.search(
                     r"DATA\s*=\s*(.*)$", text, re.IGNORECASE | re.DOTALL
                 )
@@ -525,6 +577,45 @@ def _clipboard_buttons(
         paste_button.clicked.connect(_do_paste)
         row.addWidget(paste_button)
     return widget
+
+
+def _set_live_data_html(
+    label: QLabel, data: bytes | None, edits: list | None = None
+) -> None:
+    """Онлайн-DATA кадра с побайтовой подсветкой маски оператора.
+
+    Байт, у которого в поле настройки стоит «X»/пусто — голубой
+    (не участвует в сравнении); байт с введённым значением —
+    зелёный (отчёт мастера: «если записали что-то помимо X,
+    соответствующий байт зажигается зелёным»).
+    """
+    if data is None:
+        label.setText("—")
+        label.setProperty("live_plain", "")
+        return
+    plain = " ".join(f"{b:02X}" for b in data)
+    label.setProperty("live_plain", plain)
+    if not edits:
+        label.setText(plain)
+        return
+    # Байт «задан», если в ЛЮБОМ из переданных полей (от/до) у него
+    # стоит значение, а не «X»/пусто.
+    token_lists = [
+        _data_tokens(group) for group in (
+            edits if isinstance(edits[0], (list, tuple)) else [edits]
+        ) if group
+    ]
+    parts = []
+    for i, byte in enumerate(data):
+        filled = any(
+            i < len(tokens) and tokens[i] not in ("", "X")
+            for tokens in token_lists
+        )
+        color = "#4CAF50" if filled else "#7C9EFF"
+        parts.append(
+            f"<span style='color:{color}'>{byte:02X}</span>"
+        )
+    label.setText(" ".join(parts))
 
 
 def _map_points(points: list[tuple[float, float]], raw: float) -> float:
@@ -924,7 +1015,16 @@ class _FrameRow(QWidget):
         _selectable(self.live_label)
         row.addWidget(self.live_label)
         row.addWidget(
-            _clipboard_buttons(self.live_label, font, self.data)
+            _clipboard_buttons(
+                self.live_label,
+                font,
+                self.data,
+                frame_fields={
+                    "id": self.can_id,
+                    "bit": self.bit,
+                    "dlc": self.dlc,
+                },
+            )
         )
 
         # Крестик — стандартная иконка закрытия: символ «✕» в части
@@ -965,9 +1065,7 @@ class _FrameRow(QWidget):
             if fid is None or tab is None
             else tab.live_frame(fid, bool(self.bit.currentData()))
         )
-        self.live_label.setText(
-            "—" if data is None else " ".join(f"{b:02X}" for b in data)
-        )
+        _set_live_data_html(self.live_label, data, self.data)
 
 
 class _ValuePage(QWidget):
@@ -1117,7 +1215,15 @@ class _ValuePage(QWidget):
         live_row.addWidget(self.live_data_label)
         live_row.addWidget(
             _clipboard_buttons(
-                self.live_data_label, font, self.data_from
+                self.live_data_label,
+                font,
+                self.data_from,
+                frame_fields={
+                    "id": self.can_id,
+                    "bit": self.bit,
+                    "dlc": self.dlc,
+                },
+                copy_online=True,
             )
         )
         live_row.addStretch()
@@ -1156,18 +1262,17 @@ class _ValuePage(QWidget):
         # колонка «Величина» — цифры и разделители (отчёт мастера:
         # подмена в таблицах привязки не работала). Имена состояний
         # «Динамической» — свободный текст, не трогаем.
-        # DATA-ячейка: у «Динамической» точка — один байт (максимум
-        # 2 hex-символа — отчёт мастера); у «Численной» значение может
-        # быть многобайтовым — предел DLC·2, как при коммите.
+        # DATA-ячейка: значение может быть многобайтовым — предел по
+        # DLC (с запасом на пробелы между байтами при вставке строки
+        # вида «01 02 03» — отчёт мастера: «не получается написать
+        # больше одного байта»).
         self.points_table.setItemDelegateForColumn(
             0,
             _BindingCellDelegate(
                 "0123456789ABCDEFabcdef ",
                 self,
-                max_len=(
-                    (lambda: max(2, int(self.dlc.value()) * 2))
-                    if kind == "numeric"
-                    else 2
+                max_len=lambda: max(
+                    2, int(self.dlc.value()) * 2 + int(self.dlc.value())
                 ),
             ),
         )
@@ -1428,8 +1533,9 @@ class _ValuePage(QWidget):
             if fid is None or tab is None
             else tab.live_frame(fid, bool(self.bit.currentData()))
         )
-        self.live_data_label.setText(
-            "—" if data is None else " ".join(f"{b:02X}" for b in data)
+        _set_live_data_html(
+            self.live_data_label, data,
+            [self.data_from, self.data_to],
         )
         raw = getattr(row, "live_raw", None) if row is not None else None
         self.live_hex_label.setText(
@@ -1598,7 +1704,17 @@ class _ImpulsePage(QWidget):
         live_row.addStretch()
         live_row.addWidget(self.live_data_label)
         live_row.addWidget(
-            _clipboard_buttons(self.live_data_label, font, self.data)
+            _clipboard_buttons(
+                self.live_data_label,
+                font,
+                self.data,
+                frame_fields={
+                    "id": self.can_id,
+                    "bit": self.bit,
+                    "dlc": self.dlc,
+                },
+                copy_online=True,
+            )
         )
         live_row.addSpacing(10)
         live_row.addWidget(self.flag_label)
@@ -1626,9 +1742,7 @@ class _ImpulsePage(QWidget):
             if fid is None or tab is None
             else tab.live_frame(fid, bool(self.bit.currentData()))
         )
-        self.live_data_label.setText(
-            "—" if data is None else " ".join(f"{b:02X}" for b in data)
-        )
+        _set_live_data_html(self.live_data_label, data, self.data)
         row = self._get_row() if self._get_row is not None else None
         live = getattr(row, "live_value", None) if row is not None else None
         self.flag_label.setText("1" if live else "0")
@@ -1758,7 +1872,13 @@ class _CachePage(QWidget):
         live_row.addWidget(self.live_id_label)
         live_row.addWidget(self.live_data_label)
         live_row.addWidget(
-            _clipboard_buttons(self.live_data_label, font, None)
+            _clipboard_buttons(
+                self.live_data_label,
+                font,
+                self.data_from,
+                frame_fields={"id": self.can_id, "bit": self.bit},
+                copy_online=True,
+            )
         )
         live_row.addStretch()
         layout.addLayout(live_row)
@@ -1786,10 +1906,12 @@ class _CachePage(QWidget):
         if data is None:
             self.live_id_label.setText("—")
             self.live_data_label.setText("—")
+            self.live_data_label.setProperty("live_plain", "")
             return
         self.live_id_label.setText(f"{fid:X}")
-        self.live_data_label.setText(
-            " ".join(f"{b:02X}" for b in self.byte_slice(data))
+        _set_live_data_html(
+            self.live_data_label, self.byte_slice(data),
+            [self.data_from, self.data_to],
         )
 
     def read(self) -> dict[str, Any]:
@@ -1921,8 +2043,12 @@ class _CmdFrameRow(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
 
-        # Порядок колонок — как в строке «Ответ» триггера:
-        # битность, ID, DLC, DATA, RTR … паузы/кол-во, ✕.
+        # Порядок колонок — сначала ID, затем разрядность 29/11
+        # (отчёт мастера).
+        row.addWidget(QLabel("ID"))
+        self.can_id = _HexIdEdit(font)
+        row.addWidget(self.can_id)
+
         row.addWidget(QLabel(tr("Бит")))
         self.bit = QComboBox()
         self.bit.setFont(font)
@@ -1930,10 +2056,6 @@ class _CmdFrameRow(QWidget):
         self.bit.addItem(tr("29 бит"), True)
         self.bit.setFixedWidth(92)
         row.addWidget(self.bit)
-
-        row.addWidget(QLabel("ID"))
-        self.can_id = _HexIdEdit(font)
-        row.addWidget(self.can_id)
         _bind_id_width(self.bit, self.can_id)
 
         row.addWidget(QLabel("DLC"))
@@ -1956,7 +2078,19 @@ class _CmdFrameRow(QWidget):
 
         # Кнопки «копировать/вставить» — в верхнюю онлайн-строку.
         live_row.insertWidget(
-            2, _clipboard_buttons(self.live_label, font, self.data)
+            2,
+            _clipboard_buttons(
+                self.live_label,
+                font,
+                self.data,
+                frame_fields={
+                    "id": self.can_id,
+                    "bit": self.bit,
+                    "dlc": self.dlc,
+                    "rtr": self.rtr,
+                },
+                copy_online=True,
+            ),
         )
 
         def _ms_spin(value: int = 0) -> QSpinBox:
@@ -2058,9 +2192,7 @@ class _CmdFrameRow(QWidget):
             if fid is None or tab is None
             else tab.live_frame(fid, bool(self.bit.currentData()))
         )
-        self.live_label.setText(
-            "—" if data is None else " ".join(f"{b:02X}" for b in data)
-        )
+        _set_live_data_html(self.live_label, data, self.data)
 
     def read(self) -> dict[str, Any]:
         return {
@@ -2220,7 +2352,7 @@ class _CommandDialog(QDialog):
         if row in self._frame_rows:
             self._frame_rows.remove(row)
         self._frames_layout.removeWidget(row)
-        row.deleteLater()
+        retire(row)
         self._update_pause_rows()
 
     def current_config(self) -> dict[str, Any]:
@@ -2374,6 +2506,18 @@ class VariableDialog(QDialog):
         self._storage_size_label.setStyleSheet("color: #9A9AA5;")
         _selectable(self._storage_size_label)
         head.addWidget(self._storage_size_label)
+        # «Перенести в управление»: копия переменной появляется
+        # командой в колонке «Управление» — у каждого пакета из её
+        # таблицы привязки своё «Кол-во»/«Пауза» (отчёт мастера).
+        self._to_control_check = QCheckBox(tr("Перенести в управление"))
+        self._to_control_check.setFont(font)
+        self._to_control_check.setChecked(bool(config.get("to_control")))
+        self._to_control_check.setToolTip(
+            tr("Создаёт в разделе «Управление» команду с фреймами "
+               "этой переменной — для вызова из Гибкой логики")
+        )
+        self._to_control_check.setVisible(not self._for_control)
+        head.addWidget(self._to_control_check)
         head.addStretch()
         layout.addLayout(head)
 
@@ -2495,7 +2639,7 @@ class VariableDialog(QDialog):
         if row in self._frame_rows:
             self._frame_rows.remove(row)
         self._frames_layout.removeWidget(row)
-        row.deleteLater()
+        retire(row)
 
     def _active_value_page(self) -> _ValuePage | None:
         """Страница байтовой переменной текущего вида или None."""
@@ -2717,6 +2861,7 @@ class VariableDialog(QDialog):
                 else "ram"
             ),
             "cache_bit": self._cache_bit_check.isChecked(),
+            "to_control": self._to_control_check.isChecked(),
         }
         var_type = self._type_combo.currentData()
         if var_type == _TYPE_STATIC:
@@ -3191,8 +3336,12 @@ class _VarColumn(QWidget):
         if row in self._rows:
             self._rows.remove(row)
         self._rows_layout.removeWidget(row)
-        row.deleteLater()
+        retire(row)
         self.persist()
+        if self.key == "read":
+            # «Перенести в управление»: удалённая переменная тянет
+            # за собой свою команду-зеркало (отчёт мастера).
+            self._tab._sync_control_mirrors()
 
     def edit_row(self, row: _VariableRow) -> None:
         # Доп. каналы — компактный диалог без фреймов: только имя,
@@ -3226,11 +3375,14 @@ class _VarColumn(QWidget):
                 row.config.update(snapshot)
                 row._refresh_labels()
                 self.persist()
+                if self.key == "read":
+                    self._tab._sync_control_mirrors()
             return
         row.config.update(dialog.config)
         row._refresh_labels()
         if self.key == "read":
             self.sort_rows()
+            self._tab._sync_control_mirrors()
         self.persist()
 
     def _on_add(self) -> None:
@@ -3242,6 +3394,7 @@ class _VarColumn(QWidget):
         else:
             if self.key == "read":
                 self.sort_rows()
+                self._tab._sync_control_mirrors()
             self.persist()
 
     # Порядок разделов во вкладке «Чтение»: статическая → численная →
@@ -3272,7 +3425,7 @@ class _VarColumn(QWidget):
     def clear(self) -> None:
         for row in list(self._rows):
             self._rows_layout.removeWidget(row)
-            row.deleteLater()
+            retire(row)
         self._rows.clear()
         self.persist()
 
@@ -3573,6 +3726,134 @@ class VariablesTab(QWidget):
                         continue
         return ""
 
+    # ---- «Перенести в управление» -------------------------------------
+
+    @staticmethod
+    def _mirror_frames(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+        """Фреймы команды-зеркала по конфигурации переменной чтения.
+
+        «Динамическая переменная» даёт по пакету на каждую точку
+        таблицы привязки (DATA = сырое значение точки), остальные
+        виды — один пакет из её настройки фрейма (отчёт мастера)."""
+        var_type = cfg.get("type")
+
+        def _base() -> dict[str, Any]:
+            return {
+                "channel": 0,
+                "extended": bool(cfg.get("extended", False)),
+                "id": str(cfg.get("id", "")),
+                "dlc": int(cfg.get("dlc", 8) or 8),
+                "rtr": False,
+                "delay_before_send": 0,
+                "delay_between": 0,
+                "count": 1,
+                "next_delay": 0,
+            }
+
+        if var_type == _TYPE_STATIC:
+            frames = []
+            for fr in cfg.get("frames") or []:
+                base = _base()
+                base.update({
+                    "extended": bool(fr.get("extended", False)),
+                    "id": str(fr.get("id", "")),
+                    "dlc": int(fr.get("dlc", 8) or 8),
+                    "data": str(fr.get("data", "")),
+                    "rtr": bool(fr.get("rtr", False)),
+                })
+                frames.append(base)
+            return frames or [dict(_base(), data="")]
+
+        if var_type == _TYPE_DYNCACHE:
+            used = cfg.get("bytes") or []
+            width = max(1, len(used)) * 2
+            frames = []
+            for point in cfg.get("points") or []:
+                try:
+                    value = int(point[0])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                frames.append(
+                    dict(_base(), data=f"{value:0{width}X}")
+                )
+            if frames:
+                return frames
+            return [dict(_base(), data=str(cfg.get("from", "")))]
+
+        data = str(
+            cfg.get("data") or cfg.get("from") or cfg.get("data_from") or ""
+        )
+        return [dict(_base(), data=data)]
+
+    def _sync_control_mirrors(self) -> None:
+        """Держит колонку «Управление» в соответствии с галочкой
+        «Перенести в управление» у переменных чтения: команда-зеркало
+        с тем же именем и фреймами из настройки переменной
+        (отчёт мастера)."""
+        wanted: dict[str, dict[str, Any]] = {}
+        for row in self._read_col._rows:
+            cfg = row.config
+            if not cfg.get("to_control"):
+                continue
+            name = str(cfg.get("name", "")).strip()
+            if not name:
+                continue
+            wanted[name] = cfg
+
+        # Зеркала без источника/снятой галочки — убираем.
+        for row in list(self._ctrl_col._rows):
+            src = str(row.config.get("mirror_of", "")).strip()
+            if src and src not in wanted:
+                self._ctrl_col.remove_row(row)
+
+        for name, cfg in wanted.items():
+            mirror = next(
+                (
+                    row
+                    for row in self._ctrl_col._rows
+                    if str(row.config.get("mirror_of", "")).strip() == name
+                ),
+                None,
+            )
+            new_frames = self._mirror_frames(cfg)
+            if mirror is None:
+                mirror = self._ctrl_col.add_row({
+                    "type": _TYPE_COMMAND,
+                    "name": name,
+                    "folder": str(cfg.get("folder", "")),
+                    "frames": new_frames,
+                    "mirror_of": name,
+                    "cache": {},
+                })
+                continue
+            # Существующее зеркало: имя/папка синхронно, у фреймов
+            # сохраняем настроенные «Кол-во»/паузы — ключ (id,data)
+            # в приоритете, индекс — запасной (отчёт мастера: у каждого
+            # пакета свои настройки отправки).
+            old_frames = mirror.config.get("frames") or []
+            tuned: dict[tuple[str, str], dict[str, Any]] = {}
+            for i, fr in enumerate(old_frames):
+                tuned[(str(fr.get("id", "")), str(fr.get("data", "")))] = fr
+                tuned[i] = fr  # type: ignore[dict-item]
+            merged = []
+            for i, fr in enumerate(new_frames):
+                keep = (
+                    tuned.get((str(fr.get("id", "")), str(fr.get("data", ""))))
+                    or tuned.get(i)
+                )
+                if keep:
+                    for key in ("count", "delay_between", "next_delay",
+                                "delay_before_send", "channel", "rtr"):
+                        fr[key] = keep.get(key, fr.get(key))
+                merged.append(fr)
+            mirror.config.update({
+                "name": name,
+                "folder": str(cfg.get("folder", "")),
+                "frames": merged,
+            })
+            mirror._refresh_labels()
+        self._ctrl_col.persist()
+
     def live_frame(
         self, frame_id: int, extended: bool = False
     ) -> bytes | None:
@@ -3643,6 +3924,15 @@ class VariablesTab(QWidget):
             return seen
         return []
 
+    def aux_channel_configs(self) -> list[dict[str, Any]]:
+        """Конфиги доп. каналов (вид «Доп канал входа/выхода») третьей
+        колонки — для каскадного меню ГЛ: имя → пин/функция."""
+        return [
+            dict(c) for c in self._aux_col.configs()
+            if c.get("type") == "aux"
+            and str(c.get("name", "")).strip()
+        ]
+
     # ---- хранение ------------------------------------------------------
 
     def export_config(self) -> dict[str, Any]:
@@ -3680,6 +3970,9 @@ class VariablesTab(QWidget):
         # Раздел «Чтение» упорядочен по виду переменной и алфавиту
         # (отчёт мастера).
         self._read_col.sort_rows()
+        # Зеркала «Перенести в управление»: существующие обновляются
+        # из источников, недостающие — создаются (отчёт мастера).
+        self._sync_control_mirrors()
 
     def _restore(self) -> None:
         """Столбцы стартуют пустыми — кэша переменных в config.json

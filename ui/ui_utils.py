@@ -2,10 +2,30 @@
 
 
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QPushButton, QSizePolicy
+from PySide6.QtWidgets import QPushButton, QSizePolicy, QWidget
 
 
 _INDICATOR_PREFIX = "✓ "
+
+_graveyard: QWidget | None = None
+
+
+def retire(widget: QWidget) -> None:
+    """Прячет виджет на «кладбище» вместо deleteLater().
+
+    DeferredDelete, исполненный посреди processEvents() внутри serial-сессии,
+    приводит к нативному падению Qt на Windows. Удаляемые строки/панели
+    просто перепрятываются на скрытый контейнер — C++-объект живёт до
+    выхода приложения, события и сигналы остаются валидными.
+    """
+    global _graveyard
+    if widget is None:
+        return
+    widget.hide()
+    widget.setEnabled(False)
+    if _graveyard is None:
+        _graveyard = QWidget()
+    widget.setParent(_graveyard)
 
 
 def setup_button(button: QPushButton, bold: bool = False, height: int = 28) -> None:

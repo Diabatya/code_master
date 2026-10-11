@@ -45,9 +45,13 @@ import contextlib
 import time
 from typing import Any
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, Slot
+from PySide6.QtCore import (
+    QEasingCurve, QPointF, QPropertyAnimation, Qt, QTimer, Slot,
+)
 from shiboken6 import isValid
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (
+    QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -57,6 +61,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -72,7 +77,7 @@ from models.logger import get_logger
 from models.translations import _ as tr
 from models.utils import hex_to_int
 from ui.hex_edit import create_data_field_widget
-from ui.ui_utils import setup_button
+from ui.ui_utils import retire, setup_button
 from ui.variables_tab import _HexIdEdit, _bind_id_width, _tokens_match
 
 logger = get_logger(__name__)
@@ -335,6 +340,47 @@ class _ClickableSummary(QLabel):
             if callable(toggle):
                 toggle()
         super().mousePressEvent(event)
+
+
+class _ArrowButton(QPushButton):
+    """Кнопка-стрелка сворачивания программы: треугольник рисуется
+    QPainter'ом — глиф «▲» в части шрифтов Windows отсутствовал и
+    кнопка выглядела пустой (отчёт мастера)."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._collapsed = False
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self._collapsed = collapsed
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor("#C0C0C8") if self.underMouse() else QColor("#9A9AA5")
+        painter.setBrush(QBrush(color))
+        painter.setPen(Qt.PenStyle.NoPen)
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        half_w, half_h = 6.0, 4.0
+        if self._collapsed:
+            # Свёрнута — стрелка «вниз».
+            points = [
+                (cx - half_w, cy - half_h),
+                (cx + half_w, cy - half_h),
+                (cx, cy + half_h),
+            ]
+        else:
+            points = [
+                (cx - half_w, cy + half_h),
+                (cx + half_w, cy + half_h),
+                (cx, cy - half_h),
+            ]
+        painter.drawPolygon(
+            QPolygonF([QPointF(x, y) for x, y in points])
+        )
+        painter.end()
 
 
 class _PulsePreview(QWidget):
@@ -1251,11 +1297,11 @@ def _detach_item(item, sep) -> None:
 
     setParent(None) НЕ используем: он делает виджет топлевел-окном,
     создание/удаление нативного окна рушит Qt на Windows/macOS
-    (отчёт мастера — краш по крестику). Само удаление отложено ещё
-    на один тик после скрытия: отпускание мыши по кнопке-«крестику»
-    внутри item завершается до DeferredDelete — иначе Qt на Windows
-    доставлял release уже скрытому/полуудалённому виджету и
-    приложение падало (повторный отчёт мастера)."""
+    (отчёт мастера — краш по крестику). Виджет не удаляется вовсе —
+    прячется на «кладбище» (retire): DeferredDelete, исполненный
+    посреди processEvents() внутри serial-сессии опроса, ронял Qt
+    на Windows (третий отчёт мастера — вылеты при сбросе и по
+    крестику программы/пункта)."""
     if isValid(item):
         # Анимация свёртки могла быть в полёте (фокус-аут при клике по
         # крестику): бегущая QPropertyAnimation по «maximumHeight»
@@ -1298,10 +1344,10 @@ def _detach_item(item, sep) -> None:
         if parent is not None and parent.layout() is not None:
             parent.layout().removeWidget(item)
         item.setVisible(False)
-        QTimer.singleShot(0, item.deleteLater)
+        retire(item)
     if sep is not None and isValid(sep):
         sep.setVisible(False)
-        QTimer.singleShot(0, sep.deleteLater)
+        retire(sep)
 
 
 def _auto_collapse(item) -> None:
@@ -1344,6 +1390,16 @@ def _auto_collapse(item) -> None:
                     return
             if new is not None and isValid(new) and item.isAncestorOf(new):
                 return  # фокус внутри пункта — редактирование идёт
+            # Клик по сводке сам может принести focusChanged (фокус
+            # уходит с ранее активного поля, QLabel-строка фокус не
+            # берёт): только что развёрнутый пункт мгновенно
+            # сворачивался обратно — «доп. параметр не открывался
+            # повторно» (отчёт мастера). Даём редактору время
+            # доиграть анимацию развёртки.
+            if (
+                time.monotonic() - getattr(item, "_toggled_at", 0.0)
+            ) < 0.4:
+                return
             # В одну строку сворачивается только ПОЛНОСТЬЮ настроенный
             # пункт: пока обязательные поля пустые, дерево настройки
             # остаётся развёрнутым (отчёт мастера).
@@ -1381,6 +1437,7 @@ def _animate_editor_toggle(item) -> None:
     end = 0 if expanded else max(1, editor.sizeHint().height())
     final = 0 if expanded else 16777215
     item._editor_open = not expanded
+    item._toggled_at = time.monotonic()
     old = getattr(item, "_anim_finished_cb", None)
     if old is not None:
         with contextlib.suppress(RuntimeError, TypeError):
@@ -1391,19 +1448,23 @@ def _animate_editor_toggle(item) -> None:
         if isValid(editor):
             editor.setMaximumHeight(v)
 
+    # stop() у бегущей анимации испускает finished() — обработчик
+    # подключаем ПОСЛЕ остановки, иначе финальная высота применялась
+    # преждевременно и развёртка мигала/не открывалась.
+    anim.stop()
     item._anim_finished_cb = _apply_final
     anim.finished.connect(_apply_final)
-    anim.stop()
     anim.setStartValue(editor.maximumHeight())
     anim.setEndValue(end)
     anim.start()
 
 
 def _popup_type_selector(item) -> None:
-    """Клик по голубой строке «Не выбрано» — список функций комбобокса
+    """Клик по голубой строке «Не выбрано» — каскадное меню выбора
     открывается СРАЗУ: промежуточная строка выбора функции внутри
-    дерева лишняя, оператор выбирает вид из выпадающего дерева по
-    первому клику (отчёт мастера)."""
+    дерева лишняя (отчёт мастера). Наведение на вид переменной
+    показывает список заполненных переменных этого вида, наведение
+    на переменную — доступные для неё команды/события."""
     if not getattr(item, "_editor_open", False):
         return
     combo = getattr(item, "_type", None)
@@ -1411,10 +1472,118 @@ def _popup_type_selector(item) -> None:
         return
 
     def _popup() -> None:
-        if isValid(combo):
-            combo.showPopup()
+        if isValid(item):
+            _open_type_menu(item)
 
     QTimer.singleShot(0, _popup)
+
+
+def _aux_channel_names(item) -> list[tuple[str, int, str]]:
+    """Именованные доп. каналы из третьей колонки «Переменных»:
+    (имя, пин/канал, функция) — для каскадного меню пунктов ГЛ."""
+    tab = item._row._tab._variables_tab
+    if tab is None:
+        return []
+    aux = getattr(tab, "aux_channel_configs", None)
+    if not callable(aux):
+        return []
+    out = []
+    for cfg in aux():
+        name = str(cfg.get("name", "")).strip()
+        if name:
+            out.append(
+                (
+                    name,
+                    int(cfg.get("channel", 1) or 1),
+                    str(cfg.get("function", "")),
+                )
+            )
+    return out
+
+
+def _apply_menu_choice(item, code: str, patch: dict[str, Any]) -> None:
+    """Применяет выбор каскадного меню: тип + поля страницы, сводка,
+    пометка «грязной» конфигурации."""
+    if not isValid(item):
+        return
+    cfg = {"type": code}
+    cfg.update(patch)
+    try:
+        item.write(cfg)
+        item._update_summary()
+        item._row._mark_dirty()
+    except RuntimeError:
+        pass
+
+
+def _open_type_menu(item) -> None:
+    """Каскадное меню: вид → переменная → команда/событие.
+
+    Уровни строятся по спецификации пункта (``_menu_spec``):
+    * вид без переменных — листовой пункт (тип выбирается сам);
+    * вид с переменными — подменю имён; имя-лист выбирает
+      переменную, имя с подменю — третий уровень команд/событий.
+    """
+    spec_fn = getattr(item, "_menu_spec", None)
+    if not callable(spec_fn):
+        return
+    spec = spec_fn()
+    if not spec:
+        return
+    combo = item._type
+    menu = QMenu(item._summary)
+    for code, entries in spec:
+        idx = combo.findData(code)
+        if idx < 0:
+            continue  # вид скрыт для этого пункта
+        title = combo.itemText(idx)
+        if not entries:
+            act = menu.addAction(title)
+            act.triggered.connect(
+                lambda _c=False, c=code: _apply_menu_choice(item, c, {})
+            )
+            continue
+        sub = menu.addMenu(title)
+        for label, payload in entries:
+            if isinstance(payload, list) and payload:
+                sub2 = sub.addMenu(label)
+                for opt_label, patch in payload:
+                    act = sub2.addAction(opt_label)
+                    act.triggered.connect(
+                        lambda _c=False, c=code, p=patch:
+                            _apply_menu_choice(item, c, dict(p))
+                    )
+            else:
+                act = sub.addAction(label)
+                patch = payload if isinstance(payload, dict) else {"var": label}
+                act.triggered.connect(
+                    lambda _c=False, c=code, p=patch:
+                        _apply_menu_choice(item, c, dict(p))
+                )
+        if sub.isEmpty():
+            # Нет заполненных переменных этого вида — вид всё равно
+            # доступен как обычный пункт меню.
+            sub.menuAction().setText(f"{title} —")
+            act = sub.addAction(tr("Выбрать"))
+            act.triggered.connect(
+                lambda _c=False, c=code: _apply_menu_choice(item, c, {})
+            )
+    anchor = item._summary
+    menu.popup(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+
+def _menu_names(
+    item, column: str, var_type: str | None
+) -> list[str]:
+    """Имена заполненных переменных вида из вкладки «Переменные»."""
+    tab = item._row._tab._variables_tab
+    return tab.variable_names(column, var_type) if tab else []
+
+
+def _menu_bindings(item, name: str) -> list[str]:
+    """Имена из таблицы привязки динамической переменной."""
+    tab = item._row._tab._variables_tab
+    return tab.variable_binding_names("read", name) if tab else []
 
 
 class _EventItem(QWidget):
@@ -1660,6 +1829,103 @@ class _EventItem(QWidget):
         # Список состояний «Динамической переменной» подтягивается
         # из её таблицы привязки (отчёт мастера).
         self._dyn.refresh_binding_names()
+
+    def _menu_spec(self) -> list[tuple[str, list | None]]:
+        """Виды событий → заполненные переменные → команды/события —
+        для каскадного меню по клику «Не выбрано» (отчёт мастера)."""
+        edge_opts = [
+            (tr("Стала 1"), {"edge": "on"}),
+            (tr("Стала 0"), {"edge": "off"}),
+            (tr("1 или 0"), {"edge": "both"}),
+        ]
+        num_opts = [
+            (tr("Стало больше"), {"dir": "gt"}),
+            (tr("Стало меньше"), {"dir": "lt"}),
+        ]
+        aux_opts = [
+            (tr("Активен"), {"state": 1}),
+            (tr("Не активен"), {"state": 0}),
+        ]
+        flag_opts = [
+            (tr("Стала 1"), {"state": 1}),
+            (tr("Стала 0"), {"state": 0}),
+        ]
+        cache_ops = [
+            (tr("Приход DATA КЭШ"), {"cache_op": _CACHE_OP_RX}),
+            (tr("Записалась КЭШ переменная"),
+             {"cache_op": _CACHE_OP_WRITTEN}),
+            (tr("Стирание КЭШ переменной"),
+             {"cache_op": _CACHE_OP_ERASED}),
+        ]
+
+        def with_var(name: str, opts: list) -> list:
+            return [
+                (label, {"var": name, **patch}) for label, patch in opts
+            ]
+
+        dyn_vars = []
+        for n in _menu_names(self, "read", "dyn_cache"):
+            states = _menu_bindings(self, n)
+            dyn_vars.append(
+                (
+                    n,
+                    [(s, {"var": n, "dir": "eq", "value": s})
+                     for s in states] or with_var(n, [
+                        (tr("Активно"), {"dir": "eq", "value": ""}),
+                    ]),
+                )
+            )
+        aux_vars = []
+        for name, ch, func in _aux_channel_names(self):
+            direction = "out" if func != "discrete_in" else "in"
+            aux_vars.append(
+                (
+                    name,
+                    [
+                        (label, {"channel": ch, "direction": direction,
+                                 **p})
+                        for label, p in aux_opts
+                    ],
+                )
+            )
+        return [
+            (
+                _EVENT_STATIC,
+                [(n, with_var(n, edge_opts))
+                 for n in _menu_names(self, "read", "static")],
+            ),
+            (_EVENT_DYN, dyn_vars),
+            (
+                _EVENT_NUM,
+                [(n, with_var(n, num_opts))
+                 for n in _menu_names(self, "read", "dynamic")],
+            ),
+            (
+                _EVENT_IMPULSE,
+                [(n, None) for n in _menu_names(self, "read", "impulse")],
+            ),
+            (_EVENT_AUX, aux_vars),
+            (
+                _EVENT_FLAG,
+                [(n, with_var(n, flag_opts))
+                 for n in _menu_names(self, "aux", "flag")],
+            ),
+            (_EVENT_FRAME, None),
+            (_EVENT_POWER, None),
+            (
+                _EVENT_CACHEVAR,
+                [(n, with_var(n, cache_ops))
+                 for n in _menu_names(self, "read", "cache")],
+            ),
+            (
+                _EVENT_PROGRAM,
+                [
+                    (n, None)
+                    for n in self._row._tab._program_names()
+                    if n and n != self._row._name_edit.text().strip()
+                ],
+            ),
+        ]
 
     def _update_summary(self, *_args) -> None:
         """Компактная подпись события: имя + функция (отчёт мастера)."""
@@ -2069,6 +2335,78 @@ class _CondItem(QWidget):
         # Состояния «Динамической переменной» — из её таблицы привязки
         # (отчёт мастера: список состояний в условии был пуст).
         self._dyn_page.refresh_binding_names()
+
+    def _menu_spec(self) -> list[tuple[str, list | None]]:
+        """Виды условий → заполненные переменные → проверки — для
+        каскадного меню по клику «Не выбрано» (отчёт мастера)."""
+        on_off = [
+            (tr("Активна (1)"), {"state": 1}),
+            (tr("Не активна (0)"), {"state": 0}),
+        ]
+        aux_opts = [
+            (tr("Активен"), {"state": 1}),
+            (tr("Не активен"), {"state": 0}),
+        ]
+        num_opts = [
+            (tr("Больше"), {"op": "gt"}),
+            (tr("Меньше"), {"op": "lt"}),
+            (tr("Равно"), {"op": "eq"}),
+        ]
+        cache_opts = [
+            (tr("Записан КЭШ"), {"cache_op": _CACHE_OP_FILLED}),
+            (tr("Не записан КЭШ"), {"cache_op": _CACHE_OP_EMPTY}),
+        ]
+
+        def with_var(name: str, opts: list) -> list:
+            return [
+                (label, {"var": name, **patch}) for label, patch in opts
+            ]
+
+        dyn_vars = []
+        for n in _menu_names(self, "read", "dyn_cache"):
+            states = _menu_bindings(self, n)
+            dyn_vars.append(
+                (
+                    n,
+                    [(s, {"var": n, "state": s}) for s in states]
+                    or with_var(n, [(tr("Активно"), {"state": ""})]),
+                )
+            )
+        aux_vars = [
+            (
+                name,
+                [(label, {"channel": ch, **p}) for label, p in aux_opts],
+            )
+            for name, ch, _func in _aux_channel_names(self)
+        ]
+        return [
+            (
+                _COND_STATIC,
+                [(n, with_var(n, on_off))
+                 for n in _menu_names(self, "read", "static")],
+            ),
+            (_COND_DYN, dyn_vars),
+            (
+                _COND_NUM,
+                [(n, with_var(n, num_opts))
+                 for n in _menu_names(self, "read", "dynamic")],
+            ),
+            (
+                _COND_IMPULSE,
+                [(n, None) for n in _menu_names(self, "read", "impulse")],
+            ),
+            (_COND_AUX, aux_vars),
+            (
+                _COND_FLAG,
+                [(n, with_var(n, on_off))
+                 for n in _menu_names(self, "aux", "flag")],
+            ),
+            (
+                _COND_CACHEVAR,
+                [(n, with_var(n, cache_opts))
+                 for n in _menu_names(self, "read", "cache")],
+            ),
+        ]
 
     def _update_summary(self, *_args) -> None:
         ctype = self._type.currentData()
@@ -2697,6 +3035,68 @@ class _ActionItem(QWidget):
         self.cache_var.set_names(cache, tr("— не выбрано —"))
         self._abort.refresh_variables()
 
+    def _menu_spec(self) -> list[tuple[str, list | None]]:
+        """Виды действий → заполненные переменные → команды — для
+        каскадного меню по клику «Не выбрано» (отчёт мастера)."""
+        aux_modes = [
+            (tr("Вкл"), {"aux_mode": "on"}),
+            (tr("Выкл"), {"aux_mode": "off"}),
+            (tr("Подать импульсы"), {"aux_mode": "pulse"}),
+            (tr("Вкл ШИМ"), {"aux_mode": "pwm"}),
+        ]
+        flag_modes = [
+            (tr("Включить"), {"flag_mode": "on"}),
+            (tr("Включить на"), {"flag_mode": "pulse"}),
+            (tr("Выключить"), {"flag_mode": "off"}),
+        ]
+        cv_ops = [
+            (tr("Записать КЭШ"), {"cv_op": _CACHE_OP_COMMIT}),
+            (tr("Отправить КЭШ"), {"cv_op": _CACHE_OP_SEND}),
+            (tr("Стереть КЭШ"), {"cv_op": _CACHE_OP_ERASE}),
+        ]
+        aux_vars = [
+            (
+                name,
+                [
+                    (label, {"aux_channel": ch, **p})
+                    for label, p in aux_modes
+                ],
+            )
+            for name, ch, _func in _aux_channel_names(self)
+            if 1 <= ch <= 4  # выходные каналы OUT1-4 (отчёт мастера)
+        ]
+        return [
+            (_ACT_AUX, aux_vars),
+            (
+                _ACT_VAR,
+                [(n, None) for n in _menu_names(self, "control", None)],
+            ),
+            (
+                _ACT_FLAG,
+                [
+                    (n, [(label, {"flag_var": n, **p})
+                         for label, p in flag_modes])
+                    for n in _menu_names(self, "aux", "flag")
+                ],
+            ),
+            (_ACT_FRAME, None),
+            (
+                _ACT_CACHE,
+                [
+                    (n, {"cachevar": n})
+                    for n in _menu_names(self, "read", "cache")
+                ],
+            ),
+            (
+                _ACT_CACHEVAR,
+                [
+                    (n, [(label, {"cachevar": n, **p})
+                         for label, p in cv_ops])
+                    for n in _menu_names(self, "read", "cache")
+                ],
+            ),
+        ]
+
     # ---- схема -----------------------------------------------------------
 
     def read(self) -> dict[str, Any]:
@@ -2964,18 +3364,11 @@ class RuleRowWidget(QWidget):
         self._name_edit.setPlaceholderText(tr("Программа"))
         self._name_edit.setClearButtonEnabled(True)
         self._name_edit.textChanged.connect(self._mark_dirty)
-        # Сворачивание — серая стрелка «вверх» (отчёт мастера:
-        # подчёркивание выглядело белой точкой на кнопке). В свёрнутом
-        # состоянии стрелка переворачивается «вниз».
-        self._collapse_button = QPushButton("▲")
-        self._collapse_button.setFont(
-            QFont("Segoe UI", 9, QFont.Weight.Bold)
-        )
+        # Сворачивание — рисованный серый треугольник «вверх»
+        # (отчёт мастера: текстовый глиф «▲» не рендерился, кнопка
+        # выглядела пустой). В свёрнутом состоянии — «вниз».
+        self._collapse_button = _ArrowButton()
         self._collapse_button.setFixedSize(30, 24)
-        self._collapse_button.setStyleSheet(
-            "QPushButton { color: #9A9AA5; }"
-            "QPushButton:hover { color: #C0C0C8; }"
-        )
         self._collapse_button.setToolTip(tr("Свернуть программу"))
         self._collapse_button.clicked.connect(self._toggle_collapsed)
         # Крестик закрытия — голубой, как у событий/условий/действий
@@ -3334,7 +3727,7 @@ class RuleRowWidget(QWidget):
         collapsed = not self._body.isHidden()
         self._body.setVisible(not collapsed)
         self._summary_label.setVisible(collapsed)
-        self._collapse_button.setText("▼" if collapsed else "▲")
+        self._collapse_button.set_collapsed(collapsed)
         self._collapse_button.setToolTip(
             tr("Развернуть программу") if collapsed
             else tr("Свернуть программу")

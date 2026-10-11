@@ -57,7 +57,7 @@ from models.translations import _ as tr
 from models.utils import hex_to_int
 from ui.hex_edit import create_data_field_widget
 from ui.packet_clipboard import create_clipboard_buttons
-from ui.ui_utils import setup_button
+from ui.ui_utils import retire, setup_button
 from ui.variables_tab import _HexIdEdit
 from ui.memory_indicator import MemoryIndicator
 
@@ -1065,8 +1065,7 @@ class CanGatewayTab(QWidget):
             self._programs.remove(program)
         # Без setParent(None): репарент создаёт топлевел-окно и рушит Qt
         # в обработчике clicked() (отчёт мастера — вылеты по крестику).
-        program.setVisible(False)
-        program.deleteLater()
+        retire(program)
         for p in self._programs:
             p.refresh_title()
         self.mark_dirty()

@@ -1514,6 +1514,25 @@ class FlashWorker(QThread):
             return False, tr("USB DFU ошибка: {0}").format(exc)
 
 
+_BL_READ_MIN_ADDR = 0x08008000
+
+
+def _read_bl_memory_padded(bl: "Bootloader", start: int, size: int) -> bytes:
+    """Читает память через бутлоадер с учётом его нижней границы.
+
+    Прошивка бутлоадера принимает чтение только от страницы идентификации
+    (0x08008000). Полная вычитка от 0x08000000 запрашивает и область
+    бутлоадера — она возвращается как 0xFF.
+    """
+    if start >= _BL_READ_MIN_ADDR:
+        return bl.read_memory(start, size)
+    skip = min(size, _BL_READ_MIN_ADDR - start)
+    data = bytes([0xFF]) * skip
+    if skip < size:
+        data += bl.read_memory(start + skip, size - skip)
+    return data
+
+
 class ReadWorker(QThread):
     """Фоновое чтение флеш-памяти микроконтроллера."""
 
@@ -1628,7 +1647,7 @@ class ReadWorker(QThread):
             bl.enter_bootloader()
             bl.sync()
             start = self._start
-            data = bl.read_memory(start, self._size)
+            data = _read_bl_memory_padded(bl, start, self._size)
             return data, start
         finally:
             with contextlib.suppress(Exception):
@@ -1646,7 +1665,7 @@ class ReadWorker(QThread):
             bl.enter_bootloader()
             bl.sync()
             start = self._start
-            data = bl.read_memory(start, self._size)
+            data = _read_bl_memory_padded(bl, start, self._size)
             return data, start
         finally:
             with contextlib.suppress(Exception):

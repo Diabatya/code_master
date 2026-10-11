@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from models.translations import _ as tr
 from models.utils import hex_to_int, int_to_hex, parse_data_bytes
 from ui.hex_edit import HexDataEdit
+from ui.ui_utils import retire
 
 
 class _RowCheckBox(QCheckBox):
@@ -261,7 +262,7 @@ class FilterDialog(QDialog):
         if not self._rules_widgets:
             return
         rule = self._rules_widgets.pop()
-        rule["widget"].deleteLater()
+        retire(rule["widget"])
 
     def _accepted_checkbox(self, item: QListWidgetItem) -> QCheckBox | None:
         w = self._accepted_list.itemWidget(item)

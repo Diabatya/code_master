@@ -17,7 +17,9 @@ from PySide6.QtGui import (
     QPainterPath,
     QPalette,
     QPen,
+    QKeySequence,
     QRegularExpressionValidator,
+    QShortcut,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -1574,6 +1576,11 @@ class CanChannelMonitor(QWidget):
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
+        # Ctrl+C по выбранной строке кладёт её ID в буфер (отчёт
+        # мастера: «не получается скопировать в буфер обмена ID»).
+        copy_shortcut = QShortcut(QKeySequence.StandardKey.Copy, self._table)
+        copy_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        copy_shortcut.activated.connect(self._copy_current_row_id)
         # Двойной правый клик по строке ID → сразу «История ID» (без меню).
         # Штатный MouseButtonDblClick до нас не доезжает: первый правый
         # клик уже открыл контекстное меню, и второй уходит в него.
@@ -2644,6 +2651,13 @@ class CanChannelMonitor(QWidget):
         item = self._table.item(row, 0)
         if item is not None:
             QApplication.clipboard().setText(item.text())
+
+    def _copy_current_row_id(self) -> None:
+        """Ctrl+C на таблице мониторинга — ID выбранной строки
+        в буфер (отчёт мастера)."""
+        row = self._table.currentRow()
+        if row >= 0:
+            self._copy_selected_id(row)
 
     def _copy_selected_data(self, row: int) -> None:
         item = self._table.item(row, 2)
