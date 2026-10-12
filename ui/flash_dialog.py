@@ -2246,6 +2246,13 @@ class FlashDialog(QDialog):
         logger.info("Начало подключения: метод=%s", method)
         self._log(tr("Подключение через {0}...").format(method))
         self._connect_button.setEnabled(False)
+        # COM-порт занят приложением — сначала освобождаем, иначе
+        # Bootloader.open() не может его открыть (Windows — ACCESS
+        # DENIED до 30 с на ретраях: «Подключение через usb_cdc…»
+        # висло), а авто-реконнект SerialManager успевал перехватить
+        # пере-энумерированный bootloader-порт до нашего open
+        # (отчёт мастера).
+        self._release_serial_port(method)
         self._connect_worker = ConnectWorker(method, self._config, self)
         self._connect_worker.log_line.connect(self._log)
         self._connect_worker.finished.connect(self._on_connect_finished)
@@ -2267,6 +2274,9 @@ class FlashDialog(QDialog):
     def _on_connect_finished(self, success: bool, info: dict[str, Any]) -> None:
         logger.info("Подключение завершено: success=%s, info=%s", success, info)
         self._connect_button.setEnabled(True)
+        # Порт был освобождён под bootloader-коннект — возвращаем
+        # приложению (устройство могло уйти в bootloader и обратно).
+        self._restore_serial_port()
         if success and info.get("method") and info["method"] != self._method_combo.currentData():
             index = self._method_combo.findData(info["method"])
             if index >= 0:
@@ -2551,6 +2561,10 @@ class FlashDialog(QDialog):
         if method not in ("uart", "usb_cdc", "auto") or self._serial_manager is None:
             return
         if not self._serial_manager.is_open():
+            # Порт уже отпущен предыдущей операцией — флаг
+            # восстановления сохраняем: повторный release не должен
+            # его стирать, иначе после серии «подключение → прошивка»
+            # порт приложению не вернётся (отчёт мастера).
             return
         self._port_was_open = True
         logger.info("Закрываю SerialManager перед операцией через %s", method)
@@ -2564,7 +2578,6 @@ class FlashDialog(QDialog):
         """Возвращает COM-порт приложению, если он был закрыт перед операцией."""
         if not getattr(self, "_port_was_open", False) or self._serial_manager is None:
             return
-        self._port_was_open = False
         try:
             logger.info("Восстановление SerialManager после операции")
             port = self._config.get("port", "")
@@ -2583,17 +2596,19 @@ class FlashDialog(QDialog):
                 Bootloader.USB_VID, Bootloader.USB_BOOTLOADER_PID
             ):
                 # Устройство ещё в режиме bootloader — GO/пере-энумерация
-                # не завершились. Раньше выходили молча: SerialManager
-                # оставался _shutdown, app-порт так и не подхватывался —
-                # оператору приходилось перетыкать USB (отчёт мастера).
-                # Вместо выхода ниже открываем старое имя с
-                # auto_reconnect: цикл _do_reconnect сам найдёт
-                # application-порт по PID 5740, как только Windows
-                # закончит энумерацию.
+                # не завершились. Открывать старое имя и вооружать
+                # реконнект сейчас нельзя: bootloader занял тот же
+                # COM, а цикл _do_reconnect открыл бы его параллельно
+                # с Bootloader.open() и вклинился бы в обмен прошивки
+                # (на macOS/Linux двойное открытие CDC допустимо —
+                # отчёт мастера). Флаг сохраняем: порт вернёт следующая
+                # операция после выхода устройства из bootloader.
                 logger.warning(
-                    "Устройство пока в режиме bootloader — реконнект "
-                    "вооружён, ждём application-порт"
+                    "Устройство пока в режиме bootloader — порт "
+                    "вернём после выхода в application"
                 )
+                return
+            self._port_was_open = False
             # auto_reconnect обязателен: open_port по умолчанию сбрасывает
             # флаг — после флеш-операции обрыв связи не переподключался.
             # Даже при неудачном open_port (старый COM ещё не поднялся)

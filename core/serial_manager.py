@@ -737,6 +737,14 @@ class SerialManager(QObject):
                     # зомби-хендл таймаутами, пока Windows не снимет
                     # устройство с шины (в поле — минута мёртвого порта).
                     self.expect_reboot()
+                elif command in _REBOOTING_COMMANDS:
+                    # Команда, после которой МК уходит в перезагрузку,
+                    # завершилась таймаутом: массивное стирание Flash
+                    # (заводской сброс) глушит CDC-ответ — устройство
+                    # ушло в ребут, а порт оставался открытым зомби:
+                    # is_open()=True запрещал планировщик реконнекта,
+                    # и камень «не подключался обратно» (отчёт мастера).
+                    self.expect_reboot()
                 raise last_timeout  # type: ignore[misc]
             finally:
                 if owns_session:

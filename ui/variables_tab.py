@@ -23,18 +23,16 @@
 (при записи), а не в строке таблицы (отчёт мастера). ПЗУ пока
 некликабельно — появится после подключения EEPROM к МК.
 
-Хранение: кнопки «Загрузить переменные» / «Сохранить переменные»
-читают/пишут отдельный файл «Конфиг Инфо.json» (переменные + заметки
-по ID из мониторинга). Файл чужого формата или иной версии не роняет
-приложение — выводится предупреждение. Запись DATA переменных во
-флэш МК (по аналогии с конфигурацией триггеров) — следующий этап,
-после спецификации протокола.
+Хранение: «Сохранить переменные» пишет отдельный файл
+«Конфиг Инфо.kmc» (переменные + заметки по ID из мониторинга),
+загрузка такого файла идёт общей кнопкой «Загрузить конфигурацию»
+окна настроек (отчёт мастера). Файл чужого формата или иной версии
+не роняет приложение — выводится предупреждение.
 """
 
 from __future__ import annotations
 
 import contextlib
-import json
 import re
 from pathlib import Path
 from collections.abc import Callable
@@ -62,6 +60,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -79,10 +78,8 @@ from PySide6.QtWidgets import (
 
 from core.can_protocol import pack_can_frame
 from models.config import (
-    CONFIG_FILE_MAGIC,
     Config,
     pack_config_file,
-    unpack_config_file,
 )
 from models.id_notes import IdNotes
 from models.translations import _ as tr
@@ -212,13 +209,42 @@ class _BindingCellEdit(QLineEdit):
         parent=None,
         allowed: str | None = None,
         max_len: int | None = None,
+        group_hex: bool = False,
     ) -> None:
         super().__init__(parent)
         self._allowed = set(allowed) if allowed else None
+        # Сплошной ввод: «0102AB» сам разворачивается в «01 02 AB» —
+        # после второго символа байта курсор встаёт на первый символ
+        # следующего, оператор не переводит курсор вручную
+        # (отчёт мастера).
+        self._group_hex = group_hex
+        if group_hex:
+            # textChanged, не textEdited: группировка нужна и при
+            # вставке из буфера («0102AB» → «01 02 AB»).
+            self.textChanged.connect(self._regroup_hex)
         if max_len is not None:
             # Длина ячейки: «Значение DATA» — один байт, максимум
             # два hex-символа (отчёт мастера).
             self.setMaxLength(max_len)
+
+    def _regroup_hex(self, _text: str) -> None:
+        """Группирует набранные подряд hex-символы по байтам."""
+        text = self.text()
+        old_pos = self.cursorPosition()
+        digits_before = sum(1 for ch in text[:old_pos] if ch != " ")
+        digits = "".join(ch for ch in text.upper() if ch != " ")
+        grouped = " ".join(
+            digits[i : i + 2] for i in range(0, len(digits), 2)
+        )
+        if grouped == text:
+            return
+        self.blockSignals(True)
+        self.setText(grouped)
+        # Позиция курсора: каждая завершённая пара перед ним добавляет
+        # разделитель — «01| 02» → 3, «01 0|2» → 4.
+        new_pos = digits_before + digits_before // 2
+        self.setCursorPosition(min(new_pos, len(grouped)))
+        self.blockSignals(False)
 
     def _insert_mapped(self, text: str) -> None:
         mapped = translate_cyrillic_layout(text)
@@ -263,16 +289,18 @@ class _BindingCellDelegate(QStyledItemDelegate):
         allowed: str | None = None,
         parent=None,
         max_len: int | Callable[[], int] | None = None,
+        group_hex: bool = False,
     ) -> None:
         super().__init__(parent)
         self._allowed = allowed
         self._max_len = max_len
+        self._group_hex = group_hex
 
     def createEditor(self, parent, option, index):  # noqa: N802
         limit = (
             self._max_len() if callable(self._max_len) else self._max_len
         )
-        return _BindingCellEdit(parent, self._allowed, limit)
+        return _BindingCellEdit(parent, self._allowed, limit, self._group_hex)
 
 
 def _bind_id_width(bit_combo: QComboBox, *edits: _HexIdEdit) -> None:
@@ -376,6 +404,25 @@ def _edits_bytes_sum(edits: list[QLineEdit]) -> int | None:
         except ValueError:
             continue
     return total if used else None
+
+
+def _sblp_decode(window: bytes, endian: str) -> int | None:
+    """Декодирует SBLP-запись из выбранных байтов кадра.
+
+    Формат (отчёт мастера): первый байт — префикс N (1..8, число
+    байтов значения), за ним N байт самого числа. ``endian``:
+    ``"be"`` — «С лево на право», старший байт слева;
+    ``"le"`` — «С право на лево», старший байт справа.
+    ``None`` — запись битая (N=0, N>8 или байтов не хватает)."""
+    if len(window) < 2:
+        return None
+    n = window[0]
+    if n == 0 or n > 8 or n > len(window) - 1:
+        return None
+    value = window[1 : 1 + n]
+    if endian == "le":
+        value = value[::-1]
+    return int.from_bytes(value, "big")
 
 
 def _autofill_x_on_id(
@@ -500,11 +547,37 @@ def _clipboard_buttons(
             text = online
         elif target_edits:
             # Копируем СИМВОЛЫ, введённые оператором в поля DATA,
-            # а не онлайн-кадр с шины (отчёт мастера).
-            text = " ".join(
+            # а не онлайн-кадр с шины (отчёт мастера). Когда у поля
+            # есть свой ID/DLC — в буфер идёт ПОЛНЫЙ пакет
+            # «ID=.. DLC=.. DATA=..», чтобы «вставить» заполняло
+            # и идентификатор (отчёт мастера: «ID не вставляется»).
+            data_text = " ".join(
                 e.text().strip().upper()
                 for e in target_edits if e.text().strip()
             )
+            id_edit = (frame_fields or {}).get("id")
+            id_text = (
+                id_edit.text().strip().upper()
+                if id_edit is not None and hasattr(id_edit, "text")
+                else ""
+            )
+            if id_text:
+                parts = [f"ID=0x{id_text}"]
+                dlc_spin = (frame_fields or {}).get("dlc")
+                if dlc_spin is not None and hasattr(dlc_spin, "value"):
+                    parts.append(f"DLC={dlc_spin.value()}")
+                rtr_check = (frame_fields or {}).get("rtr")
+                if (
+                    rtr_check is not None
+                    and hasattr(rtr_check, "isChecked")
+                    and rtr_check.isChecked()
+                ):
+                    parts.append("RTR=1")
+                if data_text:
+                    parts.append(f"DATA={data_text}")
+                text = " ".join(parts)
+            else:
+                text = data_text
         else:
             text = online
         if text and text != "—":
@@ -1120,6 +1193,46 @@ class _ValuePage(QWidget):
         self.dlc.setValue(8)
         self.dlc.setFixedWidth(56)
         line1.addWidget(self.dlc)
+        # «SBLP» — декодирование числа с префиксом длины (отчёт
+        # мастера): активна, когда в вычислении ≥2 байтов; меню —
+        # «С лево на право» (старший байт слева, BE) и
+        # «С право на лево» (старший справа, LE).
+        self._sblp = ""
+        self.sblp_btn = QPushButton("SBLP")
+        self.sblp_btn.setFont(font)
+        self.sblp_btn.setFixedHeight(28)
+        self.sblp_btn.setToolTip(tr(
+            "SBLP: байт префикса N + N байтов числа; активна при "
+            "выборе двух и более байтов в вычислении"
+        ))
+        self._sblp_menu = QMenu(self.sblp_btn)
+        for label, mode in (
+            (tr("С лево на право"), "be"),
+            (tr("С право на лево"), "le"),
+        ):
+            action = self._sblp_menu.addAction(
+                label, lambda _c=False, m=mode: self._set_sblp(m)
+            )
+            action.setCheckable(True)
+            action.setData(mode)
+        self.sblp_btn.setMenu(self._sblp_menu)
+        if kind == "numeric":
+            line1.addWidget(self.sblp_btn)
+            # «Вывод желаемого числа»: по умолчанию точки и значения
+            # ограничены пределами «ОТ»–«ДО»; «От 0 до бесконечности»
+            # снимает верхнюю границу — число выводится без потолка
+            # (отчёт мастера).
+            self.out_range = QComboBox()
+            self.out_range.setFont(font)
+            self.out_range.addItem(tr("От 0 до бесконечности (∞)"), "inf")
+            self.out_range.addItem(tr("В пределах «ОТ»–«ДО»"), "range")
+            self.out_range.setToolTip(
+                tr("Допустимый диапазон выводимого числа")
+            )
+            self.out_range.currentIndexChanged.connect(
+                lambda _i: self._on_edits_changed()
+            )
+            line1.addWidget(self.out_range)
         line1.addStretch()
         layout.addLayout(line1)
 
@@ -1263,17 +1376,18 @@ class _ValuePage(QWidget):
         # подмена в таблицах привязки не работала). Имена состояний
         # «Динамической» — свободный текст, не трогаем.
         # DATA-ячейка: значение может быть многобайтовым — предел по
-        # DLC (с запасом на пробелы между байтами при вставке строки
-        # вида «01 02 03» — отчёт мастера: «не получается написать
-        # больше одного байта»).
+        # DLC: «байт×2 + разделитель» на каждый байт, последнему
+        # разделитель не нужен → 3·DLC−1 (отчёт мастера: «больше,
+        # чем DLC, написать нельзя»).
         self.points_table.setItemDelegateForColumn(
             0,
             _BindingCellDelegate(
                 "0123456789ABCDEFabcdef ",
                 self,
                 max_len=lambda: max(
-                    2, int(self.dlc.value()) * 2 + int(self.dlc.value())
+                    2, int(self.dlc.value()) * 3 - 1
                 ),
+                group_hex=True,
             ),
         )
         if kind == "numeric":
@@ -1320,6 +1434,9 @@ class _ValuePage(QWidget):
             "#4DD0E1", "#F06292", "#AED581", "#FFD54F",
         )
         self._name_palette = _NAME_PALETTE
+        # Начальное состояние SBLP: без двух байтов в вычислении
+        # кнопка неактивна (отчёт мастера).
+        self._update_sblp_enabled()
 
     # ---- внутреннее -----------------------------------------------------
 
@@ -1327,13 +1444,41 @@ class _ValuePage(QWidget):
         if self._on_changed is not None:
             self._on_changed()
 
+    def _set_sblp(self, mode: str) -> None:
+        """Переключает режим SBLP: повторный клик по выбранному
+        варианту снимает режим (отчёт мастера)."""
+        self._sblp = "" if self._sblp == mode else mode
+        for action in self._sblp_menu.actions():
+            action.setChecked(action.data() == self._sblp)
+        labels = {
+            "be": tr("С лево на право"),
+            "le": tr("С право на лево"),
+        }
+        self.sblp_btn.setText(
+            "SBLP" if not self._sblp else f"SBLP: {labels[self._sblp]}"
+        )
+        self._emit_changed()
+
+    def _update_sblp_enabled(self) -> None:
+        """SBLP активна только когда в вычислении ≥2 байтов — записи
+        с префиксом короче быть не может (отчёт мастера)."""
+        enabled = (
+            self._kind == "numeric"
+            and len(_data_bytes_used(self.data_from)) >= 2
+        )
+        self.sblp_btn.setEnabled(enabled)
+        if not enabled and self._sblp:
+            self._set_sblp(self._sblp)
+
     def _on_edits_changed(self) -> None:
+        self._update_sblp_enabled()
         self._refresh_graph()
         self._emit_changed()
 
     def _on_dlc_changed(self, value: int) -> None:
         _set_data_enabled(self.data_from, value)
         _set_data_enabled(self.data_to, value)
+        self._update_sblp_enabled()
         self._refresh_graph()
         self._emit_changed()
 
@@ -1436,7 +1581,11 @@ class _ValuePage(QWidget):
                 item.setText(text)
                 self.points_table.blockSignals(False)
             ok = bool(self._HEX_CELL_RE.match(text))
-            if ok and self._kind == "numeric" and text:
+            unbounded = (
+                getattr(self, "out_range", None) is not None
+                and self.out_range.currentData() == "inf"
+            )
+            if ok and self._kind == "numeric" and text and not unbounded:
                 value = _parse_data_hex(text)
                 lo = _edits_bytes_sum(self.data_from)
                 hi = _edits_bytes_sum(self.data_to)
@@ -1488,7 +1637,13 @@ class _ValuePage(QWidget):
         self.graph.set_axis_x(lo, hi)
         self.graph.set_points(self.read_points())
         # Точки привязки вне диапазона «ОТ»/«ДО» — красные символы и
-        # строка предупреждения под таблицей.
+        # строка предупреждения под таблицей. В режиме «От 0 до
+        # бесконечности» верхняя граница снята — предупреждений нет
+        # (отчёт мастера).
+        unbounded = (
+            getattr(self, "out_range", None) is not None
+            and self.out_range.currentData() == "inf"
+        )
         out_of_range = False
         for row in range(self.points_table.rowCount()):
             item = self.points_table.item(row, 0)
@@ -1497,8 +1652,12 @@ class _ValuePage(QWidget):
             value = _parse_data_hex(item.text())
             if value is None:
                 continue
-            if (lo is not None and value < lo) or (
-                hi is not None and value > hi
+            if (
+                not unbounded
+                and (
+                    (lo is not None and value < lo)
+                    or (hi is not None and value > hi)
+                )
             ):
                 out_of_range = True
                 item.setForeground(QColor("#F44336"))
@@ -1582,7 +1741,14 @@ class _ValuePage(QWidget):
         if self.points_table.rowCount() == 0:
             for _ in range(4):
                 self.add_point_row()
-        if self._kind != "numeric":
+        if self._kind == "numeric":
+            self._set_sblp(str(config.get("sblp", "") or ""))
+            self._update_sblp_enabled()
+            idx = self.out_range.findData(
+                str(config.get("out_range", "inf") or "inf")
+            )
+            self.out_range.setCurrentIndex(idx if idx >= 0 else 0)
+        else:
             self._recolor_names()
         self._refresh_graph()
 
@@ -1596,6 +1762,8 @@ class _ValuePage(QWidget):
             "bytes": _data_bytes_used(self.data_from),
         }
         if self._kind == "numeric":
+            cfg["sblp"] = self._sblp
+            cfg["out_range"] = str(self.out_range.currentData() or "inf")
             cfg["points"] = self.read_points()
         else:
             # «Динамическая переменная»: пары (сырое значение, имя).
@@ -3046,6 +3214,38 @@ class _AuxDialog(QDialog):
         }
 
 
+class _RowGrip(QLabel):
+    """Ручка перетаскивания строки переменной: тянем за «⋮⋮» —
+    строка едет вверх/вниз по списку курсором (отчёт мастера)."""
+
+    def __init__(self, row: _VariableRow) -> None:
+        super().__init__("⋮⋮")
+        self._row = row
+        self._dragging = False
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setToolTip(tr("Перетащить строку выше/ниже"))
+        self.setStyleSheet("color: #7C9EFF; padding: 0 2px;")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._dragging:
+            self._row._column._drag_row_to(
+                self._row, event.globalPosition().toPoint().y()
+            )
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._dragging:
+            self._dragging = False
+            self._row._column.persist()
+        super().mouseReleaseEvent(event)
+
+
 class _VariableRow(QFrame):
     """Строка переменной в колонке:
 
@@ -3090,6 +3290,11 @@ class _VariableRow(QFrame):
         row = QHBoxLayout(self)
         row.setContentsMargins(10, 6, 6, 6)
         row.setSpacing(10)
+
+        # Ручка перетаскивания — оператор курсором выставляет
+        # строку выше/ниже в списке (отчёт мастера).
+        self._grip = _RowGrip(self)
+        row.addWidget(self._grip)
 
         self._name_label = QLabel()
         self._name_label.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
@@ -3173,31 +3378,40 @@ class _VariableRow(QFrame):
             else:
                 sm.send_data(packed)
 
-        t = 0
-        for fr in self.config.get("frames") or []:
-            can_id = hex_to_int(str(fr.get("id", "")))
-            if can_id is None:
-                continue
-            count = max(1, int(fr.get("count", 1) or 1))
-            between = int(fr.get("delay_between", 0) or 0)
-            rtr = bool(fr.get("rtr", False))
-            dlc = max(0, min(8, int(fr.get("dlc", 8) or 8)))
-            tokens = str(fr.get("data", "")).split()
-            payload = bytearray(8)
-            for i, tok in enumerate(tokens[:8]):
-                if tok and tok.upper() != "X":
-                    value = hex_to_int(tok)
-                    payload[i] = value if value is not None else 0
-            for n in range(count):
-                for channel in (1, 2):
-                    _send(
-                        channel, can_id,
-                        b"" if rtr else bytes(payload[:dlc]),
-                        rtr, dlc, t + n * between,
-                    )
-            t += (count - 1) * between + int(
-                fr.get("next_delay", 0) or 0
-            )
+        def _schedule(frames: list[dict[str, Any]], t0: int) -> int:
+            t = t0
+            for fr in frames:
+                can_id = hex_to_int(str(fr.get("id", "")))
+                if can_id is None:
+                    continue
+                count = max(1, int(fr.get("count", 1) or 1))
+                between = int(fr.get("delay_between", 0) or 0)
+                rtr = bool(fr.get("rtr", False))
+                dlc = max(0, min(8, int(fr.get("dlc", 8) or 8)))
+                tokens = str(fr.get("data", "")).split()
+                payload = bytearray(8)
+                for i, tok in enumerate(tokens[:8]):
+                    if tok and tok.upper() != "X":
+                        value = hex_to_int(tok)
+                        payload[i] = value if value is not None else 0
+                for n in range(count):
+                    for channel in (1, 2):
+                        _send(
+                            channel, can_id,
+                            b"" if rtr else bytes(payload[:dlc]),
+                            rtr, dlc, t + n * between,
+                        )
+                t += (count - 1) * between + int(
+                    fr.get("next_delay", 0) or 0
+                )
+            return t
+
+        t = _schedule(self.config.get("frames") or [], 0)
+        # Зеркало статической переменной «→ 1»: «Тест» держит бит 1 с,
+        # затем шлёт фреймы «→ 0» (отчёт мастера).
+        pulse = self.config.get("pulse_frames") or []
+        if pulse:
+            _schedule(pulse, t + 1000)
 
     def _refresh_labels(self) -> None:
         name = self.config.get("name", "").strip()
@@ -3294,11 +3508,28 @@ class _VarColumn(QWidget):
         self._title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         box.addWidget(self._title)
 
-        # Кнопка добавления — НАД таблицей (отчёт мастера).
+        # Кнопка добавления — НАД таблицей (отчёт мастера); рядом —
+        # число видимых строк списка (отчёт мастера).
         self._add_btn = QPushButton(tr("＋ Добавить переменную"))
         self._add_btn.setFont(font)
         self._add_btn.clicked.connect(self._on_add)
-        box.addWidget(self._add_btn)
+        add_row_layout = QHBoxLayout()
+        add_row_layout.addWidget(self._add_btn)
+        add_row_layout.addStretch()
+        rows_label = QLabel(tr("Строк:"))
+        rows_label.setFont(font)
+        add_row_layout.addWidget(rows_label)
+        self._visible_rows = QSpinBox()
+        self._visible_rows.setFont(font)
+        self._visible_rows.setRange(3, 30)
+        self._visible_rows.setValue(8)
+        self._visible_rows.setFixedWidth(56)
+        self._visible_rows.setToolTip(
+            tr("Сколько строк переменных видно без прокрутки")
+        )
+        self._visible_rows.valueChanged.connect(self._apply_visible_rows)
+        add_row_layout.addWidget(self._visible_rows)
+        box.addLayout(add_row_layout)
 
         container = QWidget()
         self._rows_layout = QVBoxLayout(container)
@@ -3308,8 +3539,40 @@ class _VarColumn(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(container)
+        self._scroll = scroll
         box.addWidget(scroll, 1)
         layout.addWidget(self._group, 1)
+        self._apply_visible_rows(self._visible_rows.value())
+
+    def _apply_visible_rows(self, count: int) -> None:
+        """Высота списка — ровно ``count`` строк (отчёт мастера)."""
+        # ~38 px на строку (рамка+отступы) + верхний зазор списка.
+        self._scroll.setFixedHeight(count * 38 + 8)
+
+    def move_row(self, row: _VariableRow, index: int) -> None:
+        """Перемещает строку на позицию ``index`` в списке
+        (перетаскивание за ручку «⋮⋮» — отчёт мастера)."""
+        if row not in self._rows:
+            return
+        index = max(0, min(index, len(self._rows) - 1))
+        self._rows.remove(row)
+        self._rows.insert(index, row)
+        self._rows_layout.removeWidget(row)
+        self._rows_layout.insertWidget(index, row)
+
+    def _drag_row_to(self, row: _VariableRow, global_y: int) -> None:
+        """Целевая позиция строки по Y курсора: выше центра строки —
+        перед ней (отчёт мастера)."""
+        if row not in self._rows:
+            return
+        target = len(self._rows) - 1
+        for i, other in enumerate(self._rows):
+            center = other.mapToGlobal(other.rect().center()).y()
+            if global_y < center:
+                target = i
+                break
+        if target != self._rows.index(row):
+            self.move_row(row, target)
 
     def add_row(self, config: dict[str, Any] | None = None) -> _VariableRow:
         cfg = dict(config or {})
@@ -3475,15 +3738,16 @@ class VariablesTab(QWidget):
         # таблицами (отчёт мастера).
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
-        self._load_btn = QPushButton(tr("Загрузить переменные"))
+        # «Сохранить переменные» живёт внизу окна настроек рядом с
+        # общей «Сохранить» (отчёт мастера) — создаём здесь, а
+        # размещает settings_window через save_variables_button.
         self._save_btn = QPushButton(tr("Сохранить переменные"))
         self._clear_btn = QPushButton(tr("Очистить"))
-        for btn in (self._load_btn, self._save_btn, self._clear_btn):
+        for btn in (self._save_btn, self._clear_btn):
             btn.setFont(self._font)
             btn.setFixedHeight(30)
-            btn_row.addWidget(btn)
+        btn_row.addWidget(self._clear_btn)
         btn_row.addStretch()
-        self._load_btn.clicked.connect(self._load_file)
         self._save_btn.clicked.connect(self._save_file)
         self._clear_btn.clicked.connect(self._clear_all)
         layout.addLayout(btn_row)
@@ -3660,11 +3924,23 @@ class VariablesTab(QWidget):
                         )
                 else:
                     # «Численная переменная»: сырое значение —
-                    # СУММА выбранных байтов кадра (отчёт мастера).
-                    for i in used:
-                        if i < len(data):
-                            raw += data[i]
+                    # СУММА выбранных байтов кадра (отчёт мастера);
+                    # в режиме SBLP — декодирование префикса длины +
+                    # значения (отчёт мастера).
+                    sblp = str(cfg.get("sblp", "") or "")
+                    if sblp:
+                        window = bytes(
+                            data[i] for i in used if i < len(data)
+                        )
+                        decoded = _sblp_decode(window, sblp)
+                        if decoded is not None:
+                            raw = decoded
                             seen = True
+                    else:
+                        for i in used:
+                            if i < len(data):
+                                raw += data[i]
+                                seen = True
                     if seen:
                         row.set_live_value(_map_points(points, raw), raw)
 
@@ -3785,12 +4061,72 @@ class VariablesTab(QWidget):
         )
         return [dict(_base(), data=data)]
 
+    @staticmethod
+    def _mirror_commands(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+        """Команды-зеркала переменной чтения — по ОДНОЙ на каждую
+        точку/фрейм (отчёт мастера: «переменные отдельными функциями,
+        каждая должна отправляться самостоятельно», а не общей
+        командой со всеми пакетами).
+
+        * «Статическая переменная» распадается на «имя → 1» и
+          «имя → 0» — как в «Управлении»; «→ 1» получает
+          ``pulse_frames`` — «Тест» подаёт импульс 1 с → фреймы «0».
+        * «Динамическая переменная» — команда на каждую точку
+          таблицы привязки («имя · привязка»).
+        * Остальные — команда на каждый настроенный фрейм."""
+        name = str(cfg.get("name", "")).strip() or tr("Команда")
+        folder = str(cfg.get("folder", ""))
+        var_type = cfg.get("type")
+
+        def _cmd(cname: str, frames: list[dict[str, Any]]) -> dict[str, Any]:
+            return {
+                "type": _TYPE_COMMAND,
+                "name": cname,
+                "folder": folder,
+                "frames": frames,
+                "cache": {},
+            }
+
+        if var_type == _TYPE_STATIC:
+            commands = _legacy_to_command(cfg)
+            on_cmd = next(
+                (c for c in commands if str(c["name"]).endswith("→ 1")),
+                None,
+            )
+            off_cmd = next(
+                (c for c in commands if str(c["name"]).endswith("→ 0")),
+                None,
+            )
+            if on_cmd is not None and off_cmd is not None:
+                on_cmd["pulse_frames"] = off_cmd["frames"]
+            for c in commands:
+                c["cache"] = {}
+            return commands
+
+        frames = VariablesTab._mirror_frames(cfg)
+        if var_type == _TYPE_DYNCACHE:
+            points = cfg.get("points") or []
+            commands = []
+            for i, fr in enumerate(frames):
+                try:
+                    suffix = str(points[i][1]).strip() or f"точка {i + 1}"
+                except (TypeError, IndexError):
+                    suffix = f"точка {i + 1}"
+                commands.append(_cmd(f"{name} · {suffix}", [fr]))
+            return commands or [_cmd(name, frames)]
+
+        if len(frames) <= 1:
+            return [_cmd(name, frames)]
+        return [
+            _cmd(f"{name} · пакет {i + 1}", [fr])
+            for i, fr in enumerate(frames)
+        ]
+
     def _sync_control_mirrors(self) -> None:
         """Держит колонку «Управление» в соответствии с галочкой
-        «Перенести в управление» у переменных чтения: команда-зеркало
-        с тем же именем и фреймами из настройки переменной
-        (отчёт мастера)."""
-        wanted: dict[str, dict[str, Any]] = {}
+        «Перенести в управление» у переменных чтения: по ОТДЕЛЬНОЙ
+        команде-зеркалу на каждую точку/фрейм (отчёт мастера)."""
+        wanted: dict[str, list[dict[str, Any]]] = {}
         for row in self._read_col._rows:
             cfg = row.config
             if not cfg.get("to_control"):
@@ -3798,7 +4134,7 @@ class VariablesTab(QWidget):
             name = str(cfg.get("name", "")).strip()
             if not name:
                 continue
-            wanted[name] = cfg
+            wanted[name] = self._mirror_commands(cfg)
 
         # Зеркала без источника/снятой галочки — убираем.
         for row in list(self._ctrl_col._rows):
@@ -3806,52 +4142,60 @@ class VariablesTab(QWidget):
             if src and src not in wanted:
                 self._ctrl_col.remove_row(row)
 
-        for name, cfg in wanted.items():
-            mirror = next(
-                (
-                    row
-                    for row in self._ctrl_col._rows
-                    if str(row.config.get("mirror_of", "")).strip() == name
-                ),
-                None,
-            )
-            new_frames = self._mirror_frames(cfg)
-            if mirror is None:
-                mirror = self._ctrl_col.add_row({
-                    "type": _TYPE_COMMAND,
-                    "name": name,
-                    "folder": str(cfg.get("folder", "")),
-                    "frames": new_frames,
-                    "mirror_of": name,
-                    "cache": {},
-                })
-                continue
-            # Существующее зеркало: имя/папка синхронно, у фреймов
-            # сохраняем настроенные «Кол-во»/паузы — ключ (id,data)
-            # в приоритете, индекс — запасной (отчёт мастера: у каждого
-            # пакета свои настройки отправки).
-            old_frames = mirror.config.get("frames") or []
+        for name, commands in wanted.items():
+            # Существующие зеркала источника: переносим «Кол-во»/паузы
+            # во фреймы по ключу (id, data) — у каждого пакета свои
+            # настройки отправки (отчёт мастера).
+            old = [
+                row
+                for row in self._ctrl_col._rows
+                if str(row.config.get("mirror_of", "")).strip() == name
+            ]
             tuned: dict[tuple[str, str], dict[str, Any]] = {}
-            for i, fr in enumerate(old_frames):
-                tuned[(str(fr.get("id", "")), str(fr.get("data", "")))] = fr
-                tuned[i] = fr  # type: ignore[dict-item]
-            merged = []
-            for i, fr in enumerate(new_frames):
-                keep = (
-                    tuned.get((str(fr.get("id", "")), str(fr.get("data", ""))))
-                    or tuned.get(i)
+            for row in old:
+                for fr in row.config.get("frames") or []:
+                    tuned[(str(fr.get("id", "")), str(fr.get("data", "")))] = fr
+            used: set[int] = set()
+            for i, cmd in enumerate(commands):
+                for fr in cmd["frames"]:
+                    keep = tuned.get(
+                        (str(fr.get("id", "")), str(fr.get("data", "")))
+                    )
+                    if keep:
+                        for key in ("count", "delay_between", "next_delay",
+                                    "delay_before_send", "channel", "rtr"):
+                            fr[key] = keep.get(key, fr.get(key))
+                row = next(
+                    (
+                        r
+                        for r in old
+                        if id(r) not in used
+                        and int(r.config.get("mirror_idx", 0) or 0) == i
+                    ),
+                    None,
                 )
-                if keep:
-                    for key in ("count", "delay_between", "next_delay",
-                                "delay_before_send", "channel", "rtr"):
-                        fr[key] = keep.get(key, fr.get(key))
-                merged.append(fr)
-            mirror.config.update({
-                "name": name,
-                "folder": str(cfg.get("folder", "")),
-                "frames": merged,
-            })
-            mirror._refresh_labels()
+                if row is None:
+                    row = next(
+                        (r for r in old if id(r) not in used), None
+                    )
+                if row is None:
+                    self._ctrl_col.add_row(
+                        dict(
+                            cmd,
+                            mirror_of=name,
+                            mirror_idx=i,
+                        )
+                    )
+                    continue
+                used.add(id(row))
+                row.config.update(cmd)
+                row.config["mirror_of"] = name
+                row.config["mirror_idx"] = i
+                row._refresh_labels()
+            # Лишние зеркала (точки удалены из таблицы привязки).
+            for row in old:
+                if id(row) not in used and row in self._ctrl_col._rows:
+                    self._ctrl_col.remove_row(row)
         self._ctrl_col.persist()
 
     def live_frame(
@@ -3986,13 +4330,6 @@ class VariablesTab(QWidget):
     # ---- файл «Config Variable» ----------------------------------------
 
     # Ключи, по которым JSON распознаётся как общий конфиг программы
-    # (триггеры/ГЛ/шлюз/скорости) — имя файла значения не имеет,
-    # оператор сохраняет под любым (отчёт мастера).
-    _PROGRAM_KEYS = (
-        "triggers", "flexible_rules", "gateway_rules", "gateway_ignore",
-        "can1_speed", "can2_speed",
-    )
-
     def _device_fields(self) -> dict[str, Any]:
         """Идентичность устройства внутри файла: по ней загрузка
         сверяет, подходит ли конфиг подключённому МК."""
@@ -4028,20 +4365,12 @@ class VariablesTab(QWidget):
         )
         return not dev_name or not file_name or file_name == dev_name
 
-    def _route_program_file(self, path: str) -> None:
-        """В руках оператора оказался общий конфиг программы —
-        отдаём его стандартной загрузке окна настроек (та сама
-        сверяет устройство и прогружает нужные области)."""
-        window = self.window()
-        loader = getattr(window, "load_config_from_path", None)
-        if callable(loader):
-            loader(path)
-        else:
-            QMessageBox.information(
-                self, tr("Конфигурация"),
-                tr("Это файл общей конфигурации — загрузите его кнопкой "
-                   "«Загрузить конфигурацию»."),
-            )
+    @property
+    def save_variables_button(self) -> QPushButton:
+        """Кнопка «Сохранить переменные» — размещается окном
+        настроек в нижней панели рядом с общей «Сохранить»
+        (отчёт мастера)."""
+        return self._save_btn
 
     def _file_prefix(self) -> str:
         """Префикс имени файла — тип оборудования подключённого
@@ -4096,64 +4425,6 @@ class VariablesTab(QWidget):
                 .format(exc)
             )
 
-    def _load_file(self) -> None:
-        # Открываем папку последнего файла переменных, а не
-        # стартовую (отчёт мастера).
-        start_dir = (
-            self._config.get("last_variables_dir", "")
-            or _config_info_dir()
-        )
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            tr("Загрузить переменные"),
-            start_dir,
-            "Config Variable (*.kmc *.json);;" + tr("Все файлы (*)"),
-        )
-        if not path:
-            return
-        self._config.set("last_variables_dir", str(Path(path).parent))
-        try:
-            raw = Path(path).read_bytes()
-        except OSError as exc:
-            QMessageBox.warning(
-                self, tr("Ошибка"), tr("Не удалось открыть файл: {0}")
-                .format(exc)
-            )
-            return
-        # Верификация вида конфига по СОДЕРЖИМОМУ, не по имени файла:
-        # бинарный .kmc распаковываем и смотрим kind payload'а — «Config
-        # Variable» (codemaster_config_info) принимаем, «Config Program»
-        # отдаём общей загрузке окна настроек (отчёт мастера).
-        if raw.startswith(CONFIG_FILE_MAGIC):
-            try:
-                payload, _name, _serial = unpack_config_file(raw)
-            except (ValueError, KeyError, UnicodeDecodeError,
-                    json.JSONDecodeError) as exc:
-                QMessageBox.warning(
-                    self, tr("Config Variable"),
-                    tr("Файл повреждён: {0}").format(exc),
-                )
-                return
-            if payload.get("kind") != _CONFIG_INFO_KIND:
-                self._route_program_file(path)
-                return
-        else:
-            try:
-                payload: Any = json.loads(raw.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                payload = None
-        if (
-            isinstance(payload, dict)
-            and payload.get("kind") != _CONFIG_INFO_KIND
-            and any(key in payload for key in self._PROGRAM_KEYS)
-        ):
-            self._route_program_file(path)
-            return
-        # Чужой формат / битый файл / несовместимая версия — только
-        # предупреждение, приложение продолжает работать.
-        if not self.load_payload(payload, warn_format=True):
-            return
-
     def load_payload(self, payload: Any, warn_format: bool = False) -> bool:
         """Прогружает payload файла «Config Variable» (общий код
         проверок kind/format/устройства). Вызывается и из загрузчика
@@ -4193,7 +4464,6 @@ class VariablesTab(QWidget):
 
     def retranslate_ui(self) -> None:
         self._title.setText(tr("Переменные"))
-        self._load_btn.setText(tr("Загрузить переменные"))
         self._save_btn.setText(tr("Сохранить переменные"))
         self._clear_btn.setText(tr("Очистить"))
         self._read_col._title.setText(tr("Чтение"))

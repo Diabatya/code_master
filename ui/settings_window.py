@@ -485,6 +485,11 @@ class SettingsWindow(QMainWindow):
         setup_button(self._save_button, height=32)
         self._save_button.clicked.connect(self._save_current_config)
 
+        # «Сохранить переменные» — внизу рядом с общей «Сохранить»
+        # (отчёт мастера); кнопка живёт во вкладке «Переменные».
+        self._save_variables_button = self._variables_tab.save_variables_button
+        self._save_variables_button.setMinimumHeight(32)
+
         self._diff_button = QPushButton(tr("Что изменится"))
         setup_button(self._diff_button, height=32)
         self._diff_button.setToolTip(
@@ -510,6 +515,7 @@ class SettingsWindow(QMainWindow):
 
         bottom_layout.addStretch()
         bottom_layout.addWidget(self._save_button)
+        bottom_layout.addWidget(self._save_variables_button)
         bottom_layout.addWidget(self._diff_button)
         bottom_layout.addWidget(self._save_config_button)
         bottom_layout.addWidget(self._load_config_button)
@@ -1766,8 +1772,8 @@ class SettingsWindow(QMainWindow):
             if not self._variables_tab.load_payload(payload):
                 QMessageBox.warning(
                     self, tr("Конфигурация"),
-                    tr("Это файл переменных — загрузите его кнопкой "
-                       "«Загрузить переменные»."),
+                    tr("Не удалось применить файл переменных — "
+                       "проверьте устройство и версию файла."),
                 )
             return
 

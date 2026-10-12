@@ -302,6 +302,14 @@ int main(void)
     USBD_CDC_RegisterInterface(&hUsbDeviceFS, &USBD_CDC_fops);
     USBD_Start(&hUsbDeviceFS);
     usb_active = 1U;
+    /* Принудительная пере-энумерация: старт приложения после GO
+     * бутлоадера/программного сброса — хост держит мёртвую
+     * CDC-сессию прежнего устройства, и без видимого detach камень
+     * «не читается до перетыка разъёма» (отчёт мастера). SDIS-цикл
+     * роняет подтяжку D+ — Windows энумерирует заново. */
+    USB_DevDisconnect(USB_OTG_FS);
+    HAL_Delay(60U);
+    USB_DevConnect(USB_OTG_FS);
   }
   App_NoteStage(6U);
 

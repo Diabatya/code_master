@@ -469,6 +469,15 @@ static void bl_cmd_go(void)
   if (address != APP_START) { bl_send_nack(); return; }
 
   bl_send_ack();
+  /* ACK должен уехать до разрушения USB-сессии: CDC_Transmit_FS лишь
+   * кладёт байт в IN-FIFO, хост забирает его следующим IN-токеном
+   * (кадр ~1 мс). Затем — видимый хосту detach через SDIS: без него
+   * Windows держит мёртвую CDC-энумерацию, и после старта
+   * application камень «не читается до перетыка разъёма» (отчёт
+   * мастера). */
+  HAL_Delay(20U);
+  USB_DevDisconnect(USB_OTG_FS);
+  HAL_Delay(80U);
   Bootloader_JumpToApplication(address);
 }
 

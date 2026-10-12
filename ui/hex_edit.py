@@ -1,6 +1,8 @@
 """Поле ввода одного HEX-байта с автопереходом фокуса."""
 
 
+import re
+
 from PySide6.QtCore import QRegularExpression, Qt
 from PySide6.QtGui import QFont, QKeyEvent, QRegularExpressionValidator
 from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QScrollArea, QWidget
@@ -123,6 +125,17 @@ class HexDataEdit(QLineEdit):
             super().insertFromMimeData(source)
             return
         text = translate_cyrillic_hex(source.text()).strip()
+        # Полный пакет «ID=0x123 DLC=8 DATA=01 02» из мониторинга /
+        # кнопки копирования переменной: в байтовые поля идёт только
+        # DATA-часть (отчёт мастера: вставка всего фрейма теряла
+        # первый байт).
+        if "=" in text:
+            match = re.search(
+                r"DATA\s*=\s*(.*)$", text, re.IGNORECASE | re.DOTALL
+            )
+            text = match.group(1).strip() if match else ""
+            if not text:
+                return
         tokens = text.split() if " " in text else [
             text[i : i + 2] for i in range(0, len(text), 2)
         ]
