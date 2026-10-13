@@ -3938,6 +3938,13 @@ class FlexibleLogicTab(QWidget):
         # порождает дубли.
         self._device_flex_state = "unknown"
         self._device_flex_unconfirmed = False
+        # Монотонное поколение исполнения (ревью CM-R12): каждый
+        # отложенный коллбек захватывает своё поколение при
+        # планировании и молчит, если с тех пор сменилась сессия,
+        # владелец или исполняемый снимок. Не обнуляется и не
+        # переиспользуется при reconnect — один счётчик на всю
+        # жизнь виджета.
+        self._exec_generation = 0
         self._rule_counters: list[int] = []
         self._row_widgets: list[RuleRowWidget] = []
         self._internal_rules: list[dict[str, Any]] = []
@@ -4098,9 +4105,15 @@ class FlexibleLogicTab(QWidget):
         # (отчёт мастера: программа отрабатывает только после
         # записи в камень).
         active = self._config.get("flexible_rules_active")
-        self._runtime_rules = (
+        new_runtime = (
             list(active) if isinstance(active, list) else list(rules)
         )
+        if new_runtime != self._runtime_rules:
+            # Сменился исполняемый снимок — новое поколение:
+            # запланированные действия прошлых правил не стреляют
+            # (ревью CM-R12).
+            self._new_exec_generation()
+        self._runtime_rules = new_runtime
         self._refresh_device_managed()
         self._rule_counters = [0] * len(rules)
         self._rebuild_rows()
@@ -4168,7 +4181,13 @@ class FlexibleLogicTab(QWidget):
         событии численной переменной не должен запускать программу
         до сохранения)."""
         self._save_config()
-        self._runtime_rules = self._collect_rules()
+        new_runtime = self._collect_rules()
+        if new_runtime != self._runtime_rules:
+            # Новый исполняемый снимок — новое поколение: действия,
+            # запланированные прежними правилами (в т.ч. уже ушедшими
+            # на МК), не исполняются на ПК повторно (ревью CM-R12).
+            self._new_exec_generation()
+        self._runtime_rules = new_runtime
         self._config.set("flexible_rules_active", self._runtime_rules)
         self._refresh_device_managed()
         self._rules_dirty = True
@@ -4279,6 +4298,12 @@ class FlexibleLogicTab(QWidget):
         записанных правил)."""
         if state not in ("empty", "no-tail", "verified", "conflict"):
             raise ValueError(f"device flex state: {state}")
+        if state != self._device_flex_state:
+            # Смена подтверждённого владельца — новое поколение:
+            # действия, запланированные при прежнем владении, не
+            # должны стрелять после повторного подтверждения
+            # (ревью CM-R12).
+            self._new_exec_generation()
         self._device_flex_state = state
         self._device_flex_unconfirmed = False
         if managed is not None:
@@ -4287,28 +4312,25 @@ class FlexibleLogicTab(QWidget):
         else:
             self._refresh_device_managed()
 
-    def reset_device_flex_state(self) -> None:
-        """Смена сессии/устройства: подтверждённое владение НЕ
-        переносится на новую сессию — до повторной проверки области
-        владелец неизвестен и ПК-исполнение приостановлено
-        (ревью CM-R10). Уже запланированные таймеры не отменяются —
-        их гейт на момент срабатывания (_execute_scheduled/
-        _send_frame) отбрасывает действие в приостановленном
-        состоянии."""
-        self._device_flex_state = "unknown"
-        self._device_flex_unconfirmed = False
-        self._device_managed = set()
-        # Запланированное старой сессией не переживает смену
-        # устройства: отложенные действия помечаются прерванными
-        # (их таймер сработает и уйдёт без команды), счётчики
-        # занятости и последние события-трекеры очищаются — иначе
-        # занятое состояние/трекинг DATA «переехали» бы на новое
-        # устройство (ревью CM-R10).
+    def _new_exec_generation(self, *, device_too: bool = False) -> None:
+        """Новое поколение исполнения (ревью CM-R12/R13).
+
+        Запланированные коллбеки захватывают поколение при
+        планировании и отбрасываются при несовпадении — поэтому здесь
+        же сбрасывается весь трекинг, привязанный к поколению:
+        _rule_busy (его таймеры-счётчики уже мертвы), отложенные
+        действия помечаются прерванными, дедуп-события/фронты/
+        «программа начала работать» — индексы старого снимка не
+        применяются к новым программам.
+
+        device_too=True — смена устройства/сессии: дополнительно
+        сбрасываются зеркала переменных/доп.каналов и детекторы
+        импульсов — они описывают камень прошлой сессии. При смене
+        только владельца/снимка (тот же камень) зеркала живы."""
+        self._exec_generation += 1
         for entry in self._pending_actions:
             entry["aborted"] = True
         self._rule_busy.clear()
-        # Трекинг событий/фронтов — per-session: «тот же DATA»
-        # старого устройства не должен приглушать события нового.
         self._event_fire.clear()
         self._program_event_seen.clear()
         self._program_started_seq.clear()
@@ -4318,26 +4340,49 @@ class FlexibleLogicTab(QWidget):
         self._dyn_flags.clear()
         self._aux_flags.clear()
         self._pulsed_now.clear()
-        self._impulse_until.clear()
-        self._aux_states.clear()
-        # Зеркала переменных нового устройства начинаются с нуля —
-        # условия программ не должны опираться на состояние камня
-        # прошлой сессии.
-        self._static_states.clear()
-        self._dyn_values.clear()
-        self._dyn_cache_bytes.clear()
-        self._tick = 0
+        # Импульсные биты «включить на N мс»: их таймер авто-гашения
+        # привязан к поколению — гасим принудительно, чтобы бит не
+        # остался взведённым навсегда; ПЗУ-биты сохраняем.
+        if self._flag_pulse_until:
+            for name in list(self._flag_pulse_until):
+                self._flag_states[name] = 0
+            self._flag_pulse_until.clear()
+            self._persist_flag_states()
+        if device_too:
+            self._impulse_until.clear()
+            self._aux_states.clear()
+            self._static_states.clear()
+            self._dyn_values.clear()
+            self._dyn_cache_bytes.clear()
+            self._tick = 0
+
+    def reset_device_flex_state(self) -> None:
+        """Смена сессии/устройства: подтверждённое владение НЕ
+        переносится на новую сессию — до повторной проверки области
+        владелец неизвестен и ПК-исполнение приостановлено
+        (ревью CM-R10). Новое поколение исполнения инвалидирует все
+        запланированные таймеры старой сессии — даже если владелец
+        позже подтвердится повторно, старые коллбеки молчат
+        (ревью CM-R12)."""
+        self._device_flex_state = "unknown"
+        self._device_flex_unconfirmed = False
+        self._device_managed = set()
+        self._new_exec_generation(device_too=True)
         self._update_executor_badges()
 
     def apply_device_flex_analysis(self, analysis: dict) -> None:
         """Единый согласованный переход владельца по анализу
-        вычитанного блоба (ревью CM-R11).
+        вычитанного блоба (ревью CM-R11/R13).
 
-        «verified»: исполняемый снимок (_runtime_rules) и managed-
-        индексы применяются ИЗ ТОЙ ЖЕ проверки — камень исполняет
-        именно эти правила, а пересчёт по прежнему снимку давал бы
-        рассинхрон (verified по новому блобу, runtime — старый).
-        Черновик пользователя (_rules) и его dirty НЕ трогаем.
+        «verified»: исполняемый снимок (_runtime_rules), внутренний
+        список исполнения (_internal_rules) и managed-индексы
+        применяются ИЗ ТОЙ ЖЕ проверки атомарно — камень исполняет
+        именно эти правила; пересчёт/переиспользование прежнего
+        снимка давал бы рассинхрон (verified по новому блобу,
+        internal — старый). Трекинг, привязанный к снимку правил,
+        сбрасывается новым поколением; зеркала переменных живут —
+        камень тот же. Черновик пользователя (_rules) и его dirty
+        НЕ трогаем.
 
         «conflict»: конфигурация не импортируется как доказанный
         runtime — ПК-исполнение целиком приостановлено до
@@ -4351,6 +4396,10 @@ class FlexibleLogicTab(QWidget):
                 # страховка против кривого вызова.
                 state = "conflict"
             else:
+                # Замена исполняемого снимка — всегда новое поколение:
+                # действия, запланированные старыми правилами, не
+                # имеют права стрелять под новым владением (CM-R12 п.5).
+                self._new_exec_generation()
                 self._runtime_rules = [dict(r) for r in rules]
                 self._config.set(
                     "flexible_rules_active", self._runtime_rules
@@ -4365,9 +4414,16 @@ class FlexibleLogicTab(QWidget):
                     ) if m
                 }
                 self._device_flex_state = "verified"
+                # Атомарно со снимком: _internal_rules перестраивается
+                # здесь же — входы исполнения никогда не видят
+                # «новый managed + старые internal» (CM-R13).
+                self._build_internal_rules()
+                self._rules_dirty = False
                 self._update_dirty_badges()
                 self._update_executor_badges()
                 return
+        if state != self._device_flex_state:
+            self._new_exec_generation()
         if state == "conflict":
             self._device_flex_state = "conflict"
             self._device_managed = set()
@@ -4890,18 +4946,30 @@ class FlexibleLogicTab(QWidget):
         dlc: int | None = None,
     ) -> None:
         packed = pack_can_frame(channel, can_id, data, rtr=rtr, dlc=dlc)
+        # Поколение захватывается при планировании: коллбек старой
+        # сессии/снимка молчит даже после повторного подтверждения
+        # владельца (ревью CM-R12).
+        gen = self._exec_generation
         if delay_ms > 0:
             QTimer.singleShot(
-                delay_ms, lambda p=packed: self._send_guarded(p)
+                delay_ms, lambda p=packed, g=gen: self._send_guarded(p, g)
             )
         else:
-            self._send_guarded(packed)
+            self._send_guarded(packed, gen)
 
-    def _send_guarded(self, packed: bytes) -> None:
+    def _send_guarded(self, packed: bytes, gen: int) -> None:
         """Единый гейт исходящих кадров программ ГЛ (ревью
-        CM-R9/R10): при «unknown»/«conflict» владелец исполнения не
-        подтверждён — даже ранее запланированная команда не уходит
-        на шину."""
+        CM-R9/R10/R12): при «unknown»/«conflict» владелец исполнения
+        не подтверждён, а смена поколения означает, что команда
+        запланирована устаревшей сессией или устаревшим снимком
+        правил — в обоих случаях кадр на шину не уходит."""
+        if gen != self._exec_generation:
+            logger.info(
+                "ГЛ: отправка отброшена — запланирована до смены "
+                "сессии/владельца (поколение %d, текущее %d)",
+                gen, self._exec_generation,
+            )
+            return
         if not self._pc_flex_allowed():
             logger.info(
                 "ГЛ: отправка пропущена — владелец исполнения "
@@ -5024,6 +5092,7 @@ class FlexibleLogicTab(QWidget):
             "abort": abort if has_abort else None,
             "aborted": False,
             "busy": delay > 0,
+            "gen": self._exec_generation,
         }
         if has_abort:
             self._pending_actions.append(entry)
@@ -5041,8 +5110,19 @@ class FlexibleLogicTab(QWidget):
             self._execute_scheduled(entry)
 
     def _execute_scheduled(self, entry: dict[str, Any]) -> None:
-        """Таймер «Задержки» дотикал — проверяем прерыватель и
-        исполняем."""
+        """Таймер «Задержки» дотикал — проверяем поколение,
+        прерыватель и исполняем."""
+        if entry.get("gen") != self._exec_generation:
+            # Проверка ДО трога чужого состояния: отложенное
+            # действие прошлого поколения не должно ни уменьшить
+            # _rule_busy программы нового снимка с тем же индексом,
+            # ни исполниться под повторно подтверждённым владельцем
+            # (ревью CM-R12).
+            logger.info(
+                "ГЛ: отложенное действие отброшено — сменилось "
+                "поколение исполнения",
+            )
+            return
         ri = int(entry.get("rule_index", -1))
         if entry.get("busy") and self._rule_busy.get(ri, 0) > 0:
             self._rule_busy[ri] -= 1
@@ -5224,9 +5304,18 @@ class FlexibleLogicTab(QWidget):
                 "pwm_time_ms": int(action.get("aux_pwm_time", 0) or 0),
             }
 
+            aux_gen = self._exec_generation
+
             def fire_aux(
                 ch=channel, m=mode, kw=kwargs, mn=mode_name,
+                g=aux_gen,
             ) -> None:
+                if g != self._exec_generation:
+                    logger.info(
+                        "ГЛ: команда доп канала №%d отброшена — "
+                        "сменилось поколение исполнения", ch,
+                    )
+                    return
                 if not self._pc_flex_allowed():
                     logger.info(
                         "ГЛ: команда доп канала №%d пропущена — "
@@ -5298,8 +5387,10 @@ class FlexibleLogicTab(QWidget):
             self._flag_pulse_until[name] = (
                 time.monotonic() + pulse_ms / 1000
             )
+            gen = self._exec_generation
             QTimer.singleShot(
-                pulse_ms, lambda n=name: self._flag_pulse_check(n)
+                pulse_ms,
+                lambda n=name, g=gen: self._flag_pulse_check(n, g),
             )
         if not changed:
             return
@@ -5312,8 +5403,12 @@ class FlexibleLogicTab(QWidget):
         self._fire_aux_events()
         self._flag_edges.pop(name, None)
 
-    def _flag_pulse_check(self, name: str) -> None:
-        """Авто-гашение «включить на N мс»: время вышло — бит в 0."""
+    def _flag_pulse_check(self, name: str, gen: int) -> None:
+        """Авто-гашение «включить на N мс»: время вышло — бит в 0.
+        Таймер старого поколения молчит — импульсы прошлой сессии
+        уже принудительно погашены в _new_exec_generation (CM-R12)."""
+        if gen != self._exec_generation:
+            return
         if time.monotonic() >= self._flag_pulse_until.get(name, 0.0):
             self._set_flag(name, 0)
 
