@@ -73,7 +73,7 @@ from PySide6.QtWidgets import (
 from core.can_protocol import pack_can_frame
 from core.serial_manager import SerialManager
 from models.config import Config
-from core.flex_compiler import managed_flags
+from core.flex_compiler import executor_info, managed_flags
 from models.logger import get_logger
 from models.translations import _ as tr
 from models.utils import hex_to_int
@@ -3354,6 +3354,37 @@ class RuleRowWidget(QWidget):
         """Оранжевый треугольник «программа ≠ записи в МК»."""
         self._dirty_badge.setVisible(bool(dirty))
 
+    def set_executor(self, owner: str, reason: str | None) -> None:
+        """Бейдж владельца исполнения программы (ревью CM-R4):
+        «устройство» — камень исполняет автономно, «ПК» — программа
+        живёт в приложении (причина — в подсказке), «не записано» —
+        программа ещё не уходила в камень, «выключена» — неактивна."""
+        text, color, tip = {
+            "device": (
+                tr("устройство"), "#7FBF7F",
+                tr("Исполняется устройством автономно — работает "
+                   "без приложения"),
+            ),
+            "pc": (
+                tr("ПК"), "#7FA8C9",
+                tr("Исполняется приложением") + (
+                    f": {reason}" if reason else ""
+                ),
+            ),
+            "unsaved": (
+                tr("не записано"), "#C9A86A",
+                tr("Программа ещё не записана в устройство"),
+            ),
+            "off": (
+                tr("выключена"), "#8A8A92",
+                tr("Программа выключена"),
+            ),
+        }.get(owner, (owner, "#8A8A92", ""))
+        self._executor_label.setText(text)
+        self._executor_label.setStyleSheet(f"color: {color};")
+        self._executor_label.setToolTip(tip)
+        self._executor_label.setVisible(True)
+
     # ---- виджеты -------------------------------------------------------
 
     def _create_widgets(self) -> None:
@@ -3388,6 +3419,11 @@ class RuleRowWidget(QWidget):
         self._counter_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._counter_label.setFixedWidth(36)
         self._counter_label.setToolTip(tr("Срабатываний"))
+        # Бейдж владельца исполнения — «устройство»/«ПК»/«не
+        # записано» (ревью CM-R4: владелец должен быть виден).
+        self._executor_label = QLabel()
+        self._executor_label.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self._executor_label.setVisible(False)
 
         self._number_label = QLabel("№")
         self._number_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
@@ -3453,6 +3489,7 @@ class RuleRowWidget(QWidget):
         header_layout.addWidget(self._summary_label, 2)
         header_layout.addWidget(_small_label(tr("Срабатываний:"), font))
         header_layout.addWidget(self._counter_label)
+        header_layout.addWidget(self._executor_label)
         header_layout.addWidget(self._collapse_button)
         header_layout.addWidget(self._remove_button)
         layout.addWidget(self._header)
@@ -4121,6 +4158,45 @@ class FlexibleLogicTab(QWidget):
         self._device_managed = {
             i for i, m in enumerate(flags) if m
         }
+        self._update_executor_badges()
+
+    def _update_executor_badges(self) -> None:
+        """Бейджи «устройство/ПК» в шапках программ — по снимку
+        записанных в МК правил (_runtime_rules): именно они
+        исполняются, черновик может отличаться (ревью CM-R4)."""
+        try:
+            proto = self._serial_manager.device_protocol_version()
+        except Exception:  # noqa: BLE001
+            proto = 0
+        try:
+            info = executor_info(self._runtime_rules, proto)
+        except Exception:  # noqa: BLE001
+            info = []
+        for i, row in enumerate(self._row_widgets):
+            try:
+                if i >= len(self._runtime_rules):
+                    row.set_executor("unsaved", None)
+                    continue
+                entry = (
+                    info[i]
+                    if i < len(info)
+                    else {"managed": False, "active": True,
+                          "reason": None}
+                )
+                if not entry.get("active", True):
+                    row.set_executor("off", None)
+                elif entry.get("managed") and self._device_flexb:
+                    row.set_executor("device", None)
+                else:
+                    reason = entry.get("reason")
+                    if entry.get("managed") and not self._device_flexb:
+                        reason = tr(
+                            "в устройстве нет исполняемой копии — "
+                            "запишите настройки"
+                        )
+                    row.set_executor("pc", reason)
+            except Exception:  # noqa: BLE001
+                row._executor_label.setVisible(False)
 
     def set_device_flexb(self, present: bool) -> None:
         """В блобе FLXH лежит контейнер FLXB — камень исполняет
@@ -4140,6 +4216,7 @@ class FlexibleLogicTab(QWidget):
         self._rule_counters = [0] * len(self._row_widgets)
         self._refresh_variable_lists()
         self._update_dirty_badges()
+        self._update_executor_badges()
 
     def _add_row_widget(
         self,

@@ -77,6 +77,11 @@ class _FakeSerialManager(QObject):
         self.upload_outcomes: dict[int, Any] = {}
         self.uploads: list[tuple[int, bytes]] = []
         self.download_data: bytes | None = None
+        # Управляемые исходы по региону: dict/None — значение,
+        # исключение — бросается (ревью CM-R4: INFO exception/None/
+        # неверная длина, вычитка по регионам).
+        self.info_outcomes: dict[int, Any] = {}
+        self.download_by_region: dict[int, bytes | None] = {}
         self.peek_data: bytes | None = None
         self.info_len: dict[int, int] = {}
 
@@ -97,6 +102,11 @@ class _FakeSerialManager(QObject):
         return bool(outcome)
 
     def storage_info(self, region: int) -> dict | None:
+        if region in self.info_outcomes:
+            outcome = self.info_outcomes[region]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
         # После записи область отдаёт длину последнего блоба.
         for reg, blob in reversed(self.uploads):
             if reg == region:
@@ -104,6 +114,8 @@ class _FakeSerialManager(QObject):
         return None
 
     def storage_download(self, region: int) -> bytes | None:
+        if region in self.download_by_region:
+            return self.download_by_region[region]
         return self.download_data
 
     def storage_peek(self, region: int, length: int) -> bytes | None:
@@ -111,7 +123,12 @@ class _FakeSerialManager(QObject):
 
 
 class _FakeTab:
-    """Минимальная вкладка: шпионы вызовов вместо реальных виджетов."""
+    """Минимальная вкладка: шпионы вызовов вместо реальных виджетов.
+
+    Полный контракт, который SettingsWindow может дёрнуть: отложенный
+    _sync_from_device (singleShot 400 мс после конструктора) звонит в
+    вкладки — фейк обязан моделировать его целиком, иначе отложенный
+    callback стреляет в частично подменённый объект (ревью CM-R4)."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -138,6 +155,15 @@ class _FakeTab:
 
     def commit_runtime(self) -> None:
         self.calls.append("commit_runtime")
+
+    # --- контракт _sync_from_device/фоновых коллбеков -------------
+
+    def on_device_session_started(self) -> None:
+        self.calls.append("on_device_session_started")
+
+    def sync_from_device(self, force: bool = False) -> bool:
+        self.calls.append("sync_from_device")
+        return True
 
 
 @pytest.fixture(scope="module")
@@ -173,7 +199,14 @@ def window(qapp, monkeypatch):
     )
 
     serial = _FakeSerialManager()
+    # Отложенная авто-вычитка (singleShot 400 мс) планируется, только
+    # если порт открыт на момент конструктора. Закрываем её на время
+    # создания окна — иначе в тесте, пережившем 400 мс (полный
+    # прогон), callback стреляет в уже подменённые вкладки и добавляет
+    # чужой critical-диалог до ожидаемого warning (ревью CM-R4).
+    serial.open = False
     w = SettingsWindow(serial, None, None)
+    serial.open = True
     config = w._config
     config.set("device_serial", "TEST1")
     # Вкладки заменяем шпионами — реальные тяжелы и не нужны для
@@ -187,6 +220,12 @@ def window(qapp, monkeypatch):
     w._save_button.setEnabled(True)
     yield w, serial, config, toasts, dialogs
     w.deleteLater()
+    # DeferredDelete и отложенные коллбеки должны исполниться до конца
+    # теста — иначе они всплывают внутри СЛЕДУЮЩЕГО теста
+    # (ревью CM-R4).
+    from PySide6.QtCore import QCoreApplication, QEvent
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    qapp.processEvents()
     from ui.memory_indicator import MemoryIndicator
     MemoryIndicator.shutdown_poller()
 
@@ -311,3 +350,108 @@ def test_retry_after_failure(window) -> None:
     serial.upload_outcomes.clear()
     assert w._save_current_config() is True
     assert toasts
+
+
+# ---- CM-R4: расширенные сценарии отказов пути сохранения ----------
+
+
+def test_var_upload_exception_is_failure(window) -> None:
+    """Исключение записи VAR (не только False) — подтверждённый отказ:
+    dirty сохранён, подтверждения нет, ГЛ-коммит не вызывался."""
+    w, serial, _c, toasts, _d = window
+    serial.upload_outcomes[STORAGE_REGION_VAR] = RuntimeError("usb gone")
+    assert w._save_current_config() is False
+    assert w._save_button.isEnabled()
+    assert not toasts
+    assert "commit_runtime" not in w._flexible_tab.calls
+    # Запись FLEX после сбоя VAR не пыталась исполниться.
+    assert not [r for r, _ in serial.uploads if r == STORAGE_REGION_FLEX]
+
+
+def test_info_none_after_upload_is_failure(window) -> None:
+    """storage_info = None после «успешной» записи — размер блоба не
+    подтверждён, сохранение отклонено, dirty сохранён."""
+    w, serial, _c, toasts, _d = window
+    serial.info_outcomes[STORAGE_REGION_VAR] = None
+    assert w._save_current_config() is False
+    assert w._save_button.isEnabled()
+    assert not toasts
+    assert "commit_runtime" not in w._flexible_tab.calls
+
+
+def test_info_exception_after_upload_is_failure(window) -> None:
+    """Исключение storage_info на проверке длины — сохранение не
+    подтверждается, dirty остаётся."""
+    w, serial, _c, toasts, _d = window
+    serial.info_outcomes[STORAGE_REGION_VAR] = TimeoutError("info lost")
+    assert w._save_current_config() is False
+    assert w._save_button.isEnabled()
+    assert not toasts
+
+
+def test_info_wrong_length_is_failure(window) -> None:
+    """INFO с неверной длиной — область приняла НЕ наш блоб: отказ,
+    dirty сохранён, подтверждения нет."""
+    w, serial, _c, toasts, _d = window
+    serial.info_outcomes[STORAGE_REGION_VAR] = {
+        "base": 0x08010000, "len": 999999, "gen": 7,
+    }
+    assert w._save_current_config() is False
+    assert w._save_button.isEnabled()
+    assert not toasts
+    assert "commit_runtime" not in w._flexible_tab.calls
+
+
+def test_cache_invalidated_on_failure(window) -> None:
+    """Сбой записи инвалидирует закэшированный блоб — старое
+    содержимое не выдаётся за актуальное."""
+    w, serial, _c, _t, _d = window
+    key = ("TEST1", STORAGE_REGION_VAR)
+    w._blob_cache[key] = (1, b"stale")
+    serial.upload_outcomes[STORAGE_REGION_VAR] = False
+    assert w._save_current_config() is False
+    assert key not in w._blob_cache
+
+
+def test_retry_after_info_failure(window) -> None:
+    """Успешный повтор после отказа INFO — окно не требует
+    пересоздания."""
+    w, serial, _c, toasts, _d = window
+    serial.info_outcomes[STORAGE_REGION_VAR] = None
+    assert w._save_current_config() is False
+    serial.info_outcomes.clear()
+    assert w._save_current_config() is True
+    assert toasts
+
+
+def test_commit_unknown_mismatch_keeps_device_owner(window) -> None:
+    """Потерянный COMMIT по FLEX, а вычитка вернула ДРУГОЙ валидный
+    FLXB (прежнее содержимое камня): наша запись не засчитана, но
+    владелец исполнения — реальное содержимое устройства, а не наш
+    черновик: прежние программы по-прежнему исполняет камень (нет ни
+    мёртвых программ, ни двойного исполнения — ревью CM-R4 §7)."""
+    w, serial, _c, toasts, _d = window
+    stale = build_flex_blob(
+        [{"title": "Старая программа", "active": False}]
+    )
+    serial.upload_outcomes[STORAGE_REGION_FLEX] = StorageCommitUnknown()
+    serial.download_by_region[STORAGE_REGION_FLEX] = stale
+    assert w._save_current_config() is False
+    assert not toasts
+    assert "commit_runtime" not in w._flexible_tab.calls
+    # Перечитывание по факту: в камне валидный FLXB (пусть и не наш) —
+    # флаг отражает именно это.
+    assert w._flexible_tab.flexb is True
+
+
+def test_commit_unknown_corrupt_blob_marks_pc_owner(window) -> None:
+    """Потерянный COMMIT, а область содержит битый контейнер —
+    исполняет ПК (камень такой контейнер отвергнет): флаг честно
+    опущен, программы не «мёртвы»."""
+    w, serial, _c, _t, _d = window
+    corrupt = bytearray(build_flex_blob([]))
+    corrupt[-1] ^= 0x5A  # битая запись/трейлер — контейнер невалиден
+    serial.upload_outcomes[STORAGE_REGION_FLEX] = StorageCommitUnknown()
+    serial.download_by_region[STORAGE_REGION_FLEX] = bytes(corrupt)
+    assert w._save_current_config() is False
+    assert w._flexible_tab.flexb is False

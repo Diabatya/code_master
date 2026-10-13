@@ -2,6 +2,8 @@
 покрытие pack/unpack, подстановки «X из кадра события», отсева
 некомпилируемых программ и квоты FLEX_MAX_RECORDS."""
 
+import json
+
 from core.flex_compiler import (
     FLEX_BLOB_MAGIC,
     FLEX_BLOB_VERSION,
@@ -329,3 +331,82 @@ def test_extract_flex_json_broken_container() -> None:
     blob = bytearray(build_flex_blob([_rule()]))
     blob[4] = FLEX_BLOB_VERSION + 1
     assert extract_flex_json(bytes(blob)) == bytes(blob)
+
+
+# ---- CM-R3: строгая валидация контейнера -------------------------------
+
+
+def test_flexb_extra_tail_rejected() -> None:
+    """Точная длина: лишний хвост после записей отвергает контейнер
+    (раньше проходил — «достаточная длина» вместо точной)."""
+    blob = build_flex_blob([_rule()])
+    assert parse_flex_blob(blob + b"EXTRA") is None
+
+
+def test_flexb_json_zero_and_schema() -> None:
+    """json_len=0, невалидный JSON и JSON без схемы (dict+rules) —
+    контейнер отвергается: владелец исполнения не определяется по
+    магии (CM-R3)."""
+    blob = bytearray(build_flex_blob([_rule()]))
+    json_len = int.from_bytes(blob[8:12], "little")
+
+    # json_len = 0
+    bad = bytearray(blob)
+    bad[8:12] = (0).to_bytes(4, "little")
+    assert parse_flex_blob(bytes(bad)) is None
+
+    # Невалидный JSON той же длины
+    bad = bytearray(blob)
+    bad[12:12 + json_len] = b"!" * json_len
+    assert parse_flex_blob(bytes(bad)) is None
+
+    # Валидный JSON, но не схема конфигурации (нет "rules")
+    doc = json.dumps({"kind": "x"}).encode("utf-8")
+    bad = bytearray(blob)
+    bad[8:12] = len(doc).to_bytes(4, "little")
+    bad[12:12 + json_len] = doc.ljust(json_len, b" ")
+    assert parse_flex_blob(bytes(bad[:12 + json_len])) is None
+
+    # Валидный dict-JSON без списка rules
+    doc = json.dumps({"kind": "code_master_flex_logic", "rules": 5}
+                     ).encode("utf-8")
+    bad = bytearray(blob)
+    bad[8:12] = len(doc).to_bytes(4, "little")
+    bad[12:12 + json_len] = doc.ljust(json_len, b" ")
+    assert parse_flex_blob(bytes(bad[:12 + json_len])) is None
+
+
+def test_flexb_record_crc_and_fields() -> None:
+    """Повреждённая CRC записи и запись с недопустимыми полями
+    отвергают контейнер ЦЕЛИКОМ (all-or-nothing, как в прошивке):
+    половина записей без другой половины невозможна."""
+    blob = build_flex_blob([_rule()])
+    json_len = int.from_bytes(blob[8:12], "little")
+    rec_off = 12 + json_len
+
+    bad = bytearray(blob)
+    bad[-1] ^= 0x5A  # crc8 последней записи
+    assert parse_flex_blob(bytes(bad)) is None
+
+    # tx_channel = 55 — недопустимое поле (offset 32 записи v3),
+    # crc исправлен: отказ именно из-за полей.
+    from core.trigger_protocol import crc8 as _crc8
+    bad = bytearray(blob)
+    bad[rec_off + 32] = 0x55
+    bad[-1] = _crc8(bytes(bad[rec_off:-1]))
+    assert parse_flex_blob(bytes(bad)) is None
+
+    # Неизвестный бит rx_flags (offset 83 записи) — отказ.
+    bad = bytearray(blob)
+    bad[rec_off + 83] |= 0x40
+    bad[-1] = _crc8(bytes(bad[rec_off:-1]))
+    assert parse_flex_blob(bytes(bad)) is None
+
+
+def test_flexb_valid_blob_still_parses() -> None:
+    """Контроль: валидный контейнер проходит строгую проверку."""
+    blob = build_flex_blob([_rule(), _rule(active=False)])
+    parsed = parse_flex_blob(blob)
+    assert parsed is not None
+    json_part, count = parsed
+    assert json.loads(json_part.decode("utf-8"))["rules"]

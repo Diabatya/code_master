@@ -33,7 +33,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from core.trigger_protocol import TRIGGER_SIZE, pack_trigger
+from core.trigger_protocol import (
+    TRIGGER_SIZE,
+    pack_trigger,
+    record_fields_valid,
+)
 from models.utils import hex_to_int
 
 FLEX_BLOB_MAGIC = b"FLXB"
@@ -230,14 +234,14 @@ def _rule_events(rule: dict[str, Any]) -> list:
     return events
 
 
-def compile_rule(rule: dict[str, Any]) -> list[dict[str, Any]] | None:
-    """Программа ГЛ → список записей trigger_t (словари для pack_trigger).
+def _compile_rule(
+    rule: dict[str, Any],
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """Программа ГЛ → (записи trigger_t | None, причина отказа | None).
 
-    None — программа на камне не выражается (исполняет приложение).
-    [] — программа компилируется, но записей не порождает (неактивна,
-    нет рабочих событий или действий)."""
+    Причины — для UI-бейджа «кто исполняет» (ревью CM-R4/R5)."""
     if not rule.get("active", False):
-        return []
+        return [], None
     events, conditions, actions = _rule_parts(rule)
 
     # Условия ПРИ на камне не поддерживаются — переменные/флаги/доп.
@@ -245,17 +249,19 @@ def compile_rule(rule: dict[str, Any]) -> list[dict[str, Any]] | None:
     for cond in conditions:
         ctype = cond.get("type", _COND_NONE)
         if ctype not in (None, "", _COND_NONE):
-            return None
+            return None, "условие ПРИ — только на ПК"
 
     rx_parts: list[tuple[int, dict[str, Any]]] = []
     for idx, event in enumerate(events):
+        if not isinstance(event, dict):
+            return None, "повреждённое событие — только на ПК"
         rx = _event_to_rx(event)
         if rx is None:
-            return None
+            return None, "событие не про CAN-кадр — только на ПК"
         if rx:
             rx_parts.append((idx, rx))
     if not rx_parts:
-        return []
+        return [], None
     # Пересекающиеся события: ИЛИ-семантика ПК (break на первом
     # совпавшем) в записях не выражается — на камне сработали бы обе
     # записи и действия исполнились бы дважды. Такая программа
@@ -263,21 +269,21 @@ def compile_rule(rule: dict[str, Any]) -> list[dict[str, Any]] | None:
     for i in range(len(rx_parts)):
         for j in range(i + 1, len(rx_parts)):
             if _rx_overlap(rx_parts[i][1], rx_parts[j][1]):
-                return None
+                return None, "пересекающиеся события — только на ПК"
     # rx_cond_idx упаковывается в rx_flags битах 2..4 — максимум 7.
     if max(idx for idx, _ in rx_parts) > 7:
-        return None
+        return None, "больше 8 событий — только на ПК"
 
     tx_parts: list[tuple[int, dict[str, Any]]] = []
     for idx, action in enumerate(actions):
         if not isinstance(action, dict):
-            return None
+            return None, "повреждённое действие — только на ПК"
         # «Задержка» выполнения и «Прервать если» — только на ПК.
         if int(action.get("exec_delay", 0) or 0) > 0:
-            return None
+            return None, "задержка выполнения действия — только на ПК"
         abort = action.get("abort") or {}
         if abort.get("type") not in (None, "", _EVENT_NONE):
-            return None
+            return None, "прерыватель действия — только на ПК"
         # Действия не-фреймового типа (переменные, флаги, доп. каналы,
         # кэш) делают программу некомпилируемой целиком.
         atype = action.get("type", _ACT_FRAME)
@@ -290,14 +296,14 @@ def compile_rule(rule: dict[str, Any]) -> list[dict[str, Any]] | None:
             or action.get("cv_op")
         )
         if atype not in (None, "", _ACT_FRAME, "none") or non_frame:
-            return None
+            return None, "действие не «отправка кадра» — только на ПК"
         tx = _action_to_tx(action)
         if tx is None:
-            return None
+            return None, "действие не «отправка кадра» — только на ПК"
         if tx:
             tx_parts.append((idx, tx))
     if not tx_parts:
-        return []
+        return [], None
 
     records: list[dict[str, Any]] = []
     for ev_idx, rx in rx_parts:
@@ -349,7 +355,79 @@ def compile_rule(rule: dict[str, Any]) -> list[dict[str, Any]] | None:
             # кэш-фильтр src_* не используется).
             record["rx_tx_event_data"] = bool(subst)
             records.append(record)
+    return records, None
+
+
+def compile_rule(rule: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Программа ГЛ → список записей trigger_t (словари для pack_trigger).
+
+    None — программа на камне не выражается (исполняет приложение).
+    [] — программа компилируется, но записей не порождает (неактивна,
+    нет рабочих событий или действий)."""
+    records, _reason = _compile_rule(rule)
     return records
+
+
+def executor_info(
+    rules: list[dict[str, Any]],
+    protocol: int,
+) -> list[dict[str, Any]]:
+    """Для каждой программы — владелец исполнения и причина
+    (UI-бейдж «камень/ПК», ревью CM-R4).
+
+    Ключи записи: ``managed`` (камень исполняет), ``reason``
+    (почему программа на ПК / почему не компилируется), ``active``."""
+    if protocol < 12:
+        return [
+            {
+                "managed": False,
+                "active": bool(rule.get("active")),
+                "reason": (
+                    f"прошивка без автономной ГЛ (протокол {protocol})"
+                ),
+            }
+            for rule in rules
+        ]
+
+    per_rule: list[tuple[list | None, str | None]] = []
+    for rule in rules:
+        try:
+            per_rule.append(_compile_rule(rule))
+        except Exception:  # noqa: BLE001
+            per_rule.append((None, "ошибка конфигурации — только на ПК"))
+
+    listened = {
+        str(event.get("var", "")).strip()
+        for rule in rules
+        for event in _rule_events(rule)
+        if isinstance(event, dict) and event.get("type") == _EVENT_PROGRAM
+    }
+
+    out: list[dict[str, Any]] = []
+    used = 0
+    for i, rule in enumerate(rules):
+        records, reason = per_rule[i]
+        active = bool(rule.get("active"))
+        if (
+            records is not None
+            and str(rule.get("title", "")).strip() in listened
+        ):
+            records = None
+            reason = "зависит событие «программа начала работать» — только на ПК"
+        if records is None:
+            out.append({"managed": False, "active": active,
+                        "reason": reason or "только на ПК"})
+            continue
+        if used + len(records) > FLEX_MAX_RECORDS:
+            out.append({
+                "managed": False,
+                "active": active,
+                "reason": "квота записей МК исчерпана (16)",
+            })
+            continue
+        used += len(records)
+        out.append({"managed": True, "active": active, "reason": None})
+    return out
 
 
 def compile_rules(
@@ -426,11 +504,14 @@ def build_flex_blob(rules: list[dict[str, Any]]) -> bytes:
 def parse_flex_blob(blob: bytes) -> tuple[bytes, int] | None:
     """Разбор контейнера FLXB → (JSON-часть, число записей).
 
-    None — блоб не FLXB либо заголовок/границы повреждены: по такому
-    блобу нельзя считать программы исполняемыми камнем. Магия «FLXB»
-    сама по себе не доказывает валидность исполняемой части — версия
-    контейнера, длина JSON, число записей и границы проверяются
-    (ревью CM-05)."""
+    None — блоб не FLXB либо ЛЮБАЯ часть повреждена: по такому блобу
+    нельзя считать программы исполняемыми камнем. Проверки жёстче
+    магии (ревью CM-R3): точная длина контейнера (лишние байты —
+    несоответствие), json_len > 0 и парсится в объект со списком
+    «rules», число записей ≤ FLEX_MAX_RECORDS, каждая запись —
+    валидная trigger_t v3 по контракту прошивки (магия, формат,
+    CRC8, ограничения полей). Прошивка применяет те же правила —
+    половина записей без другой половины невозможна."""
     if (
         not blob
         or len(blob) < _FLXB_HEADER_SIZE
@@ -443,26 +524,42 @@ def parse_flex_blob(blob: bytes) -> tuple[bytes, int] | None:
         return None
     json_len = int.from_bytes(blob[8:12], "little")
     rec_off = _FLXB_HEADER_SIZE + json_len
-    if (
-        json_len == 0
-        or rec_off > len(blob)
-        or len(blob) - rec_off < count * TRIGGER_SIZE
-    ):
+    if json_len == 0 or len(blob) != rec_off + count * TRIGGER_SIZE:
         return None
-    return blob[_FLXB_HEADER_SIZE:rec_off], count
+    json_part = blob[_FLXB_HEADER_SIZE:rec_off]
+    try:
+        doc = json.loads(json_part.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get("rules"), list):
+        return None
+    for i in range(count):
+        start = rec_off + i * TRIGGER_SIZE
+        if not record_fields_valid(blob[start:start + TRIGGER_SIZE]):
+            return None
+    return json_part, count
 
 
 def flexb_header_valid(header: bytes, blob_len: int) -> bool:
-    """Проверка FLXB по первым байтам блоба (storage_peek): магия,
-    версия, число записей и длина JSON согласуются с полной длиной
-    области — без вычитки всего блоба."""
+    """Геометрическая проверка FLXB по первым байтам блоба
+    (storage_peek): магия, версия, число записей и json_len
+    согласуются с полной длиной области.
+
+    Только геометрия — записи и JSON не проверяются. Владелец
+    исполнения устанавливается по полному содержимому через
+    parse_flex_blob; эта функция — быстрый прё-фильтр."""
     if len(header) < _FLXB_HEADER_SIZE:
         return False
-    fake_len = max(int(blob_len), _FLXB_HEADER_SIZE)
-    fake = bytes(header[:_FLXB_HEADER_SIZE]) + b"\x00" * (
-        fake_len - _FLXB_HEADER_SIZE
+    count = header[5]
+    json_len = int.from_bytes(header[8:12], "little")
+    return (
+        header[:4] == FLEX_BLOB_MAGIC
+        and header[4] == FLEX_BLOB_VERSION
+        and count <= FLEX_MAX_RECORDS
+        and json_len > 0
+        and _FLXB_HEADER_SIZE + json_len + count * TRIGGER_SIZE
+        <= max(int(blob_len), 0)
     )
-    return parse_flex_blob(fake) is not None
 
 
 def extract_flex_json(blob: bytes) -> bytes:

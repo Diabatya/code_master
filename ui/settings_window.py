@@ -39,7 +39,6 @@ from PySide6.QtWidgets import (
 from core.flex_compiler import (
     build_flex_blob,
     extract_flex_json,
-    flexb_header_valid,
     parse_flex_blob,
 )
 from core.can_protocol import (
@@ -876,6 +875,10 @@ class SettingsWindow(QMainWindow):
 
     def _refresh_save_state(self) -> None:
         """Сверяет снимок полей с эталоном и обновляет кнопку."""
+        if not isValid(self) or not isValid(self._save_button):
+            # Отложенный singleShot пришёл после разрушения окна —
+            # C++-объекты трогать нельзя (ревью CM-R4).
+            return
         self._refresh_pending = False
         # Без связи с устройством сохранять нечего — кнопка выключена
         # даже при наличии правок; при восстановлении связи состояние
@@ -1299,23 +1302,37 @@ class SettingsWindow(QMainWindow):
             notify()
 
     def _refresh_device_flexb(self) -> None:
-        """Перечитывает заголовок области FLXH и обновляет владельца
-        исполнения программ ГЛ.
+        """Перечитывает область FLXH и обновляет владельца исполнения
+        программ ГЛ.
 
-        Магия FLXB сама по себе не доказывает, что исполняемая часть
-        валидна — проверяются версия, длины и границы. При нечитаемом
-        устройстве флаг не трогаем: слепое «исполняет ПК» опаснее
-        устаревшего состояния — возможны дубли PC+МК (ревью CM-02)."""
+        Владелец передаётся только по подтверждённому содержимому:
+        полная вычитка блоба и строгая валидация контейнера
+        (parse_flex_blob — магия, версия, точная длина, JSON-схема,
+        CRC/поля каждой записи). 12-байтный peek заголовка оставался
+        бы слепым к повреждённой исполняемой части (ревью CM-R3).
+        При нечитаемом устройстве флаг не трогаем: слепое «исполняет
+        ПК» опаснее устаревшего состояния — возможны дубли PC+МК
+        (ревью CM-02)."""
         try:
             info = self._serial_manager.storage_info(STORAGE_REGION_FLEX)
-            head = self._serial_manager.storage_peek(
-                STORAGE_REGION_FLEX, 12
+        except Exception:  # noqa: BLE001
+            return
+        if not info or int(info.get("len", 0)) == 0:
+            # Область пустая — записей в камне нет, это факт, а не
+            # неизвестность.
+            self._flexible_tab.set_device_flexb(False)
+            return
+        try:
+            data = self._serial_manager.storage_download(
+                STORAGE_REGION_FLEX
             )
         except Exception:  # noqa: BLE001
             return
+        if data is None:
+            # Вычитка не удалась — неизвестность, флаг не меняем.
+            return
         self._flexible_tab.set_device_flexb(
-            bool(head)
-            and flexb_header_valid(head, int(info["len"]) if info else 0)
+            parse_flex_blob(data) is not None
         )
 
     def _update_device_info(

@@ -3818,6 +3818,11 @@ class _VarColumn(QWidget):
         QTimer.singleShot(0, self._apply_row_density)
 
     def _apply_row_density(self) -> None:
+        from shiboken6 import isValid
+        if not isValid(self._scroll):
+            # Отложенный singleShot пришёл после разрушения —
+            # C++-объекты трогать нельзя (ревью CM-R4).
+            return
         count = int(getattr(self, "_desired_rows", 8) or 8)
         viewport = self._scroll.viewport().height()
         if viewport <= 0:
