@@ -1,8 +1,8 @@
 # Отчёт по ревью CodeMaster-Devin-Review-1.1.71
 
 - **Исходный SHA (база ревью):** `005ec117201fc50a1d191b3f46c95b1b44365d7f` (v1.1.71)
-- **Итоговый SHA:** см. HEAD ветки `fix/review-1.1.71` (заполняется после push)
-- **PR:** см. раздел ниже (ссылка после создания)
+- **Итоговый SHA:** `6507386` (HEAD ветки `fix/review-1.1.71`)
+- **PR:** https://github.com/Diabatya/code_master/pull/1
 - **CI:** workflow `Build and Release`, PR-прогон на итоговом SHA
 
 ## Сводная таблица CM-01…CM-08
