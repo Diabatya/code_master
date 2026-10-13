@@ -1,9 +1,9 @@
 # Отчёт по ревью CodeMaster-Devin-Review-1.1.71
 
 - **Исходный SHA (база ревью):** `005ec117201fc50a1d191b3f46c95b1b44365d7f` (v1.1.71)
-- **Итоговый SHA:** `d479d50` — коммит исправлений CM-R1..CM-R4; финальный HEAD ветки — коммит данного отчёта поверх него (`fix/review-1.1.71`)
+- **Итоговый SHA кода:** `45c3225` — коммит исправлений CM-R5..CM-R8 (третий раунд); ранее `d479d50` — CM-R1..CM-R4. Финальный HEAD ветки — коммит данного отчёта поверх (`fix/review-1.1.71`)
 - **PR:** https://github.com/Diabatya/code_master/pull/1
-- **CI:** workflow `Build and Release` на PR, прогон итогового HEAD: https://github.com/Diabatya/code_master/actions/runs/38402204097 — test-python, build-firmware (с субмодулем), build-windows/macos/linux — все зелёные; release-job пропущен корректно (PR ≠ tag/main). Предыдущий прогон: runs/38394536516.
+- **CI:** workflow `Build and Release` на PR. Прогон `f37e0c2` (кодовый HEAD раунда 2; `59f6791` отличался только отчётом): https://github.com/Diabatya/code_master/actions/runs/38402204097 — test-python, build-firmware (с субмодулем), build-windows/macos/linux — все зелёные; release-job пропущен корректно (PR ≠ tag/main). Прогон `45c3225` — см. раздел верификации после пуша.
 
 ## Сводная таблица CM-01…CM-08
 
@@ -30,23 +30,37 @@
 | CM-R4 | Исправлено | `tests/test_save_path.py` (фикстура, `_FakeTab`); `ui/settings_window.py::_refresh_save_state`; `ui/can_monitor_tab.py::_apply_row_density`; `ui/variables_tab.py::_apply_row_density` | Фикстура закрывает порт на время конструктора — отложенная `singleShot(400, _sync_from_device)` не планируется и не стреляет в подменённые вкладки; `_FakeTab` моделирует полный контракт (`on_device_session_started`, `sync_from_device`); teardown обрабатывает deferred-delete. Латентный баг самого кода: отложенные singleShot-коллбеки падали на уже разрушенных C++-объектах — добавлены `isValid`-гарды | `test_save_path.py` — **20 тестов** (было 12): VAR exception, INFO None/exception/неверная длина, инвалидация кэша, повтор после отказа INFO, потерянный COMMIT с реальным сменённым содержимым FLEX (владелец — реальное содержимое камня) | Полный прогон падал 1 failed от чужого critical-диалога отложенной синхронизации; изолированно проходил → нестабильность устранена источником, не фильтрацией |
 | UI | Сделано | `core/flex_compiler.py::executor_info`; `ui/flexible_logic_tab.py::RuleRowWidget.set_executor`, `_update_executor_badges` | В шапке каждой программы бейдж владельца: «устройство» (зелёный, автономно), «ПК» (голубой, тултип с конкретной причиной — условие/задержка/прерыватель/пересечение событий/квота/протокол<12/нет FLXB), «не записано», «выключена». Бейдж по снимку записанных правил (`_runtime_rules`) — показывает, что исполняется сейчас. Программа на ПК с закрытым приложением не работает — причина в тултипе | `executor_info` покрыт косвенно через `compile_rules`-тесты; визуальная проверка — GUI smoke | Владелец исполнения был невидим — оператор не знал, что программа требует запущенного приложения → явный бейдж с причиной |
 
+## Третий раунд ревью (CodeMaster-Devin-PR1-Review-Round3, CM-R5…CM-R8)
+
+Проверенный ревьюером HEAD: `59f6791` (кодовый HEAD `f37e0c2` + коммит отчёта). Исправления — коммит `45c3225` на той же ветке.
+
+| # | Статус | Файл/функция | Изменение | Регресс-тест | До → После |
+|---|--------|--------------|-----------|--------------|------------|
+| CM-R5 | Исправлено | `ui/settings_window.py::_refresh_device_flexb`, `_download_config_blobs`, `_download_blob_cached`, `_apply_device_flex_state`; `ui/flexible_logic_tab.py::set_device_flex_state`, `mark_device_flex_probe_failed` | Нечитаемая область (INFO=None/исключение, вычитка None) — **неизвестность**, а не «пусто»: владелец keep-last, состояние помечается неподтверждённым (`probe_failed` → бейдж «владелец не подтверждён»). Подтверждённый INFO с len=0 → `empty`; полная вычитка → анализ содержимого. `_download_blob_cached` различает `None` (не прочитано) и `b""` (пусто) | `test_save_path.py`: `test_info_none_keeps_owner_and_marks_unconfirmed`, `test_info_exception_keeps_owner`, `test_empty_info_confirms_empty_region`, `test_download_none_after_info_keeps_owner`, `test_download_blobs_info_none_marks_probe_failed`, `test_download_blobs_empty_region_marks_empty`, `test_proto11_area_is_no_tail` | `info=None` → `set_device_flexb(False)`: ПК включал исполнение поверх работающего хвоста камня — дубли на шине → неизвестность не меняет владельца и диагностируется |
+| CM-R6 | Исправлено | `trigger.c::append_flex`; `core/flex_compiler.py::parse_flex_blob`; `test_trigger_flex.c::test_flxb_validation` | Прошивка проверяет `json_len ≤ len−12` **до** вычисления `rec_off` — переполнение uint32 (json_len≈0xFFFFFFF6) больше не проходит «проверку границ». Контракт хвоста одинаковый на обеих сторонах: магия, ver=1, count≤16 (отказ), json_len>0, точная длина `12+json_len+count*90`, CRC/поля каждой записи; содержимое JSON прошивка не читает — и хост в `parse_flex_blob` тоже (иначе «ПК отверг — МК исполняет») | `test_trigger_flex.c`: json_len=0, json_len≈UINT32_MAX, битый JSON принимается при валидном хвосте; `test_flex_compiler.py::test_flexb_json_zero_and_schema` (переполнение + tail-only контракт) | `rec_off=12+json_len` переполнялся до `rec_off > len` — мусор принимался за контейнер → проверка вычитанием до сложения; одинаковые негативные наборы на обеих сторонах |
+| CM-R7 | Исправлено | `core/flex_compiler.py::parse_flex_blob`, `parse_flex_rules` (новая), `analyze_device_flex` (новая); `ui/flexible_logic_tab.py` (состояния вместо bool); `ui/settings_window.py` | `parse_flex_blob` — только исполняемый хвост; `parse_flex_rules` — JSON-схема (dict + список rules, каждое правило — dict с корректными полями); `analyze_device_flex` перекомпилирует правила блоба и побайтово сравнивает хвост → `empty`/`no-tail`/`verified`/`conflict`. `conflict` (хвост валиден, но ≠ компиляции JSON или JSON битый): владелец — камень, ПК вслепую не включается, бейдж «конфликт — пересохраните». Владелец — только по полной вычитке блоба, не по peek | `test_flex_compiler.py::test_analyze_device_flex_states` (verified/conflict-JSON/conflict-хвост/no-tail); `test_save_path.py`: `test_valid_blob_marks_verified`, `test_legacy_json_blob_is_no_tail`, `test_tail_mismatch_is_conflict`, `test_download_blobs_verified_imports_rules`, `test_download_blobs_corrupt_json_sets_conflict` | Наличие магии FLXB = «камень исполняет»; чужой хвост при читаемом JSON считался владением → верификация tail==compile(JSON); conflict — явное состояние, не PC-фоллбэк |
+| CM-R8 | Исправлено | `trigger.c::flex_firing_t`, `pending_response_t`, `Trigger_Poll` | Плановый срок (`fire_at_tick`) и ближайшая попытка хранятся раздельно: `due = fire_at + retries*1мс`. Отказ отодвигает попытку, не расписание: серия 1050/1070/1090 при отказе на 1050 → 1051/1070/1090. Просроченные плановые сроки исполняются по одному за тик опроса (документировано; раньше комментарий ложно обещал «догон залпом»). Длительный отказ: после 20 ретраев серия сбрасывается целиком в `dropped` — без бесконечного цикла и залпа | `test_trigger_flex.c`: `test_retry_keeps_series_schedule` (1051/1070/1090 + interval=0), `test_retry_channels_independent` (CAN2 глухой — CAN1 по плану), `test_retry_outage_policy` (обе серии dropped за окно, рекорд не отравлен) | `fire_at = now+1` на каждом отказе сдвигало ВСЮ серию (1051/1071/1091) → плановые сроки неизменны; CAN1/CAN2 ретраятся независимо |
+
 ## Команды верификации и результат
 
 | Команда | Exit | Результат |
 |---------|------|-----------|
-| `QT_QPA_PLATFORM=offscreen python3 -m pytest -q` | 0 | **169 passed**, 4 warnings (было 157; +12: CM-R3/R4 сценарии) |
-| `python3 -m pytest tests/test_save_path.py -q` | 0 | **20 passed** (точное число — было 12, не 13) |
+| `QT_QPA_PLATFORM=offscreen python3 -m pytest -q` | 0 | **182 passed**, 4 warnings (было 169; +13: CM-R5/R7 tri-state, CM-R6 overflow/контракт, CM-R7 анализ) |
+| `python3 -m pytest tests/test_save_path.py -q` | 0 | **32 passed** (было 20; +12: неизвестность/empty/no-tail/verified/conflict) |
+| `python3 -m pytest tests/test_flex_compiler.py -q` | 0 | **26 passed** (контракт хвоста, parse_flex_rules, analyze_device_flex) |
 | `python3 -m ruff check .` | 0 | All checks passed |
 | `python3 -m compileall -q core ui models` | 0 | OK |
 | `cc … test_trigger_flash.c && ./a.out` | 0 | PASS: 70 слотов round-trip |
 | `cc … test_device_config.c && ./a.out` | 0 | PASS: round-trip, size=32 |
 | `cc … test_event_log_ring.c && ./a.out` | 0 | PASS: blank boot, пагинация, wraparound |
-| `cc … test_trigger_flex.c && ./a.out` | 0 | PASS: 15 сценариев — очередь с метками времени, ретраи/переполнение, pad_8, валидация FLXB |
+| `cc … test_trigger_flex.c && ./a.out` | 0 | PASS: 18 сценариев — метки серий, ретраи без сдвига расписания (1051/1070/1090), interval=0, CAN1/CAN2-независимость, bounded outage, overflow json_len |
 | `git submodule update --init --recursive` | 0 | STM32CubeF1 @ dad36d75 |
-| `make -C firmware/application` (clean) | 0 | text 43392, data 408, bss 64652, dec 108452; metadata start=0x08009000 size=43800 crc32=0x43C5A413 |
+| `make -C firmware/application` (clean) | 0 | text 43380, data 408, bss 64652, dec 108440; metadata start=0x08009000 size=43788 crc32=0x97502F62 |
 | `make -C firmware/bootloader` (clean) | 0 | text 19440, data 396, bss 8384, dec 28220 |
 | `make_full_image.py --version 1.1.71` | 0 | full image 3 сегмента, 65292 B; VER1=v1.1.71; cdc app-only образ собран |
 | GUI smoke (SettingsWindow offscreen + shutdown poller) | 0 | GUI SMOKE OK |
+
+**Лимиты памяти (STM32F105RCT6):** Flash app 224 KiB (0x08008000–0x0803FFFF) — занято text+data 43788 B ≈ 19.5%; RAM 65536 B — bss+data 65060 B, под стек остаётся **476 B** (без изменений относительно раунда 2 — `fire_at_tick`/`retries` заняли освобождённые поля, bss не вырос: 64652).
 
 Toolchain: `arm-none-eabi-gcc` (Arm GNU Toolchain 15.2.rel1, /opt/homebrew/bin). Python 3.x + PySide6, Qt offscreen.
 
@@ -54,7 +68,7 @@ Toolchain: `arm-none-eabi-gcc` (Arm GNU Toolchain 15.2.rel1, /opt/homebrew/bin).
 
 - **Proto 10** — хранилище недоступно: `_upload_config_blobs` явно отказывает запись VAR/FLEX с объяснением; блобы не пишутся и не читаются.
 - **Proto 11** — блобы пишутся/читаются в прежнем формате чистого JSON (`{kind, format, rules/variables}`); FLXB не отправляется; `device_flexb=False`, программы ГЛ исполняет приложение.
-- **Proto 12** — область FLXH принимает контейнер FLXB: `FLXB` + ver=1 + count≤16 + json_len + JSON + записи trigger_t (90 B). `device_flexb=True` только после полной вычитки и строгой валидации содержимого (`parse_flex_blob`): точная длина, JSON-схема, CRC/поля каждой записи (CM-R3).
+- **Proto 12** — область FLXH принимает контейнер FLXB: `FLXB` + ver=1 + count≤16 + json_len + JSON + записи trigger_t (90 B). Владелец исполнения — состояние области по полной вычитке (`analyze_device_flex`): `verified` (хвост == компиляции JSON — камень исполняет эти программы), `conflict` (хвост валиден, но не совпадает с конфигурацией — камень владеет, требуется повторная запись), `no-tail`/`empty` (исполняемых записей нет — ПК), неподтверждённое состояние при нечитаемой области (keep-last, без PC-фоллбэка). JSON — конфигурация ПК; исполняет прошивка только хвост (CM-R6/R7).
 - Старые чисто-JSON блобы остаются читаемыми через `extract_flex_json`; повреждённый FLXB возвращается целиком и отвергается валидатором, не роняя вычитку.
 
 ## Автономное исполнение ГЛ: что на МК, что на ПК
