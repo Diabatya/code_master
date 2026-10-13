@@ -3,7 +3,7 @@
 - **Исходный SHA (база ревью):** `005ec117201fc50a1d191b3f46c95b1b44365d7f` (v1.1.71)
 - **Итоговый SHA:** `6507386` (HEAD ветки `fix/review-1.1.71`)
 - **PR:** https://github.com/Diabatya/code_master/pull/1
-- **CI:** workflow `Build and Release`, PR-прогон на итоговом SHA
+- **CI:** workflow `Build and Release` на PR: https://github.com/Diabatya/code_master/actions/runs/38394536516 — test-python, build-firmware (с субмодулем), build-windows/macos/linux — все зелёные; release-job пропущен корректно (PR ≠ tag/main).
 
 ## Сводная таблица CM-01…CM-08
 
