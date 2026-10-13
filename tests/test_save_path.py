@@ -171,12 +171,25 @@ class _FakeTab:
         self.flexb = bool(present)
         self.flex_state = "verified" if present else "no-tail"
 
-    def set_config(self, rules: list) -> None:
+    def set_config(
+        self, rules: list, *, suspend_execution: bool = False
+    ) -> None:
         self.calls.append("set_config")
         self.rules = list(rules)
+        self.suspended = suspend_execution
 
     def import_config(self, variables: Any) -> None:
         self.variables = variables
+
+    def apply_device_flex_analysis(self, analysis: dict) -> None:
+        self.flex_state = analysis["state"]
+        self.probe_failed = False
+        self.flexb = self.flex_state in ("verified", "conflict")
+
+    def reset_device_flex_state(self) -> None:
+        self.flex_state = "unknown"
+        self.flexb = None
+        self.probe_failed = False
 
     def commit_runtime(self) -> None:
         self.calls.append("commit_runtime")

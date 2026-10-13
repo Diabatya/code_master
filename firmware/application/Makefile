@@ -36,7 +36,7 @@ INCLUDES = \
   -I$(CUBE)/Middlewares/ST/STM32_USB_Device_Library/Core/Inc \
   -I$(CUBE)/Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc
 
-CFLAGS = $(MCU) $(DEFS) $(INCLUDES) -O2 -g -Wall -ffunction-sections -fdata-sections
+CFLAGS = $(MCU) $(DEFS) $(INCLUDES) -O2 -g -Wall -ffunction-sections -fdata-sections -fstack-usage
 ASFLAGS = $(MCU) $(DEFS) $(INCLUDES) -Wall -fdata-sections -ffunction-sections
 LDFLAGS = $(MCU) -specs=nano.specs -specs=nosys.specs -TSTM32F105RCTx_APP.ld \
           -Wl,-Map=$(BUILD_DIR)/$(PROJECT).map,--gc-sections -ffunction-sections -fdata-sections

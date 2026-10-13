@@ -38,6 +38,10 @@ def qapp():
 def tab(qapp, monkeypatch):
     monkeypatch.setattr(fl_module, "Config", _FakeConfig)
     widget = FlexibleLogicTab(SerialManager())
+    # Тесты моделируют ПК-исполнение при подтверждённом владении
+    # «исполняемого хвоста в устройстве нет» — без этого начальное
+    # состояние unknown приостанавливает программы (CM-R10).
+    widget.set_device_flex_state("no-tail")
     yield widget
     widget.deleteLater()
 

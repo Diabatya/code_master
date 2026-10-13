@@ -580,6 +580,10 @@ class SettingsWindow(QMainWindow):
         # пропущена, чтобы не затирать работу оператора. «Сохранить»
         # активна: нажатие запишет содержимое экрана поверх устройства.
         self._device_diverged = False
+        # Идентичность устройства, для которого подтверждено владение
+        # исполнением ГЛ (serial или тип при пустом serial). Смена —
+        # сброс состояния до повторного зондирования (ревью CM-R10).
+        self._flex_owner_key: str | None = None
         self._save_opacity = QGraphicsOpacityEffect(self._save_button)
         self._save_button.setGraphicsEffect(self._save_opacity)
         self._install_dirty_tracking(self.centralWidget())
@@ -1107,6 +1111,14 @@ class SettingsWindow(QMainWindow):
             self._hide_loading_overlay()
             self._device_diverged = False
             self._trigger_tab.clear_device_managed()
+            # Сессия закрылась — подтверждённое владение ГЛ не
+            # переносится: до повторной проверки области владелец
+            # неизвестен и ПК-исполнение приостановлено (CM-R10).
+            reset_flex = getattr(
+                self._flexible_tab, "reset_device_flex_state", None
+            )
+            if callable(reset_flex):
+                reset_flex()
             # Связь потеряна — «Сохранить» недоступна, даже если есть
             # несохранённые правки: писать некуда.
             self._save_opacity.setOpacity(0.4)
@@ -1292,6 +1304,21 @@ class SettingsWindow(QMainWindow):
         (отчёт мастера)."""
         self._connected_device_type = device_type
         self._update_device_info(device_type, device_version)
+        # Владение исполнением ГЛ привязано к конкретному устройству:
+        # опознание другого камня без разрыва сессии — сброс состояния
+        # до повторного зондирования (ревью CM-R10).
+        serial = str(self._config.get("device_serial") or "")
+        owner_key = serial or f"type:{device_type}"
+        if (
+            self._flex_owner_key is not None
+            and self._flex_owner_key != owner_key
+        ):
+            reset = getattr(
+                self._flexible_tab, "reset_device_flex_state", None
+            )
+            if callable(reset):
+                reset()
+        self._flex_owner_key = owner_key
         # Заголовок блоба FLXH определяет, какие программы ГЛ
         # исполняет сам МК (FLXB — скомпилированные записи) — до
         # notify_device_ready, чтобы флаги device_managed уже были
@@ -1308,15 +1335,23 @@ class SettingsWindow(QMainWindow):
         Владелец передаётся только по подтверждённому содержимому:
         полная вычитка блоба, валидация исполняемого хвоста и его
         сверка с JSON-конфигурацией (analyze_device_flex →
-        «empty»/«no-tail»/«verified»/«conflict» — ревью CM-R5/R7).
-        Нечитаемая область (INFO/вычитка вернули None или упали) —
-        НЕИЗВЕСТНОСТЬ, а не «пусто»: состояние не меняем, только
-        помечаем владельца неподтверждённым. Слепое «исполняет ПК»
-        дало бы дубли PC+МК поверх продолжающего работать хвоста."""
-        try:
-            proto = self._serial_manager.device_protocol_version()
-        except Exception:  # noqa: BLE001
-            proto = 0
+        «empty»/«no-tail»/«verified»/«conflict» — ревью CM-R5/R7/R11).
+        Нечитаемая область (INFO/вычитка вернули None или упали,
+        версия протокола неизвестна) — НЕИЗВЕСТНОСТЬ, а не «пусто»
+        и не «proto<12»: состояние не меняем, только помечаем
+        владельца неподтверждённым. Слепое «исполняет ПК» дало бы
+        дубли PC+МК поверх продолжающего работать хвоста."""
+        config = getattr(self, "_config", None)
+        if config is not None and config.get("emulation", False):
+            # Эмуляция — реального исполнителя нет, владелец ПК.
+            self._flexible_tab.set_device_flex_state("no-tail")
+            return
+        proto = self._query_flex_proto()
+        if proto is None:
+            # Версия протокола неизвестна — не доказательство
+            # «proto<12» (ревью CM-R10): владелец не подтверждён.
+            self._flexible_tab.mark_device_flex_probe_failed()
+            return
         if proto < 12:
             # FLXB-записи исполняет только прошивка протокола 12+ —
             # владелец точно ПК, независимо от содержимого области.
@@ -1345,6 +1380,7 @@ class SettingsWindow(QMainWindow):
             self._flexible_tab.mark_device_flex_probe_failed()
             return
         self._apply_device_flex_state(analyze_device_flex(data))
+
 
     def _update_device_info(
         self, device_type: int = 0, device_version: int = 0, query_device: bool = True
@@ -2288,23 +2324,69 @@ class SettingsWindow(QMainWindow):
                     legacy = blob.get("rules")
                     rules = legacy if isinstance(legacy, list) else None
                 if rules is not None:
-                    self._flexible_tab.set_config(rules)
+                    # conflict: JSON-конфигурация читается — показываем
+                    # её в черновике для диагностики/правки, но НЕ в
+                    # исполняемом снимке: соответствие хвоста этим
+                    # правилам не доказано (ревью CM-R11).
+                    self._flexible_tab.set_config(
+                        rules,
+                        suspend_execution=analysis["state"] == "conflict",
+                    )
                 # Владельца ставим ПОСЛЕ импорта правил: пересчёт
                 # managed-индексов идёт по свежему снимку — тем
                 # самым правилам, что лежат в блобе (ревью CM-R7).
                 self._apply_device_flex_state(analysis)
 
-    def _apply_device_flex_state(self, analysis: dict) -> None:
-        """Владелец исполнения программ ГЛ по итогам анализа блоба.
+    def _query_flex_proto(self) -> int | None:
+        """Версия протокола устройства для решения о владельце ГЛ.
 
-        На прошивке протокола <12 хвост FLXB не исполняется — владелец
-        ПК независимо от содержимого области."""
+        Кэш `device_protocol_version()` отдаёт 0, когда SYSTEM_INFO
+        ни разу не доехал — это НЕИЗВЕСТНОСТЬ, а не «протокол 0»
+        (protocol_version начинается с 1 — ревью CM-R10): спрашиваем
+        устройство напрямую. Молчание/исключение/невалидный ответ →
+        None; известные версии возвращаются как есть (1..11 — точно
+        без FLXB, владелец ПК; ≥12 — зондируем область)."""
         try:
             proto = self._serial_manager.device_protocol_version()
         except Exception:  # noqa: BLE001
             proto = 0
+        if isinstance(proto, bool) or not isinstance(proto, int):
+            return None
+        if proto >= 1:
+            return proto
+        try:
+            info = self._serial_manager.read_system_info()
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(info, dict):
+            return None
+        try:
+            direct = int(info.get("protocol_version") or 0)
+        except (TypeError, ValueError):
+            return None
+        return direct if direct >= 1 else None
+
+    def _apply_device_flex_state(self, analysis: dict) -> None:
+        """Владелец исполнения программ ГЛ по итогам анализа блоба.
+
+        На подтверждённой прошивке протокола <12 хвост FLXB не
+        исполняется — владелец ПК независимо от содержимого области.
+        Ошибка/отсутствие версии — неизвестность, а не «proto<12»
+        (ревью CM-R10): состояние не меняем, помечаем probe_failed.
+        Сам переход — единый: вкладка применяет состояние вместе с
+        confirmed-rules/managed из той же проверки (CM-R11)."""
+        proto = self._query_flex_proto()
+        if proto is None:
+            self._flexible_tab.mark_device_flex_probe_failed()
+            return
         if proto < 12:
             self._flexible_tab.set_device_flex_state("no-tail")
+            return
+        apply_analysis = getattr(
+            self._flexible_tab, "apply_device_flex_analysis", None
+        )
+        if callable(apply_analysis):
+            apply_analysis(analysis)
         else:
             self._flexible_tab.set_device_flex_state(analysis["state"])
 
