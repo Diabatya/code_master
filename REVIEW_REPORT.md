@@ -3,7 +3,7 @@
 - **Исходный SHA (база ревью):** `005ec117201fc50a1d191b3f46c95b1b44365d7f` (v1.1.71)
 - **Итоговый SHA:** `d479d50` — коммит исправлений CM-R1..CM-R4; финальный HEAD ветки — коммит данного отчёта поверх него (`fix/review-1.1.71`)
 - **PR:** https://github.com/Diabatya/code_master/pull/1
-- **CI:** workflow `Build and Release` на PR: https://github.com/Diabatya/code_master/actions/runs/38394536516 — test-python, build-firmware (с субмодулем), build-windows/macos/linux — все зелёные; release-job пропущен корректно (PR ≠ tag/main).
+- **CI:** workflow `Build and Release` на PR, прогон итогового HEAD: https://github.com/Diabatya/code_master/actions/runs/38402204097 — test-python, build-firmware (с субмодулем), build-windows/macos/linux — все зелёные; release-job пропущен корректно (PR ≠ tag/main). Предыдущий прогон: runs/38394536516.
 
 ## Сводная таблица CM-01…CM-08
 
