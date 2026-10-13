@@ -37,9 +37,10 @@ from PySide6.QtWidgets import (
 )
 
 from core.flex_compiler import (
-    FLEX_BLOB_MAGIC,
     build_flex_blob,
     extract_flex_json,
+    flexb_header_valid,
+    parse_flex_blob,
 )
 from core.can_protocol import (
     CMD_CFG_FACTORY_RESET,
@@ -52,7 +53,7 @@ from core.can_protocol import (
     STORAGE_REGION_VAR,
 )
 
-from core.serial_manager import SerialManager
+from core.serial_manager import SerialManager, StorageCommitUnknown
 from models.config import CONFIG_FILE_FILTER, Config, pack_config_file, unpack_config_file
 from models.logger import get_logger
 from models.translations import _ as tr, get_all_translations
@@ -84,6 +85,18 @@ except Exception:  # noqa: BLE001
         return []
 
 logger = get_logger(__name__)
+
+
+class SaveStageError(Exception):
+    """Сбой обязательного этапа записи в устройство.
+
+    Несёт имя этапа — оператор должен видеть, что именно не
+    записалось, а не общий «не удалось сохранить» (ревью CM-02)."""
+
+    def __init__(self, stage: str, detail: object = "") -> None:
+        self.stage = stage
+        self.detail = str(detail)
+        super().__init__(f"{stage}: {self.detail}")
 
 
 class ConnectionTab(QWidget):
@@ -1280,18 +1293,30 @@ class SettingsWindow(QMainWindow):
         # исполняет сам МК (FLXB — скомпилированные записи) — до
         # notify_device_ready, чтобы флаги device_managed уже были
         # верными и «Включение устройства» не отработало дважды.
-        try:
-            head = self._serial_manager.storage_peek(
-                STORAGE_REGION_FLEX, 12
-            )
-            self._flexible_tab.set_device_flexb(
-                bool(head) and head[:4] == FLEX_BLOB_MAGIC
-            )
-        except Exception:  # noqa: BLE001
-            self._flexible_tab.set_device_flexb(False)
+        self._refresh_device_flexb()
         notify = getattr(self._flexible_tab, "notify_device_ready", None)
         if callable(notify):
             notify()
+
+    def _refresh_device_flexb(self) -> None:
+        """Перечитывает заголовок области FLXH и обновляет владельца
+        исполнения программ ГЛ.
+
+        Магия FLXB сама по себе не доказывает, что исполняемая часть
+        валидна — проверяются версия, длины и границы. При нечитаемом
+        устройстве флаг не трогаем: слепое «исполняет ПК» опаснее
+        устаревшего состояния — возможны дубли PC+МК (ревью CM-02)."""
+        try:
+            info = self._serial_manager.storage_info(STORAGE_REGION_FLEX)
+            head = self._serial_manager.storage_peek(
+                STORAGE_REGION_FLEX, 12
+            )
+        except Exception:  # noqa: BLE001
+            return
+        self._flexible_tab.set_device_flexb(
+            bool(head)
+            and flexb_header_valid(head, int(info["len"]) if info else 0)
+        )
 
     def _update_device_info(
         self, device_type: int = 0, device_version: int = 0, query_device: bool = True
@@ -1905,7 +1930,16 @@ class SettingsWindow(QMainWindow):
         if not self._serial_manager.is_open():
             logger.warning("Сохранение настроек без открытого COM-порта")
         try:
-            self._config.save()
+            if not self._config.save():
+                # Файл не записался — dirty и введённые данные
+                # сохраняются, подтверждения «записано» быть не
+                # должно (ревью CM-02).
+                QMessageBox.critical(
+                    self,
+                    tr("Ошибка"),
+                    tr("Не удалось сохранить конфигурацию в файл"),
+                )
+                return False
             # Тип устройства из загруженного конфига может не совпадать
             # с подключённым (файл выгружен с другой модели) — спрашиваем
             # до записи в МК.
@@ -1947,7 +1981,14 @@ class SettingsWindow(QMainWindow):
                 self._loading = True
                 self._show_loading_overlay()
                 try:
-                    self._trigger_tab.write_to_device()
+                    try:
+                        self._trigger_tab.write_to_device()
+                    except TriggerValidationAborted:
+                        raise
+                    except Exception as exc:
+                        raise SaveStageError(
+                            tr("Запись триггеров"), exc
+                        ) from exc
                     # Общая запись для всех вкладок: CAN-скорости/режимы из
                     # «Мониторинга» прогружаются тем же действием, что и
                     # триггеры — иначе заданный оператором бод-рейт шины не
@@ -1955,7 +1996,14 @@ class SettingsWindow(QMainWindow):
                     if hasattr(self._monitor_tab, "apply_can_settings_to_device"):
                         self._progress_offset = 85.0
                         self._progress_scale = 15.0
-                        self._monitor_tab.apply_can_settings_to_device()
+                        try:
+                            self._monitor_tab.apply_can_settings_to_device()
+                        except CanSettingsReadbackMismatch:
+                            raise
+                        except Exception as exc:
+                            raise SaveStageError(
+                                tr("Параметры CAN"), exc
+                            ) from exc
                     # Переменные и программы ГЛ — в камень (маркерное
                     # хранилище, протокол v10): устройство хранит их
                     # автономно, вычитка поднимает на любом ПК.
@@ -1973,13 +2021,29 @@ class SettingsWindow(QMainWindow):
             show_toast(
                 self,
                 tr("Настройки записаны в устройство")
-                if self._serial_manager.is_open()
+                if (
+                    self._serial_manager.is_open()
+                    and not self._config.get("emulation", False)
+                )
                 else tr("Конфигурация сохранена"),
             )
             return True
         except (TriggerValidationAborted, CanSettingsReadbackMismatch):
             # Оператор уже увидел список проблем — сохранение прервано
             # молча, кнопка «Сохранить» остаётся активной.
+            return False
+        except SaveStageError as exc:
+            # Отката между этапами нет — предыдущие этапы уже могли
+            # изменить устройство; dirty и индикаторы изменений
+            # сохраняются до успешного сохранения (ревью CM-02).
+            QMessageBox.warning(
+                self,
+                tr("Сохранение не завершено"),
+                tr("Сбой на этапе «{0}»: {1}\n\nЧасть настроек уже "
+                   "могла измениться в устройстве.").format(
+                    exc.stage, exc.detail
+                ),
+            )
             return False
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить: {0}").format(exc))
@@ -1989,68 +2053,141 @@ class SettingsWindow(QMainWindow):
         """Пишет блобы переменных и программ ГЛ в маркерное хранилище
         МК (CMD_STORAGE_*, протокол v11 — в сборке v10 парсер ронял
         эти команды до диспетчера): переменные — в область VARH у
-        конца Flash, программы ГЛ — в FLXH за концом кода. Прошивка без
-        storage-команд отвечает отказом — сохранение не срываем."""
-        try:
-            proto = self._serial_manager.device_protocol_version()
-            if proto < 11:
-                # Молчаливый пропуск выглядел для оператора как
-                # «переменные и ГЛ не сохранились в камень» (отчёт
-                # мастера) — показываем причину явно.
-                logger.warning(
-                    "Прошивка МК (протокол %s) не умеет хранилище "
-                    "переменных/ГЛ — обновите прошивку устройства",
-                    proto,
-                )
-                show_toast(
-                    self,
-                    tr("Прошивка устройства устарела: переменные и "
-                       "программы ГЛ не записаны — обновите прошивку"),
-                )
-                return
-            serial = str(self._config.get("device_serial") or "")
-            var_blob = json.dumps(
+        конца Flash, программы ГЛ — в FLXH за концом кода.
+
+        Любой сбой обязательной записи — SaveStageError с именем
+        этапа: «успех» подтверждается только после реальной записи
+        обоих областей (ревью CM-02). Формат блоба ГЛ зависит от
+        возможностей прошивки: protocol>=12 — контейнер FLXB с
+        записями для автономного исполнения; protocol 11 — прежний
+        чистый JSON, программы исполняет приложение (CM-05)."""
+        proto = self._serial_manager.device_protocol_version()
+        if proto < 11:
+            raise SaveStageError(
+                tr("Переменные и программы ГЛ"),
+                tr("прошивка устройства (протокол {0}) не поддерживает "
+                   "хранилище — обновите прошивку").format(proto),
+            )
+        serial = str(self._config.get("device_serial") or "")
+        var_blob = json.dumps(
+            {
+                "kind": "code_master_variables",
+                "format": 1,
+                "variables": self._variables_tab.export_config(),
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        self._storage_write_verified(
+            STORAGE_REGION_VAR, var_blob, tr("Переменные"), serial
+        )
+        rules = self._flexible_tab.get_config()
+        if proto >= 12:
+            # FLXB-контейнер: JSON-конфигурация + хвост из
+            # скомпилированных записей trigger_t — прошивка
+            # исполняет программы ГЛ автономно, без ПК (отчёт
+            # мастера: «ГЛ должен работать без приложения, как
+            # триггеры»).
+            flex_blob = build_flex_blob(rules)
+        else:
+            # Протокол 11 хранит блобы, но FLXB-записей не исполняет —
+            # пишем прежний JSON, исполнение ГЛ остаётся на ПК.
+            flex_blob = json.dumps(
                 {
-                    "kind": "code_master_variables",
+                    "kind": "code_master_flex_logic",
                     "format": 1,
-                    "variables": self._variables_tab.export_config(),
+                    "rules": rules,
                 },
                 ensure_ascii=False,
             ).encode("utf-8")
-            self._serial_manager.storage_upload(STORAGE_REGION_VAR, var_blob)
-            # FLXB-контейнер: JSON-конфигурация + хвост из
-            # скомпилированных записей trigger_t — прошивка
-            # (protocol>=12) исполняет программы ГЛ автономно,
-            # без ПК (отчёт мастера: «ГЛ должен работать без
-            # приложения, как триггеры»).
-            flex_blob = build_flex_blob(self._flexible_tab.get_config())
-            self._serial_manager.storage_upload(STORAGE_REGION_FLEX, flex_blob)
-            # Записанный блоб — контейнер FLXB: с этого момента
-            # скомпилированные программы исполняет сам МК, а ПК их
-            # пропускает (флаг до commit_runtime — снимок считается
-            # с учётом реального содержимого камня).
-            self._flexible_tab.set_device_flexb(True)
-            # Программа ГЛ записана в камень — с этого момента
-            # исполняется именно она; до записи работал старый
-            # снимок, живые правки полей не отрабатывали
-            # (отчёт мастера).
-            self._flexible_tab.commit_runtime()
-            # Кэш блобов обновляем свежей генерацией — следующее
-            # «Настроить» на этом устройстве не перекачивает то, что
-            # мы только что сами туда записали.
-            for region, blob in (
-                (STORAGE_REGION_VAR, var_blob),
-                (STORAGE_REGION_FLEX, flex_blob),
-            ):
-                info = self._serial_manager.storage_info(region)
-                if info is not None:
-                    self._blob_cache[(serial, region)] = (
-                        int(info["gen"]), blob
-                    )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Не удалось записать блобы переменных/ГЛ в МК: %s", exc
+        try:
+            self._storage_write_verified(
+                STORAGE_REGION_FLEX, flex_blob, tr("Программы ГЛ"), serial
             )
+        except SaveStageError:
+            # Исход записи ГЛ под вопросом — перечитываем заголовок
+            # области: от реального содержимого камня зависит, кто
+            # исполняет программы (иначе возможны дубли PC+МК или
+            # мёртвые программы).
+            self._refresh_device_flexb()
+            raise
+        # Флаг device_managed — по РЕАЛЬНО записанному формату:
+        # FLXB ушёл только в прошивку protocol>=12.
+        self._flexible_tab.set_device_flexb(proto >= 12)
+        # Программа ГЛ записана в камень — с этого момента
+        # исполняется именно она; до записи работал старый
+        # снимок, живые правки полей не отрабатывали
+        # (отчёт мастера).
+        self._flexible_tab.commit_runtime()
+        # Кэш блобов обновляем свежей генерацией — следующее
+        # «Настроить» на этом устройстве не перекачивает то, что
+        # мы только что сами туда записали.
+        for region, blob in (
+            (STORAGE_REGION_VAR, var_blob),
+            (STORAGE_REGION_FLEX, flex_blob),
+        ):
+            info = self._serial_manager.storage_info(region)
+            if info is not None:
+                self._blob_cache[(serial, region)] = (
+                    int(info["gen"]), blob
+                )
+
+    def _storage_write_verified(
+        self,
+        region: int,
+        blob: bytes,
+        stage: str,
+        serial: str,
+    ) -> None:
+        """storage_upload с проверяемым результатом.
+
+        False/исключение — подтверждённый отказ (SaveStageError).
+        Потерянный ответ COMMIT — исход неизвестен: определяемся
+        вычиткой области, а при нечитаемости инвалидируем кэш и
+        сообщаем, что часть настроек могла измениться (ревью CM-02)."""
+        try:
+            ok = self._serial_manager.storage_upload(region, blob)
+        except StorageCommitUnknown as exc:
+            if self._storage_readback_matches(region, blob):
+                logger.warning(
+                    "COMMIT региона %d: ответ потерян, но блоб "
+                    "подтверждён вычиткой",
+                    region,
+                )
+                ok = True
+            else:
+                self._blob_cache.pop((serial, region), None)
+                raise SaveStageError(
+                    stage,
+                    tr("ответ устройства потерян — исход записи "
+                       "неизвестен"),
+                ) from exc
+        except Exception as exc:  # noqa: BLE001
+            self._blob_cache.pop((serial, region), None)
+            raise SaveStageError(stage, exc) from exc
+        if not ok:
+            self._blob_cache.pop((serial, region), None)
+            raise SaveStageError(
+                stage, tr("устройство отклонило запись")
+            )
+        # COMMIT-ACK подтверждает CRC полезной нагрузки; INFO с
+        # ожидаемой длиной — дешёвая проверка, что область приняла
+        # именно наш блоб (gen сам по себе не доказывает содержимое).
+        info = self._serial_manager.storage_info(region)
+        if info is None or int(info["len"]) != len(blob):
+            self._blob_cache.pop((serial, region), None)
+            raise SaveStageError(
+                stage,
+                tr("проверка записи не подтвердила размер блоба"),
+            )
+
+    def _storage_readback_matches(self, region: int, blob: bytes) -> bool:
+        """Вычитка области после потери COMMIT-ответа: блоб на
+        устройстве побайтово совпал с тем, что писали."""
+        try:
+            data = self._serial_manager.storage_download(region)
+        except Exception:  # noqa: BLE001
+            return False
+        return data is not None and bytes(data) == bytes(blob)
 
     def _download_config_blobs(self) -> None:
         """Подтягивает переменные и программы ГЛ из маркерного
@@ -2073,10 +2210,12 @@ class SettingsWindow(QMainWindow):
         for region in (STORAGE_REGION_VAR, STORAGE_REGION_FLEX):
             data = self._download_blob_cached(serial, region)
             if region == STORAGE_REGION_FLEX:
-                # Старший блоб без магии FLXB — чистый JSON старой
-                # версии: записей на МК нет, программы исполняет ПК.
+                # Контейнер FLXB с валидным заголовком и целой
+                # исполняемой частью — камень исполняет записи сам;
+                # старый JSON-блоб или повреждённый FLXB — программы
+                # исполняет ПК (ревью CM-05).
                 self._flexible_tab.set_device_flexb(
-                    bool(data) and data[:4] == FLEX_BLOB_MAGIC
+                    parse_flex_blob(data) is not None
                 )
             if not data:
                 continue

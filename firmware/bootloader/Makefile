@@ -6,6 +6,11 @@ BUILD_DIR = build
 
 CUBE = ../libs/STM32CubeF1
 
+ifeq ($(wildcard $(CUBE)/Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal.h),)
+$(error STM32CubeF1 submodule is missing or not checked out. \
+Run 'git submodule update --init --recursive' at the repository root before building)
+endif
+
 CC = arm-none-eabi-gcc
 AS = arm-none-eabi-gcc -x assembler-with-cpp
 CP = arm-none-eabi-objcopy

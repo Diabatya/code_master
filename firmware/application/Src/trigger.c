@@ -232,12 +232,11 @@ static void append_flex(void)
    * мастер-копия в ОЗУ не нужна (RAM почти исчерпана кольцевыми
    * буферами CAN). */
   s_count = s_user_count;
-  uint32_t base = 0U;
   uint32_t len = 0U;
-  if (!Storage_FlexPayload(&base, &len) || len < 12U) {
+  const uint8_t *p = Storage_FlexPayload(&len);
+  if (p == NULL || len < 12U) {
     return;
   }
-  const uint8_t *p = (const uint8_t *)base;
   if (p[0] != 'F' || p[1] != 'L' || p[2] != 'X' || p[3] != 'B'
       || p[4] != 1U) {
     return; /* блог старого приложения — чистый JSON без записей */
@@ -1006,14 +1005,24 @@ static uint8_t fire_byte_compared(const trigger_t *t, uint8_t is_src, uint8_t i)
 
 /* «Кол-во сработок до смены DATA»: запоминает содержимое кадра на
  * уровне ID-фильтра; при смене DATA защёлка лимита сбрасывается —
- * триггер снова исполняет до rx/src_fire_limit сработок. Вызывается
- * только когда соответствующий лимит != 0. */
+ * триггер снова исполняет до rx/src_fire_limit сработок. Для
+ * пользовательских триггеров вызывается только когда лимит != 0; для
+ * записей ГЛ (хвост списка) — всегда: запомненная DATA нужна ещё и
+ * для подавления повторного кадра во время отработки.
+ * full_data=1 (записи ГЛ): «смена DATA» — любой байт кадра, как в
+ * _event_fired на ПК (сравнение pad_8 целиком); wildcard-позиции
+ * фильтра на ПК сменой тоже считаются. full_data=0 — только байты,
+ * значимые в маске фильтра (семантика триггеров). */
 static void fire_track(fire_state_t *st, const can_frame_t *frame,
-                       const trigger_t *t, uint8_t is_src)
+                       const trigger_t *t, uint8_t is_src,
+                       uint8_t full_data)
 {
   uint8_t dlc = frame->dlc > 8U ? 8U : frame->dlc;
   uint8_t changed = (uint8_t)(!st->have || st->last_dlc != dlc);
-  if (changed == 0U) {
+  if (changed == 0U && full_data != 0U) {
+    changed = (uint8_t)(memcmp(st->last, frame->data, dlc) != 0);
+  }
+  if (changed == 0U && full_data == 0U) {
     for (uint8_t i = 0; i < 8U; i++) {
       if (fire_byte_compared(t, is_src, i) == 0U) {
         continue;
@@ -1039,6 +1048,16 @@ static void fire_track(fire_state_t *st, const can_frame_t *frame,
     st->count = 0U;
     st->suppress = 0U;
   }
+}
+
+/* Кадр побайтово совпадает с последним, взведшим запись (pad_8-
+ * семантика ПК: байты за DLC нулевые, разная DLC — другая DATA). */
+static uint8_t fire_same_data(const fire_state_t *st,
+                              const can_frame_t *frame)
+{
+  uint8_t dlc = frame->dlc > 8U ? 8U : frame->dlc;
+  return (uint8_t)(st->have != 0U && st->last_dlc == dlc
+                   && memcmp(st->last, frame->data, dlc) == 0);
 }
 
 static void arm_response(uint8_t index, const trigger_t *t, uint8_t echo)
@@ -1114,7 +1133,7 @@ void Trigger_OnFrame(const can_frame_t *frame)
         && !(frame->echo != 0U && (t->src_flags & TRIGGER_F_MUTE_ECHO) != 0U)
         && src_id_matches(t, frame)) {
       if (t->src_fire_limit != 0U) {
-        fire_track(&s_src_state[i], frame, t, 1U);
+        fire_track(&s_src_state[i], frame, t, 1U, 0U);
       }
       if (s_src_state[i].suppress == 0U && src_range_matches(t, frame)) {
         s_cache[i] = *frame;
@@ -1148,11 +1167,58 @@ void Trigger_OnFrame(const can_frame_t *frame)
         || !rx_header_matches(t, frame)) {
       continue;
     }
-    if (t->rx_fire_limit != 0U) {
-      fire_track(&s_rx_state[i], frame, t, 0U);
+    if (i >= s_user_count) {
+      /* Запись, скомпилированная из программы ГЛ (хвост списка —
+       * записей пользовательских триггеров не касается). Порядок
+       * повторяет _event_fired на ПК:
+       * 1) «смена DATA» считается по всем 8 байтам кадра — ПК
+       *    сравнивает pad_8 целиком, а не только masked-позиции,
+       *    иначе лимит сработок не сбрасывался бы там, где ПК
+       *    запускает программу заново;
+       * 2) запоминается только последний ПОЛНОСТЬЮ совпавший кадр
+       *    (ПК обновляет last после _frame_event_matches) — кадр с
+       *    тем же ID, но не подходящей DATA лимит не сбрасывает;
+       * 3) повторный кадр с той же DATA, пока программа занята
+       *    (задержка/повторы), на ПК подавляется (_rule_busy —
+       *    «хвост старой команды»), а arm_response здесь молча
+       *    перезаписал бы pending и начал последовательность
+       *    заново. Пропускаем такой кадр; кадр с новой DATA —
+       *    новая команда, как на ПК. */
+      if (s_pending[i].armed != 0U
+          && fire_same_data(&s_rx_state[i], frame)) {
+        continue;
+      }
+      if (!rx_data_matches(t, frame)) {
+        continue;
+      }
+      fire_track(&s_rx_state[i], frame, t, 0U, 1U);
+      if (s_rx_state[i].suppress != 0U) {
+        continue;
+      }
+    } else {
+      if (t->rx_fire_limit != 0U) {
+        fire_track(&s_rx_state[i], frame, t, 0U, 0U);
+      }
+      if (s_rx_state[i].suppress != 0U || !rx_data_matches(t, frame)) {
+        continue;
+      }
     }
-    if (s_rx_state[i].suppress != 0U || !rx_data_matches(t, frame)) {
-      continue;
+    if (i >= s_user_count && s_pending[i].armed != 0U) {
+      /* Программа ГЛ занята, но DATA новая — на ПК это «новая
+       * команда»: отложенное действие не затирается (там каждое
+       * срабатывание — своя отложенная отправка), а у нас ячейка
+       * pending одна. Досылаем взведённую сейчас — send_response
+       * для X-подстановки ещё видит ЕЁ кадр события в s_cache[i]
+       * (обновление кэша ниже по коду ещё не выполнено), затем
+       * вооружаем новую последовательность. Число отправок как на
+       * ПК; различие только в том, что невышедшие повторы старой
+       * команды схлопываются в одну досылку. */
+      const trigger_t *pt = &s_triggers[s_pending[i].trigger_index];
+      uint8_t reps = s_pending[i].remaining;
+      while (reps > 0U && send_response(pt, i, s_pending[i].echo)) {
+        reps--;
+      }
+      s_pending[i].armed = 0U;
     }
     if (t->rx_flags & TRIGGER_F_TX_EVENT_DATA) {
       /* Запись ГЛ с подстановкой «X из события»: кадр, взведший

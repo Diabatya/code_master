@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from core.trigger_protocol import pack_trigger
+from core.trigger_protocol import TRIGGER_SIZE, pack_trigger
 from models.utils import hex_to_int
 
 FLEX_BLOB_MAGIC = b"FLXB"
@@ -43,10 +43,10 @@ FLEX_MAX_RECORDS = 16  # должен совпадать с trigger.h
 _FLXB_HEADER_SIZE = 12
 
 # Варианты событий/действий, которые умеет движок триггеров.
-_COMPILABLE_EVENTS = {"frame", "power"}
 _EVENT_NONE = "none"
 _EVENT_FRAME = "frame"
 _EVENT_POWER = "power"
+_EVENT_PROGRAM = "program"
 _ACT_FRAME = "frame"
 _COND_NONE = "none"
 
@@ -97,10 +97,15 @@ def _event_to_rx(event: dict[str, Any]) -> dict[str, Any] | None:
     # Канал события: 0=CAN1, 1=CAN2, 2=любой — None/прочерк → «любой»
     # («0 or 2» здесь ошибочно превращал бы CAN1 в «любой»).
     ch = event.get("channel", 2)
+    # «Кол-во сработок до смены DATA»: на ПК 0/1 — «без ограничения»
+    # (_event_fired: limit > 1), а старые конфиги писали 1 — передача
+    # 1 в rx_fire_limit запирала бы запись на камне после первой
+    # сработки. Нормализуем: ограничением считается только >1.
+    fire_limit = int(event.get("fire_limit", 0) or 0)
     rx_flags_extra = {
         # ПК не реагирует на TX-эхо — на камне то же через MUTE_ECHO.
         "rx_listen_echo": False,
-        "rx_fire_limit": int(event.get("fire_limit", 0) or 0) & 0xFFFF,
+        "rx_fire_limit": (fire_limit if fire_limit > 1 else 0) & 0xFFFF,
     }
     return {
         "rx_channel": (2 if ch is None else int(ch)) & 0xFF,
@@ -174,6 +179,57 @@ def _rule_parts(rule: dict[str, Any]) -> tuple[list, list, list]:
     return events, conditions, actions
 
 
+def _rx_overlap(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Могут ли два скомпилированных события сработать на одном кадре
+    (или на одном старте для «Включение устройства»).
+
+    На ПК события программы объединены по ИЛИ с break — кадр,
+    совпавший с двумя событиями, исполняет действия один раз. На камне
+    каждое событие — отдельная запись trigger_t: пересекающиеся
+    фильтры дали бы двойную отправку, поэтому такие программы не
+    компилируются и остаются на исполнении приложения."""
+    a_boot = bool(a.get("rx_fire_on_boot"))
+    b_boot = bool(b.get("rx_fire_on_boot"))
+    if a_boot or b_boot:
+        # «Включение устройства» вооружается при старте: два power-
+        # события сработали бы оба. power+frame не пересекаются —
+        # кадр шины boot-запись не возбуждает.
+        return a_boot and b_boot
+    # Канал: 2 = любой — пересекается с любым.
+    if (
+        a["rx_channel"] != 2
+        and b["rx_channel"] != 2
+        and a["rx_channel"] != b["rx_channel"]
+    ):
+        return False
+    if a["rx_extended"] != b["rx_extended"]:
+        return False
+    if (a["rx_id"] & a["rx_id_mask"]) != (b["rx_id"] & b["rx_id_mask"]):
+        return False
+    # rx_rtr: 0 = любой кадр, 1 = только RTR, 2 = только данные.
+    if a["rx_rtr"] and b["rx_rtr"] and a["rx_rtr"] != b["rx_rtr"]:
+        return False
+    # rx_dlc: 0 = любая длина.
+    if a["rx_dlc"] and b["rx_dlc"] and a["rx_dlc"] != b["rx_dlc"]:
+        return False
+    # DATA: позиции, заданные в обоих фильтрах, должны совпадать.
+    # В RTR-режиме данные не сравниваются вовсе.
+    if a["rx_rtr"] != 1 and b["rx_rtr"] != 1:
+        for i in range(8):
+            both = a["rx_data_mask"][i] & b["rx_data_mask"][i]
+            if both and (a["rx_data"][i] & both) != (b["rx_data"][i] & both):
+                return False
+    return True
+
+
+def _rule_events(rule: dict[str, Any]) -> list:
+    """События правила с учётом легаси-формата (одиночный «event»)."""
+    events = rule.get("events")
+    if not isinstance(events, list) or not events:
+        events = [rule.get("event") or {}]
+    return events
+
+
 def compile_rule(rule: dict[str, Any]) -> list[dict[str, Any]] | None:
     """Программа ГЛ → список записей trigger_t (словари для pack_trigger).
 
@@ -200,6 +256,14 @@ def compile_rule(rule: dict[str, Any]) -> list[dict[str, Any]] | None:
             rx_parts.append((idx, rx))
     if not rx_parts:
         return []
+    # Пересекающиеся события: ИЛИ-семантика ПК (break на первом
+    # совпавшем) в записях не выражается — на камне сработали бы обе
+    # записи и действия исполнились бы дважды. Такая программа
+    # остаётся на ПК (ревью CM-03).
+    for i in range(len(rx_parts)):
+        for j in range(i + 1, len(rx_parts)):
+            if _rx_overlap(rx_parts[i][1], rx_parts[j][1]):
+                return None
     # rx_cond_idx упаковывается в rx_flags битах 2..4 — максимум 7.
     if max(idx for idx, _ in rx_parts) > 7:
         return None
@@ -295,15 +359,37 @@ def compile_rules(
 
     Записи укладываются до FLEX_MAX_RECORDS; программа, не влезшая
     целиком, остаётся на исполнении приложением."""
-    records: list[dict[str, Any]] = []
-    managed: list[bool] = []
+    per_rule: list[list[dict[str, Any]] | None] = []
     for rule in rules:
         try:
-            rule_records = compile_rule(rule)
+            per_rule.append(compile_rule(rule))
         except Exception:  # noqa: BLE001
             # Битый элемент конфига не должен срывать запись всего
             # блоба — программа остаётся на исполнении приложения.
-            rule_records = None
+            per_rule.append(None)
+
+    # Событие «программа <имя> начала работать» существует только в
+    # рантайме ПК: программа, ушедшая на камень, стартует без уведомления
+    # приложения — слушающая её программа никогда бы не сработала.
+    # Целевая программа вместе со слушателем остаётся на ПК
+    # (ревью CM-05).
+    listened = {
+        str(event.get("var", "")).strip()
+        for rule in rules
+        for event in _rule_events(rule)
+        if isinstance(event, dict) and event.get("type") == _EVENT_PROGRAM
+    }
+    if listened:
+        for i, rule in enumerate(rules):
+            if (
+                per_rule[i] is not None
+                and str(rule.get("title", "")).strip() in listened
+            ):
+                per_rule[i] = None
+
+    records: list[dict[str, Any]] = []
+    managed: list[bool] = []
+    for rule, rule_records in zip(rules, per_rule, strict=False):
         if rule_records is None:
             managed.append(False)
             continue
@@ -337,20 +423,55 @@ def build_flex_blob(rules: list[dict[str, Any]]) -> bytes:
     return bytes(packed)
 
 
-def extract_flex_json(blob: bytes) -> bytes:
-    """JSON-часть блоба FLXH: из контейнера FLXB или весь блоб,
-    если он старого (чисто JSON) формата."""
+def parse_flex_blob(blob: bytes) -> tuple[bytes, int] | None:
+    """Разбор контейнера FLXB → (JSON-часть, число записей).
+
+    None — блоб не FLXB либо заголовок/границы повреждены: по такому
+    блобу нельзя считать программы исполняемыми камнем. Магия «FLXB»
+    сама по себе не доказывает валидность исполняемой части — версия
+    контейнера, длина JSON, число записей и границы проверяются
+    (ревью CM-05)."""
     if (
         not blob
         or len(blob) < _FLXB_HEADER_SIZE
         or blob[:4] != FLEX_BLOB_MAGIC
+        or blob[4] != FLEX_BLOB_VERSION
     ):
-        return blob
+        return None
+    count = blob[5]
+    if count > FLEX_MAX_RECORDS:
+        return None
     json_len = int.from_bytes(blob[8:12], "little")
-    end = _FLXB_HEADER_SIZE + json_len
-    if end > len(blob):
+    rec_off = _FLXB_HEADER_SIZE + json_len
+    if (
+        json_len == 0
+        or rec_off > len(blob)
+        or len(blob) - rec_off < count * TRIGGER_SIZE
+    ):
+        return None
+    return blob[_FLXB_HEADER_SIZE:rec_off], count
+
+
+def flexb_header_valid(header: bytes, blob_len: int) -> bool:
+    """Проверка FLXB по первым байтам блоба (storage_peek): магия,
+    версия, число записей и длина JSON согласуются с полной длиной
+    области — без вычитки всего блоба."""
+    if len(header) < _FLXB_HEADER_SIZE:
+        return False
+    fake_len = max(int(blob_len), _FLXB_HEADER_SIZE)
+    fake = bytes(header[:_FLXB_HEADER_SIZE]) + b"\x00" * (
+        fake_len - _FLXB_HEADER_SIZE
+    )
+    return parse_flex_blob(fake) is not None
+
+
+def extract_flex_json(blob: bytes) -> bytes:
+    """JSON-часть блоба FLXH: из контейнера FLXB или весь блоб,
+    если он старого (чисто JSON) формата."""
+    parsed = parse_flex_blob(blob)
+    if parsed is None:
         return blob
-    return blob[_FLXB_HEADER_SIZE:end]
+    return parsed[0]
 
 
 def managed_flags(rules: list[dict[str, Any]], protocol: int) -> list[bool]:
