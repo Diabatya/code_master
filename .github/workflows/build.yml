@@ -4,9 +4,38 @@ on:
   push:
     branches: [ main ]
     tags: [ 'v*' ]
+  pull_request:
   workflow_dispatch:
 
 jobs:
+  test-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install Qt system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 \
+            libdbus-1-3 libfontconfig1 libglib2.0-0
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run Python tests (Qt offscreen, изолированные XDG)
+        env:
+          QT_QPA_PLATFORM: offscreen
+          XDG_CONFIG_HOME: ${{ runner.temp }}/xdg-config
+          XDG_DATA_HOME: ${{ runner.temp }}/xdg-data
+          XDG_CACHE_HOME: ${{ runner.temp }}/xdg-cache
+        run: |
+          mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
+          python -m pytest -q
+      - name: Lint
+        run: ruff check .
+      - name: Compile check
+        run: python -m compileall -q core ui models
+
   build-windows:
     runs-on: windows-latest
     steps:
@@ -113,6 +142,15 @@ jobs:
             firmware/application/tests/test_device_config.c \
             -o /tmp/test_device_config
           /tmp/test_device_config
+          cc -I firmware/application/tests/stubs -I firmware/application/Inc \
+            firmware/application/tests/test_event_log_ring.c \
+            -o /tmp/test_event_log_ring
+          /tmp/test_event_log_ring
+          cc -I firmware/application/tests/stubs -I firmware/application/Inc \
+            -I firmware/application/Src \
+            firmware/application/tests/test_trigger_flex.c \
+            -o /tmp/test_trigger_flex
+          /tmp/test_trigger_flex
       - name: Verify application metadata
         run: |
           python3 -m pip install intelhex
@@ -146,7 +184,7 @@ jobs:
           path: firmware-artifacts
 
   release:
-    needs: [build-windows, build-macos, build-linux, build-firmware]
+    needs: [test-python, build-windows, build-macos, build-linux, build-firmware]
     runs-on: ubuntu-latest
     permissions:
       contents: write

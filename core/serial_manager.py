@@ -10,8 +10,6 @@ import time
 from PySide6.QtCore import QObject, QThread, Signal, QTimer
 
 from core.can_protocol import (
-    CMD_AUTO_SPEED,
-    CMD_AUTO_SPEED_RESP,
     CMD_CAN_MODE,
     CMD_CAN_SPEED,
     CMD_CAN_STATS,
@@ -94,6 +92,13 @@ class _PortWriteTimeout(TimeoutError):
     повторная попытка бессмысленна, а дескриптор нужно закрывать и
     переподключаться немедленно.
     """
+
+
+class StorageCommitUnknown(TimeoutError):
+    """Ответ на CMD_STORAGE_COMMIT потерян: исход записи неизвестен —
+    устройство могло применить блоб. Нельзя ни считать запись
+    успешной, ни вслепую возвращать исполнение на ПК: вызывающий код
+    обязан определиться вычиткой области (ревью CM-02)."""
 
 
 SerialPort = serial.Serial | FakeSerial
@@ -1057,7 +1062,16 @@ class SerialManager(QObject):
             self.request_control(CMD_STORAGE_DATA, payload)
             offset += len(chunk)
         crc = zlib.crc32(data) & 0xFFFFFFFF
-        self.request_control(CMD_STORAGE_COMMIT, crc.to_bytes(4, "little"))
+        try:
+            self.request_control(CMD_STORAGE_COMMIT, crc.to_bytes(4, "little"))
+        except TimeoutError as exc:
+            # COMMIT — единственный шаг, после которого «нет ответа»
+            # ещё может означать «записано»: данные ушли целиком, а
+            # прошивка могла применить их до потери ответа.
+            raise StorageCommitUnknown(
+                "Ответ на CMD_STORAGE_COMMIT потерян — исход записи "
+                "блоба неизвестен"
+            ) from exc
         return True
 
     def storage_clear(self, region: int) -> bool:
@@ -1589,40 +1603,20 @@ class SerialManager(QObject):
                 self._closing = False
 
     def auto_detect_can_speed(self) -> int | None:
-        """Останавливает чтение, отправляет 0xA0, ждёт 0xA1 с определённой скоростью.
+        """Автоопределение скорости CAN — не поддерживается.
 
-        Returns:
-            Скорость CAN в кбит/с или None.
-        """
-        with self._lock:
-            if self._port is None or not self.is_open():
-                return None
-            self._closing = True
-            self._stop_reader()
-            try:
-                self._port.reset_input_buffer()
-                self._port.write(bytes([CMD_AUTO_SPEED]))
-                deadline = time.time() + 3.0
-                buffer = bytearray()
-                while time.time() < deadline:
-                    chunk = self._port.read(256)
-                    if chunk:
-                        buffer.extend(chunk)
-                        if _scan_for_response(buffer, CMD_AUTO_SPEED_RESP) and len(buffer) >= 3:
-                            speed = (buffer[1] << 8) | buffer[2]
-                            self._config.set("can_speed_auto", True)
-                            self.can_speed_detected.emit(speed)
-                            logger.info("Скорость CAN определена: %d кбит/с", speed)
-                            return speed
-                    time.sleep(0.01)
-                logger.info("Автоопределение скорости не дало результата")
-                return None
-            except Exception as exc:  # noqa: BLE001
-                logger.error("Ошибка автоопределения скорости: %s", exc)
-                return None
-            finally:
-                self._start_reader()
-                self._closing = False
+        CMD_AUTO_SPEED (0xA0) в актуальной прошивке возвращает текущую
+        НАСТРОЕННУЮ скорость канала (CanBridge_GetBaud), а не
+        измерение по шине — ответ нельзя признавать результатом
+        автоопределения. Метод всегда возвращает None: auto-флаг и
+        сигнал detected не выставляются, чтобы по ложному «измерению»
+        не перезаписали скорость, заданную вручную (ревью CM-07).
+        Аппаратный перебор скоростей в этой задаче не реализован."""
+        logger.info(
+            "Автоопределение скорости CAN не поддерживается прошивкой "
+            "— укажите скорость вручную"
+        )
+        return None
 
     def _stop_reader(self) -> None:
         """Останавливает поток чтения и ждёт его завершения."""

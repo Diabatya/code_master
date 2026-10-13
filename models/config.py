@@ -211,15 +211,30 @@ class Config:
                     VERSION,
                 )
                 self._data.update(loaded)
+                self._normalize_loaded()
                 self.save()
                 return
             self._data.update(loaded)
+            self._normalize_loaded()
 
-    def save(self) -> None:
+    def _normalize_loaded(self) -> None:
+        """Устаревшие значения загруженной конфигурации.
+
+        can_speed_auto=True ставила старая автоскорость: ответ
+        CMD_AUTO_SPEED прошивки — текущая настроенная скорость, а не
+        измерение, поэтому флаг никогда не означал подтверждённое
+        автоопределение (ревью CM-07)."""
+        if self._data.get("can_speed_auto"):
+            self._data["can_speed_auto"] = False
+
+    def save(self) -> bool:
         """Атомарно сохраняет текущие настройки в config.json.
 
         Пишем во временный файл и подменяем целевой через os.replace: при сбое
         посреди записи прежний config.json остаётся целым, а не обрезается.
+        False — файл записать не удалось (ошибка залогирована):
+        вызывающий не должен снимать dirty-индикаторы и подтверждать
+        сохранение (ревью CM-02).
         """
         tmp_path = self._file_path.with_name(self._file_path.name + ".tmp")
         try:
@@ -232,6 +247,8 @@ class Config:
             logger.error("Ошибка сохранения конфигурации: %s", exc)
             with contextlib.suppress(OSError):
                 tmp_path.unlink(missing_ok=True)
+            return False
+        return True
 
     _BACKUP_KEEP = 10
 

@@ -358,3 +358,48 @@ def unpack_trigger(payload: bytes) -> dict[str, Any]:
     }
     result.update(tail)
     return result
+
+
+def record_fields_valid(payload: bytes) -> bool:
+    """Запись trigger_t v3 (90 Б) по контракту прошивки
+    (record_valid_at + trigger_fields_valid в trigger.c):
+    размер, магия, версия/размер формата, CRC8 и ограничения полей.
+
+    Используется валидацией контейнера FLXB — ПК и прошивка обязаны
+    принимать/отвергать записи одинаково, иначе программа могла бы
+    считаться исполняемой камнем, но молча отбрасываться
+    (ревью CM-R3)."""
+    if len(payload) != TRIGGER_SIZE:
+        return False
+    try:
+        t = unpack_trigger(payload)
+    except ValueError:
+        return False
+    # Сырые байты флагов (unpack_trigger часть битов разворачивает,
+    # неизвестные биты отбрасывает — проверяем маску по оригиналу).
+    rx_flags = payload[83]
+    src_flags = payload[86]
+    if rx_flags & ~(
+        TRIGGER_F_MUTE_ECHO | TRIGGER_F_FIRE_ON_BOOT
+        | TRIGGER_F_COND_MASK | TRIGGER_F_TX_EVENT_DATA
+    ):
+        return False
+    if src_flags & ~(TRIGGER_F_MUTE_ECHO | TRIGGER_F_CACHE_ONLY):
+        return False
+    if not (
+        t["rx_channel"] <= 2 and t["tx_channel"] <= 2
+        and t["rx_extended"] <= 1 and t["tx_extended"] <= 1
+        and t["rx_dlc"] <= 8 and t["tx_dlc"] <= 8
+        and t["tx_rtr"] <= 1 and t["rx_rtr"] <= 2
+        and t["cache_enabled"] <= 1
+        and t["src_channel"] <= 2 and t["src_extended"] <= 1
+        and t["src_dlc"] <= 8
+    ):
+        return False
+    rx_max = 0x1FFFFFFF if t["rx_extended"] else 0x7FF
+    tx_max = 0x1FFFFFFF if t["tx_extended"] else 0x7FF
+    src_max = 0x1FFFFFFF if t["src_extended"] else 0x7FF
+    return (
+        t["rx_id"] <= rx_max and t["rx_id_mask"] <= rx_max
+        and t["tx_id"] <= tx_max and t["src_id"] <= src_max
+    )

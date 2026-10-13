@@ -32,15 +32,20 @@ static uint32_t s_generation;   /* generation последнего коммит�
 
 /* Кэш режима «автоматическая запись DATA»: последний кадр, попавший в
  * фильтр «Откуда читаем». Хранится в RAM, не во Flash — перезапись
- * страницы на каждый кадр исчерпала бы ресурс стираний (~10k циклов). */
-static can_frame_t s_cache[TRIGGER_ALL_RECORDS];
-static uint8_t s_cache_valid[TRIGGER_ALL_RECORDS];
+ * страницы на каждый кадр исчерпала бы ресурс стираний (~10k циклов).
+ * Только пользовательские записи [0..TRIGGER_MAX_RECORDS): записи ГЛ
+ * кэшем не пользуются — снимок DATA события для X-подстановки хранит
+ * сама очередь запусков (s_flex_queue). */
+static can_frame_t s_cache[TRIGGER_MAX_RECORDS];
+static uint8_t s_cache_valid[TRIGGER_MAX_RECORDS];
 
 /* Pending deferred responses (delay_ms > 0 or repeat count > 1). A
  * fixed-size list is enough since there are at most TRIGGER_COUNT
  * triggers and each can have at most one response in flight at a time
  * (a new match on the same trigger while one is already pending simply
- * re-arms it). */
+ * re-arms it). Только пользовательские записи — у записей ГЛ каждое
+ * совпадение события ставит ОТДЕЛЬНУЮ серию в s_flex_queue (на ПК
+ * _send_frame/QTimer планирует каждый запуск независимо, ревью CM-R1). */
 typedef struct {
   uint8_t  armed;
   uint8_t  trigger_index;
@@ -66,9 +71,32 @@ typedef struct {
  * воскресавшим после каждого ребута. */
 #define TRIGGER_STAGE_TIMEOUT_MS 15000U
 
-static pending_response_t s_pending[TRIGGER_ALL_RECORDS];
+static pending_response_t s_pending[TRIGGER_MAX_RECORDS];
+
+/* Очередь запусков записей ГЛ (хвост списка): каждый элемент — одна
+ * серия отправок с собственным сроком, числом повторов, интервалом и
+ * снимком DATA кадра-события для X-подстановки. На ПК то же самое
+ * делает множество независимых QTimer; здесь глубина ограничена RAM —
+ * переполнение не теряет команду молча: серия отбрасывается с учётом
+ * в s_dropped_count (ревью CM-R1). */
+typedef struct {
+  uint32_t fire_at_tick;   /* ПЛАНОВЫЙ срок следующей отправки серии —
+                            * ретраи его не трогают: ближайшая попытка
+                            * = fire_at_tick + retries*RETRY_DELAY
+                            * (ревью CM-R8: отказ не сдвигает серию) */
+  uint8_t  data[8];        /* pad-8 снимок DATA кадра-события */
+  uint16_t interval_ms;
+  uint8_t  trigger_index;
+  uint8_t  remaining;      /* оставшиеся отправки серии */
+  uint8_t  echo;
+  uint8_t  retries;        /* попытки отправки при занятых TX-ящиках */
+  uint8_t  used;
+} flex_firing_t;
+static flex_firing_t s_flex_queue[FLEX_QUEUE_DEPTH];
+
 static uint32_t s_fired_count;
-static uint32_t s_dropped_count; /* отправки, исчерпавшие ретраи */
+static uint32_t s_dropped_count; /* отправки, исчерпавшие ретраи или
+                                  * потерянные при переполнении очереди */
 static uint32_t s_max_lateness_ms;
 static uint8_t s_flash_valid_count; /* включённых записей, прочитанных
   из Flash при старте — диагностика «триггеры пропали после питания» */
@@ -84,8 +112,10 @@ typedef struct {
   uint8_t  last_dlc;
   uint8_t  last[8];
 } fire_state_t;
-static fire_state_t s_rx_state[TRIGGER_ALL_RECORDS];   /* условие приёма */
-static fire_state_t s_src_state[TRIGGER_ALL_RECORDS];  /* источник кэша */
+static fire_state_t s_rx_state[TRIGGER_ALL_RECORDS];   /* условие приёма
+                                 * (записям ГЛ нужен трекинг смены DATA) */
+static fire_state_t s_src_state[TRIGGER_MAX_RECORDS];  /* источник кэша —
+                                 * только пользовательские записи */
 
 static uint8_t trigger_fields_valid(const trigger_t *trig);
 static uint8_t erase_pages(uint32_t from, uint32_t to);
@@ -230,14 +260,15 @@ static void append_flex(void)
 {
   /* Хвост списка пересобирается прямо из Flash — отдельная
    * мастер-копия в ОЗУ не нужна (RAM почти исчерпана кольцевыми
-   * буферами CAN). */
+   * буферами CAN). Очередь запусков старых записей не переживает
+   * пересборку: индексы хвоста могли сместиться. */
   s_count = s_user_count;
-  uint32_t base = 0U;
+  memset(s_flex_queue, 0, sizeof(s_flex_queue));
   uint32_t len = 0U;
-  if (!Storage_FlexPayload(&base, &len) || len < 12U) {
+  const uint8_t *p = Storage_FlexPayload(&len);
+  if (p == NULL || len < 12U) {
     return;
   }
-  const uint8_t *p = (const uint8_t *)base;
   if (p[0] != 'F' || p[1] != 'L' || p[2] != 'X' || p[3] != 'B'
       || p[4] != 1U) {
     return; /* блог старого приложения — чистый JSON без записей */
@@ -245,36 +276,52 @@ static void append_flex(void)
   uint8_t count = p[5];
   uint32_t json_len = (uint32_t)p[8] | ((uint32_t)p[9] << 8)
                       | ((uint32_t)p[10] << 16) | ((uint32_t)p[11] << 24);
-  uint32_t rec_off = 12U + json_len;
-  if (count > FLEX_MAX_RECORDS) {
-    count = FLEX_MAX_RECORDS;
-  }
-  if ((uint64_t)rec_off + (uint64_t)count * sizeof(trigger_t)
-      > (uint64_t)len) {
+  /* Точный контракт ИСПОЛНЯЕМОГО хвоста, одинаковый с ПК (ревью
+   * CM-R3/CM-R6): count ≤ FLEX_MAX_RECORDS (отказ, не обрезание),
+   * json_len > 0 и 12 + json_len + count*sizeof(trigger_t) == len
+   * ровно — без хвоста и без недостачи. Содержимое JSON прошивка
+   * НЕ проверяет и не использует — контракт исполнителя определяется
+   * только геометрией и записями; валидность JSON-конфигурации —
+   * зона ПК (см. core/flex_compiler.py). Сложение защищено: json_len
+   * сравнивается с len-12 ДО вычисления смещения — иначе при
+   * json_len≈0xFFFFFFFF rec_off переполнялся в 32 битах и
+   * «проверка границ» принимала мусор (ревью CM-R6). */
+  if (count > FLEX_MAX_RECORDS || json_len == 0U || json_len > len - 12U) {
     return;
+  }
+  uint32_t rec_off = 12U + json_len;
+  if ((uint32_t)count * sizeof(trigger_t) != len - rec_off) {
+    return;
+  }
+  /* Валидация ВСЕХ записей до загрузки: одна битая запись (CRC/поля)
+   * отклоняет контейнер целиком — иначе часть программ исполнялась бы
+   * МК, а ПК считал бы managed по правилам всё: искомые программы
+   * оказались бы мёртвыми либо исполнялись бы вдвойне. ПК валидирует
+   * тем же набором проверок (core/flex_compiler.py::parse_flex_blob). */
+  for (uint8_t i = 0U; i < count; i++) {
+    trigger_t probe;
+    if (!load_record(p + rec_off + (uint32_t)i * sizeof(trigger_t),
+                     sizeof(trigger_t), &probe)) {
+      return;
+    }
   }
   for (uint8_t i = 0U;
        i < count && s_count < TRIGGER_ALL_RECORDS; i++) {
-    if (load_record(p + rec_off + (uint32_t)i * sizeof(trigger_t),
-                    sizeof(trigger_t), &s_triggers[s_count])) {
-      s_count++;
-    }
+    memcpy(&s_triggers[s_count],
+           p + rec_off + (uint32_t)i * sizeof(trigger_t),
+           sizeof(trigger_t));
+    s_count++;
   }
 }
 
 void Trigger_ReloadFlex(void)
 {
+  /* append_flex сам сбрасывает очередь запусков; защёлки «смены DATA»
+   * хвоста относились к прежним записям — чистим их диапазон.
+   * s_pending/s_cache/s_src_state хвост не используют — пользовательская
+   * часть списка тут не трогается вообще. */
   append_flex();
-  /* Отложенные отправки/защёлки хвоста относились к прежним записям
-   * ГЛ — сбрасываем только их диапазон, пользовательские записи
-   * (низ списка) не трогаем. */
-  memset(&s_pending[s_user_count], 0,
-         sizeof(pending_response_t) * (TRIGGER_ALL_RECORDS - s_user_count));
-  memset(&s_cache_valid[s_user_count], 0,
-         TRIGGER_ALL_RECORDS - (uint32_t)s_user_count);
   memset(&s_rx_state[s_user_count], 0,
-         sizeof(fire_state_t) * (TRIGGER_ALL_RECORDS - s_user_count));
-  memset(&s_src_state[s_user_count], 0,
          sizeof(fire_state_t) * (TRIGGER_ALL_RECORDS - s_user_count));
 }
 
@@ -1006,15 +1053,34 @@ static uint8_t fire_byte_compared(const trigger_t *t, uint8_t is_src, uint8_t i)
 
 /* «Кол-во сработок до смены DATA»: запоминает содержимое кадра на
  * уровне ID-фильтра; при смене DATA защёлка лимита сбрасывается —
- * триггер снова исполняет до rx/src_fire_limit сработок. Вызывается
- * только когда соответствующий лимит != 0. */
+ * триггер снова исполняет до rx/src_fire_limit сработок. Для
+ * пользовательских триггеров вызывается только когда лимит != 0; для
+ * записей ГЛ (хвост списка) — всегда (трекинг смены DATA для лимита
+ * сработок).
+ * full_data=1 (записи ГЛ): «смена DATA» — сравнение НОРМАЛИЗОВАННЫХ
+ * восьми байт кадра, как _pad_8 на ПК — байты за пределами DLC
+ * считаются нулевыми, и сама DLC сменой DATA не является
+ * (11 / 11 00 — одинаковые). full_data=0 — байты, значимые в маске
+ * фильтра, плюс DLC (семантика пользовательских триггеров не
+ * меняется — ревью CM-R2). */
 static void fire_track(fire_state_t *st, const can_frame_t *frame,
-                       const trigger_t *t, uint8_t is_src)
+                       const trigger_t *t, uint8_t is_src,
+                       uint8_t full_data)
 {
   uint8_t dlc = frame->dlc > 8U ? 8U : frame->dlc;
-  uint8_t changed = (uint8_t)(!st->have || st->last_dlc != dlc);
-  if (changed == 0U) {
+  uint8_t changed = (uint8_t)(st->have == 0U);
+  if (changed == 0U && full_data != 0U) {
     for (uint8_t i = 0; i < 8U; i++) {
+      uint8_t cur = (i < dlc) ? frame->data[i] : 0U;
+      if (cur != st->last[i]) {
+        changed = 1U;
+        break;
+      }
+    }
+  }
+  if (changed == 0U && full_data == 0U) {
+    changed = (uint8_t)(st->last_dlc != dlc);
+    for (uint8_t i = 0; changed == 0U && i < 8U; i++) {
       if (fire_byte_compared(t, is_src, i) == 0U) {
         continue;
       }
@@ -1057,8 +1123,12 @@ static void arm_response(uint8_t index, const trigger_t *t, uint8_t echo)
  * tx_* записи. tx_channel хранится 0-based (индекс комбобокса UI), а
  * CanBridge_Transmit ждёт wire-нумерацию 1/2. echo — глубина TX-эха
  * исходного кадра: ответ наследует её, иначе каждый ответ начинал бы
- * цепочку заново и пинг-понг триггеров не ограничивался. */
-static uint8_t send_response(const trigger_t *t, uint8_t index, uint8_t echo)
+ * цепочку заново и пинг-понг триггеров не ограничивался.
+ * event_data — pad-8 снимок DATA кадра-события для X-подстановки
+ * (записи ГЛ берут его из элемента очереди — у каждого запуска свой
+ * кадр); NULL — читать s_cache[index] (пользовательские триггеры). */
+static uint8_t send_response(const trigger_t *t, uint8_t index,
+                             uint8_t echo, const uint8_t *event_data)
 {
   can_frame_t resp;
   if (t->cache_enabled) {
@@ -1074,12 +1144,16 @@ static uint8_t send_response(const trigger_t *t, uint8_t index, uint8_t echo)
     resp.id = t->tx_id;
     resp.dlc = t->tx_dlc;
     memcpy(resp.data, t->tx_data, 8);
-    /* ГЛ: «X»-байты ответа подставляются из кадра события — слот
-     * s_cache[index] наполнен при матче (Trigger_OnFrame). */
+    /* ГЛ: «X»-байты ответа подставляются из кадра события. */
     if (t->rx_flags & TRIGGER_F_TX_EVENT_DATA) {
+      const uint8_t *subst = event_data;
+      if (subst == NULL && index < TRIGGER_MAX_RECORDS
+          && s_cache_valid[index]) {
+        subst = s_cache[index].data;
+      }
       for (uint8_t j = 0; j < 8U; j++) {
         if (t->src_from[j] == 0xFFU) {
-          resp.data[j] = s_cache_valid[index] ? s_cache[index].data[j] : 0U;
+          resp.data[j] = (subst != NULL) ? subst[j] : 0U;
         }
       }
     }
@@ -1095,6 +1169,67 @@ static uint8_t send_response(const trigger_t *t, uint8_t index, uint8_t echo)
     sent |= CanBridge_Transmit(&resp);
   }
   return sent;
+}
+
+/* Постановка серии записи ГЛ в очередь: серия сохраняет свой срок,
+ * число повторов, интервал и снимок DATA события для X-подстановки —
+ * на ПК то же расписание дают независимые QTimer (_send_frame,
+ * delay + n*between). Переполнение → 0: серия отбрасывается с учётом
+ * в s_dropped_count — потеря диагностируется, молчаливого дропа нет
+ * (ревью CM-R1). */
+static uint8_t flex_enqueue(uint8_t index, const trigger_t *t,
+                            const uint8_t *event_data, uint8_t echo,
+                            uint32_t fire_at)
+{
+  for (uint8_t q = 0U; q < FLEX_QUEUE_DEPTH; q++) {
+    flex_firing_t *e = &s_flex_queue[q];
+    if (e->used != 0U) {
+      continue;
+    }
+    e->used = 1U;
+    e->trigger_index = index;
+    e->fire_at_tick = fire_at;
+    e->remaining = t->tx_count ? t->tx_count : 1U;
+    e->interval_ms = t->tx_interval_ms;
+    e->echo = echo;
+    e->retries = 0U;
+    if (event_data != NULL) {
+      memcpy(e->data, event_data, 8U);
+    } else {
+      memset(e->data, 0, sizeof(e->data));
+    }
+    return 1U;
+  }
+  return 0U;
+}
+
+/* Взвод запуска записи ГЛ: мгновенную отправку (delay=0, count=1)
+ * пробуем сразу — отказ ящиков ставит серию в очередь с нулевым
+ * сроком (ретраи в Trigger_Poll), остальные серии ждут свой тик. */
+static void flex_fire(uint8_t index, const trigger_t *t,
+                      const can_frame_t *frame)
+{
+  uint8_t sends = t->tx_count ? t->tx_count : 1U;
+  uint8_t ev_data[8];
+  const uint8_t *evp = NULL;
+  if (t->rx_flags & TRIGGER_F_TX_EVENT_DATA) {
+    memset(ev_data, 0, sizeof(ev_data));
+    memcpy(ev_data, frame->data,
+           frame->dlc < 8U ? frame->dlc : 8U);
+    evp = ev_data;
+  }
+  if (t->delay_ms == 0U && sends == 1U) {
+    if (send_response(t, index, frame->echo, evp)) {
+      s_fired_count++;
+      return;
+    }
+  }
+  if (!flex_enqueue(index, t, evp, frame->echo,
+                    HAL_GetTick() + t->delay_ms)) {
+    /* Очередь переполнена — серия потеряна, но не молча: считаем в
+     * dropped (Trigger_GetStats → CMD_TRIGGER_STATS на ПК). */
+    s_dropped_count += sends;
+  }
 }
 
 void Trigger_OnFrame(const can_frame_t *frame)
@@ -1114,7 +1249,7 @@ void Trigger_OnFrame(const can_frame_t *frame)
         && !(frame->echo != 0U && (t->src_flags & TRIGGER_F_MUTE_ECHO) != 0U)
         && src_id_matches(t, frame)) {
       if (t->src_fire_limit != 0U) {
-        fire_track(&s_src_state[i], frame, t, 1U);
+        fire_track(&s_src_state[i], frame, t, 1U, 0U);
       }
       if (s_src_state[i].suppress == 0U && src_range_matches(t, frame)) {
         s_cache[i] = *frame;
@@ -1148,33 +1283,56 @@ void Trigger_OnFrame(const can_frame_t *frame)
         || !rx_header_matches(t, frame)) {
       continue;
     }
-    if (t->rx_fire_limit != 0U) {
-      fire_track(&s_rx_state[i], frame, t, 0U);
-    }
-    if (s_rx_state[i].suppress != 0U || !rx_data_matches(t, frame)) {
-      continue;
-    }
-    if (t->rx_flags & TRIGGER_F_TX_EVENT_DATA) {
-      /* Запись ГЛ с подстановкой «X из события»: кадр, взведший
-       * программу, складываем в слот кэша — send_response берёт
-       * из него позиции src_from[j]==0xFF, в т.ч. для повторов.
-       * Байты за DLC кадра HAL не заполняет — там мусор стека;
-       * обнуляем, ПК-исполнение паддит недостающие байты нулями
-       * (_pad_8). */
-      s_cache[i] = *frame;
-      if (frame->dlc < 8U) {
-        memset(&s_cache[i].data[frame->dlc], 0, 8U - frame->dlc);
+    if (i >= s_user_count) {
+      /* Запись, скомпилированная из программы ГЛ (хвост списка —
+       * записей пользовательских триггеров не касается). Порядок
+       * повторяет _event_fired на ПК:
+       * 1) «смена DATA» считается по pad_8 — всем восьми нормализованным
+       *    байтам кадра (CM-R2);
+       * 2) запоминается только последний ПОЛНОСТЬЮ совпавший кадр
+       *    (ПК обновляет last после _frame_event_matches) — кадр с
+       *    тем же ID, но не подходящей DATA лимит не сбрасывает;
+       * 3) подавления «программа занята» для скомпилированных
+       *    программ НЕТ: на ПК _rule_busy растёт только от
+       *    exec_delay-отсрочки, а такие действия компилятор на МК
+       *    не отдаёт — каждый совпавший кадр ставит свою серию
+       *    отправок со своим расписанием (ревью CM-R1). */
+      if (!rx_data_matches(t, frame)) {
+        continue;
       }
-      s_cache_valid[i] = 1U;
+      fire_track(&s_rx_state[i], frame, t, 0U, 1U);
+      if (s_rx_state[i].suppress != 0U) {
+        continue;
+      }
+    } else {
+      if (t->rx_fire_limit != 0U) {
+        fire_track(&s_rx_state[i], frame, t, 0U, 0U);
+      }
+      if (s_rx_state[i].suppress != 0U || !rx_data_matches(t, frame)) {
+        continue;
+      }
     }
-    {
+    if (i >= s_user_count) {
+      flex_fire(i, t, frame);
+    } else {
+      if (t->rx_flags & TRIGGER_F_TX_EVENT_DATA) {
+        /* Запись с подстановкой «X из события»: кадр, взведший
+         * программу, складываем в слот кэша — send_response берёт
+         * из него позиции src_from[j]==0xFF. Байты за DLC кадра
+         * HAL не заполняет — там мусор стека; обнуляем (_pad_8). */
+        s_cache[i] = *frame;
+        if (frame->dlc < 8U) {
+          memset(&s_cache[i].data[frame->dlc], 0, 8U - frame->dlc);
+        }
+        s_cache_valid[i] = 1U;
+      }
       uint8_t sends = t->tx_count ? t->tx_count : 1U;
       if (t->delay_ms == 0U && sends == 1U) {
         /* Zero delay, single shot: send immediately, no need to go
          * through the pending list — keeps the "instant echo" case as
          * low-latency as possible (still bounded by
          * CanBridge_Transmit()'s own mailbox wait). */
-        if (send_response(t, i, frame->echo)) {
+        if (send_response(t, i, frame->echo, NULL)) {
           s_fired_count++;
         } else {
           /* Ящики заняты — не дропаем молча: переводим отправку на
@@ -1184,10 +1342,10 @@ void Trigger_OnFrame(const can_frame_t *frame)
       } else {
         arm_response(i, t, frame->echo);
       }
-      if (t->rx_fire_limit != 0U
-          && ++s_rx_state[i].count >= t->rx_fire_limit) {
-        s_rx_state[i].suppress = 1U;
-      }
+    }
+    if (t->rx_fire_limit != 0U
+        && ++s_rx_state[i].count >= t->rx_fire_limit) {
+      s_rx_state[i].suppress = 1U;
     }
   }
 }
@@ -1206,9 +1364,18 @@ void Trigger_FireOnBoot(void)
     }
     uint8_t sends = t->tx_count ? t->tx_count : 1U;
     /* boot_delay_ms — пауза от старта МК до сработки (протокол 7):
-     * складывается с delay_ms записи — вооружаем с суммарным тиком. */
+     * складывается с delay_ms записи — вооружаем с суммарным тиком.
+     * Записи ГЛ (хвост) идут в s_flex_queue — как запуски по кадру:
+     * кадра события нет, снимок DATA нулевой (как у ПК — пустой
+     * фрейм события «Включение устройства»). */
+    if (i >= s_user_count) {
+      (void)flex_enqueue(i, t, NULL, 0U,
+                         HAL_GetTick() + t->delay_ms
+                         + t->boot_delay_ms);
+      continue;
+    }
     if (t->boot_delay_ms == 0U && t->delay_ms == 0U && sends == 1U) {
-      if (send_response(t, i, 0U)) {
+      if (send_response(t, i, 0U, NULL)) {
         s_fired_count++;
       } else {
         arm_response(i, t, 0U);
@@ -1231,37 +1398,106 @@ void Trigger_Poll(void)
     s_staged_max = 0U;
     memset(s_stage_flags, 0, sizeof(s_stage_flags));
   }
-  for (uint8_t i = 0; i < TRIGGER_ALL_RECORDS; i++) {
-    if (s_pending[i].armed && (int32_t)(now - s_pending[i].fire_at_tick) >= 0) {
+  for (uint8_t i = 0; i < TRIGGER_MAX_RECORDS; i++) {
+    /* Плановый срок (fire_at_tick) и ближайшая попытка хранятся
+     * раздельно: срок попытки = fire_at + retries*RETRY_DELAY. Отказ
+     * ящиков отодвигает попытку на ~1 мс, но НЕ сдвигает расписание
+     * серии — следующие плановые отправки идут от исходных сроков
+     * (ревью CM-R8). */
+    uint32_t due = s_pending[i].fire_at_tick
+                   + (uint32_t)s_pending[i].retries
+                     * TRIGGER_TX_RETRY_DELAY_MS;
+    if (s_pending[i].armed && (int32_t)(now - due) >= 0) {
       uint32_t lateness = now - s_pending[i].fire_at_tick;
       if (lateness > s_max_lateness_ms) {
         s_max_lateness_ms = lateness;
       }
       uint8_t index = s_pending[i].trigger_index;
       const trigger_t *t = &s_triggers[index];
-      if (!send_response(t, index, s_pending[i].echo)) {
-        /* Ящики заняты: попытку не сжигаем, переарм на ~1 мс. Раньше
-         * провал тут молча съедал отправку — ответ триггера пропадал
-         * на нагруженной шине без следа ни в одном счётчике. */
+      if (!send_response(t, index, s_pending[i].echo, NULL)) {
+        /* Ящики заняты: попытку не сжигаем, переарм на ~1 мс
+         * (retries+1 сам отодвигает due — fire_at не трогаем).
+         * Раньше провал тут молча съедал отправку — ответ триггера
+         * пропадал на нагруженной шине без следа ни в одном
+         * счётчике. */
         if (s_pending[i].retries < TRIGGER_TX_RETRY_MAX) {
           s_pending[i].retries++;
-          s_pending[i].fire_at_tick = now + TRIGGER_TX_RETRY_DELAY_MS;
           continue;
         }
-        s_dropped_count++;
+        /* Ретраи исчерпаны — серия отбрасывается целиком (как в
+         * очереди ГЛ): на мёртвой шине оставшиеся повторы горели бы
+         * те же 20 мс, потеря серии считается в dropped разом. */
+        s_dropped_count += s_pending[i].remaining;
+        s_pending[i].armed = 0U;
+        s_pending[i].retries = 0U;
+        continue;
       } else {
         s_fired_count++;
       }
       s_pending[i].retries = 0U;
-      /* Повторные отправки («Кол-во отправок» > 1): переарм на
-       * tx_interval_ms; в кэш-режиме каждый повтор шлёт уже свежие
-       * данные кэша. */
+      /* Повторные отправки («Кол-во отправок» > 1): следующая —
+       * в ПЛАНОВЫЙ срок fire_at += interval, а не «через interval от
+       * текущей попытки»: краткий отказ (1050→1051) не сдвигает серию
+       * 1070/1090 (ревью CM-R8). Просроченный плановый срок просто
+       * исполняется ближайшим Poll — одна отправка за проход.
+       * В кэш-режиме каждый повтор шлёт уже свежие данные кэша. */
       if (s_pending[i].remaining > 1U) {
         s_pending[i].remaining--;
-        s_pending[i].fire_at_tick = now + s_pending[i].interval_ms;
+        s_pending[i].fire_at_tick += s_pending[i].interval_ms;
       } else {
         s_pending[i].armed = 0U;
       }
+    }
+  }
+  /* Серии записей ГЛ: у каждой свой плановый срок — расписание серии
+   * сохраняется полностью (ревью CM-R1). Повторы идут от исходного
+   * fire_at += interval, как у абсолютных QTimer на ПК. Отказ ящиков
+   * отодвигает только ближайшую попытку (due = fire_at + retries*1
+   * мс), плановые сроки не сдвигаются (ревью CM-R8); за один проход
+   * Poll из серии отправляется один кадр — просроченные плановые
+   * сроки догоняются по одному за тик опроса. */
+  for (uint8_t q = 0U; q < FLEX_QUEUE_DEPTH; q++) {
+    flex_firing_t *e = &s_flex_queue[q];
+    uint32_t due = e->fire_at_tick
+                   + (uint32_t)e->retries * TRIGGER_TX_RETRY_DELAY_MS;
+    if (e->used == 0U || (int32_t)(now - due) < 0) {
+      continue;
+    }
+    uint32_t lateness = now - e->fire_at_tick;
+    if (lateness > s_max_lateness_ms) {
+      s_max_lateness_ms = lateness;
+    }
+    uint8_t index = e->trigger_index;
+    if (index >= s_count) {
+      e->used = 0U; /* запись убрали (перезапись блоба) */
+      continue;
+    }
+    const trigger_t *t = &s_triggers[index];
+    const uint8_t *evp =
+        (t->rx_flags & TRIGGER_F_TX_EVENT_DATA) != 0U ? e->data : NULL;
+    if (!send_response(t, index, e->echo, evp)) {
+      /* Ящики заняты: попытку не сжигаем, переарм на ~1 мс — тот же
+       * ограниченный механизм ретраев, что и у пользовательских
+       * записей; исчерпание считается в dropped (ревью CM-R1).
+       * Ограниченная политика при длительном отказе: после
+       * TRIGGER_TX_RETRY_MAX попыток серия отбрасывается целиком —
+       * бесконечного цикла и неконтролируемого залпа нет, потеря
+       * диагностируется счётчиком (ревью CM-R8). */
+      if (e->retries < TRIGGER_TX_RETRY_MAX) {
+        e->retries++;
+        continue;
+      }
+      s_dropped_count += e->remaining;
+      e->used = 0U;
+      continue;
+    }
+    s_fired_count++;
+    e->retries = 0U;
+    if (e->remaining > 1U) {
+      e->remaining--;
+      e->fire_at_tick += e->interval_ms;
+    } else {
+      e->used = 0U;
     }
   }
 }

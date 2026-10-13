@@ -33,7 +33,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from core.trigger_protocol import pack_trigger
+from core.trigger_protocol import (
+    TRIGGER_SIZE,
+    pack_trigger,
+    record_fields_valid,
+)
 from models.utils import hex_to_int
 
 FLEX_BLOB_MAGIC = b"FLXB"
@@ -43,10 +47,10 @@ FLEX_MAX_RECORDS = 16  # должен совпадать с trigger.h
 _FLXB_HEADER_SIZE = 12
 
 # Варианты событий/действий, которые умеет движок триггеров.
-_COMPILABLE_EVENTS = {"frame", "power"}
 _EVENT_NONE = "none"
 _EVENT_FRAME = "frame"
 _EVENT_POWER = "power"
+_EVENT_PROGRAM = "program"
 _ACT_FRAME = "frame"
 _COND_NONE = "none"
 
@@ -97,10 +101,15 @@ def _event_to_rx(event: dict[str, Any]) -> dict[str, Any] | None:
     # Канал события: 0=CAN1, 1=CAN2, 2=любой — None/прочерк → «любой»
     # («0 or 2» здесь ошибочно превращал бы CAN1 в «любой»).
     ch = event.get("channel", 2)
+    # «Кол-во сработок до смены DATA»: на ПК 0/1 — «без ограничения»
+    # (_event_fired: limit > 1), а старые конфиги писали 1 — передача
+    # 1 в rx_fire_limit запирала бы запись на камне после первой
+    # сработки. Нормализуем: ограничением считается только >1.
+    fire_limit = int(event.get("fire_limit", 0) or 0)
     rx_flags_extra = {
         # ПК не реагирует на TX-эхо — на камне то же через MUTE_ECHO.
         "rx_listen_echo": False,
-        "rx_fire_limit": int(event.get("fire_limit", 0) or 0) & 0xFFFF,
+        "rx_fire_limit": (fire_limit if fire_limit > 1 else 0) & 0xFFFF,
     }
     return {
         "rx_channel": (2 if ch is None else int(ch)) & 0xFF,
@@ -174,14 +183,65 @@ def _rule_parts(rule: dict[str, Any]) -> tuple[list, list, list]:
     return events, conditions, actions
 
 
-def compile_rule(rule: dict[str, Any]) -> list[dict[str, Any]] | None:
-    """Программа ГЛ → список записей trigger_t (словари для pack_trigger).
+def _rx_overlap(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Могут ли два скомпилированных события сработать на одном кадре
+    (или на одном старте для «Включение устройства»).
 
-    None — программа на камне не выражается (исполняет приложение).
-    [] — программа компилируется, но записей не порождает (неактивна,
-    нет рабочих событий или действий)."""
+    На ПК события программы объединены по ИЛИ с break — кадр,
+    совпавший с двумя событиями, исполняет действия один раз. На камне
+    каждое событие — отдельная запись trigger_t: пересекающиеся
+    фильтры дали бы двойную отправку, поэтому такие программы не
+    компилируются и остаются на исполнении приложения."""
+    a_boot = bool(a.get("rx_fire_on_boot"))
+    b_boot = bool(b.get("rx_fire_on_boot"))
+    if a_boot or b_boot:
+        # «Включение устройства» вооружается при старте: два power-
+        # события сработали бы оба. power+frame не пересекаются —
+        # кадр шины boot-запись не возбуждает.
+        return a_boot and b_boot
+    # Канал: 2 = любой — пересекается с любым.
+    if (
+        a["rx_channel"] != 2
+        and b["rx_channel"] != 2
+        and a["rx_channel"] != b["rx_channel"]
+    ):
+        return False
+    if a["rx_extended"] != b["rx_extended"]:
+        return False
+    if (a["rx_id"] & a["rx_id_mask"]) != (b["rx_id"] & b["rx_id_mask"]):
+        return False
+    # rx_rtr: 0 = любой кадр, 1 = только RTR, 2 = только данные.
+    if a["rx_rtr"] and b["rx_rtr"] and a["rx_rtr"] != b["rx_rtr"]:
+        return False
+    # rx_dlc: 0 = любая длина.
+    if a["rx_dlc"] and b["rx_dlc"] and a["rx_dlc"] != b["rx_dlc"]:
+        return False
+    # DATA: позиции, заданные в обоих фильтрах, должны совпадать.
+    # В RTR-режиме данные не сравниваются вовсе.
+    if a["rx_rtr"] != 1 and b["rx_rtr"] != 1:
+        for i in range(8):
+            both = a["rx_data_mask"][i] & b["rx_data_mask"][i]
+            if both and (a["rx_data"][i] & both) != (b["rx_data"][i] & both):
+                return False
+    return True
+
+
+def _rule_events(rule: dict[str, Any]) -> list:
+    """События правила с учётом легаси-формата (одиночный «event»)."""
+    events = rule.get("events")
+    if not isinstance(events, list) or not events:
+        events = [rule.get("event") or {}]
+    return events
+
+
+def _compile_rule(
+    rule: dict[str, Any],
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """Программа ГЛ → (записи trigger_t | None, причина отказа | None).
+
+    Причины — для UI-бейджа «кто исполняет» (ревью CM-R4/R5)."""
     if not rule.get("active", False):
-        return []
+        return [], None
     events, conditions, actions = _rule_parts(rule)
 
     # Условия ПРИ на камне не поддерживаются — переменные/флаги/доп.
@@ -189,31 +249,41 @@ def compile_rule(rule: dict[str, Any]) -> list[dict[str, Any]] | None:
     for cond in conditions:
         ctype = cond.get("type", _COND_NONE)
         if ctype not in (None, "", _COND_NONE):
-            return None
+            return None, "условие ПРИ — только на ПК"
 
     rx_parts: list[tuple[int, dict[str, Any]]] = []
     for idx, event in enumerate(events):
+        if not isinstance(event, dict):
+            return None, "повреждённое событие — только на ПК"
         rx = _event_to_rx(event)
         if rx is None:
-            return None
+            return None, "событие не про CAN-кадр — только на ПК"
         if rx:
             rx_parts.append((idx, rx))
     if not rx_parts:
-        return []
+        return [], None
+    # Пересекающиеся события: ИЛИ-семантика ПК (break на первом
+    # совпавшем) в записях не выражается — на камне сработали бы обе
+    # записи и действия исполнились бы дважды. Такая программа
+    # остаётся на ПК (ревью CM-03).
+    for i in range(len(rx_parts)):
+        for j in range(i + 1, len(rx_parts)):
+            if _rx_overlap(rx_parts[i][1], rx_parts[j][1]):
+                return None, "пересекающиеся события — только на ПК"
     # rx_cond_idx упаковывается в rx_flags битах 2..4 — максимум 7.
     if max(idx for idx, _ in rx_parts) > 7:
-        return None
+        return None, "больше 8 событий — только на ПК"
 
     tx_parts: list[tuple[int, dict[str, Any]]] = []
     for idx, action in enumerate(actions):
         if not isinstance(action, dict):
-            return None
+            return None, "повреждённое действие — только на ПК"
         # «Задержка» выполнения и «Прервать если» — только на ПК.
         if int(action.get("exec_delay", 0) or 0) > 0:
-            return None
+            return None, "задержка выполнения действия — только на ПК"
         abort = action.get("abort") or {}
         if abort.get("type") not in (None, "", _EVENT_NONE):
-            return None
+            return None, "прерыватель действия — только на ПК"
         # Действия не-фреймового типа (переменные, флаги, доп. каналы,
         # кэш) делают программу некомпилируемой целиком.
         atype = action.get("type", _ACT_FRAME)
@@ -226,14 +296,14 @@ def compile_rule(rule: dict[str, Any]) -> list[dict[str, Any]] | None:
             or action.get("cv_op")
         )
         if atype not in (None, "", _ACT_FRAME, "none") or non_frame:
-            return None
+            return None, "действие не «отправка кадра» — только на ПК"
         tx = _action_to_tx(action)
         if tx is None:
-            return None
+            return None, "действие не «отправка кадра» — только на ПК"
         if tx:
             tx_parts.append((idx, tx))
     if not tx_parts:
-        return []
+        return [], None
 
     records: list[dict[str, Any]] = []
     for ev_idx, rx in rx_parts:
@@ -285,7 +355,79 @@ def compile_rule(rule: dict[str, Any]) -> list[dict[str, Any]] | None:
             # кэш-фильтр src_* не используется).
             record["rx_tx_event_data"] = bool(subst)
             records.append(record)
+    return records, None
+
+
+def compile_rule(rule: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Программа ГЛ → список записей trigger_t (словари для pack_trigger).
+
+    None — программа на камне не выражается (исполняет приложение).
+    [] — программа компилируется, но записей не порождает (неактивна,
+    нет рабочих событий или действий)."""
+    records, _reason = _compile_rule(rule)
     return records
+
+
+def executor_info(
+    rules: list[dict[str, Any]],
+    protocol: int,
+) -> list[dict[str, Any]]:
+    """Для каждой программы — владелец исполнения и причина
+    (UI-бейдж «камень/ПК», ревью CM-R4).
+
+    Ключи записи: ``managed`` (камень исполняет), ``reason``
+    (почему программа на ПК / почему не компилируется), ``active``."""
+    if protocol < 12:
+        return [
+            {
+                "managed": False,
+                "active": bool(rule.get("active")),
+                "reason": (
+                    f"прошивка без автономной ГЛ (протокол {protocol})"
+                ),
+            }
+            for rule in rules
+        ]
+
+    per_rule: list[tuple[list | None, str | None]] = []
+    for rule in rules:
+        try:
+            per_rule.append(_compile_rule(rule))
+        except Exception:  # noqa: BLE001
+            per_rule.append((None, "ошибка конфигурации — только на ПК"))
+
+    listened = {
+        str(event.get("var", "")).strip()
+        for rule in rules
+        for event in _rule_events(rule)
+        if isinstance(event, dict) and event.get("type") == _EVENT_PROGRAM
+    }
+
+    out: list[dict[str, Any]] = []
+    used = 0
+    for i, rule in enumerate(rules):
+        records, reason = per_rule[i]
+        active = bool(rule.get("active"))
+        if (
+            records is not None
+            and str(rule.get("title", "")).strip() in listened
+        ):
+            records = None
+            reason = "зависит событие «программа начала работать» — только на ПК"
+        if records is None:
+            out.append({"managed": False, "active": active,
+                        "reason": reason or "только на ПК"})
+            continue
+        if used + len(records) > FLEX_MAX_RECORDS:
+            out.append({
+                "managed": False,
+                "active": active,
+                "reason": "квота записей МК исчерпана (16)",
+            })
+            continue
+        used += len(records)
+        out.append({"managed": True, "active": active, "reason": None})
+    return out
 
 
 def compile_rules(
@@ -295,15 +437,37 @@ def compile_rules(
 
     Записи укладываются до FLEX_MAX_RECORDS; программа, не влезшая
     целиком, остаётся на исполнении приложением."""
-    records: list[dict[str, Any]] = []
-    managed: list[bool] = []
+    per_rule: list[list[dict[str, Any]] | None] = []
     for rule in rules:
         try:
-            rule_records = compile_rule(rule)
+            per_rule.append(compile_rule(rule))
         except Exception:  # noqa: BLE001
             # Битый элемент конфига не должен срывать запись всего
             # блоба — программа остаётся на исполнении приложения.
-            rule_records = None
+            per_rule.append(None)
+
+    # Событие «программа <имя> начала работать» существует только в
+    # рантайме ПК: программа, ушедшая на камень, стартует без уведомления
+    # приложения — слушающая её программа никогда бы не сработала.
+    # Целевая программа вместе со слушателем остаётся на ПК
+    # (ревью CM-05).
+    listened = {
+        str(event.get("var", "")).strip()
+        for rule in rules
+        for event in _rule_events(rule)
+        if isinstance(event, dict) and event.get("type") == _EVENT_PROGRAM
+    }
+    if listened:
+        for i, rule in enumerate(rules):
+            if (
+                per_rule[i] is not None
+                and str(rule.get("title", "")).strip() in listened
+            ):
+                per_rule[i] = None
+
+    records: list[dict[str, Any]] = []
+    managed: list[bool] = []
+    for rule, rule_records in zip(rules, per_rule, strict=False):
         if rule_records is None:
             managed.append(False)
             continue
@@ -337,20 +501,147 @@ def build_flex_blob(rules: list[dict[str, Any]]) -> bytes:
     return bytes(packed)
 
 
-def extract_flex_json(blob: bytes) -> bytes:
-    """JSON-часть блоба FLXH: из контейнера FLXB или весь блоб,
-    если он старого (чисто JSON) формата."""
+def parse_flex_blob(blob: bytes) -> tuple[bytes, int] | None:
+    """Разбор контейнера FLXB → (JSON-часть, число записей).
+
+    Проверяет ТОЛЬКО исполняемый контракт — то же, что
+    firmware/application/Src/trigger.c::append_flex: магия, версия
+    контейнера, count ≤ FLEX_MAX_RECORDS (отказ, не обрезание),
+    json_len > 0, точная длина 12 + json_len + count*90 (лишний
+    хвост и недостача — отказ), каждая запись — валидная trigger_t
+    v3 по контракту прошивки (магия/формат/CRC8/поля).
+
+    Содержимое JSON-части здесь НЕ проверяется — прошивка её не
+    читает, и расхождение «ПК отверг, МК исполняет» создавало бы
+    двойного владельца (ревью CM-R6). Валидность JSON-схемы —
+    отдельная зона: parse_flex_rules() для конфигурации ПК и
+    analyze_device_flex() для владельца исполнения."""
     if (
         not blob
         or len(blob) < _FLXB_HEADER_SIZE
         or blob[:4] != FLEX_BLOB_MAGIC
+        or blob[4] != FLEX_BLOB_VERSION
     ):
-        return blob
+        return None
+    count = blob[5]
+    if count > FLEX_MAX_RECORDS:
+        return None
     json_len = int.from_bytes(blob[8:12], "little")
-    end = _FLXB_HEADER_SIZE + json_len
-    if end > len(blob):
+    if json_len == 0 or json_len > len(blob) - _FLXB_HEADER_SIZE:
+        return None
+    rec_off = _FLXB_HEADER_SIZE + json_len
+    if len(blob) - rec_off != count * TRIGGER_SIZE:
+        return None
+    for i in range(count):
+        start = rec_off + i * TRIGGER_SIZE
+        if not record_fields_valid(blob[start:start + TRIGGER_SIZE]):
+            return None
+    return blob[_FLXB_HEADER_SIZE:rec_off], count
+
+
+def parse_flex_rules(json_part: bytes) -> list[dict[str, Any]] | None:
+    """JSON-часть контейнера → список правил, если схема валидна.
+
+    Схема (ревью CM-R7): объект с ключом «rules» — список словарей;
+    в каждом правиле события/условия/действия, если заданы, —
+    списки словарей (или легаси-поля event/condition/action —
+    словари), «active» — bool, «title» — строка. Повреждённый
+    элемент отвергается здесь, а не поздним исключением в UI."""
+    try:
+        doc = json.loads(json_part.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    rules = doc.get("rules")
+    if not isinstance(rules, list):
+        return None
+    for rule in rules:
+        if not isinstance(rule, dict):
+            return None
+        for key in ("events", "conditions", "actions"):
+            value = rule.get(key)
+            if value is not None and not (
+                isinstance(value, list)
+                and all(isinstance(e, dict) for e in value)
+            ):
+                return None
+        for key in ("event", "condition", "action"):
+            value = rule.get(key)
+            if value is not None and not isinstance(value, dict):
+                return None
+        if "active" in rule and not isinstance(rule["active"], bool):
+            return None
+        if "title" in rule and not isinstance(rule["title"], str):
+            return None
+    return rules
+
+
+def analyze_device_flex(blob: bytes) -> dict[str, Any]:
+    """Классификация содержимого области FLXH — владелец исполнения
+    программ ГЛ (ревью CM-R5..CM-R7).
+
+    state:
+      «no-tail»  — исполняемого хвоста нет (не FLXB или повреждён):
+                   прошивка такой контейнер отвергает целиком →
+                   камень исполняет НИЧЕГО, владелец — ПК;
+      «conflict» — хвост валиден и загружается прошивкой, но
+                   соответствие его правилам недоказуемо: JSON
+                   не читается по схеме либо байты хвоста не совпали
+                   с компиляцией JSON-правил. Владелец — камень
+                   (ПК вслепую не включается поверх работающего
+                   хвоста); путь восстановления — повторная запись;
+      «verified» — хвост валиден И побайтово совпадает с
+                   детерминированной компиляцией правил из JSON:
+                   камень исполняет именно эти программы (множество
+                   managed — индексы правил на камне).
+    Ключи rules/managed заполнены только когда JSON прочитан."""
+    parsed = parse_flex_blob(blob)
+    if parsed is None:
+        return {"state": "no-tail", "rules": None, "managed": []}
+    json_part, count = parsed
+    rules = parse_flex_rules(json_part)
+    if rules is None:
+        # Хвост исполняется, а конфигурация не читается — нельзя ни
+        # подтвердить владение, ни включить ПК вслепую.
+        return {"state": "conflict", "rules": None, "managed": []}
+    expected, managed = compile_rules(rules)
+    expected_tail = b"".join(pack_trigger(r) for r in expected)
+    actual_tail = blob[_FLXB_HEADER_SIZE + len(json_part):]
+    if actual_tail != expected_tail:
+        return {"state": "conflict", "rules": rules, "managed": []}
+    return {"state": "verified", "rules": rules, "managed": managed}
+
+
+def flexb_header_valid(header: bytes, blob_len: int) -> bool:
+    """Геометрическая проверка FLXB по первым байтам блоба
+    (storage_peek): магия, версия, число записей и json_len
+    согласуются с полной длиной области.
+
+    Только геометрия — записи и JSON не проверяются. Владелец
+    исполнения устанавливается по полному содержимому через
+    parse_flex_blob; эта функция — быстрый прё-фильтр."""
+    if len(header) < _FLXB_HEADER_SIZE:
+        return False
+    count = header[5]
+    json_len = int.from_bytes(header[8:12], "little")
+    return (
+        header[:4] == FLEX_BLOB_MAGIC
+        and header[4] == FLEX_BLOB_VERSION
+        and count <= FLEX_MAX_RECORDS
+        and json_len > 0
+        and _FLXB_HEADER_SIZE + json_len + count * TRIGGER_SIZE
+        <= max(int(blob_len), 0)
+    )
+
+
+def extract_flex_json(blob: bytes) -> bytes:
+    """JSON-часть блоба FLXH: из контейнера FLXB или весь блоб,
+    если он старого (чисто JSON) формата."""
+    parsed = parse_flex_blob(blob)
+    if parsed is None:
         return blob
-    return blob[_FLXB_HEADER_SIZE:end]
+    return parsed[0]
 
 
 def managed_flags(rules: list[dict[str, Any]], protocol: int) -> list[bool]:

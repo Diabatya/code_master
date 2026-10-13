@@ -40,6 +40,7 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include <stddef.h>
 
 #define STORE_MAGIC_FLEX  0x464C5848UL /* "FLXH" */
 #define STORE_MAGIC_VAR   0x56415248UL /* "VARH" */
@@ -140,8 +141,8 @@ uint8_t Storage_RegionInfo(uint8_t region, uint32_t *base_out,
                            uint32_t *len_out, uint32_t *gen_out);
 /* Указатель на полезную нагрузку блоба FLXH прямо во Flash (без
  * копирования) — trigger.c читает отсюда контейнер FLXB со
- * скомпилированными записями ГЛ. 0 — области нет. */
-uint8_t Storage_FlexPayload(uint32_t *base_out, uint32_t *len_out);
+ * скомпилированными записями ГЛ. NULL — области нет. */
+const uint8_t *Storage_FlexPayload(uint32_t *len_out);
 
 /* Сессия записи блоба: Begin выбирает/освобождает страницы (при надобности
  * пересаживая TRGH/EVLH) и стирает целевой диапазон; WriteChunk пишет

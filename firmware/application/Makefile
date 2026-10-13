@@ -12,6 +12,11 @@ BUILD_DIR = build
 
 CUBE = ../libs/STM32CubeF1
 
+ifeq ($(wildcard $(CUBE)/Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal.h),)
+$(error STM32CubeF1 submodule is missing or not checked out. \
+Run 'git submodule update --init --recursive' at the repository root before building)
+endif
+
 CC = arm-none-eabi-gcc
 AS = arm-none-eabi-gcc -x assembler-with-cpp
 CP = arm-none-eabi-objcopy
@@ -31,7 +36,7 @@ INCLUDES = \
   -I$(CUBE)/Middlewares/ST/STM32_USB_Device_Library/Core/Inc \
   -I$(CUBE)/Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc
 
-CFLAGS = $(MCU) $(DEFS) $(INCLUDES) -O2 -g -Wall -ffunction-sections -fdata-sections
+CFLAGS = $(MCU) $(DEFS) $(INCLUDES) -O2 -g -Wall -ffunction-sections -fdata-sections -fstack-usage
 ASFLAGS = $(MCU) $(DEFS) $(INCLUDES) -Wall -fdata-sections -ffunction-sections
 LDFLAGS = $(MCU) -specs=nano.specs -specs=nosys.specs -TSTM32F105RCTx_APP.ld \
           -Wl,-Map=$(BUILD_DIR)/$(PROJECT).map,--gc-sections -ffunction-sections -fdata-sections

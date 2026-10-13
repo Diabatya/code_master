@@ -4,7 +4,7 @@
 
 import pytest
 
-from core.can_protocol import CMD_CAN_SPEED
+from core.can_protocol import CMD_AUTO_SPEED, CMD_CAN_SPEED
 from core.serial_manager import SerialManager
 from tests.test_request_control import _ScriptedPort, _cmd_response, _manager_with_port
 
@@ -67,3 +67,26 @@ def test_set_can_speed_all_supported_rates() -> None:
     for kbps in SerialManager.SUPPORTED_CAN_BAUD_KBPS:
         assert manager.set_can_speed(1, kbps) == kbps
     assert len(port.writes) == len(SerialManager.SUPPORTED_CAN_BAUD_KBPS)
+
+
+def test_auto_detect_can_speed_is_unsupported() -> None:
+    """CMD_AUTO_SPEED прошивки возвращает CanBridge_GetBaud(0) — текущую
+    НАСТРОЕННУЮ скорость, а не измерение по шине. Хост обязан честно
+    сообщить «не поддерживается»: без команды на устройство, без
+    can_speed_detected и без can_speed_auto=True (ревью CM-07)."""
+    from PySide6.QtCore import QObject
+
+    emitted: list[int] = []
+
+    class _Probe(QObject):
+        pass
+
+    port = _ScriptedPort(_cmd_response(CMD_AUTO_SPEED, 0, bytes([0xFA, 0x00])))
+    manager = _manager_with_port(port)
+    probe = _Probe()
+    manager.can_speed_detected.connect(emitted.append, probe)
+
+    assert manager.auto_detect_can_speed() is None
+    assert port.writes == []                    # команда не отправлена
+    assert emitted == []                        # ложное «измерено» не эмитится
+    assert not manager._config.get("can_speed_auto", False)

@@ -2,14 +2,21 @@
 покрытие pack/unpack, подстановки «X из кадра события», отсева
 некомпилируемых программ и квоты FLEX_MAX_RECORDS."""
 
+import json
+
 from core.flex_compiler import (
     FLEX_BLOB_MAGIC,
+    FLEX_BLOB_VERSION,
     FLEX_MAX_RECORDS,
+    analyze_device_flex,
     build_flex_blob,
     compile_rule,
     compile_rules,
     extract_flex_json,
+    flexb_header_valid,
     managed_flags,
+    parse_flex_blob,
+    parse_flex_rules,
 )
 from core.trigger_protocol import (
     TRIGGER_F_TX_EVENT_DATA,
@@ -188,3 +195,271 @@ def test_inactive_rule_produces_no_records() -> None:
     assert compile_rule(_rule(active=False)) == []
     records, managed = compile_rules([_rule(active=False)])
     assert records == [] and managed == [False]
+
+
+# --- Пересекающиеся события ИЛИ (ревью CM-03) ------------------------
+
+
+def test_overlapping_events_not_compiled() -> None:
+    """Кадр, совпадающий с двумя событиями программы: на ПК — один
+    запуск (break), на камне две записи дали бы две отправки →
+    программа остаётся на ПК."""
+    rule = _rule(events=[
+        _frame_event("123", channel=2),
+        _frame_event("123", channel=0),
+    ])
+    assert compile_rule(rule) is None
+    _records, managed = compile_rules([rule])
+    assert managed == [False]
+
+
+def test_non_overlapping_events_compile() -> None:
+    """Разные ID или непересекающиеся каналы — компилируются."""
+    recs = compile_rule(_rule(events=[
+        _frame_event("123", channel=0),
+        _frame_event("456", channel=0),
+    ]))
+    assert recs is not None and len(recs) == 2
+    recs = compile_rule(_rule(events=[
+        _frame_event("123", channel=0),
+        _frame_event("123", channel=1),   # CAN1 ≠ CAN2 — не пересекаются
+    ]))
+    assert recs is not None and len(recs) == 2
+
+
+def test_overlapping_data_masks_not_compiled() -> None:
+    """Маски DATA совместимы («AA» и «AA BB» одного ID пересекаются —
+    кадр AA BB … совпадает с обоими фильтрами); «AA» и «BB» — нет."""
+    assert compile_rule(_rule(events=[
+        _frame_event("123", data="AA"),
+        _frame_event("123", data="AA BB"),
+    ])) is None
+    recs = compile_rule(_rule(events=[
+        _frame_event("123", data="AA"),
+        _frame_event("123", data="BB"),
+    ]))
+    assert recs is not None and len(recs) == 2
+
+
+def test_two_power_events_not_compiled() -> None:
+    """Два «Включение устройства» — обе записи вооружились бы при
+    старте (на ПК старт программы один); power+frame — компилируется."""
+    assert compile_rule(_rule(events=[
+        {"type": "power"}, {"type": "power"},
+    ])) is None
+    recs = compile_rule(_rule(events=[
+        {"type": "power"}, _frame_event("123"),
+    ]))
+    assert recs is not None and len(recs) == 2
+
+
+# --- fire_limit (ревью CM-04) -----------------------------------------
+
+
+def test_fire_limit_normalized() -> None:
+    """На ПК 0/1 — «без ограничения»; в запись уходит только >1,
+    иначе легаси-конфиг с limit=1 запирал бы программу на камне."""
+    for limit, expect in ((0, 0), (1, 0), (2, 2), (7, 7)):
+        recs = compile_rule(_rule(
+            events=[{**_frame_event(), "fire_limit": limit}],
+        ))
+        assert recs is not None and len(recs) == 1
+        assert recs[0]["rx_fire_limit"] == expect
+
+
+# --- Зависимость «программа начала работать» (ревью CM-05) ------------
+
+
+def test_program_event_pulls_target_to_pc() -> None:
+    """Слушатель старта программы видит его только на ПК: если цель
+    ушла на камень, старт невидим → цель остаётся на ПК вместе со
+    слушателем."""
+    target = _rule()
+    target["title"] = "Насос"
+    listener = _rule(events=[{
+        "type": "program", "var": "Насос",
+    }])
+    records, managed = compile_rules([target, listener])
+    assert managed == [False, False]
+    assert records == []
+    # Без слушателя цель компилируется.
+    records2, managed2 = compile_rules([target])
+    assert managed2 == [True] and len(records2) == 1
+
+
+# --- Валидация контейнера FLXB (ревью CM-05) --------------------------
+
+
+def test_parse_flex_blob_validates_container() -> None:
+    blob = build_flex_blob([_rule()])
+    parsed = parse_flex_blob(blob)
+    assert parsed is not None
+    json_part, count = parsed
+    assert count == 1 and json_part.startswith(b"{")
+
+    # Чистый JSON старой версии — не FLXB.
+    assert parse_flex_blob(b'{"rules":[]}') is None
+    # Неверная версия контейнера.
+    bad = bytearray(blob)
+    bad[4] = 0xEE
+    assert parse_flex_blob(bytes(bad)) is None
+    # Число записей за пределом квоты.
+    bad = bytearray(blob)
+    bad[5] = FLEX_MAX_RECORDS + 1
+    assert parse_flex_blob(bytes(bad)) is None
+    # Усечённый JSON/хвост записей.
+    assert parse_flex_blob(blob[:20]) is None
+    bad = bytearray(blob)
+    bad[8:12] = (len(blob) * 2).to_bytes(4, "little")
+    assert parse_flex_blob(bytes(bad)) is None
+    # Блоб обрезан внутри области записей.
+    assert parse_flex_blob(blob[:-5]) is None
+
+
+def test_flexb_header_valid_from_peek() -> None:
+    blob = build_flex_blob([_rule()])
+    assert flexb_header_valid(blob[:12], len(blob)) is True
+    assert flexb_header_valid(blob[:12], 12) is False   # JSON не влезает
+    bad = bytearray(blob)
+    bad[4] = 9
+    assert flexb_header_valid(bytes(bad[:12]), len(bad)) is False
+    assert flexb_header_valid(b"JSON12345678", 100) is False
+    assert flexb_header_valid(b"FL", 100) is False
+
+
+def test_extract_flex_json_broken_container() -> None:
+    """Повреждённый FLXB (невалидный заголовок) возвращается целиком —
+    JSON-парсер вызывающего явно откажет, а не съест мусор."""
+    blob = bytearray(build_flex_blob([_rule()]))
+    blob[4] = FLEX_BLOB_VERSION + 1
+    assert extract_flex_json(bytes(blob)) == bytes(blob)
+
+
+# ---- CM-R3: строгая валидация контейнера -------------------------------
+
+
+def test_flexb_extra_tail_rejected() -> None:
+    """Точная длина: лишний хвост после записей отвергает контейнер
+    (раньше проходил — «достаточная длина» вместо точной)."""
+    blob = build_flex_blob([_rule()])
+    assert parse_flex_blob(blob + b"EXTRA") is None
+
+
+def test_flexb_json_zero_and_schema() -> None:
+    """parse_flex_blob проверяет ТОЛЬКО исполняемый контракт (как
+    firmware append_flex): json_len=0 и выход JSON за границы —
+    отказ; СОДЕРЖИМОЕ JSON прошивка не читает, и хост не должен
+    расходиться (CM-R6). Валидность схемы — parse_flex_rules."""
+    blob = bytearray(build_flex_blob([_rule()]))
+    json_len = int.from_bytes(blob[8:12], "little")
+
+    # json_len = 0 — отказ на обеих сторонах.
+    bad = bytearray(blob)
+    bad[8:12] = (0).to_bytes(4, "little")
+    assert parse_flex_blob(bytes(bad)) is None
+
+    # json_len ≈ UINT32_MAX — переполнение 12+json_len не должно
+    # маскировать выход за границы (CM-R6).
+    bad = bytearray(blob)
+    bad[8:12] = (0xFFFFFFF6).to_bytes(4, "little")
+    assert parse_flex_blob(bytes(bad)) is None
+
+    # Невалидный JSON той же длины — хвост исполняемый, контейнер
+    # принимается (прошивка загрузит записи); схема отвергается
+    # отдельным парсером.
+    bad = bytearray(blob)
+    bad[12:12 + json_len] = b"!" * json_len
+    assert parse_flex_blob(bytes(bad)) is not None
+    assert parse_flex_rules(b"!" * json_len) is None
+
+    # Валидный JSON, но не схема конфигурации (нет "rules").
+    assert parse_flex_rules(json.dumps({"kind": "x"}).encode()) is None
+    # dict-JSON без списка rules.
+    assert parse_flex_rules(
+        json.dumps({"kind": "code_master_flex_logic", "rules": 5}
+                   ).encode()
+    ) is None
+    # Правило не-dict и элемент списка не-dict — отказ схемы.
+    assert parse_flex_rules(
+        json.dumps({"rules": ["oops"]}).encode()
+    ) is None
+    assert parse_flex_rules(
+        json.dumps({"rules": [{"title": "P", "events": "oops"}]}
+                   ).encode()
+    ) is None
+    # UTF-8 мусор.
+    assert parse_flex_rules(b"\xff\xfe") is None
+
+
+def test_analyze_device_flex_states() -> None:
+    """Классификация владельца (CM-R7): verified — хвост ==
+    компиляции JSON; conflict — хвост загружается прошивкой, но не
+    верифицирован; no-tail — исполняемых записей нет."""
+    rules = [_rule()]
+    blob = build_flex_blob(rules)
+    a = analyze_device_flex(blob)
+    assert a["state"] == "verified"
+    assert a["managed"] == [True]
+
+    # Легаси-JSON и мусор — исполняемого хвоста нет.
+    assert analyze_device_flex(b'{"rules":[]}')["state"] == "no-tail"
+    assert analyze_device_flex(b"\x00" * 40)["state"] == "no-tail"
+    assert analyze_device_flex(blob + b"EXTRA")["state"] == "no-tail"
+
+    # Битый JSON при валидном хвосте — conflict: камень исполняет
+    # записи, а их соответствие конфигурации недоказуемо.
+    bad = bytearray(blob)
+    bad[12] = ord("!")
+    bad[13] = ord("!")
+    a = analyze_device_flex(bytes(bad))
+    assert a["state"] == "conflict"
+    assert a["rules"] is None
+
+    # Хвост от ДРУГИХ правил при сохранённом JSON — conflict.
+    other = build_flex_blob(
+        [_rule(actions=[_frame_action(data="FF")])]
+    )
+    json_len = int.from_bytes(blob[8:12], "little")
+    other_json_len = int.from_bytes(other[8:12], "little")
+    franken = bytearray(blob[:12 + json_len])
+    franken[5] = other[5]
+    franken += other[12 + other_json_len:]
+    a = analyze_device_flex(bytes(franken))
+    assert a["state"] == "conflict"
+    assert a["rules"] is not None      # JSON читается, но хвост чужой
+
+
+def test_flexb_record_crc_and_fields() -> None:
+    """Повреждённая CRC записи и запись с недопустимыми полями
+    отвергают контейнер ЦЕЛИКОМ (all-or-nothing, как в прошивке):
+    половина записей без другой половины невозможна."""
+    blob = build_flex_blob([_rule()])
+    json_len = int.from_bytes(blob[8:12], "little")
+    rec_off = 12 + json_len
+
+    bad = bytearray(blob)
+    bad[-1] ^= 0x5A  # crc8 последней записи
+    assert parse_flex_blob(bytes(bad)) is None
+
+    # tx_channel = 55 — недопустимое поле (offset 32 записи v3),
+    # crc исправлен: отказ именно из-за полей.
+    from core.trigger_protocol import crc8 as _crc8
+    bad = bytearray(blob)
+    bad[rec_off + 32] = 0x55
+    bad[-1] = _crc8(bytes(bad[rec_off:-1]))
+    assert parse_flex_blob(bytes(bad)) is None
+
+    # Неизвестный бит rx_flags (offset 83 записи) — отказ.
+    bad = bytearray(blob)
+    bad[rec_off + 83] |= 0x40
+    bad[-1] = _crc8(bytes(bad[rec_off:-1]))
+    assert parse_flex_blob(bytes(bad)) is None
+
+
+def test_flexb_valid_blob_still_parses() -> None:
+    """Контроль: валидный контейнер проходит строгую проверку."""
+    blob = build_flex_blob([_rule(), _rule(active=False)])
+    parsed = parse_flex_blob(blob)
+    assert parsed is not None
+    json_part, count = parsed
+    assert json.loads(json_part.decode("utf-8"))["rules"]

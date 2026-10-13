@@ -527,14 +527,13 @@ uint8_t Storage_RegionInfo(uint8_t region, uint32_t *base_out,
   return 1U;
 }
 
-uint8_t Storage_FlexPayload(uint32_t *base_out, uint32_t *len_out)
+const uint8_t *Storage_FlexPayload(uint32_t *len_out)
 {
   if (s_flex.base == 0U) {
-    return 0U;
+    return NULL;
   }
-  *base_out = s_flex.base + STORE_HEADER_SIZE;
   *len_out = s_flex.payload_len;
-  return 1U;
+  return (const uint8_t *)(s_flex.base + STORE_HEADER_SIZE);
 }
 
 static uint8_t erase_pages(uint32_t from, uint32_t to)
