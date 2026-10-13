@@ -1,9 +1,9 @@
 # Отчёт по ревью CodeMaster-Devin-Review-1.1.71
 
 - **Исходный SHA (база ревью):** `005ec117201fc50a1d191b3f46c95b1b44365d7f` (v1.1.71)
-- **Итоговый SHA кода:** `94b9d01` — коммит исправлений CM-R12..CM-R13 (пятый раунд); ранее `91ee862` — CM-R9..CM-R11, `45c3225` — CM-R5..CM-R8, `d479d50` — CM-R1..CM-R4. Финальный HEAD ветки — коммит данного отчёта поверх (`fix/review-1.1.71`)
+- **Итоговый SHA кода:** `1caccf5` — коммит исправлений CM-R14..CM-R15 (шестой раунд); ранее `94b9d01` — CM-R12..CM-R13, `91ee862` — CM-R9..CM-R11, `45c3225` — CM-R5..CM-R8, `d479d50` — CM-R1..CM-R4. Финальный HEAD ветки — коммит данного отчёта поверх (`fix/review-1.1.71`)
 - **PR:** https://github.com/Diabatya/code_master/pull/1
-- **CI:** workflow `Build and Release` на PR. Раунд 5 — прогон HEAD `a50d03e` (код `94b9d01` + отчёт): https://github.com/Diabatya/code_master/actions/runs/38438498595 — все job зелёные (test-python/build-*/build-firmware ✓, release пропущен корректно); финальный учётный коммит `798fbe1`: runs/38439027896 — зелёный. Ранее: `d29dc24` (код `91ee862` + отчёт): runs/38418362380 — зелёный; `f57ada8`: runs/38418881830 — зелёный. Прогон раунда 3 (`a1f0456`): runs/38410066806; раунда 2 (`f37e0c2`): runs/38402204097.
+- **CI:** workflow `Build and Release` на PR. Раунд 6 — прогон итогового HEAD указан ниже после завершения; ранее: раунд 5 — `a50d03e` (код `94b9d01` + отчёт): runs/38438498595, финальный `798fbe1`: runs/38439027896, последний отчётный `8f2da8a`: runs/38439531185 — все зелёные. Раунд 4: `d29dc24` runs/38418362380, `f57ada8` runs/38418881830; раунд 3 (`a1f0456`): runs/38410066806; раунд 2 (`f37e0c2`): runs/38402204097. Release-job на PR пропускается корректно.
 
 ## Сводная таблица CM-01…CM-08
 
@@ -67,14 +67,34 @@
 | CM-R12 | Исправлено | `ui/flexible_logic_tab.py::_exec_generation`, `_new_exec_generation`, `reset_device_flex_state`, `set_device_flex_state`, `apply_device_flex_analysis`, `commit_runtime`, `_load_config`, `_send_frame`/`_send_guarded`, `_run_actions`/`_execute_scheduled`, `fire_aux` (aux_delay), `_set_flag`/`_flag_pulse_check` | Поколение исполнения: каждый асинхронный QTimer-коллбек захватывает поколение при планировании и отбрасывается при несовпадении — даже когда новая сессия уже подтверждена `empty`/`no-tail`/`verified` и гейт `_pc_flex_allowed` вновь открыт. `_new_exec_generation` бампится при смене устройства/сессии, смене подтверждённого владельца и замене исполняемого снимка; централизованно сбрасывает привязанный к поколению трекинг: `_pending_actions`→aborted, `_rule_busy`, `_event_fire`, `_program_event_seen`, фронты кэшей/флагов, принудительное гашение взведённых импульсных битов; `device_too` при смене камня гасит зеркала переменных/доп.каналов и `_tick`. Проверка поколения в `_execute_scheduled` — ДО декремента `_rule_busy`: старый таймер не съедает занятость программы нового снимка с тем же индексом | `test_flex_runtime_owner.py`: `test_old_session_exec_delay_silent_after_reconfirm`, `test_old_session_frame_delay_silent_after_reconfirm` (delay/count/between), `test_old_session_aux_delay_silent_after_reconfirm`, `test_exec_delay_with_abort_dies_on_reconfirm`, `test_cache_send_action_dies_on_reconfirm`, `test_old_callback_does_not_touch_new_busy`, `test_rapid_resets_long_timer_from_first_session`, `test_old_session_timer_silent_after_reconfirm_verified` (смешанные managed/PC), `test_verified_transition_kills_pending_old_runtime`, `test_pending_old_rule_dies_on_verified` | Гейт состояния в момент срабатывания не спасал: reset → быстрое подтверждение новой сессии → старый таймер слал команду уже под чужим владением; проверено переходом «старая сессия → reset → повторное подтверждение → истечение таймера» — 0 отправок CAN/AUX |
 | CM-R13 | Исправлено | `apply_device_flex_analysis` (verified-ветка): `_new_exec_generation` → `_runtime_rules` из `analysis["rules"]` → `_device_managed` из `analysis["managed"]` → `_build_internal_rules()` → `_rules_dirty=False` — в одном переходе | Verified теперь атомарно меняет весь связанный набор: снимок, managed-индексы, `_internal_rules`, счётчики и `_cache_watch` перестраиваются из той же проверки до ближайшего кадра — прослойки «новый managed + старые internal» не существует; `_rules_dirty` не переносит ленивую перестройку через кадр. Черновик `flexible_rules` и его dirty-бейдж не трогаются | `test_flex_runtime_owner.py`: `test_verified_swaps_internal_rules` (internal=NEW, старый кадр молчит, новый отправляет), `test_verified_mixed_managed_switches_owners`, `test_managed_to_pc_transition`, `test_verified_preserves_draft_and_executes_new`, `test_boot_event_uses_new_runtime`, `test_aux_event_uses_new_runtime` | Verified обновлял `_runtime_rules`/`_device_managed`, но исполнение продолжало ходить по старому `_internal_rules` до ленивой перестройки → атомарная замена, старый кадр 0x123 молчит, новый 0x555 исполняется ПК |
 
+## Шестой раунд ревью (CodeMaster-Devin-PR1-Review-Round6, CM-R14…CM-R15)
+
+Проверенный ревьюером HEAD: `8f2da8a`. Пробник на настоящей вкладке воспроизвёл:
+повторный verified того же блоба менял поколение 2→3 и отменял законную команду
+(`sent=0` вместо 1); три цикла «schedule + reset» оставляли `len(_pending_actions)=3`
+записей `aborted=True` навсегда. Исправления — коммит `1caccf5`.
+
+Политика повторного чтения: поколение исполнения инвалидируется только при
+фактической смене контекста — сессии/устройства (`reset_device_flex_state`),
+подтверждённого состояния владения, исполняемого снимка правил или managed-набора.
+Повторная вычитка идентичного содержимого (verified с теми же rules+managed,
+повтор после `mark_probe_failed`, повторный `empty`/`no-tail`/`conflict`) — лишь
+подтверждение: снимается флаг неподтверждённости и обновляются бейджи, таймеры,
+`_rule_busy`, счётчики событий и импульсы не трогаются.
+
+| # | Статус | Файл/функция | Изменение | Регресс-тест | До → После |
+|---|--------|--------------|-----------|--------------|------------|
+| CM-R14 | Исправлено | `ui/flexible_logic_tab.py::apply_device_flex_analysis` | Verified ветка сначала вычисляет managed-индексы и сравнивает `state+rules+managed` с текущим контекстом: совпадение → только `_device_flex_unconfirmed=False` + бейджи, поколение и запланированные команды живы. Различие → прежний атомарный переход `_new_exec_generation` → `_runtime_rules` → `_device_managed` → `_build_internal_rules`. После reset поколение уже сменено — тот же verified старые коллбеки не воскрешает | `test_flex_runtime_owner.py`: `test_identical_reverify_keeps_exec_delay` (gen неизменен, 1 отправка), `test_identical_reverify_keeps_send_series` (серия delay/count/between не прерывается), `test_identical_reverify_keeps_aux_delay`, `test_probe_failed_then_same_verified_keeps_actions`, `test_changed_verified_still_invalidates`, `test_changed_managed_still_invalidates`, `test_reset_then_same_verified_still_kills_old` | Пробник ревью: `identical verified generation= 2 -> 3 sent= 0` → `2 -> 2 sent= 1` |
+| CM-R15 | Исправлено | `ui/flexible_logic_tab.py::_new_exec_generation`, `_check_pending_aborts` | При инвалидации записи `_pending_actions` помечаются `aborted` и **удаляются из живого списка** (коллбек держит собственную ссылку до истечения таймера — список ему не нужен); `_check_pending_aborts` пропускает aborted/stale-gen записи — они не создают событийный трекинг нового поколения. Проверка gen в `_execute_scheduled` остаётся до трога `_rule_busy` | `test_flex_runtime_owner.py`: `test_stale_pending_removed_on_reset` (3 цикла — список пуст), `test_stale_pending_removed_on_verified_swap`, `test_stale_pending_removed_on_conflict`, `test_identical_reverify_keeps_pending_list`, `test_new_pending_same_index_after_reset`, `test_abort_event_still_cancels_same_generation` | Пробник ревью: `stale pending= 3 aborted= True` → `stale pending= 0` |
+
 ## Команды верификации и результат
 
 | Команда | Exit | Результат |
 |---------|------|-----------|
-| `QT_QPA_PLATFORM=offscreen python3 -m pytest -q` | 0 | **208 passed**, 4 warnings (было 192; +16: CM-R12/R13 переходные регрессии — `test_flex_runtime_owner.py`) |
+| `QT_QPA_PLATFORM=offscreen python3 -m pytest -q` | 0 | **221 passed**, 4 warnings (было 208; +13: CM-R14/R15 переходные регрессии — `test_flex_runtime_owner.py`) |
 | `python3 -m pytest tests/test_save_path.py -q` | 0 | **32 passed** (неизвестность/empty/no-tail/verified/conflict) |
 | `python3 -m pytest tests/test_flex_compiler.py -q` | 0 | **26 passed** (контракт хвоста, parse_flex_rules, analyze_device_flex) |
-| `python3 -m pytest tests/test_flex_runtime_owner.py -q` | 0 | **26 passed** (владение/сессии + поколение исполнения: старые таймеры мертвы после reset→подтверждения; verified атомарно перестраивает `_internal_rules`) |
+| `python3 -m pytest tests/test_flex_runtime_owner.py -q` | 0 | **39 passed** (владение/сессии + поколение исполнения: старые таймеры мертвы после reset→подтверждения; verified атомарно перестраивает `_internal_rules`; идентичный verified не отменяет команды; `_pending_actions` не копит старые поколения) |
 | `python3 -m ruff check .` | 0 | All checks passed |
 | `python3 -m compileall -q core ui models` | 0 | OK |
 | `cc … test_trigger_flash.c && ./a.out` | 0 | PASS: 70 слотов round-trip |
