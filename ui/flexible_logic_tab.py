@@ -4328,8 +4328,15 @@ class FlexibleLogicTab(QWidget):
         импульсов — они описывают камень прошлой сессии. При смене
         только владельца/снимка (тот же камень) зеркала живы."""
         self._exec_generation += 1
+        # Отложенные действия прошлого поколения: помечаем прерванными
+        # И убираем из живого списка — их таймеры вернутся по gen
+        # до трога состояния, а держать их в _pending_actions навсегда
+        # значит копить записи и кормить ими _check_pending_aborts
+        # новой сессии (ревью CM-R15). Сам коллбек держит свою ссылку
+        # на entry до истечения таймера — список ему не нужен.
         for entry in self._pending_actions:
             entry["aborted"] = True
+        self._pending_actions.clear()
         self._rule_busy.clear()
         self._event_fire.clear()
         self._program_event_seen.clear()
@@ -4396,6 +4403,28 @@ class FlexibleLogicTab(QWidget):
                 # страховка против кривого вызова.
                 state = "conflict"
             else:
+                # managed — список bool по индексам правил (как у
+                # compile_rules): set(managed) дал бы {True, False},
+                # где `0 in`/`1 in` истинны по равенству — все
+                # программы «ушли бы на камень». Берём индексы.
+                managed_idx = {
+                    i for i, m in enumerate(
+                        analysis.get("managed") or ()
+                    ) if m
+                }
+                if (
+                    self._device_flex_state == "verified"
+                    and self._runtime_rules == rules
+                    and self._device_managed == managed_idx
+                ):
+                    # Повторная вычитка ТОГО ЖЕ блоба на том же
+                    # устройстве в той же сессии: контекст подтверждён
+                    # без изменений — не отменяем запланированные
+                    # команды, busy, счётчики событий и импульсы
+                    # (ревью CM-R14). Инвалидирует поколение только
+                    # фактическая смена сессии/владельца/снимка.
+                    self._update_executor_badges()
+                    return
                 # Замена исполняемого снимка — всегда новое поколение:
                 # действия, запланированные старыми правилами, не
                 # имеют права стрелять под новым владением (CM-R12 п.5).
@@ -4404,15 +4433,7 @@ class FlexibleLogicTab(QWidget):
                 self._config.set(
                     "flexible_rules_active", self._runtime_rules
                 )
-                # managed — список bool по индексам правил (как у
-                # compile_rules): set(managed) дал бы {True, False},
-                # где `0 in`/`1 in` истинны по равенству — все
-                # программы «ушли бы на камень». Берём индексы.
-                self._device_managed = {
-                    i for i, m in enumerate(
-                        analysis.get("managed") or ()
-                    ) if m
-                }
+                self._device_managed = managed_idx
                 self._device_flex_state = "verified"
                 # Атомарно со снимком: _internal_rules перестраивается
                 # здесь же — входы исполнения никогда не видят
@@ -5207,6 +5228,14 @@ class FlexibleLogicTab(QWidget):
         if not self._pending_actions:
             return
         for entry in list(self._pending_actions):
+            # Страховка CM-R15: записи прошлого поколения или уже
+            # прерванные не участвуют в новой сессии и не создают
+            # событийный трекинг под новым снимком.
+            if (
+                entry["aborted"]
+                or entry.get("gen") != self._exec_generation
+            ):
+                continue
             abort = entry["abort"]
             if abort is None:
                 continue

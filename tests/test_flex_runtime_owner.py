@@ -577,3 +577,239 @@ def test_aux_event_uses_new_runtime(tab) -> None:
     tab._fire_aux_events()
     QTest.qWait(60)
     assert len(tab._sent) == 1
+
+
+# ------------------------------------------------------------------
+# CM-R14: повторная верификация НЕИЗМЕННОГО снимка — не отменяет
+# законные команды текущей сессии
+# ------------------------------------------------------------------
+
+
+def test_identical_reverify_keeps_exec_delay(tab) -> None:
+    """Пробник ревью: тот же verified-анализ повторно — без reset,
+    смены устройства, правил и владельца. Поколение и команда живы."""
+    rule = _frame_rule(exec_delay=80)
+    analysis = analyze_device_flex(build_flex_blob([rule]))
+    assert analysis["state"] == "verified"
+    assert analysis["managed"] == [False]
+    tab.apply_device_flex_analysis(analysis)
+    tab.process_frame(_rx_frame())
+    gen = tab._exec_generation
+    tab.apply_device_flex_analysis(analysis)  # идентичное — не смена
+    assert tab._exec_generation == gen
+    QTest.qWait(160)
+    assert len(tab._sent) == 1
+
+
+def test_identical_reverify_keeps_send_series(tab) -> None:
+    """Повторная вычитка МЕЖДУ повторами серии delay/count/between:
+    серия сохраняет число и расписание."""
+    rule = _frame_rule(exec_delay=10, delay=40, count=2, between=70)
+    analysis = analyze_device_flex(build_flex_blob([rule]))
+    tab.apply_device_flex_analysis(analysis)
+    tab.process_frame(_rx_frame())
+    QTest.qWait(80)  # первая отправка (10+40) уже ушла
+    assert len(tab._sent) == 1
+    tab.apply_device_flex_analysis(analysis)  # та же вычитка
+    QTest.qWait(160)  # вторая на 10+40+70
+    assert len(tab._sent) == 2
+
+
+def test_identical_reverify_keeps_aux_delay(tab) -> None:
+    """aux_delay старого поколения НЕ отменяется идентичной
+    верификацией."""
+    aux: list = []
+    tab._serial_manager.send_aux = lambda *a, **kw: aux.append((a, kw))
+    rule = _frame_rule(exec_delay=10, aux_delay=60)
+    rule["action"].update(
+        frame_enabled=False, aux_enabled=True,
+        aux_channel=1, aux_mode="on",
+    )
+    analysis = analyze_device_flex(build_flex_blob([rule]))
+    tab.apply_device_flex_analysis(analysis)
+    tab.process_frame(_rx_frame())
+    tab.apply_device_flex_analysis(analysis)
+    QTest.qWait(160)
+    assert len(aux) == 1
+
+
+def test_probe_failed_then_same_verified_keeps_actions(tab) -> None:
+    """mark_probe_failed → успешное чтение ТОГО ЖЕ verified:
+    разрешённые действия не теряются, диагностика снимается."""
+    rule = _frame_rule(exec_delay=80)
+    analysis = analyze_device_flex(build_flex_blob([rule]))
+    tab.apply_device_flex_analysis(analysis)
+    tab.process_frame(_rx_frame())
+    tab.mark_device_flex_probe_failed()
+    assert tab._device_flex_unconfirmed
+    gen = tab._exec_generation
+    tab.apply_device_flex_analysis(analysis)
+    assert not tab._device_flex_unconfirmed
+    assert tab._exec_generation == gen
+    QTest.qWait(160)
+    assert len(tab._sent) == 1
+
+
+def test_changed_verified_still_invalidates(tab) -> None:
+    """Контроль: ДРУГИЕ правила в verified — прежняя команда гасится
+    (политика смены контекста сохранена)."""
+    tab.apply_device_flex_analysis(
+        analyze_device_flex(build_flex_blob([_frame_rule(exec_delay=80)]))
+    )
+    tab.process_frame(_rx_frame())
+    new = _frame_rule(event_id="555", title="NEW", exec_delay=1)
+    tab.apply_device_flex_analysis(
+        analyze_device_flex(build_flex_blob([new]))
+    )
+    QTest.qWait(160)
+    assert len(tab._sent) == 0  # старая команда убита сменой снимка
+    tab.process_frame(_rx_frame(0x555))
+    QTest.qWait(60)
+    assert len(tab._sent) == 1
+
+
+def test_changed_managed_still_invalidates(tab) -> None:
+    """managed-набор изменился (правило ушло на камень) — прежняя
+    PC-команда отменяется: исполнять её значило бы дубль."""
+    pc = _frame_rule(exec_delay=80)
+    a1 = analyze_device_flex(build_flex_blob([pc]))
+    assert a1["managed"] == [False]
+    tab.apply_device_flex_analysis(a1)
+    tab.process_frame(_rx_frame())
+    # Теперь то же правило компилируемо (exec_delay убран из JSON) —
+    # владелец сменился на камень.
+    hw = _frame_rule()
+    a2 = analyze_device_flex(build_flex_blob([hw]))
+    assert a2["managed"] == [True]
+    tab.apply_device_flex_analysis(a2)
+    QTest.qWait(160)
+    assert tab._sent == []
+
+
+def test_reset_then_same_verified_still_kills_old(tab) -> None:
+    """Reset уже сменил поколение: та же verified-вычитка новой
+    сессии не воскрешает старые коллбеки и не блокирует новые."""
+    rule = _frame_rule(exec_delay=80)
+    analysis = analyze_device_flex(build_flex_blob([rule]))
+    tab.apply_device_flex_analysis(analysis)
+    tab.process_frame(_rx_frame())          # старый таймер
+    tab.reset_device_flex_state()
+    tab.apply_device_flex_analysis(analysis)  # новая сессия, тот же блоб
+    QTest.qWait(160)
+    assert tab._sent == []
+    tab.process_frame(_rx_frame())          # новая команда работает
+    QTest.qWait(160)
+    assert len(tab._sent) == 1
+
+
+# ------------------------------------------------------------------
+# CM-R15: записи старых поколений не копятся в _pending_actions
+# ------------------------------------------------------------------
+
+
+def _abort_rule(exec_delay: int = 30) -> dict[str, Any]:
+    rule = _frame_rule(exec_delay=exec_delay)
+    rule["action"]["abort"] = {
+        "type": "frame", "id": "999", "channel": 2,
+        "dlc": 0, "data": "",
+    }
+    return rule
+
+
+def test_stale_pending_removed_on_reset(tab) -> None:
+    """Пробник ревью: 3× (schedule + reset→no-tail) — живой список
+    не держит записи прошлых поколений."""
+    tab.set_device_flex_state("no-tail")
+    tab.set_config([_abort_rule()])
+    for _ in range(3):
+        tab.process_frame(_rx_frame())
+        assert len(tab._pending_actions) == 1
+        tab.reset_device_flex_state()
+        assert tab._pending_actions == []  # убрано при инвалидации
+        tab.set_device_flex_state("no-tail")
+        QTest.qWait(60)
+    assert tab._pending_actions == []
+    assert tab._sent == []
+
+
+def test_stale_pending_removed_on_verified_swap(tab) -> None:
+    """Замена снимка тоже чистит живой список."""
+    rule = _abort_rule(60)
+    tab.set_config([rule])
+    tab.apply_device_flex_analysis(
+        analyze_device_flex(build_flex_blob([rule]))
+    )
+    tab.process_frame(_rx_frame())
+    assert len(tab._pending_actions) == 1
+    new = _frame_rule(event_id="555", title="NEW")
+    tab.apply_device_flex_analysis(
+        analyze_device_flex(build_flex_blob([new]))
+    )
+    assert tab._pending_actions == []
+    QTest.qWait(120)
+    assert tab._sent == []
+
+
+def test_stale_pending_removed_on_conflict(tab) -> None:
+    """verified→conflict: pending старого контекста уходит из
+    списка сразу, не дожидаясь таймеров."""
+    rule = _abort_rule(60)
+    tab.set_config([rule])
+    tab.apply_device_flex_analysis(
+        analyze_device_flex(build_flex_blob([rule]))
+    )
+    tab.process_frame(_rx_frame())
+    assert len(tab._pending_actions) == 1
+    other = _frame_rule(event_id="200", title="OTHER")
+    conflict = analyze_device_flex(
+        _conflict_blob(tail_rules=[rule], json_rules=[other])
+    )
+    assert conflict["state"] == "conflict"
+    tab.apply_device_flex_analysis(conflict)
+    assert tab._pending_actions == []
+
+
+def test_identical_reverify_keeps_pending_list(tab) -> None:
+    """Неизменная верификация сохраняет и pending-записи
+    (CM-R14 + CM-R15 вместе)."""
+    rule = _abort_rule(80)
+    analysis = analyze_device_flex(build_flex_blob([rule]))
+    tab.set_config([rule])
+    tab.apply_device_flex_analysis(analysis)
+    tab.process_frame(_rx_frame())
+    assert len(tab._pending_actions) == 1
+    tab.apply_device_flex_analysis(analysis)
+    assert len(tab._pending_actions) == 1
+    assert not tab._pending_actions[0]["aborted"]
+    QTest.qWait(160)
+    assert len(tab._sent) == 1
+
+
+def test_new_pending_same_index_after_reset(tab) -> None:
+    """Новая запись с тем же rule_index после reset живёт в
+    чистом списке и исполняется; поздний старый таймер ничего
+    не трогает."""
+    tab.set_device_flex_state("no-tail")
+    tab.set_config([_abort_rule(40)])
+    tab.process_frame(_rx_frame())
+    tab.reset_device_flex_state()
+    tab.set_device_flex_state("no-tail")
+    tab.process_frame(_rx_frame())  # index 0, новое поколение
+    assert len(tab._pending_actions) == 1
+    entry = tab._pending_actions[0]
+    assert entry["gen"] == tab._exec_generation
+    QTest.qWait(90)
+    assert len(tab._sent) == 1
+    assert tab._pending_actions == []
+
+
+def test_abort_event_still_cancels_same_generation(tab) -> None:
+    """Прерыватель текущего поколения работает — гард CM-R15
+    не сломал штатный abort."""
+    tab.set_device_flex_state("no-tail")
+    tab.set_config([_abort_rule(80)])
+    tab.process_frame(_rx_frame())
+    tab.process_frame(_rx_frame(0x999))  # событие-прерыватель
+    QTest.qWait(140)
+    assert tab._sent == []
+    assert tab._pending_actions == []
