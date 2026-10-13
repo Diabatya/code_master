@@ -15,12 +15,17 @@ _Static_assert((sizeof(trigger_t) % 2U) == 0U, "trigger_t size must be halfword-
 _Static_assert(sizeof(trigger_t) == TRIGGER_RECORD_SIZE, "trigger_t must match wire record size");
 _Static_assert(sizeof(trigger_header_t) == TRIGGER_HEADER_SIZE, "trigger_header_t must be 16 bytes");
 
-static trigger_t s_triggers[TRIGGER_MAX_RECORDS];
+static trigger_t s_triggers[TRIGGER_ALL_RECORDS];
 static trigger_t s_staged[TRIGGER_MAX_RECORDS];
 static uint8_t s_stage_flags[TRIGGER_MAX_RECORDS];
 static uint8_t s_staged_max;    /* наибольший staged-индекс +1 */
 static uint32_t s_stage_tick;   /* тик последнего STAGE */
-static uint8_t s_count;         /* активных записей в списке */
+static uint8_t s_count;         /* активных записей в списке
+                                 * (пользовательские + хвост ГЛ) */
+static uint8_t s_user_count;    /* записей из хранилища TRGH — граница,
+                                 * до которой работают STAGE/COMMIT/
+                                 * Get/Count; хвост за ней — записи ГЛ */
+
 static uint32_t s_store_base;   /* адрес заголовка области во Flash, 0 — нет */
 static uint32_t s_store_pages;  /* страниц, занятых текущей областью */
 static uint32_t s_generation;   /* generation последнего коммита */
@@ -28,8 +33,8 @@ static uint32_t s_generation;   /* generation последнего коммит�
 /* Кэш режима «автоматическая запись DATA»: последний кадр, попавший в
  * фильтр «Откуда читаем». Хранится в RAM, не во Flash — перезапись
  * страницы на каждый кадр исчерпала бы ресурс стираний (~10k циклов). */
-static can_frame_t s_cache[TRIGGER_MAX_RECORDS];
-static uint8_t s_cache_valid[TRIGGER_MAX_RECORDS];
+static can_frame_t s_cache[TRIGGER_ALL_RECORDS];
+static uint8_t s_cache_valid[TRIGGER_ALL_RECORDS];
 
 /* Pending deferred responses (delay_ms > 0 or repeat count > 1). A
  * fixed-size list is enough since there are at most TRIGGER_COUNT
@@ -61,7 +66,7 @@ typedef struct {
  * воскресавшим после каждого ребута. */
 #define TRIGGER_STAGE_TIMEOUT_MS 15000U
 
-static pending_response_t s_pending[TRIGGER_MAX_RECORDS];
+static pending_response_t s_pending[TRIGGER_ALL_RECORDS];
 static uint32_t s_fired_count;
 static uint32_t s_dropped_count; /* отправки, исчерпавшие ретраи */
 static uint32_t s_max_lateness_ms;
@@ -79,8 +84,8 @@ typedef struct {
   uint8_t  last_dlc;
   uint8_t  last[8];
 } fire_state_t;
-static fire_state_t s_rx_state[TRIGGER_MAX_RECORDS];   /* условие приёма */
-static fire_state_t s_src_state[TRIGGER_MAX_RECORDS];  /* источник кэша */
+static fire_state_t s_rx_state[TRIGGER_ALL_RECORDS];   /* условие приёма */
+static fire_state_t s_src_state[TRIGGER_ALL_RECORDS];  /* источник кэша */
 
 static uint8_t trigger_fields_valid(const trigger_t *trig);
 static uint8_t erase_pages(uint32_t from, uint32_t to);
@@ -210,6 +215,69 @@ static uint32_t find_store(uint8_t *count_out, uint32_t *gen_out,
   return best;
 }
 
+/* --- Автономная гибкая логика (протокол 12) -------------------------
+ * ПК при сохранении ГЛ упаковывает в полезную нагрузку блоба FLXH
+ * контейнер FLXB:
+ *   [0..3]  магия «FLXB», [4] версия контейнера = 1,
+ *   [5]     число скомпилированных записей N,
+ *   [6..7]  зарезервировано, [8..11] длина JSON u32 LE,
+ *   [12..12+J) JSON-конфигурация (для вычитки настройки на ПК),
+ *   далее   N записей trigger_t (90 Б с crc8 — как в TRGH).
+ * Программа ГЛ компилируется в записи, когда ВСЕ события — «Фрейм»
+ * или «Включение устройства», условий нет, а все действия — отправки
+ * кадров; остальные программы исполняет ПК, как раньше. */
+static void append_flex(void)
+{
+  /* Хвост списка пересобирается прямо из Flash — отдельная
+   * мастер-копия в ОЗУ не нужна (RAM почти исчерпана кольцевыми
+   * буферами CAN). */
+  s_count = s_user_count;
+  uint32_t base = 0U;
+  uint32_t len = 0U;
+  if (!Storage_FlexPayload(&base, &len) || len < 12U) {
+    return;
+  }
+  const uint8_t *p = (const uint8_t *)base;
+  if (p[0] != 'F' || p[1] != 'L' || p[2] != 'X' || p[3] != 'B'
+      || p[4] != 1U) {
+    return; /* блог старого приложения — чистый JSON без записей */
+  }
+  uint8_t count = p[5];
+  uint32_t json_len = (uint32_t)p[8] | ((uint32_t)p[9] << 8)
+                      | ((uint32_t)p[10] << 16) | ((uint32_t)p[11] << 24);
+  uint32_t rec_off = 12U + json_len;
+  if (count > FLEX_MAX_RECORDS) {
+    count = FLEX_MAX_RECORDS;
+  }
+  if ((uint64_t)rec_off + (uint64_t)count * sizeof(trigger_t)
+      > (uint64_t)len) {
+    return;
+  }
+  for (uint8_t i = 0U;
+       i < count && s_count < TRIGGER_ALL_RECORDS; i++) {
+    if (load_record(p + rec_off + (uint32_t)i * sizeof(trigger_t),
+                    sizeof(trigger_t), &s_triggers[s_count])) {
+      s_count++;
+    }
+  }
+}
+
+void Trigger_ReloadFlex(void)
+{
+  append_flex();
+  /* Отложенные отправки/защёлки хвоста относились к прежним записям
+   * ГЛ — сбрасываем только их диапазон, пользовательские записи
+   * (низ списка) не трогаем. */
+  memset(&s_pending[s_user_count], 0,
+         sizeof(pending_response_t) * (TRIGGER_ALL_RECORDS - s_user_count));
+  memset(&s_cache_valid[s_user_count], 0,
+         TRIGGER_ALL_RECORDS - (uint32_t)s_user_count);
+  memset(&s_rx_state[s_user_count], 0,
+         sizeof(fire_state_t) * (TRIGGER_ALL_RECORDS - s_user_count));
+  memset(&s_src_state[s_user_count], 0,
+         sizeof(fire_state_t) * (TRIGGER_ALL_RECORDS - s_user_count));
+}
+
 void Trigger_Init(void)
 {
   memset(s_pending, 0, sizeof(s_pending));
@@ -223,6 +291,7 @@ void Trigger_Init(void)
   s_dropped_count = 0U;
   s_max_lateness_ms = 0U;
   s_count = 0U;
+  s_user_count = 0U;
   s_staged_max = 0U;
   s_stage_tick = 0U;
   s_store_base = 0U;
@@ -265,6 +334,9 @@ void Trigger_Init(void)
       (void)erase_pages(TRIGGER_LEGACY_ADDR, legacy_end);
       Storage_NoteLegacyTrigDone();
     }
+    /* Хвост списка — скомпилированные записи ГЛ из блоба FLXH. */
+    s_user_count = s_count;
+    Trigger_ReloadFlex();
     return;
   }
 
@@ -338,11 +410,17 @@ void Trigger_Init(void)
     /* Сбой записи не фатален: список уже в RAM и работает, переезд
      * повторится при следующем старте. */
   }
+  /* Хвост списка — скомпилированные записи ГЛ из блоба FLXH. */
+  s_user_count = s_count;
+  Trigger_ReloadFlex();
 }
 
 uint8_t Trigger_Get(uint8_t index, trigger_t *out)
 {
-  if (index >= s_count) {
+  /* Хост видит только пользовательскую часть списка — записи ГЛ
+   * в хвосте ей не показываются (не должны появляться «фантомными»
+   * триггерами в вычитке). */
+  if (index >= s_user_count) {
     return 0U;
   }
   *out = s_triggers[index];
@@ -351,7 +429,7 @@ uint8_t Trigger_Get(uint8_t index, trigger_t *out)
 
 uint8_t Trigger_Count(void)
 {
-  return s_count;
+  return s_user_count;
 }
 
 /* Страница целиком стёрта (все 0xFF) — её можно программировать без
@@ -507,7 +585,10 @@ static uint8_t program_store(uint32_t base, uint32_t generation, uint8_t total,
 void Trigger_ClearAll(void)
 {
   erase_trig_regions();
-  s_count = 0U;
+  s_user_count = 0U;
+  /* Записи ГЛ живут в блобе FLXH — «очистка триггеров» их не трогает:
+   * хвост списка пересобирается из мастер-копии. */
+  append_flex();
   s_staged_max = 0U;
   s_stage_tick = 0U;
   s_store_base = 0U;
@@ -531,7 +612,8 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
       || trig->src_channel > 2U || trig->src_extended > 1U
       || trig->src_dlc > 8U
       || (trig->rx_flags & ~(TRIGGER_F_MUTE_ECHO | TRIGGER_F_FIRE_ON_BOOT
-                             | TRIGGER_F_COND_MASK)) != 0U
+                             | TRIGGER_F_COND_MASK
+                             | TRIGGER_F_TX_EVENT_DATA)) != 0U
       || (trig->src_flags & ~(TRIGGER_F_MUTE_ECHO
                               | TRIGGER_F_CACHE_ONLY)) != 0U) {
     return 0U;
@@ -584,12 +666,12 @@ uint8_t Trigger_Commit(uint8_t total)
    * совместимости может гасить хвост пустыми записями — старая
    * прошивка запишет их в слоты, новая отбросит по длине списка). */
   if (total == 0xFFU) {
-    total = s_count > s_staged_max ? s_count : s_staged_max;
+    total = s_user_count > s_staged_max ? s_user_count : s_staged_max;
   }
   if (total > TRIGGER_MAX_RECORDS) {
     return 0U;
   }
-  if (s_staged_max == 0U && total == s_count) {
+  if (s_staged_max == 0U && total == s_user_count) {
     return 1U; /* нечего коммитить */
   }
 
@@ -602,7 +684,7 @@ uint8_t Trigger_Commit(uint8_t total)
   for (uint8_t j = 0U; j < total; j++) {
     if (s_stage_flags[j] != 0U) {
       src[j] = &s_staged[j];
-    } else if (j < s_count) {
+    } else if (j < s_user_count) {
       src[j] = &s_triggers[j];
     } else {
       src[j] = &empty_rec;
@@ -725,7 +807,10 @@ uint8_t Trigger_Commit(uint8_t total)
   for (uint8_t j = 0U; j < total; j++) {
     s_triggers[j] = *src[j];
   }
-  s_count = total;
+  /* Хвост записей ГЛ пересобирается за новой пользовательской частью —
+   * записи из FLXH коммитом триггеров не задеваются. */
+  s_user_count = total;
+  append_flex();
   s_store_base = (total != 0U) ? base : 0U;
   if (total == 0U) {
     s_store_pages = 0U;
@@ -752,7 +837,7 @@ uint8_t Trigger_Set(uint8_t index, const trigger_t *trig)
   if (!Trigger_Stage(index, trig)) {
     return 0U;
   }
-  uint8_t total = s_count;
+  uint8_t total = s_user_count;
   if (index >= total) {
     total = (uint8_t)(index + 1U);
   }
@@ -765,7 +850,7 @@ uint8_t Trigger_Set(uint8_t index, const trigger_t *trig)
  * место стирается, пишется целиком, старые страницы вычищаются. */
 uint8_t Trigger_Relocate(uint32_t new_base)
 {
-  if (s_store_base == 0U || s_count == 0U) {
+  if (s_store_base == 0U || s_user_count == 0U) {
     return 1U; /* переносить нечего */
   }
   if (new_base < Storage_CodeEnd()
@@ -775,8 +860,10 @@ uint8_t Trigger_Relocate(uint32_t new_base)
   if (new_base == s_store_base) {
     return 1U;
   }
+  /* Переносится только область TRGH — пользовательские записи;
+   * записи ГЛ в неё не входят (они из блоба FLXH). */
   const trigger_t *src[TRIGGER_MAX_RECORDS];
-  for (uint8_t j = 0U; j < s_count; j++) {
+  for (uint8_t j = 0U; j < s_user_count; j++) {
     src[j] = &s_triggers[j];
   }
   /* Целевой диапазон стирается целиком — он может частично пересекаться
@@ -786,7 +873,7 @@ uint8_t Trigger_Relocate(uint32_t new_base)
   }
   uint32_t old_base = s_store_base;
   uint32_t old_end = old_base + s_store_pages * TRIGGER_FLASH_PAGE;
-  if (!program_store(new_base, s_generation + 1U, s_count, src)) {
+  if (!program_store(new_base, s_generation + 1U, s_user_count, src)) {
     return 0U;
   }
   s_generation++;
@@ -804,7 +891,7 @@ uint8_t Trigger_Relocate(uint32_t new_base)
 
 uint8_t Trigger_SetEnabled(uint8_t index, uint8_t enabled)
 {
-  if (index >= s_count) {
+  if (index >= s_user_count) {
     return 0U;
   }
   trigger_t updated = s_triggers[index];
@@ -848,9 +935,18 @@ static uint8_t rx_data_matches(const trigger_t *t, const can_frame_t *frame)
 {
   if (t->rx_rtr != 1U) {
     /* В RTR-режиме кадр не несёт данных — сравнение по Data не имеет
-     * смысла и пропускается. Байт с маской 0x00 — wildcard «X». */
-    for (uint8_t i = 0; i < frame->dlc && i < 8U; i++) {
-      if ((t->rx_data[i] & t->rx_data_mask[i]) != (frame->data[i] & t->rx_data_mask[i])) {
+     * смысла и пропускается. Байт с маской 0x00 — wildcard «X».
+     * Байты за пределами DLC считаются нулевыми, как в host-логике
+     * (_tokens_match / _cache_src_matches): маска, выставленная на
+     * позицию, которой нет в коротком кадре, на ПК давала «не совпало»
+     * (0 != ожидаемое), а на МК молча пропускалась — программы ГЛ
+     * с длинным шаблоном DATA срабатывали на коротких кадрах. */
+    for (uint8_t i = 0; i < 8U; i++) {
+      if (t->rx_data_mask[i] == 0U) {
+        continue;
+      }
+      uint8_t b = (i < frame->dlc) ? frame->data[i] : 0U;
+      if ((t->rx_data[i] & t->rx_data_mask[i]) != (b & t->rx_data_mask[i])) {
         return 0U;
       }
     }
@@ -978,6 +1074,15 @@ static uint8_t send_response(const trigger_t *t, uint8_t index, uint8_t echo)
     resp.id = t->tx_id;
     resp.dlc = t->tx_dlc;
     memcpy(resp.data, t->tx_data, 8);
+    /* ГЛ: «X»-байты ответа подставляются из кадра события — слот
+     * s_cache[index] наполнен при матче (Trigger_OnFrame). */
+    if (t->rx_flags & TRIGGER_F_TX_EVENT_DATA) {
+      for (uint8_t j = 0; j < 8U; j++) {
+        if (t->src_from[j] == 0xFFU) {
+          resp.data[j] = s_cache_valid[index] ? s_cache[index].data[j] : 0U;
+        }
+      }
+    }
   }
   resp.echo = echo;
   uint8_t sent = 0U;
@@ -1049,6 +1154,19 @@ void Trigger_OnFrame(const can_frame_t *frame)
     if (s_rx_state[i].suppress != 0U || !rx_data_matches(t, frame)) {
       continue;
     }
+    if (t->rx_flags & TRIGGER_F_TX_EVENT_DATA) {
+      /* Запись ГЛ с подстановкой «X из события»: кадр, взведший
+       * программу, складываем в слот кэша — send_response берёт
+       * из него позиции src_from[j]==0xFF, в т.ч. для повторов.
+       * Байты за DLC кадра HAL не заполняет — там мусор стека;
+       * обнуляем, ПК-исполнение паддит недостающие байты нулями
+       * (_pad_8). */
+      s_cache[i] = *frame;
+      if (frame->dlc < 8U) {
+        memset(&s_cache[i].data[frame->dlc], 0, 8U - frame->dlc);
+      }
+      s_cache_valid[i] = 1U;
+    }
     {
       uint8_t sends = t->tx_count ? t->tx_count : 1U;
       if (t->delay_ms == 0U && sends == 1U) {
@@ -1113,7 +1231,7 @@ void Trigger_Poll(void)
     s_staged_max = 0U;
     memset(s_stage_flags, 0, sizeof(s_stage_flags));
   }
-  for (uint8_t i = 0; i < TRIGGER_MAX_RECORDS; i++) {
+  for (uint8_t i = 0; i < TRIGGER_ALL_RECORDS; i++) {
     if (s_pending[i].armed && (int32_t)(now - s_pending[i].fire_at_tick) >= 0) {
       uint32_t lateness = now - s_pending[i].fire_at_tick;
       if (lateness > s_max_lateness_ms) {

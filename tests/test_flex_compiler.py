@@ -1,0 +1,190 @@
+"""Компилятор программ ГЛ в записи trigger_t (контейнер FLXB):
+покрытие pack/unpack, подстановки «X из кадра события», отсева
+некомпилируемых программ и квоты FLEX_MAX_RECORDS."""
+
+from core.flex_compiler import (
+    FLEX_BLOB_MAGIC,
+    FLEX_MAX_RECORDS,
+    build_flex_blob,
+    compile_rule,
+    compile_rules,
+    extract_flex_json,
+    managed_flags,
+)
+from core.trigger_protocol import (
+    TRIGGER_F_TX_EVENT_DATA,
+    unpack_trigger,
+)
+
+
+def _frame_event(can_id: str = "123", channel: int = 2, data: str = "") -> dict:
+    return {
+        "type": "frame", "channel": channel, "extended": False,
+        "id": can_id, "dlc": 8, "data": data, "fire_limit": 0,
+    }
+
+
+def _frame_action(
+    can_id: str = "456", channel: int = 0, data: str = "01 02",
+    delay: int = 0, count: int = 1, between: int = 0,
+) -> dict:
+    return {
+        "type": "frame", "frame_enabled": True, "channel": channel,
+        "extended": False, "id": can_id, "dlc": 8, "data": data,
+        "delay": delay, "count": count, "between": between,
+    }
+
+
+def _rule(
+    events=None, actions=None, conditions=None, active=True,
+) -> dict:
+    return {
+        "title": "P", "active": active,
+        "events": events if events is not None else [_frame_event()],
+        "conditions": conditions if conditions is not None else [],
+        "actions": actions if actions is not None else [_frame_action()],
+    }
+
+
+def _record_dicts(rule) -> list[dict]:
+    """compile_rule → распакованные записи (проверка проводного вида)."""
+    records = compile_rule(rule)
+    assert records is not None
+    from core.trigger_protocol import pack_trigger
+
+    return [unpack_trigger(pack_trigger(r)) for r in records]
+
+
+def test_simple_frame_to_frame_compiles() -> None:
+    recs = _record_dicts(_rule())
+    assert len(recs) == 1
+    rec = recs[0]
+    assert rec["enabled"] == 1
+    assert rec["rx_channel"] == 2          # событие «любой канал»
+    assert rec["rx_id"] == 0x123
+    assert rec["rx_id_mask"] == 0x7FF
+    assert rec["tx_channel"] == 0          # действие CAN1
+    assert rec["tx_id"] == 0x456
+    assert rec["tx_dlc"] == 8
+    assert rec["tx_data"][:2] == b"\x01\x02"
+
+
+def test_event_data_mask() -> None:
+    """Шаблон DATA события → rx_data/rx_data_mask (X — wildcard)."""
+    recs = _record_dicts(_rule(events=[_frame_event(data="AA X 0F")]))
+    rec = recs[0]
+    assert rec["rx_data"][:3] == b"\xAA\x00\x0F"
+    assert rec["rx_data_mask"][:3] == b"\xFF\x00\xFF"
+
+
+def test_x_substitution_marks_unspecified_positions() -> None:
+    """Семантика ПК: payload строится НА кадре события — байт без
+    валидного токена (X/пусто/за концом списка) берётся из пришедшего
+    кадра; маска подстановки src_from покрывает их все."""
+    recs = compile_rule(_rule(actions=[_frame_action(data="01 X 03")]))
+    assert recs is not None and len(recs) == 1
+    assert recs[0]["rx_tx_event_data"] is True
+    # «01 X 03» → явные байты 0 и 2; все остальные — из события.
+    expect = bytes([0x00, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])
+    assert recs[0]["src_from"] == expect
+    # Проводной вид: флаг реально уезжает в записи (rx_flags бит 5).
+    from core.trigger_protocol import pack_trigger
+
+    raw = pack_trigger(recs[0])
+    # rx_flags — поле формата v3 по смещению 83 (см. trigger_t).
+    assert raw[83] & TRIGGER_F_TX_EVENT_DATA
+
+
+def test_explicit_token_no_subst() -> None:
+    """Все 8 байт заданы явно — подстановки нет, флаг не взводится."""
+    recs = compile_rule(_rule(
+        actions=[_frame_action(data="01 02 03 04 05 06 07 08")],
+    ))
+    assert recs is not None and len(recs) == 1
+    assert recs[0]["rx_tx_event_data"] is False
+    assert recs[0]["src_from"] == b"\x00" * 8
+
+
+def test_power_event_compiles_to_boot() -> None:
+    recs = _record_dicts(_rule(events=[{"type": "power"}]))
+    assert len(recs) == 1
+    assert recs[0]["rx_fire_on_boot"] is True
+
+
+def test_uncompilable_variants() -> None:
+    """Условия ПРИ, нефреймовые события и действия (переменные/флаги/
+    доп.каналы/кэш) — остаются на исполнении приложения."""
+    assert compile_rule(_rule(conditions=[{"type": "static",
+                                         "var": "V", "state": 1}])) is None
+    assert compile_rule(_rule(events=[{"type": "static",
+                                      "var": "V"}])) is None
+    assert compile_rule(_rule(actions=[{"type": "var",
+                                        "var": "V"}])) is None
+    assert compile_rule(_rule(actions=[{
+        "type": "aux", "aux_enabled": True, "aux_channel": 1,
+        "aux_mode": "on",
+    }])) is None
+    # «Задержка» выполнения действия — только на ПК.
+    assert compile_rule(_rule(actions=[{
+        **_frame_action(), "exec_delay": 100,
+    }])) is None
+
+
+def test_multi_event_action_no_keyerror() -> None:
+    """Декартово произведение событий×действий — без KeyError
+    (регресс: pop('_subst') падал на второй итерации)."""
+    recs = compile_rule(_rule(
+        events=[_frame_event("111"), _frame_event("222", channel=0)],
+        actions=[_frame_action("333"), _frame_action("444", data="X")],
+    ))
+    assert recs is not None and len(recs) == 4
+
+
+def test_extended_inferred_from_wide_id() -> None:
+    """ID > 0x7FF без галочки extended — иначе trigger_fields_valid
+    прошивки отбрасывал бы запись молча."""
+    recs = _record_dicts(_rule(events=[_frame_event("1ABCDEF")]))
+    assert recs[0]["rx_extended"] == 1
+    recs = _record_dicts(_rule(actions=[_frame_action("1ABCDEF")]))
+    assert recs[0]["tx_extended"] == 1
+
+
+def test_records_quota() -> None:
+    """Свыше FLEX_MAX_RECORDS — программа остаётся на приложении."""
+    rules = [
+        _rule(events=[_frame_event(f"{0x100 + i:X}")])
+        for i in range(FLEX_MAX_RECORDS + 2)
+    ]
+    records, managed = compile_rules(rules)
+    assert len(records) == FLEX_MAX_RECORDS
+    assert sum(managed) == FLEX_MAX_RECORDS
+    assert managed[-2:] == [False, False]
+
+
+def test_blob_roundtrip() -> None:
+    rules = [_rule(), _rule(conditions=[{"type": "static", "var": "V",
+                                        "state": 1}])]
+    blob = build_flex_blob(rules)
+    assert blob[:4] == FLEX_BLOB_MAGIC
+    assert blob[4] == 1
+    assert blob[5] == 1                      # скомпилировалась 1 из 2
+    import json
+
+    payload = json.loads(extract_flex_json(blob).decode("utf-8"))
+    assert payload["rules"] == rules
+    # Старый чисто-JSON блоб проходит как есть.
+    legacy = json.dumps({"rules": rules}).encode()
+    assert extract_flex_json(legacy) == legacy
+
+
+def test_managed_flags_protocol_gate() -> None:
+    rules = [_rule(), _rule(conditions=[{"type": "static", "var": "V",
+                                        "state": 1}])]
+    assert managed_flags(rules, 11) == [False, False]
+    assert managed_flags(rules, 12) == [True, False]
+
+
+def test_inactive_rule_produces_no_records() -> None:
+    assert compile_rule(_rule(active=False)) == []
+    records, managed = compile_rules([_rule(active=False)])
+    assert records == [] and managed == [False]

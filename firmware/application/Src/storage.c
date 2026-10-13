@@ -527,6 +527,16 @@ uint8_t Storage_RegionInfo(uint8_t region, uint32_t *base_out,
   return 1U;
 }
 
+uint8_t Storage_FlexPayload(uint32_t *base_out, uint32_t *len_out)
+{
+  if (s_flex.base == 0U) {
+    return 0U;
+  }
+  *base_out = s_flex.base + STORE_HEADER_SIZE;
+  *len_out = s_flex.payload_len;
+  return 1U;
+}
+
 static uint8_t erase_pages(uint32_t from, uint32_t to)
 {
   HAL_FLASH_Unlock();
@@ -774,6 +784,13 @@ uint8_t Storage_WriteChunk(uint32_t offset, const uint8_t *data,
   HAL_FLASH_Lock();
   s_write_tick = HAL_GetTick();
   return 1U;
+}
+
+/* Регион активной сессии записи — protocol.c после COMMIT области
+ * FLEX перечитывает скомпилированные записи ГЛ (Trigger_ReloadFlex). */
+uint8_t Storage_WriteRegion(void)
+{
+  return s_write_region;
 }
 
 uint8_t Storage_Commit(uint32_t payload_crc)

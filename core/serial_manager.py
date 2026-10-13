@@ -1015,6 +1015,24 @@ class SerialManager(QObject):
             out += chunk[:want]
         return bytes(out)
 
+    def storage_peek(self, region: int, length: int) -> bytes | None:
+        """Первые байты блоба области — дешёвая проверка магии
+        контейнера без вычитки всего блоба (FLXB в FLXH определяет,
+        исполняет ли МК программы ГЛ сам)."""
+        info = self.storage_info(region)
+        if info is None or info["len"] == 0:
+            return None
+        want = min(int(length), int(info["len"]))
+        payload = (
+            bytes((region & 0xFF,))
+            + (0).to_bytes(2, "little")
+            + bytes((want & 0xFF,))
+        )
+        chunk = self.request_control(CMD_STORAGE_READ, payload)
+        if len(chunk) < want:
+            return None
+        return bytes(chunk[:want])
+
     def storage_upload(self, region: int, data: bytes) -> bool:
         """Пишет блоб транзакцией BEGIN → DATA×N → COMMIT.
 

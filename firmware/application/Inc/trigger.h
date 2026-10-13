@@ -85,10 +85,23 @@ extern "C" {
  * вычитке хоста для сборки условий обратно в один блок. Протокол 7. */
 #define TRIGGER_F_COND_SHIFT  2U
 #define TRIGGER_F_COND_MASK   0x1CU
+/* rx_flags бит 5 — «X-байты ответа из кадра события» (скомпилированная
+ * ГЛ): позиции отмечены src_from[i]==0xFF (кэш-фильтр src_* у таких
+ * записей не используется), при матче байты кадра-события складываются
+ * в слот s_cache[i] и подставляются в ответ — в т.ч. в повторах
+ * (семантика ГЛ «X = байт из пришедшего кадра»). Протокол 12. */
+#define TRIGGER_F_TX_EVENT_DATA 0x20U
 /* Предел по RAM, а не по пулу: триггеры, staging-буфер и кэши живут в
  * ОЗУ — 70 записей ≈ 3 страницы пула из 4 (четвёртая остаётся запасом
  * на рост записи/пула). При росте RAM-бюджета можно поднять до 99. */
 #define TRIGGER_MAX_RECORDS   70U
+/* Скомпилированные записи ГЛ (контейнер FLXB в блобе FLXH): живут в
+ * хвосте списка за пользовательскими триггерами, исполняются тем же
+ * движком — матч кадра, задержки, повторы, кэш, FIRE_ON_BOOT.
+ * ПК не вычитывает их как триггеры (Trigger_Count/Get ограничены
+ * пользовательской частью). */
+#define FLEX_MAX_RECORDS      16U
+#define TRIGGER_ALL_RECORDS   (TRIGGER_MAX_RECORDS + FLEX_MAX_RECORDS)
 /* Легаси-регион v2: 49 слотов × 82 Б с 0x0803E000 (читается один раз
  * при миграции, затем страницы возвращаются в пул). */
 #define TRIGGER_LEGACY_ADDR   0x0803E000U
@@ -218,6 +231,11 @@ uint8_t Trigger_Relocate(uint32_t new_base);
 
 /* Enables/disables a trigger without touching its other fields. */
 uint8_t Trigger_SetEnabled(uint8_t index, uint8_t enabled);
+
+/* Перечитывает контейнер FLXB из блоба FLXH и пересобирает хвост
+ * списка записей (скомпилированные программы ГЛ). Вызывается после
+ * COMMIT области FLEX — программы применяются без перезагрузки. */
+void Trigger_ReloadFlex(void);
 
 #ifdef __cplusplus
 }

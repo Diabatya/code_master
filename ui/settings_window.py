@@ -36,6 +36,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.flex_compiler import (
+    FLEX_BLOB_MAGIC,
+    build_flex_blob,
+    extract_flex_json,
+)
 from core.can_protocol import (
     CMD_CFG_FACTORY_RESET,
     DEVICE_TYPE_ANALOG,
@@ -56,7 +61,11 @@ from ui.com_settings_dialog import BaudRateDetector
 from ui.analog_ports_tab import AnalogPortsTab
 from ui.can_analyzer import CanAnalyzer
 from ui.can_gateway_tab import CanGatewayTab
-from ui.can_monitor_tab import CanMonitorTab, CanSettingsReadbackMismatch
+from ui.can_monitor_tab import (
+    CalculatorDialog,
+    CanMonitorTab,
+    CanSettingsReadbackMismatch,
+)
 from ui.can_topology import CanTopologyWidget
 from ui.can_trigger_tab import CanTriggerTab, TriggerValidationAborted
 from ui.event_log_tab import EventLogTab
@@ -473,6 +482,17 @@ class SettingsWindow(QMainWindow):
 
         search_layout.addWidget(self._search_edit)
         search_layout.addStretch()
+        # Калькулятор — глобальная кнопка в правом верхнем углу,
+        # доступна на любой вкладке (отчёт мастера).
+        self._calc_button = QPushButton("🧮")
+        self._calc_button.setFixedSize(34, 30)
+        self._calc_button.setToolTip(
+            tr("Калькулятор BIN/DEC/HEX/CHAR")
+        )
+        self._calc_button.clicked.connect(
+            lambda: CalculatorDialog(self).exec()
+        )
+        search_layout.addWidget(self._calc_button)
         layout.addLayout(self._device_layout)
         layout.addLayout(search_layout)
 
@@ -489,13 +509,6 @@ class SettingsWindow(QMainWindow):
         # (отчёт мастера); кнопка живёт во вкладке «Переменные».
         self._save_variables_button = self._variables_tab.save_variables_button
         self._save_variables_button.setMinimumHeight(32)
-
-        self._diff_button = QPushButton(tr("Что изменится"))
-        setup_button(self._diff_button, height=32)
-        self._diff_button.setToolTip(
-            tr("Сравнение полей с последней записью/вычиткой устройства")
-        )
-        self._diff_button.clicked.connect(self._show_settings_diff)
 
         self._save_config_button = QPushButton(tr("Сохранить конфигурацию"))
         setup_button(self._save_config_button, height=32)
@@ -516,7 +529,6 @@ class SettingsWindow(QMainWindow):
         bottom_layout.addStretch()
         bottom_layout.addWidget(self._save_button)
         bottom_layout.addWidget(self._save_variables_button)
-        bottom_layout.addWidget(self._diff_button)
         bottom_layout.addWidget(self._save_config_button)
         bottom_layout.addWidget(self._load_config_button)
         bottom_layout.addWidget(self._factory_reset_button)
@@ -1160,7 +1172,8 @@ class SettingsWindow(QMainWindow):
                 self,
                 tr(
                     "Триггеры в устройстве отличаются — экран не изменён. "
-                    "«Что изменится» покажет разницу, Ctrl+R вычитает устройство"
+                    "Отличающиеся блоки помечены оранжевым треугольником, "
+                    "Ctrl+R вычитает устройство"
                 ),
             )
         elif applied:
@@ -1263,6 +1276,19 @@ class SettingsWindow(QMainWindow):
         (отчёт мастера)."""
         self._connected_device_type = device_type
         self._update_device_info(device_type, device_version)
+        # Заголовок блоба FLXH определяет, какие программы ГЛ
+        # исполняет сам МК (FLXB — скомпилированные записи) — до
+        # notify_device_ready, чтобы флаги device_managed уже были
+        # верными и «Включение устройства» не отработало дважды.
+        try:
+            head = self._serial_manager.storage_peek(
+                STORAGE_REGION_FLEX, 12
+            )
+            self._flexible_tab.set_device_flexb(
+                bool(head) and head[:4] == FLEX_BLOB_MAGIC
+            )
+        except Exception:  # noqa: BLE001
+            self._flexible_tab.set_device_flexb(False)
         notify = getattr(self._flexible_tab, "notify_device_ready", None)
         if callable(notify):
             notify()
@@ -1992,15 +2018,18 @@ class SettingsWindow(QMainWindow):
                 ensure_ascii=False,
             ).encode("utf-8")
             self._serial_manager.storage_upload(STORAGE_REGION_VAR, var_blob)
-            flex_blob = json.dumps(
-                {
-                    "kind": "code_master_flex_logic",
-                    "format": 1,
-                    "rules": self._flexible_tab.get_config(),
-                },
-                ensure_ascii=False,
-            ).encode("utf-8")
+            # FLXB-контейнер: JSON-конфигурация + хвост из
+            # скомпилированных записей trigger_t — прошивка
+            # (protocol>=12) исполняет программы ГЛ автономно,
+            # без ПК (отчёт мастера: «ГЛ должен работать без
+            # приложения, как триггеры»).
+            flex_blob = build_flex_blob(self._flexible_tab.get_config())
             self._serial_manager.storage_upload(STORAGE_REGION_FLEX, flex_blob)
+            # Записанный блоб — контейнер FLXB: с этого момента
+            # скомпилированные программы исполняет сам МК, а ПК их
+            # пропускает (флаг до commit_runtime — снимок считается
+            # с учётом реального содержимого камня).
+            self._flexible_tab.set_device_flexb(True)
             # Программа ГЛ записана в камень — с этого момента
             # исполняется именно она; до записи работал старый
             # снимок, живые правки полей не отрабатывали
@@ -2043,16 +2072,28 @@ class SettingsWindow(QMainWindow):
         serial = str(self._config.get("device_serial") or "")
         for region in (STORAGE_REGION_VAR, STORAGE_REGION_FLEX):
             data = self._download_blob_cached(serial, region)
+            if region == STORAGE_REGION_FLEX:
+                # Старший блоб без магии FLXB — чистый JSON старой
+                # версии: записей на МК нет, программы исполняет ПК.
+                self._flexible_tab.set_device_flexb(
+                    bool(data) and data[:4] == FLEX_BLOB_MAGIC
+                )
             if not data:
                 continue
             try:
-                blob = json.loads(data.decode("utf-8"))
+                # FLXB-контейнер: JSON-часть после 12-байтового
+                # заголовка; чистый JSON (старый блог) — как есть.
+                blob = json.loads(extract_flex_json(data).decode("utf-8"))
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Блоб хранилища МК (регион %d) не читается: %s",
                     region, exc,
                 )
                 continue
+            if not isinstance(blob, dict):
+                # Блоб старых версий — голый список (без обёртки
+                # kind/format): отдаём содержимое напрямую.
+                blob = {"variables": blob, "rules": blob}
             if region == STORAGE_REGION_VAR:
                 self._variables_tab.import_config(
                     blob.get("variables", blob)

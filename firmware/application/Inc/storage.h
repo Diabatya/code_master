@@ -138,6 +138,10 @@ uint8_t Storage_Read(uint8_t region, uint32_t offset, uint8_t *out,
 /* base — страница заголовка новейшего поколения, len — payload_len. */
 uint8_t Storage_RegionInfo(uint8_t region, uint32_t *base_out,
                            uint32_t *len_out, uint32_t *gen_out);
+/* Указатель на полезную нагрузку блоба FLXH прямо во Flash (без
+ * копирования) — trigger.c читает отсюда контейнер FLXB со
+ * скомпилированными записями ГЛ. 0 — области нет. */
+uint8_t Storage_FlexPayload(uint32_t *base_out, uint32_t *len_out);
 
 /* Сессия записи блоба: Begin выбирает/освобождает страницы (при надобности
  * пересаживая TRGH/EVLH) и стирает целевой диапазон; WriteChunk пишет
@@ -147,6 +151,9 @@ uint8_t Storage_RegionInfo(uint8_t region, uint32_t *base_out,
 uint8_t Storage_BeginWrite(uint8_t region, uint32_t payload_len);
 /* База активной сессии (0 — сессии нет) — для ответа CMD_STORAGE_BEGIN. */
 uint32_t Storage_WriteBase(void);
+/* Регион активной сессии записи — для Trigger_ReloadFlex() после
+ * коммита области FLEX. */
+uint8_t Storage_WriteRegion(void);
 uint8_t Storage_WriteChunk(uint32_t offset, const uint8_t *data,
                            uint32_t len);
 uint8_t Storage_Commit(uint32_t payload_crc);

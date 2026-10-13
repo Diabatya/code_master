@@ -1,13 +1,47 @@
 """Вспомогательные функции для настройки UI-элементов."""
 
 
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPolygon
 from PySide6.QtWidgets import QPushButton, QSizePolicy, QWidget
+
+from models.translations import _ as tr
 
 
 _INDICATOR_PREFIX = "✓ "
 
 _graveyard: QWidget | None = None
+
+
+class DirtyBadge(QWidget):
+    """Оранжевый треугольник в левом верхнем углу элемента — программа
+    ГЛ/триггер отличается от записанной в устройство (отчёт мастера:
+    замена кнопки «Что изменится»). Размер — как кнопка закрытия."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(16, 16)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setToolTip(
+            tr("Отличается от записанного в устройство — сохраните")
+        )
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#FF9800"))
+        rect = self.rect()
+        painter.drawPolygon(
+            QPolygon(
+                [
+                    QPoint(rect.left(), rect.top()),
+                    QPoint(rect.right(), rect.top()),
+                    QPoint(rect.left(), rect.bottom()),
+                ]
+            )
+        )
+        painter.end()
 
 
 def retire(widget: QWidget) -> None:

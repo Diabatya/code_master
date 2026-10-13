@@ -33,6 +33,9 @@ TRIGGER_F_MUTE_ECHO = 0x01
 TRIGGER_F_FIRE_ON_BOOT = 0x02
 TRIGGER_F_COND_SHIFT = 2
 TRIGGER_F_COND_MASK = 0x1C
+# rx_flags бит 5 — «X-байты ответа из кадра события» (скомпилированная
+# ГЛ, см. core/flex_compiler.py). Позиции X размечены src_from[i]=0xFF.
+TRIGGER_F_TX_EVENT_DATA = 0x20
 # src_flags бит 1 = CACHE_ONLY: запись только наполняет кэш, ответ не
 # вооружается — так «автозапись DATA в кэш» и обычные «Фреймы ответа»
 # работают в одном триггере вместе (филлеры + ответные записи группы).
@@ -259,6 +262,8 @@ def pack_trigger(values: dict[str, Any], fmt_version: int = TRIGGER_FORMAT_VERSI
         rx_flags = 0 if values.get("rx_listen_echo", True) else TRIGGER_F_MUTE_ECHO
         if values.get("rx_fire_on_boot"):
             rx_flags |= TRIGGER_F_FIRE_ON_BOOT
+        if values.get("rx_tx_event_data"):
+            rx_flags |= TRIGGER_F_TX_EVENT_DATA
         rx_flags |= (
             int(values.get("rx_cond_idx", 0)) << TRIGGER_F_COND_SHIFT
         ) & TRIGGER_F_COND_MASK

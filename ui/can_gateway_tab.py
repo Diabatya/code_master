@@ -1193,6 +1193,13 @@ class CanGatewayTab(QWidget):
             # Эхо собственной передачи МК — не внешний кадр; иначе
             # кадр мог бы зациклиться между каналами.
             return
+        if not self._internal_rules:
+            # БЕЗ активных программ шлюз не должен ретранслировать:
+            # пад-through в конце пересылал каждый кадр CAN1 в CAN2
+            # и обратно — отчёт мастера («данные проходят через CAN2
+            # в CAN1, программ шлюзования нет») и шторм ACK/bus-off на
+            # шине без второго узла.
+            return
         frame_id = int(frame["id"])
         frame_channel = int(frame["channel"])
         data = bytes(frame["data"])

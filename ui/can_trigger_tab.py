@@ -64,7 +64,7 @@ from ui.id_edit import IdPasteEdit
 from ui.memory_indicator import MemoryIndicator
 from ui.packet_clipboard import create_clipboard_buttons
 from ui.toast import show_toast
-from ui.ui_utils import retire
+from ui.ui_utils import DirtyBadge, retire
 
 _CHECK_ICON = str((Path(__file__).parent.parent / "assets" / "icons" / "check.svg").resolve())
 
@@ -167,6 +167,10 @@ class CanTriggerTab(QWidget):
         # _blocks и растёт/сжимается вместе с ним. Сбрасывается при любом
         # редактировании блока и при отключении порта.
         self._device_managed: list[bool] = []
+        # _block_dirty[i] == True: блок отличается от записанного в МК —
+        # в левом верхнем углу триггера оранжевый треугольник (отчёт
+        # мастера: замена кнопки «Что изменится»).
+        self._block_dirty: list[bool] = []
         # pc_suspended[i] == True: блок пришёл из «Загрузить конфигурацию»
         # и ещё не подтверждён «Сохранить» — приложение НЕ исполняет его,
         # иначе загрузка файла сразу запускала ответы на шине, как будто
@@ -1196,7 +1200,9 @@ class CanTriggerTab(QWidget):
                "после применения конфигурации (первые {0} триггеров)")
             .format(TRIGGER_NAME_MAX_COUNT)
         )
-        name_edit.textChanged.connect(lambda _t: self._mark_dirty())
+        name_edit.textChanged.connect(
+            lambda _t, i=index: self._mark_dirty(i)
+        )
 
         recv = self._create_receive_row(font, tr("Приём"))
         response = self._create_response_block(font)
@@ -1395,6 +1401,16 @@ class CanTriggerTab(QWidget):
             holder, 0, 0,
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
         )
+        # Оранжевый треугольник «не совпадает с МК» — левый верхний
+        # угол блока (отчёт мастера: замена кнопки «Что изменится»).
+        badge = DirtyBadge(inner)
+        badge.setContentsMargins(0, 0, 0, 0)
+        grid.addWidget(
+            badge, 0, 0,
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+        )
+        badge.setVisible(False)
+        block["dirty_badge"] = badge
         delete_button.raise_()
         block["wrapper"] = wrapper
         block["inner"] = inner
@@ -1484,6 +1500,8 @@ class CanTriggerTab(QWidget):
         block = self._blocks.pop(index)
         self._device_managed.pop(index)
         self._pc_suspended.pop(index)
+        if index < len(self._block_dirty):
+            self._block_dirty.pop(index)
         host = block.get("wrapper") or block["group"]
         self._blocks_layout.removeWidget(host)
         # Без setParent(None): репарент создаёт топлевел-окно и рушит
@@ -1591,6 +1609,8 @@ class CanTriggerTab(QWidget):
         block = self._create_trigger_block(index)
         self._blocks.append(block)
         self._device_managed.append(False)
+        # Новый блок ещё не записан в МК — сразу «грязный».
+        self._block_dirty.append(True)
         # Созданный в UI блок исполняется приложением сразу (предпросмотр
         # до «Сохранить») — подвешенным его не делаем.
         self._pc_suspended.append(False)
@@ -1764,10 +1784,22 @@ class CanTriggerTab(QWidget):
         self._pc_src_state.clear()
         if index is not None and 0 <= index < len(self._device_managed):
             self._device_managed[index] = False
+        if index is not None and 0 <= index < len(self._block_dirty):
+            self._set_block_dirty(index, True)
         # Индикатор «Память» пересчитываем сразу: раньше он менялся только
         # на «Сохранить»/вычитке — стёртые вручную поля оставляли старый %.
         self._refresh_memory_indicator()
         self.settings_changed.emit()
+
+    def _set_block_dirty(self, index: int, dirty: bool) -> None:
+        """Оранжевый треугольник «блок ≠ записи в МК» (отчёт мастера)."""
+        if not (0 <= index < len(self._block_dirty)):
+            return
+        self._block_dirty[index] = bool(dirty)
+        if 0 <= index < len(self._blocks):
+            badge = self._blocks[index].get("dirty_badge")
+            if badge is not None:
+                badge.setVisible(bool(dirty))
 
     def _refresh_memory_indicator(self) -> None:
         """Пересчёт «Памяти» по текущим полям блоков (не по файлу)."""
@@ -1940,6 +1972,8 @@ class CanTriggerTab(QWidget):
         self._applying_device_state = True
         try:
             self._apply_device_group(index, group)
+            # Записи вычитаны из МК — блок совпадает с устройством.
+            self._set_block_dirty(index, False)
         finally:
             self._applying_device_state = False
         self._set_trigger_status(index, "enabled" if values["enabled"] else "disabled")
@@ -2992,6 +3026,10 @@ class CanTriggerTab(QWidget):
         # слоту в НОВОМ пуле: коммит имён идёт строго после успешного
         # CMD_TRIGGER_COMMIT и верификации.
         self._write_device_trigger_names(target, len(device))
+        # Запись и верификация прошли — все блоки совпадают с МК,
+        # треугольники «не совпадает» гасим (отчёт мастера).
+        for index in range(len(self._block_dirty)):
+            self._set_block_dirty(index, False)
         return changed
 
     def _write_device_trigger_names(
@@ -3040,6 +3078,10 @@ class CanTriggerTab(QWidget):
     def clear_device_managed(self) -> None:
         """Сбрасывает флаги исполнения на МК (при отключении порта)."""
         self._device_managed = [False] * len(self._blocks)
+        # Состояние устройства неизвестно — пока новая вычитка не
+        # подтвердит совпадение, блоки считаются отличающимися.
+        for index in range(len(self._block_dirty)):
+            self._set_block_dirty(index, True)
         # Новая сессия порта — новый «запуск устройства»: PC-исполняемые
         # boot-триггеры снова готовы к однократному выстрелу.
         self._pc_boot_fired.clear()
@@ -3104,6 +3146,7 @@ class CanTriggerTab(QWidget):
         if self._applying_device_state or index >= len(self._blocks):
             return
         self._device_managed[index] = False
+        self._set_block_dirty(index, True)
         self._set_trigger_status(index, "enabled" if enabled else "disabled")
 
     def _on_cache_active_changed(self, cache_check: QCheckBox, state: int) -> None:

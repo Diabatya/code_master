@@ -407,22 +407,20 @@ def _edits_bytes_sum(edits: list[QLineEdit]) -> int | None:
 
 
 def _sblp_decode(window: bytes, endian: str) -> int | None:
-    """Декодирует SBLP-запись из выбранных байтов кадра.
+    """Собирает число из выбранных байтов кадра по порядку
+    старшинства (отчёт мастера).
 
-    Формат (отчёт мастера): первый байт — префикс N (1..8, число
-    байтов значения), за ним N байт самого числа. ``endian``:
-    ``"be"`` — «С лево на право», старший байт слева;
-    ``"le"`` — «С право на лево», старший байт справа.
-    ``None`` — запись битая (N=0, N>8 или байтов не хватает)."""
+    ``endian``:
+    ``"be"`` — «Старший байт слева»: левый байт множится на 256
+    (06 04 → 6·256+4 = 1540);
+    ``"le"`` — «Старший байт справа»: правый байт множится на 256
+    (09 03 → 9 + 3·256 = 777).
+    ``None`` — выбрано меньше двух байтов."""
     if len(window) < 2:
         return None
-    n = window[0]
-    if n == 0 or n > 8 or n > len(window) - 1:
-        return None
-    value = window[1 : 1 + n]
     if endian == "le":
-        value = value[::-1]
-    return int.from_bytes(value, "big")
+        window = window[::-1]
+    return int.from_bytes(window, "big")
 
 
 def _autofill_x_on_id(
@@ -691,6 +689,96 @@ def _set_live_data_html(
     label.setText(" ".join(parts))
 
 
+def _degrees_model(
+    points: list[tuple[float, float]],
+) -> tuple[int, int, dict[int, tuple[float, float]]] | None:
+    """Выводит закон «сырое значение → градусы» по точкам таблицы
+    привязки (режим «Градусы», отчёт мастера).
+
+    Кодирование градуса циклично: знак и шаг определяет семейство
+    значений по модулю периода — «чётные → +, нечётные → −» или
+    «0,4,8,… → −; 2,6,10,… → +». Алгоритм перебирает период P=1..16:
+    остаток x%P разбивает точки на семейства; валидный P — когда в
+    каждом семействе знак градуса один и линейность по x
+    согласована. Точка y=0 — якорь нуля, в проверке знака не
+    участвует.
+
+    Возвращает ``(anchor, P, {residue: (slope, intercept)})`` —
+    продолжение графика за заданные точки автоматическое — или
+    ``None``, если зависимость не нашлась (линия графика — красная).
+    """
+    pts: list[tuple[int, float]] = []
+    for x, y in points:
+        try:
+            pts.append((int(round(x)), float(y)))
+        except (TypeError, ValueError):
+            continue
+    pts = sorted(set(pts))
+    if len(pts) < 3:
+        return None
+    zero_xs = [x for x, y in pts if y == 0]
+    anchor = zero_xs[0] if zero_xs else pts[0][0]
+    nonzero = [(x, y) for x, y in pts if y != 0]
+    if len(nonzero) < 2:
+        return None
+    for period in range(1, 17):
+        groups: dict[int, list[tuple[int, float]]] = {}
+        for x, y in nonzero:
+            groups.setdefault(x % period, []).append((x, y))
+        ok = True
+        model: dict[int, tuple[float, float]] = {}
+        for residue, group in groups.items():
+            group.sort()
+            signs = {1 if y > 0 else -1 for _, y in group}
+            if len(signs) > 1:
+                ok = False
+                break
+            if len(group) >= 2:
+                slopes = [
+                    (group[i + 1][1] - group[i][1])
+                    / (group[i + 1][0] - group[i][0])
+                    for i in range(len(group) - 1)
+                    if group[i + 1][0] != group[i][0]
+                ]
+                if not slopes or any(
+                    abs(s - slopes[0]) > 1e-9 for s in slopes
+                ):
+                    ok = False
+                    break
+                slope = slopes[0]
+                intercept = group[0][1] - slope * group[0][0]
+            else:
+                x, y = group[0]
+                den = x - anchor
+                if den == 0:
+                    ok = False
+                    break
+                slope = y / den
+                intercept = y - slope * x
+            model[residue] = (slope, intercept)
+        if ok:
+            return (anchor, period, model)
+    return None
+
+
+def _degrees_decode(
+    model: tuple[int, int, dict[int, tuple[float, float]]] | None,
+    raw: int,
+) -> float | None:
+    """Градусы по выведенной модели; ``None`` — значение не известного
+    семейства (таблица покрыла не все остатки периода)."""
+    if model is None:
+        return None
+    anchor, period, groups = model
+    if int(raw) == anchor:
+        return 0.0
+    entry = groups.get(int(raw) % period)
+    if entry is None:
+        return None
+    slope, intercept = entry
+    return slope * raw + intercept
+
+
 def _map_points(points: list[tuple[float, float]], raw: float) -> float:
     """Значение по «таблице привязки»: ломаная линейная интерполяция.
     За крайними точками прямая ПРОДОЛЖАЕТСЯ по наклону краевого
@@ -723,6 +811,22 @@ def _parse_data_hex(text: str) -> float | None:
     if not t or not all(ch in "0123456789abcdef" for ch in t):
         return None
     return float(int(t, 16))
+
+
+def _data_text_bytes(text: str) -> bytes | None:
+    """Текст ячейки DATA таблицы привязки → байты («09 03» →
+    ``b"\\x09\\x03"``). ``None`` — текст не HEX или нечётное число
+    hex-цифр."""
+    t = translate_cyrillic_hex(text).strip().lower().replace(" ", "")
+    if t.startswith("0x"):
+        t = t[2:]
+    if t.endswith("h"):
+        t = t[:-1]
+    if not t or len(t) % 2 or not all(
+        ch in "0123456789abcdef" for ch in t
+    ):
+        return None
+    return bytes(int(t[i : i + 2], 16) for i in range(0, len(t), 2))
 
 
 def _parse_axis_value(text: str) -> float | None:
@@ -818,6 +922,11 @@ class _GraphPreview(QWidget):
         # Ось X от полей DATA «от»/«до»: начало оси = значение «от»,
         # конец = значение «до» (отчёт мастера).
         self._axis_x: tuple[float, float] | None = None
+        # «Градусы»: 4-зонный график, оси через (0,0); модель —
+        # выведенная по точкам циклическая зависимость (зелёная
+        # линия) или None — «перелом» (красная) (отчёт мастера).
+        self._degree_mode = False
+        self._degree_model = None
         # Точка курсора на линии — пунктирные проекции к осям.
         self._hover: tuple[float, float] | None = None
         self.setMinimumHeight(160)
@@ -834,6 +943,15 @@ class _GraphPreview(QWidget):
             self._axis_x = None
         else:
             self._axis_x = (min(x0, x1), max(x0, x1))
+        self.update()
+
+    def set_degree_mode(self, enabled: bool) -> None:
+        if self._degree_mode != bool(enabled):
+            self._degree_mode = bool(enabled)
+            self.update()
+
+    def set_degree_model(self, model) -> None:
+        self._degree_model = model
         self.update()
 
     def _plot_rect(self):
@@ -883,6 +1001,93 @@ class _GraphPreview(QWidget):
     def _fmt_y(value: float) -> str:
         return f"{value:g}"
 
+    def _paint_degrees(self, painter: QPainter, rect) -> None:
+        """«Градусы»: 4-зонный график — оси X и Y пересекаются
+        в центре (0,0), линии семейств уходят во все стороны
+        (отчёт мастера). Зелёная — зависимость найдена и
+        продолжается; красная — точки «переломили» график."""
+        font = painter.font()
+        font.setPointSize(7)
+        painter.setFont(font)
+        if len(self._points) < 3:
+            painter.setPen(QPen(QColor(160, 160, 170)))
+            painter.drawText(
+                rect, Qt.AlignmentFlag.AlignCenter,
+                tr("«Градусы»: минимум 3 точки "
+                   "(0°, отрицательный, положительный)"),
+            )
+            return
+        model = self._degree_model
+        valid = model is not None
+        xs = [p[0] for p in self._points]
+        ys = [p[1] for p in self._points]
+        x_lim = max(1.0, max(xs))
+        y_cand = list(ys)
+        groups: dict[int, tuple[float, float]] = {}
+        if valid:
+            _anchor, _period, groups = model
+            for slope, intercept in groups.values():
+                for x in (-x_lim, x_lim):
+                    y_cand.append(slope * x + intercept)
+        y_lim = max(1.0, max(abs(v) for v in y_cand))
+        x_lim *= 1.15
+        y_lim *= 1.15
+
+        def to_screen(x: float, y: float) -> tuple[float, float]:
+            px = rect.center().x() + x / x_lim * rect.width() / 2
+            py = rect.center().y() - y / y_lim * rect.height() / 2
+            return px, py
+
+        cx, cy = int(rect.center().x()), int(rect.center().y())
+        painter.setPen(QPen(QColor(150, 150, 165), 1))
+        painter.drawLine(rect.left(), cy, rect.right(), cy)
+        painter.drawLine(cx, rect.top(), cx, rect.bottom())
+        painter.setPen(QPen(QColor(170, 170, 185), 1))
+        for x in sorted({p[0] for p in self._points}):
+            px, _ = to_screen(x, 0)
+            painter.drawLine(int(px), cy, int(px), cy + 4)
+            painter.drawText(
+                int(px) - 26, cy + 5, 52, 14,
+                Qt.AlignmentFlag.AlignHCenter, self._fmt_x(x),
+            )
+        for y in sorted({p[1] for p in self._points if p[1] != 0}):
+            _, py = to_screen(0, y)
+            painter.drawText(
+                0, int(py) - 7, self._MARGIN_LEFT - 6, 14,
+                Qt.AlignmentFlag.AlignRight
+                | Qt.AlignmentFlag.AlignVCenter,
+                f"{y:g}°",
+            )
+
+        painter.setClipRect(rect)
+        line_color = (
+            QColor(76, 175, 80) if valid else QColor(244, 67, 54)
+        )
+        painter.setPen(QPen(line_color, 2))
+        if valid:
+            # Каждое семейство — своя прямая, продолжение за
+            # заданные точки показывает найденную цикличность.
+            edge = x_lim * 1.05
+            for slope, intercept in groups.values():
+                ax_, ay_ = to_screen(-edge, slope * -edge + intercept)
+                bx_, by_ = to_screen(edge, slope * edge + intercept)
+                painter.drawLine(int(ax_), int(ay_), int(bx_), int(by_))
+        else:
+            prev = None
+            for x, y in self._points:
+                px, py = to_screen(x, y)
+                if prev is not None:
+                    painter.drawLine(
+                        int(prev[0]), int(prev[1]), int(px), int(py)
+                    )
+                prev = (px, py)
+        painter.setClipping(False)
+        painter.setPen(QPen(QColor(255, 170, 80), 1))
+        painter.setBrush(QColor(255, 170, 80))
+        for x, y in self._points:
+            px, py = to_screen(x, y)
+            painter.drawEllipse(int(px) - 3, int(py) - 3, 6, 6)
+
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -890,6 +1095,10 @@ class _GraphPreview(QWidget):
         painter.fillRect(rect, QColor(38, 38, 48))
         painter.setPen(QPen(QColor(90, 90, 110), 1))
         painter.drawRect(rect)
+        if self._degree_mode:
+            self._paint_degrees(painter, rect)
+            painter.end()
+            return
         if len(self._points) < 2:
             painter.setPen(QPen(QColor(160, 160, 170)))
             painter.drawText(
@@ -1193,22 +1402,22 @@ class _ValuePage(QWidget):
         self.dlc.setValue(8)
         self.dlc.setFixedWidth(56)
         line1.addWidget(self.dlc)
-        # «SBLP» — декодирование числа с префиксом длины (отчёт
-        # мастера): активна, когда в вычислении ≥2 байтов; меню —
-        # «С лево на право» (старший байт слева, BE) и
-        # «С право на лево» (старший справа, LE).
+        # «SBLP» — порядок старшинства байтов при сборке числа
+        # (отчёт мастера): активна, когда в вычислении ≥2 байтов;
+        # меню — «Старший байт слева» (левый ×256, BE) и «Старший
+        # байт справа» (правый ×256, LE).
         self._sblp = ""
         self.sblp_btn = QPushButton("SBLP")
         self.sblp_btn.setFont(font)
         self.sblp_btn.setFixedHeight(28)
         self.sblp_btn.setToolTip(tr(
-            "SBLP: байт префикса N + N байтов числа; активна при "
+            "SBLP: порядок старшинства байтов; активна при "
             "выборе двух и более байтов в вычислении"
         ))
         self._sblp_menu = QMenu(self.sblp_btn)
         for label, mode in (
-            (tr("С лево на право"), "be"),
-            (tr("С право на лево"), "le"),
+            (tr("Старший байт слева"), "be"),
+            (tr("Старший байт справа"), "le"),
         ):
             action = self._sblp_menu.addAction(
                 label, lambda _c=False, m=mode: self._set_sblp(m)
@@ -1225,7 +1434,7 @@ class _ValuePage(QWidget):
             self.out_range = QComboBox()
             self.out_range.setFont(font)
             self.out_range.addItem(tr("От 0 до бесконечности (∞)"), "inf")
-            self.out_range.addItem(tr("В пределах «ОТ»–«ДО»"), "range")
+            self.out_range.addItem(tr("Градусы"), "degrees")
             self.out_range.setToolTip(
                 tr("Допустимый диапазон выводимого числа")
             )
@@ -1451,8 +1660,8 @@ class _ValuePage(QWidget):
         for action in self._sblp_menu.actions():
             action.setChecked(action.data() == self._sblp)
         labels = {
-            "be": tr("С лево на право"),
-            "le": tr("С право на лево"),
+            "be": tr("Старший байт слева"),
+            "le": tr("Старший байт справа"),
         }
         self.sblp_btn.setText(
             "SBLP" if not self._sblp else f"SBLP: {labels[self._sblp]}"
@@ -1512,6 +1721,34 @@ class _ValuePage(QWidget):
             self._refresh_graph()
             self._emit_changed()
 
+    def _point_raw(self, text: str) -> float | None:
+        """Сырое значение X-ячейки таблицы привязки.
+
+        Без SBLP — обычный HEX («0903» → 0x0903). В режиме SBLP байты
+        собираются по выбранному порядку старшинства, как и приходящие
+        байты кадра (отчёт мастера: «09 03» + «Старший байт справа»
+        → 9 + 3·256 = 777, иначе интерполяция считалась бы по 0x0903).
+        """
+        if self._sblp:
+            window = _data_text_bytes(text)
+            if window is None:
+                return None
+            decoded = _sblp_decode(window, self._sblp)
+            return float(decoded) if decoded is not None else None
+        return _parse_data_hex(text)
+
+    def _format_point_x(self, x: float) -> str:
+        """Обратная запись X точки в ячейку: в режиме SBLP число
+        раскладывается обратно в байты («777» + «Старший байт справа»
+        → «09 03»), чтобы round-trip конфига не менял ввод оператора."""
+        value = int(round(x))
+        if self._sblp:
+            count = max(2, (value.bit_length() + 7) // 8)
+            endian = "big" if self._sblp == "be" else "little"
+            raw_bytes = value.to_bytes(count, endian)
+            return " ".join(f"{b:02X}" for b in raw_bytes)
+        return f"{value:X}"
+
     def read_points(self) -> list[tuple[float, float]]:
         """Численные точки графика (только «Численная переменная»)."""
         points: list[tuple[float, float]] = []
@@ -1520,7 +1757,7 @@ class _ValuePage(QWidget):
             y_item = self.points_table.item(row, 1)
             if x_item is None or y_item is None:
                 continue
-            x = _parse_data_hex(x_item.text())
+            x = self._point_raw(x_item.text())
             y = _parse_axis_value(y_item.text())
             if x is None or y is None:
                 continue
@@ -1583,10 +1820,10 @@ class _ValuePage(QWidget):
             ok = bool(self._HEX_CELL_RE.match(text))
             unbounded = (
                 getattr(self, "out_range", None) is not None
-                and self.out_range.currentData() == "inf"
+                and self.out_range.currentData() in ("inf", "degrees")
             )
             if ok and self._kind == "numeric" and text and not unbounded:
-                value = _parse_data_hex(text)
+                value = self._point_raw(text)
                 lo = _edits_bytes_sum(self.data_from)
                 hi = _edits_bytes_sum(self.data_to)
                 if value is not None and (
@@ -1635,21 +1872,34 @@ class _ValuePage(QWidget):
         lo = _edits_bytes_sum(self.data_from)
         hi = _edits_bytes_sum(self.data_to)
         self.graph.set_axis_x(lo, hi)
-        self.graph.set_points(self.read_points())
+        points = self.read_points()
+        self.graph.set_points(points)
+        # «Градусы»: 4-зонный график с осями через (0,0); модель
+        # строится по ≥3 точкам — зелёная линия при найденной
+        # циклической зависимости, красная при «переломе» (отчёт
+        # мастера).
+        degrees = (
+            getattr(self, "out_range", None) is not None
+            and self.out_range.currentData() == "degrees"
+        )
+        self.graph.set_degree_mode(degrees)
+        self.graph.set_degree_model(
+            _degrees_model(points) if degrees else None
+        )
         # Точки привязки вне диапазона «ОТ»/«ДО» — красные символы и
-        # строка предупреждения под таблицей. В режиме «От 0 до
-        # бесконечности» верхняя граница снята — предупреждений нет
+        # строка предупреждения под таблицей. В режимах «От 0 до
+        # бесконечности» и «Градусы» границ нет — предупреждений нет
         # (отчёт мастера).
         unbounded = (
             getattr(self, "out_range", None) is not None
-            and self.out_range.currentData() == "inf"
+            and self.out_range.currentData() in ("inf", "degrees")
         )
         out_of_range = False
         for row in range(self.points_table.rowCount()):
             item = self.points_table.item(row, 0)
             if item is None or not item.text().strip():
                 continue
-            value = _parse_data_hex(item.text())
+            value = self._point_raw(item.text())
             if value is None:
                 continue
             if (
@@ -1724,6 +1974,20 @@ class _ValuePage(QWidget):
         _set_data_enabled(self.data_to, self.dlc.value())
         _text_to_data(self.data_from, config.get("from"))
         _text_to_data(self.data_to, config.get("to"))
+        if self._kind == "numeric":
+            # Порядок байтов выставляется ДО заполнения таблицы
+            # точек: формат X в ячейке зависит от режима SBLP
+            # (round-trip «09 03» ↔ 777 — отчёт мастера).
+            self._set_sblp(str(config.get("sblp", "") or ""))
+            self._update_sblp_enabled()
+            # «В пределах «ОТ»–«ДО»» заменён режимом «Градусы»
+            # (отчёт мастера) — старые конфиги «range» читаем как
+            # градусный.
+            out_mode = str(config.get("out_range", "inf") or "inf")
+            if out_mode == "range":
+                out_mode = "degrees"
+            idx = self.out_range.findData(out_mode)
+            self.out_range.setCurrentIndex(idx if idx >= 0 else 0)
         self.points_table.setRowCount(0)
         for point in config.get("points") or []:
             try:
@@ -1733,7 +1997,7 @@ class _ValuePage(QWidget):
             row = self.points_table.rowCount()
             self.points_table.insertRow(row)
             x_text = (
-                f"{int(round(x)):X}"
+                self._format_point_x(float(x))
                 if isinstance(x, (int, float)) else str(x)
             )
             self.points_table.setItem(row, 0, QTableWidgetItem(x_text))
@@ -1741,14 +2005,7 @@ class _ValuePage(QWidget):
         if self.points_table.rowCount() == 0:
             for _ in range(4):
                 self.add_point_row()
-        if self._kind == "numeric":
-            self._set_sblp(str(config.get("sblp", "") or ""))
-            self._update_sblp_enabled()
-            idx = self.out_range.findData(
-                str(config.get("out_range", "inf") or "inf")
-            )
-            self.out_range.setCurrentIndex(idx if idx >= 0 else 0)
-        else:
+        if self._kind != "numeric":
             self._recolor_names()
         self._refresh_graph()
 
@@ -2274,7 +2531,9 @@ class _CmdFrameRow(QWidget):
         between_label = QLabel(tr("Пауза между пакетами"))
         between_label.setFont(font)
         row.addWidget(between_label)
-        self.delay_between = _ms_spin()
+        # Дефолт новой команды/зеркала: 3 пакета, пауза 5 мс
+        # (отчёт мастера).
+        self.delay_between = _ms_spin(5)
         row.addWidget(self.delay_between)
         count_label = QLabel(tr("Кол-во"))
         count_label.setFont(font)
@@ -2282,7 +2541,7 @@ class _CmdFrameRow(QWidget):
         self.count = QSpinBox()
         self.count.setFont(font)
         self.count.setRange(1, 255)
-        self.count.setValue(1)
+        self.count.setValue(3)
         self.count.setFixedWidth(58)
         row.addWidget(self.count)
 
@@ -2388,8 +2647,10 @@ class _CmdFrameRow(QWidget):
         _set_data_enabled(
             self.data, 0 if self.rtr.isChecked() else self.dlc.value()
         )
-        self.delay_between.setValue(int(data.get("delay_between", 0) or 0))
-        self.count.setValue(max(1, int(data.get("count", 1) or 1)))
+        # Отсутствующие ключи → дефолт команды 3 пакета / 5 мс
+        # (отчёт мастера); явные значения оператора сохраняются.
+        self.delay_between.setValue(int(data.get("delay_between", 5) or 0))
+        self.count.setValue(max(1, int(data.get("count", 3) or 3)))
         self.next_delay.setValue(int(data.get("next_delay", 0) or 0))
 
 
@@ -3214,38 +3475,6 @@ class _AuxDialog(QDialog):
         }
 
 
-class _RowGrip(QLabel):
-    """Ручка перетаскивания строки переменной: тянем за «⋮⋮» —
-    строка едет вверх/вниз по списку курсором (отчёт мастера)."""
-
-    def __init__(self, row: _VariableRow) -> None:
-        super().__init__("⋮⋮")
-        self._row = row
-        self._dragging = False
-        self.setCursor(Qt.CursorShape.SizeVerCursor)
-        self.setToolTip(tr("Перетащить строку выше/ниже"))
-        self.setStyleSheet("color: #7C9EFF; padding: 0 2px;")
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._dragging = True
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if self._dragging:
-            self._row._column._drag_row_to(
-                self._row, event.globalPosition().toPoint().y()
-            )
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        if self._dragging:
-            self._dragging = False
-            self._row._column.persist()
-        super().mouseReleaseEvent(event)
-
-
 class _VariableRow(QFrame):
     """Строка переменной в колонке:
 
@@ -3278,6 +3507,11 @@ class _VariableRow(QFrame):
         self._pulse_timer.setSingleShot(True)
         self._pulse_timer.setInterval(500)
         self._pulse_timer.timeout.connect(self._pulse_end)
+        # Перетаскивание за саму строку ЛКМ без ручки (отчёт мастера):
+        # press запоминает точку, движение за порогом — живой перенос,
+        # отпускание без движения — открытие редактора.
+        self._press_pos = None
+        self._dragging = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setProperty("varRow", True)
         self.setStyleSheet(
@@ -3290,11 +3524,6 @@ class _VariableRow(QFrame):
         row = QHBoxLayout(self)
         row.setContentsMargins(10, 6, 6, 6)
         row.setSpacing(10)
-
-        # Ручка перетаскивания — оператор курсором выставляет
-        # строку выше/ниже в списке (отчёт мастера).
-        self._grip = _RowGrip(self)
-        row.addWidget(self._grip)
 
         self._name_label = QLabel()
         self._name_label.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
@@ -3393,7 +3622,7 @@ class _VariableRow(QFrame):
                 for i, tok in enumerate(tokens[:8]):
                     if tok and tok.upper() != "X":
                         value = hex_to_int(tok)
-                        payload[i] = value if value is not None else 0
+                        payload[i] = (value or 0) & 0xFF
                 for n in range(count):
                     for channel in (1, 2):
                         _send(
@@ -3471,11 +3700,44 @@ class _VariableRow(QFrame):
         )
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        # Клик по свободному месту строки — редактор; по кнопке
-        # удаления событие сюда не долетает (у неё свой приём).
+        # Клик/захват по свободному месту строки; по кнопке удаления
+        # событие сюда не долетает (у неё свой приём).
         if event.button() == Qt.MouseButton.LeftButton:
-            self._column.edit_row(self)
+            self._press_pos = event.position().toPoint()
+            self._dragging = False
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        # Удержание ЛКМ + движение за порогом — перенос строки
+        # курсором вверх/вниз по списку (отчёт мастера).
+        if (
+            self._press_pos is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            if not self._dragging and (
+                event.position().toPoint() - self._press_pos
+            ).manhattanLength() >= QApplication.startDragDistance():
+                self._dragging = True
+            if self._dragging:
+                self._column._drag_row_to(
+                    self, event.globalPosition().toPoint().y()
+                )
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._press_pos is not None
+        ):
+            if self._dragging:
+                # Отпустили после переноса — фиксируем порядок.
+                self._column.persist()
+            else:
+                # Чистый клик без движения — редактор переменной.
+                self._column.edit_row(self)
+        self._press_pos = None
+        self._dragging = False
+        super().mouseReleaseEvent(event)
 
 
 class _VarColumn(QWidget):
@@ -3544,10 +3806,56 @@ class _VarColumn(QWidget):
         layout.addWidget(self._group, 1)
         self._apply_visible_rows(self._visible_rows.value())
 
+    # Базовая высота строки и шрифт — из них считается ужатие.
+    _ROW_BASE_H = 38
+
     def _apply_visible_rows(self, count: int) -> None:
-        """Высота списка — ровно ``count`` строк (отчёт мастера)."""
-        # ~38 px на строку (рамка+отступы) + верхний зазор списка.
-        self._scroll.setFixedHeight(count * 38 + 8)
+        """«Строк:» N — видимая плотность списка (отчёт мастера):
+        N строк не влезает — строки и символы ужимаются; строк мало —
+        размер списка и шапка над ним НЕ меняются."""
+        self._desired_rows = count
+        # Viewport при первом вызове ещё не размечен — считаем после.
+        QTimer.singleShot(0, self._apply_row_density)
+
+    def _apply_row_density(self) -> None:
+        count = int(getattr(self, "_desired_rows", 8) or 8)
+        viewport = self._scroll.viewport().height()
+        if viewport <= 0:
+            return
+        need = count * self._ROW_BASE_H
+        # row_h = 0 — всё влезает, естественная высота строк.
+        row_h = 0 if need <= viewport else max(20, viewport // count)
+        for row in self._rows:
+            if not hasattr(row, "_base_pts"):
+                row._base_pts = {
+                    w: w.font().pointSize()
+                    for w in row.findChildren(QWidget)
+                    if w.font().pointSize() > 0
+                }
+            if row_h:
+                row.setFixedHeight(row_h)
+                scale = row_h / self._ROW_BASE_H
+                for w, base_pt in row._base_pts.items():
+                    try:
+                        f = QFont(w.font())
+                        f.setPointSize(max(5, int(base_pt * scale)))
+                        w.setFont(f)
+                    except RuntimeError:
+                        continue
+            else:
+                row.setMinimumHeight(0)
+                row.setMaximumHeight(16777215)
+                for w, base_pt in row._base_pts.items():
+                    try:
+                        f = QFont(w.font())
+                        f.setPointSize(base_pt)
+                        w.setFont(f)
+                    except RuntimeError:
+                        continue
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._apply_row_density()
 
     def move_row(self, row: _VariableRow, index: int) -> None:
         """Перемещает строку на позицию ``index`` в списке
@@ -3925,8 +4233,8 @@ class VariablesTab(QWidget):
                 else:
                     # «Численная переменная»: сырое значение —
                     # СУММА выбранных байтов кадра (отчёт мастера);
-                    # в режиме SBLP — декодирование префикса длины +
-                    # значения (отчёт мастера).
+                    # в режиме SBLP — сборка по порядку старшинства
+                    # («Старший байт справа»: 09 03 → 9 + 3·256).
                     sblp = str(cfg.get("sblp", "") or "")
                     if sblp:
                         window = bytes(
@@ -3942,7 +4250,19 @@ class VariablesTab(QWidget):
                                 raw += data[i]
                                 seen = True
                     if seen:
-                        row.set_live_value(_map_points(points, raw), raw)
+                        if cfg.get("out_range") == "degrees":
+                            # «Градусы»: значение декодируется по
+                            # выведенной из ≥3 точек циклической
+                            # зависимости; неизвестное семейство —
+                            # значение не показываем (отчёт мастера).
+                            model = _degrees_model(points)
+                            degrees = _degrees_decode(model, raw)
+                            if degrees is not None:
+                                row.set_live_value(degrees, raw)
+                        else:
+                            row.set_live_value(
+                                _map_points(points, raw), raw
+                            )
 
     def set_flag_live(self, name: str, value: int) -> None:
         """Онлайн-состояние бита «Переменная» из Гибкой логики —
@@ -4013,6 +4333,14 @@ class VariablesTab(QWidget):
         виды — один пакет из её настройки фрейма (отчёт мастера)."""
         var_type = cfg.get("type")
 
+        def _pad_tokens(text: str, dlc: int) -> str:
+            """Дополняет DATA нулями до DLC — в зеркало переносится
+            полный фрейм, а не усечённая запись (отчёт мастера)."""
+            tokens = str(text).split()
+            while len(tokens) < dlc:
+                tokens.append("00")
+            return " ".join(tokens[:dlc])
+
         def _base() -> dict[str, Any]:
             return {
                 "channel": 0,
@@ -4021,43 +4349,64 @@ class VariablesTab(QWidget):
                 "dlc": int(cfg.get("dlc", 8) or 8),
                 "rtr": False,
                 "delay_before_send": 0,
-                "delay_between": 0,
-                "count": 1,
+                # Дефолт отправки команды: 3 пакета с паузой 5 мс
+                # (отчёт мастера).
+                "delay_between": 5,
+                "count": 3,
                 "next_delay": 0,
             }
+
+        def _from_tokens(value: int | None = None) -> str:
+            """DATA зеркала: всё поле «от» целиком (включая «X»-
+            подстановки и хвост до DLC); позиции вычисления при
+            заданном значении точки заменяются его байтами —
+            по выбранному порядку старшинства SBLP (отчёт мастера)."""
+            dlc = int(cfg.get("dlc", 8) or 8)
+            used = [i for i in (cfg.get("bytes") or []) if i < dlc]
+            tokens = str(cfg.get("from", "")).split()
+            while len(tokens) < dlc:
+                tokens.append("00")
+            if value is not None and used:
+                endian = "little" if cfg.get("sblp") == "le" else "big"
+                raw = int(value).to_bytes(max(1, len(used)), endian)
+                for pos, idx in enumerate(used):
+                    if pos < len(raw):
+                        tokens[idx] = f"{raw[pos]:02X}"
+            return " ".join(tokens[:dlc])
 
         if var_type == _TYPE_STATIC:
             frames = []
             for fr in cfg.get("frames") or []:
                 base = _base()
+                fr_dlc = int(fr.get("dlc", 8) or 8)
                 base.update({
                     "extended": bool(fr.get("extended", False)),
                     "id": str(fr.get("id", "")),
-                    "dlc": int(fr.get("dlc", 8) or 8),
-                    "data": str(fr.get("data", "")),
+                    "dlc": fr_dlc,
+                    "data": _pad_tokens(str(fr.get("data", "")), fr_dlc),
                     "rtr": bool(fr.get("rtr", False)),
                 })
                 frames.append(base)
-            return frames or [dict(_base(), data="")]
+            return frames or [dict(_base(), data=_from_tokens())]
 
-        if var_type == _TYPE_DYNCACHE:
-            used = cfg.get("bytes") or []
-            width = max(1, len(used)) * 2
+        if var_type in (_TYPE_DYNCACHE, _TYPE_DYNAMIC):
             frames = []
             for point in cfg.get("points") or []:
                 try:
                     value = int(point[0])
                 except (TypeError, ValueError, IndexError):
                     continue
-                frames.append(
-                    dict(_base(), data=f"{value:0{width}X}")
-                )
+                frames.append(dict(_base(), data=_from_tokens(value)))
             if frames:
                 return frames
-            return [dict(_base(), data=str(cfg.get("from", "")))]
+            return [dict(_base(), data=_from_tokens())]
 
-        data = str(
-            cfg.get("data") or cfg.get("from") or cfg.get("data_from") or ""
+        data = _pad_tokens(
+            str(
+                cfg.get("data") or cfg.get("from")
+                or cfg.get("data_from") or ""
+            ),
+            int(cfg.get("dlc", 8) or 8),
         )
         return [dict(_base(), data=data)]
 
@@ -4104,7 +4453,7 @@ class VariablesTab(QWidget):
             return commands
 
         frames = VariablesTab._mirror_frames(cfg)
-        if var_type == _TYPE_DYNCACHE:
+        if var_type in (_TYPE_DYNCACHE, _TYPE_DYNAMIC):
             points = cfg.get("points") or []
             commands = []
             for i, fr in enumerate(frames):

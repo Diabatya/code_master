@@ -633,7 +633,7 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * версии ПК читают только первые 16 байт. */
       uint8_t out[84] = {
         s_device_version,
-        11U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
+        12U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
              * деструктивных команд; 4 = записи триггеров v3 (90 Б —
              * fire_limit + флаги эха), старым прошивкам хост шлёт 82 Б;
              * 5 = имена триггеров (CMD_TRIGGER_NAME_*) в config-странице;
@@ -651,7 +651,10 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
              * 11 = приём маркеров расширен до 0xD4..0xDA — в сборке v10
              * парсер отбрасывал CMD_SYS_RESET и CMD_STORAGE_* до
              * диспетчера; 11 = эти команды реально исполняются, плюс
-             * CFGH (настройки приложения за кодом) */
+             * CFGH (настройки приложения за кодом);
+             * 12 = контейнер FLXB в блобе FLXH: скомпилированные
+             * записи ГЛ исполняются на МК автономно (хвост списка
+             * триггеров, за пользовательской частью) */
         0U,
         1U,
         cfg->reserved[0],
@@ -872,7 +875,14 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       }
       uint32_t crc = (uint32_t)payload[0] | ((uint32_t)payload[1] << 8)
                    | ((uint32_t)payload[2] << 16) | ((uint32_t)payload[3] << 24);
+      /* Регион сессии — до коммита (Storage_Commit её закрывает):
+       * новый блог FLXH с контейнером FLXB пересобирает хвост
+       * записей — программы ГЛ применяются без перезагрузки. */
+      uint8_t region = Storage_WriteRegion();
       uint8_t ok = Storage_Commit(crc);
+      if (ok && region == STORE_REGION_FLEX) {
+        Trigger_ReloadFlex();
+      }
       send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
       break;
     }
@@ -885,6 +895,10 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
         break;
       }
       uint8_t ok = Storage_Clear(payload[0]);
+      if (ok && payload[0] == STORE_REGION_FLEX) {
+        /* Стёртый блог — стёртые записи ГЛ в хвосте списка. */
+        Trigger_ReloadFlex();
+      }
       send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
       break;
     }

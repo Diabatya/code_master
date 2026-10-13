@@ -73,11 +73,12 @@ from PySide6.QtWidgets import (
 from core.can_protocol import pack_can_frame
 from core.serial_manager import SerialManager
 from models.config import Config
+from core.flex_compiler import managed_flags
 from models.logger import get_logger
 from models.translations import _ as tr
 from models.utils import hex_to_int
 from ui.hex_edit import create_data_field_widget
-from ui.ui_utils import retire, setup_button
+from ui.ui_utils import DirtyBadge, retire, setup_button
 from ui.variables_tab import _HexIdEdit, _bind_id_width, _tokens_match
 
 logger = get_logger(__name__)
@@ -3349,6 +3350,10 @@ class RuleRowWidget(QWidget):
     def _mark_dirty(self, *_args) -> None:
         self._tab.mark_dirty()
 
+    def set_device_dirty(self, dirty: bool) -> None:
+        """Оранжевый треугольник «программа ≠ записи в МК»."""
+        self._dirty_badge.setVisible(bool(dirty))
+
     # ---- виджеты -------------------------------------------------------
 
     def _create_widgets(self) -> None:
@@ -3435,6 +3440,13 @@ class RuleRowWidget(QWidget):
         header_layout = QHBoxLayout(self._header)
         header_layout.setContentsMargins(8, 4, 8, 4)
         header_layout.setSpacing(8)
+        # Оранжевый треугольник «программа ≠ записи в МК» — левый
+        # верхний угол шапки (отчёт мастера: замена «Что изменится»).
+        self._dirty_badge = DirtyBadge(self._header)
+        self._dirty_badge.setVisible(False)
+        header_layout.addWidget(
+            self._dirty_badge, 0, Qt.AlignmentFlag.AlignTop
+        )
         header_layout.addWidget(self._active_check)
         header_layout.addWidget(self._number_label)
         header_layout.addWidget(self._name_edit, 1)
@@ -3848,6 +3860,15 @@ class FlexibleLogicTab(QWidget):
         # полей сюда не попадают, программа отрабатывает по
         # записанной в камень версии (отчёт мастера).
         self._runtime_rules: list[dict[str, Any]] = []
+        # Индексы программ, исполняемых камнем (скомпилированы в
+        # записи FLXB, прошивка protocol>=12): приложение их не
+        # исполняет — иначе действие отрабатывало бы дважды
+        # (как device_managed у триггеров — отчёт мастера).
+        self._device_managed: set[int] = set()
+        # В камне реально лежит контейнер FLXB — только тогда
+        # скомпилированные программы живут на устройстве. Старый
+        # чисто-JSON блоб записей не несёт: программы исполняет ПК.
+        self._device_flexb = False
         self._rule_counters: list[int] = []
         self._row_widgets: list[RuleRowWidget] = []
         self._internal_rules: list[dict[str, Any]] = []
@@ -4011,6 +4032,7 @@ class FlexibleLogicTab(QWidget):
         self._runtime_rules = (
             list(active) if isinstance(active, list) else list(rules)
         )
+        self._refresh_device_managed()
         self._rule_counters = [0] * len(rules)
         self._rebuild_rows()
         self._rules_dirty = True
@@ -4028,6 +4050,21 @@ class FlexibleLogicTab(QWidget):
         """Сохраняет программы в общую конфигурацию."""
         self._rules = self._collect_rules()
         self._config.set("flexible_rules", self._rules)
+        self._update_dirty_badges()
+
+    def _update_dirty_badges(self) -> None:
+        """Оранжевый треугольник на программе, отличающейся от
+        записанной в МК (снимок _runtime_rules — отчёт мастера:
+        замена кнопки «Что изменится»)."""
+        for i, row in enumerate(self._row_widgets):
+            try:
+                dirty = (
+                    i >= len(self._runtime_rules)
+                    or row.get_rule() != self._runtime_rules[i]
+                )
+            except Exception:  # noqa: BLE001
+                dirty = False
+            row.set_device_dirty(dirty)
 
     def get_config(self) -> list[dict[str, Any]]:
         """Возвращает текущие программы для экспорта."""
@@ -4064,7 +4101,35 @@ class FlexibleLogicTab(QWidget):
         self._save_config()
         self._runtime_rules = self._collect_rules()
         self._config.set("flexible_rules_active", self._runtime_rules)
+        self._refresh_device_managed()
         self._rules_dirty = True
+        self._update_dirty_badges()
+
+    def _refresh_device_managed(self) -> None:
+        """Пересчитывает, какие программы камень исполнит сам:
+        детерминированный повтор компиляции — те же правила дают
+        те же записи FLXB, что только что записаны в блоб
+        (protocol>=12)."""
+        try:
+            proto = self._serial_manager.device_protocol_version()
+            flags = (
+                managed_flags(self._runtime_rules, proto)
+                if self._device_flexb else []
+            )
+        except Exception:  # noqa: BLE001
+            flags = []
+        self._device_managed = {
+            i for i, m in enumerate(flags) if m
+        }
+
+    def set_device_flexb(self, present: bool) -> None:
+        """В блобе FLXH лежит контейнер FLXB — камень исполняет
+        скомпилированные программы сам. Вызывается при опознании
+        устройства, вычитке и записи блоба."""
+        if self._device_flexb == bool(present):
+            return
+        self._device_flexb = bool(present)
+        self._refresh_device_managed()
 
     def _rebuild_rows(self) -> None:
         """Пересоздаёт виджеты строк из self._rules."""
@@ -4074,6 +4139,7 @@ class FlexibleLogicTab(QWidget):
             self._add_row_widget(rule)
         self._rule_counters = [0] * len(self._row_widgets)
         self._refresh_variable_lists()
+        self._update_dirty_badges()
 
     def _add_row_widget(
         self,
@@ -4631,7 +4697,12 @@ class FlexibleLogicTab(QWidget):
                 for i, tok in enumerate(tokens[:8]):
                     if tok and tok.upper() != "X":
                         value = hex_to_int(tok)
-                        payload[i] = value if value is not None else 0
+                        # Токен длиннее байта (вставка «0102» без
+                        # разделителя): усекаем до младшего байта —
+                        # иначе bytearray бросал «byte must be in
+                        # range(0, 256)» в момент срабатывания
+                        # программы (отчёт мастера).
+                        payload[i] = (value or 0) & 0xFF
                     elif cached is not None and i < len(cached):
                         payload[i] = cached[i]
                 for n in range(count):
@@ -4817,7 +4888,7 @@ class FlexibleLogicTab(QWidget):
                         continue
                     v = hex_to_int(t)
                     if v is not None:
-                        payload[i] = v
+                        payload[i] = v & 0xFF
                 dlc = int(action.get("dlc", 8) or 8)
                 count = max(1, int(action.get("count", 1) or 1))
                 base_delay = int(action.get("delay", 0) or 0)
@@ -4962,6 +5033,9 @@ class FlexibleLogicTab(QWidget):
         if self._rules_dirty:
             self._build_internal_rules()
             self._rules_dirty = False
+        # Протокол устройства известен только после опознания —
+        # пересчитываем, какие программы исполняет сам МК (FLXB).
+        self._refresh_device_managed()
         self._restore_flag_states()
         # Отдельный тик: повторное «включение устройства» (реконнект)
         # должно заново стартовать слушателей «Программа начала
@@ -4972,6 +5046,11 @@ class FlexibleLogicTab(QWidget):
         for internal in self._internal_rules:
             rule_index = internal["index"]
             rule = internal["rule"]
+            if rule_index in self._device_managed:
+                # Запись FIRE_ON_BOOT уже отработала на МК при его
+                # старте — повторный запуск с ПК дал бы двойное
+                # исполнение программы.
+                continue
             events = rule.get("events")
             if not isinstance(events, list) or not events:
                 events = [rule.get("event") or {}]
@@ -5263,6 +5342,11 @@ class FlexibleLogicTab(QWidget):
         for internal in self._internal_rules:
             rule_index = internal["index"]
             rule = internal["rule"]
+            if rule_index in self._device_managed:
+                # Программа скомпилирована в записи FLXB — её исполняет
+                # сам МК (автономно, без ПК). Пропускаем, иначе действие
+                # отработало бы дважды (как device_managed у триггеров).
+                continue
             events = rule.get("events")
             if not isinstance(events, list) or not events:
                 events = [rule.get("event") or {}]

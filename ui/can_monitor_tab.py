@@ -527,27 +527,25 @@ class _DataByteDelegate(QStyledItemDelegate):
         painter.restore()
 
 
-def _data_percent(data: bytes, dlc: int, byte_indices=None) -> float:
-    """DATA как процент: сумма выбранных байт от их максимума
-    (255 × N). byte_indices=None — все байты DLC; иначе — iterable
-    индексов (чекбоксы «Байт N» в истории ID)."""
-    dlc = max(0, min(int(dlc), len(data)))
-    if dlc == 0:
-        return 0.0
-    if byte_indices is None:
-        byte_indices = range(dlc)
-    indices = [i for i in byte_indices if 0 <= i < dlc]
-    if not indices:
-        return 0.0
-    return sum(data[i] for i in indices) * 100.0 / (255.0 * len(indices))
+def _data_value(
+    data: bytes, dlc: int, byte_indices=None, endian: str = "be"
+) -> int:
+    """Позиционная сборка выбранных байт в число — то же правило,
+    что у «Численной переменной» (отчёт мастера).
 
-
-def _data_sum(data: bytes, dlc: int, byte_indices=None) -> int:
-    """Десятичная сумма выбранных байт — мгновенное значение рядом с %."""
+    ``endian`` — как у SBLP-выбора в переменной:
+    ``"be"`` — «Старший байт слева» (06 04 → 6·256+4 = 1540);
+    ``"le"`` — «Старший байт справа» (09 03 → 9 + 3·256 = 777).
+    Один выбранный байт — само его значение."""
     dlc = max(0, min(int(dlc), len(data)))
     if byte_indices is None:
         byte_indices = range(dlc)
-    return sum(data[i] for i in byte_indices if 0 <= i < dlc)
+    window = bytes(data[i] for i in byte_indices if 0 <= i < dlc)
+    if not window:
+        return 0
+    if endian == "le":
+        window = window[::-1]
+    return int.from_bytes(window, "big")
 
 
 class _PercentGraph(QWidget):
@@ -875,11 +873,23 @@ class IdHistoryDialog(QDialog):
 
         self._percent_label = QLabel("0%")
         self._percent_label.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-        # Мгновенная десятичная сумма выбранных байт — рядом с %.
+        # Мгновенное значение выбранных байт — позиционная сборка
+        # по порядку старшинства, как в «Численной переменной»
+        # (отчёт мастера: монитор считает по тем же правилам).
         self._value_label = QLabel("0")
         self._value_label.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         self._value_label.setToolTip(
-            tr("Сумма выбранных байт DATA в десятичной системе")
+            tr("Значение выбранных байт DATA в десятичной системе")
+        )
+        self._endian_combo = QComboBox()
+        self._endian_combo.setFont(font)
+        self._endian_combo.addItem(tr("Старший байт слева"), "be")
+        self._endian_combo.addItem(tr("Старший байт справа"), "le")
+        self._endian_combo.setToolTip(
+            tr("Порядок старшинства байтов при сборке числа")
+        )
+        self._endian_combo.currentIndexChanged.connect(
+            lambda _i: self._on_bytes_changed()
         )
 
         self._graph = _PercentGraph(self)
@@ -963,6 +973,7 @@ class IdHistoryDialog(QDialog):
         toolbar.addWidget(self._percent_label)
         toolbar.addWidget(QLabel("="))
         toolbar.addWidget(self._value_label)
+        toolbar.addWidget(self._endian_combo)
         toolbar.addStretch()
         toolbar.addWidget(self._rows_label)
         toolbar.addWidget(self._rows_spin)
@@ -1007,10 +1018,10 @@ class IdHistoryDialog(QDialog):
         # а не «0%» до прихода нового кадра.
         if samples:
             _t, data, rtr, dlc = samples[-1]
-            pct = _data_percent(data, dlc, self._selected_bytes()) if not rtr else 0.0
+            pct = self._current_pct(data, rtr, dlc)
             self._percent_label.setText(f"{pct:.1f}%")
             self._value_label.setText(
-                str(_data_sum(data, dlc, self._selected_bytes()) if not rtr else 0)
+                str(self._current_sum(data, rtr, dlc))
             )
             self._table.scrollToBottom()
         self._graph.update()
@@ -1152,10 +1163,30 @@ class IdHistoryDialog(QDialog):
         return sel if 0 < len(sel) < self.BYTE_COUNT else None
 
     def _current_pct(self, data: bytes, rtr: bool, dlc: int) -> float:
-        return _data_percent(data, dlc, self._selected_bytes()) if not rtr else 0.0
+        """Процент от максимума позиционного числа выбранных байт —
+        то же правило умножения байтов, что у «Численной переменной»
+        (отчёт мастера): 09 03 при «старший справа» = 9+3·256 = 777,
+        процент от 0xFFFF, а не сумма/510."""
+        if rtr:
+            return 0.0
+        endian = str(self._endian_combo.currentData() or "be")
+        sel = self._selected_bytes()
+        n = (
+            len(sel)
+            if sel is not None
+            else max(0, min(int(dlc), len(data)))
+        )
+        if n <= 0:
+            return 0.0
+        return _data_value(data, dlc, sel, endian) * 100.0 / ((256 ** n) - 1)
 
     def _current_sum(self, data: bytes, rtr: bool, dlc: int) -> int:
-        return _data_sum(data, dlc, self._selected_bytes()) if not rtr else 0
+        """Число из отмеченных байт — позиционная сборка по выбранному
+        порядку старшинства, как в переменных (отчёт мастера)."""
+        if rtr:
+            return 0
+        endian = str(self._endian_combo.currentData() or "be")
+        return _data_value(data, dlc, self._selected_bytes(), endian)
 
     def _append_row(self, t: float, data: bytes, rtr: bool, dlc: int, repaint: bool = True) -> None:
         # Автопрокрутка — только при бегунке внизу: иначе в потоке кадров

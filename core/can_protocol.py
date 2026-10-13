@@ -90,7 +90,7 @@ EVLOG_FAULT_LR = 17    # timestamp=застеканный LR, channel+code=SCB->
 # v11: парсер научился пропускать маркеры 0xD4..0xDA (в сборке v10
 # команды CMD_SYS_RESET и CMD_STORAGE_* отбрасывались до диспетчера —
 # reset таймаутил, блобы молча не писались) и регион CFGH.
-EXPECTED_PROTOCOL_VERSION = 11
+EXPECTED_PROTOCOL_VERSION = 12  # FLXB — автономное исполнение ГЛ
 
 # Ключи деструктивных команд (протокол v3): прошивка отвергает
 # CMD_CFG_WRITE без трейлера A5 5A, CMD_CFG_FACTORY_RESET без "FCLR" и
