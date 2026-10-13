@@ -80,7 +80,10 @@ static pending_response_t s_pending[TRIGGER_MAX_RECORDS];
  * переполнение не теряет команду молча: серия отбрасывается с учётом
  * в s_dropped_count (ревью CM-R1). */
 typedef struct {
-  uint32_t fire_at_tick;   /* тик первой/следующей отправки серии */
+  uint32_t fire_at_tick;   /* ПЛАНОВЫЙ срок следующей отправки серии —
+                            * ретраи его не трогают: ближайшая попытка
+                            * = fire_at_tick + retries*RETRY_DELAY
+                            * (ревью CM-R8: отказ не сдвигает серию) */
   uint8_t  data[8];        /* pad-8 снимок DATA кадра-события */
   uint16_t interval_ms;
   uint8_t  trigger_index;
@@ -273,15 +276,21 @@ static void append_flex(void)
   uint8_t count = p[5];
   uint32_t json_len = (uint32_t)p[8] | ((uint32_t)p[9] << 8)
                       | ((uint32_t)p[10] << 16) | ((uint32_t)p[11] << 24);
+  /* Точный контракт ИСПОЛНЯЕМОГО хвоста, одинаковый с ПК (ревью
+   * CM-R3/CM-R6): count ≤ FLEX_MAX_RECORDS (отказ, не обрезание),
+   * json_len > 0 и 12 + json_len + count*sizeof(trigger_t) == len
+   * ровно — без хвоста и без недостачи. Содержимое JSON прошивка
+   * НЕ проверяет и не использует — контракт исполнителя определяется
+   * только геометрией и записями; валидность JSON-конфигурации —
+   * зона ПК (см. core/flex_compiler.py). Сложение защищено: json_len
+   * сравнивается с len-12 ДО вычисления смещения — иначе при
+   * json_len≈0xFFFFFFFF rec_off переполнялся в 32 битах и
+   * «проверка границ» принимала мусор (ревью CM-R6). */
+  if (count > FLEX_MAX_RECORDS || json_len == 0U || json_len > len - 12U) {
+    return;
+  }
   uint32_t rec_off = 12U + json_len;
-  /* Точный контракт контейнера, одинаковый с ПК (ревью CM-R3):
-   * count ≤ FLEX_MAX_RECORDS (отказ, не обрезание), json_len > 0 и
-   * 12 + json_len + count*sizeof(trigger_t) == len ровно — без хвоста
-   * и без недостачи. Проверки ДО сложения в 32 бит (переполнение
-   * json_len не обходит границу): считаем в 64 битах. */
-  if (count > FLEX_MAX_RECORDS || json_len == 0U || rec_off > len
-      || (uint64_t)rec_off + (uint64_t)count * sizeof(trigger_t)
-         != (uint64_t)len) {
+  if ((uint32_t)count * sizeof(trigger_t) != len - rec_off) {
     return;
   }
   /* Валидация ВСЕХ записей до загрузки: одна битая запись (CRC/поля)
@@ -1390,7 +1399,15 @@ void Trigger_Poll(void)
     memset(s_stage_flags, 0, sizeof(s_stage_flags));
   }
   for (uint8_t i = 0; i < TRIGGER_MAX_RECORDS; i++) {
-    if (s_pending[i].armed && (int32_t)(now - s_pending[i].fire_at_tick) >= 0) {
+    /* Плановый срок (fire_at_tick) и ближайшая попытка хранятся
+     * раздельно: срок попытки = fire_at + retries*RETRY_DELAY. Отказ
+     * ящиков отодвигает попытку на ~1 мс, но НЕ сдвигает расписание
+     * серии — следующие плановые отправки идут от исходных сроков
+     * (ревью CM-R8). */
+    uint32_t due = s_pending[i].fire_at_tick
+                   + (uint32_t)s_pending[i].retries
+                     * TRIGGER_TX_RETRY_DELAY_MS;
+    if (s_pending[i].armed && (int32_t)(now - due) >= 0) {
       uint32_t lateness = now - s_pending[i].fire_at_tick;
       if (lateness > s_max_lateness_ms) {
         s_max_lateness_ms = lateness;
@@ -1398,38 +1415,52 @@ void Trigger_Poll(void)
       uint8_t index = s_pending[i].trigger_index;
       const trigger_t *t = &s_triggers[index];
       if (!send_response(t, index, s_pending[i].echo, NULL)) {
-        /* Ящики заняты: попытку не сжигаем, переарм на ~1 мс. Раньше
-         * провал тут молча съедал отправку — ответ триггера пропадал
-         * на нагруженной шине без следа ни в одном счётчике. */
+        /* Ящики заняты: попытку не сжигаем, переарм на ~1 мс
+         * (retries+1 сам отодвигает due — fire_at не трогаем).
+         * Раньше провал тут молча съедал отправку — ответ триггера
+         * пропадал на нагруженной шине без следа ни в одном
+         * счётчике. */
         if (s_pending[i].retries < TRIGGER_TX_RETRY_MAX) {
           s_pending[i].retries++;
-          s_pending[i].fire_at_tick = now + TRIGGER_TX_RETRY_DELAY_MS;
           continue;
         }
-        s_dropped_count++;
+        /* Ретраи исчерпаны — серия отбрасывается целиком (как в
+         * очереди ГЛ): на мёртвой шине оставшиеся повторы горели бы
+         * те же 20 мс, потеря серии считается в dropped разом. */
+        s_dropped_count += s_pending[i].remaining;
+        s_pending[i].armed = 0U;
+        s_pending[i].retries = 0U;
+        continue;
       } else {
         s_fired_count++;
       }
       s_pending[i].retries = 0U;
-      /* Повторные отправки («Кол-во отправок» > 1): переарм на
-       * tx_interval_ms; в кэш-режиме каждый повтор шлёт уже свежие
-       * данные кэша. */
+      /* Повторные отправки («Кол-во отправок» > 1): следующая —
+       * в ПЛАНОВЫЙ срок fire_at += interval, а не «через interval от
+       * текущей попытки»: краткий отказ (1050→1051) не сдвигает серию
+       * 1070/1090 (ревью CM-R8). Просроченный плановый срок просто
+       * исполняется ближайшим Poll — одна отправка за проход.
+       * В кэш-режиме каждый повтор шлёт уже свежие данные кэша. */
       if (s_pending[i].remaining > 1U) {
         s_pending[i].remaining--;
-        s_pending[i].fire_at_tick = now + s_pending[i].interval_ms;
+        s_pending[i].fire_at_tick += s_pending[i].interval_ms;
       } else {
         s_pending[i].armed = 0U;
       }
     }
   }
-  /* Серии записей ГЛ: каждая ждёт свой срок — расписание серии
+  /* Серии записей ГЛ: у каждой свой плановый срок — расписание серии
    * сохраняется полностью (ревью CM-R1). Повторы идут от исходного
-   * fire_at += interval, как у абсолютных QTimer на ПК — опоздавший
-   * Poll добирает серию без сдвига последующих отправок. */
+   * fire_at += interval, как у абсолютных QTimer на ПК. Отказ ящиков
+   * отодвигает только ближайшую попытку (due = fire_at + retries*1
+   * мс), плановые сроки не сдвигаются (ревью CM-R8); за один проход
+   * Poll из серии отправляется один кадр — просроченные плановые
+   * сроки догоняются по одному за тик опроса. */
   for (uint8_t q = 0U; q < FLEX_QUEUE_DEPTH; q++) {
     flex_firing_t *e = &s_flex_queue[q];
-    if (e->used == 0U
-        || (int32_t)(now - e->fire_at_tick) < 0) {
+    uint32_t due = e->fire_at_tick
+                   + (uint32_t)e->retries * TRIGGER_TX_RETRY_DELAY_MS;
+    if (e->used == 0U || (int32_t)(now - due) < 0) {
       continue;
     }
     uint32_t lateness = now - e->fire_at_tick;
@@ -1447,10 +1478,13 @@ void Trigger_Poll(void)
     if (!send_response(t, index, e->echo, evp)) {
       /* Ящики заняты: попытку не сжигаем, переарм на ~1 мс — тот же
        * ограниченный механизм ретраев, что и у пользовательских
-       * записей; исчерпание считается в dropped (ревью CM-R1). */
+       * записей; исчерпание считается в dropped (ревью CM-R1).
+       * Ограниченная политика при длительном отказе: после
+       * TRIGGER_TX_RETRY_MAX попыток серия отбрасывается целиком —
+       * бесконечного цикла и неконтролируемого залпа нет, потеря
+       * диагностируется счётчиком (ревью CM-R8). */
       if (e->retries < TRIGGER_TX_RETRY_MAX) {
         e->retries++;
-        e->fire_at_tick = now + TRIGGER_TX_RETRY_DELAY_MS;
         continue;
       }
       s_dropped_count += e->remaining;

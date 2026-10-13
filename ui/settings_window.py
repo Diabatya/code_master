@@ -37,9 +37,9 @@ from PySide6.QtWidgets import (
 )
 
 from core.flex_compiler import (
+    analyze_device_flex,
     build_flex_blob,
     extract_flex_json,
-    parse_flex_blob,
 )
 from core.can_protocol import (
     CMD_CFG_FACTORY_RESET,
@@ -1306,34 +1306,45 @@ class SettingsWindow(QMainWindow):
         программ ГЛ.
 
         Владелец передаётся только по подтверждённому содержимому:
-        полная вычитка блоба и строгая валидация контейнера
-        (parse_flex_blob — магия, версия, точная длина, JSON-схема,
-        CRC/поля каждой записи). 12-байтный peek заголовка оставался
-        бы слепым к повреждённой исполняемой части (ревью CM-R3).
-        При нечитаемом устройстве флаг не трогаем: слепое «исполняет
-        ПК» опаснее устаревшего состояния — возможны дубли PC+МК
-        (ревью CM-02)."""
+        полная вычитка блоба, валидация исполняемого хвоста и его
+        сверка с JSON-конфигурацией (analyze_device_flex →
+        «empty»/«no-tail»/«verified»/«conflict» — ревью CM-R5/R7).
+        Нечитаемая область (INFO/вычитка вернули None или упали) —
+        НЕИЗВЕСТНОСТЬ, а не «пусто»: состояние не меняем, только
+        помечаем владельца неподтверждённым. Слепое «исполняет ПК»
+        дало бы дубли PC+МК поверх продолжающего работать хвоста."""
+        try:
+            proto = self._serial_manager.device_protocol_version()
+        except Exception:  # noqa: BLE001
+            proto = 0
+        if proto < 12:
+            # FLXB-записи исполняет только прошивка протокола 12+ —
+            # владелец точно ПК, независимо от содержимого области.
+            self._flexible_tab.set_device_flex_state("no-tail")
+            return
         try:
             info = self._serial_manager.storage_info(STORAGE_REGION_FLEX)
         except Exception:  # noqa: BLE001
+            info = None
+        if info is None:
+            # INFO не прочитан — владелец не подтверждён, а не
+            # «область пустая» (ревью CM-R5).
+            self._flexible_tab.mark_device_flex_probe_failed()
             return
-        if not info or int(info.get("len", 0)) == 0:
-            # Область пустая — записей в камне нет, это факт, а не
-            # неизвестность.
-            self._flexible_tab.set_device_flexb(False)
+        if int(info.get("len", 0)) == 0:
+            # Пустая область — подтверждённый факт валидным INFO.
+            self._flexible_tab.set_device_flex_state("empty")
             return
         try:
             data = self._serial_manager.storage_download(
                 STORAGE_REGION_FLEX
             )
         except Exception:  # noqa: BLE001
-            return
+            data = None
         if data is None:
-            # Вычитка не удалась — неизвестность, флаг не меняем.
+            self._flexible_tab.mark_device_flex_probe_failed()
             return
-        self._flexible_tab.set_device_flexb(
-            parse_flex_blob(data) is not None
-        )
+        self._apply_device_flex_state(analyze_device_flex(data))
 
     def _update_device_info(
         self, device_type: int = 0, device_version: int = 0, query_device: bool = True
@@ -2127,14 +2138,17 @@ class SettingsWindow(QMainWindow):
             # мёртвые программы).
             self._refresh_device_flexb()
             raise
-        # Флаг device_managed — по РЕАЛЬНО записанному формату:
-        # FLXB ушёл только в прошивку protocol>=12.
-        self._flexible_tab.set_device_flexb(proto >= 12)
         # Программа ГЛ записана в камень — с этого момента
         # исполняется именно она; до записи работал старый
         # снимок, живые правки полей не отрабатывали
         # (отчёт мастера).
         self._flexible_tab.commit_runtime()
+        # Владелец — по РЕАЛЬНО записанному формату: FLXB ушёл только
+        # в прошивку protocol>=12 (и хвост побайтово = компиляции
+        # только что записанных правил — «verified» по построению).
+        self._flexible_tab.set_device_flex_state(
+            "verified" if proto >= 12 else "no-tail"
+        )
         # Кэш блобов обновляем свежей генерацией — следующее
         # «Настроить» на этом устройстве не перекачивает то, что
         # мы только что сами туда записали.
@@ -2226,16 +2240,21 @@ class SettingsWindow(QMainWindow):
         serial = str(self._config.get("device_serial") or "")
         for region in (STORAGE_REGION_VAR, STORAGE_REGION_FLEX):
             data = self._download_blob_cached(serial, region)
-            if region == STORAGE_REGION_FLEX:
-                # Контейнер FLXB с валидным заголовком и целой
-                # исполняемой частью — камень исполняет записи сам;
-                # старый JSON-блоб или повреждённый FLXB — программы
-                # исполняет ПК (ревью CM-05).
-                self._flexible_tab.set_device_flexb(
-                    parse_flex_blob(data) is not None
-                )
-            if not data:
+            if data is None:
+                # Область НЕ прочитана — неизвестность, а не «пусто»
+                # (ревью CM-R5): владельца вслепую не меняем.
+                if region == STORAGE_REGION_FLEX:
+                    self._flexible_tab.mark_device_flex_probe_failed()
                 continue
+            if not data:
+                # INFO подтвердил len=0 — область заведомо пуста.
+                if region == STORAGE_REGION_FLEX:
+                    self._flexible_tab.set_device_flex_state("empty")
+                continue
+            analysis = (
+                analyze_device_flex(data)
+                if region == STORAGE_REGION_FLEX else None
+            )
             try:
                 # FLXB-контейнер: JSON-часть после 12-байтового
                 # заголовка; чистый JSON (старый блог) — как есть.
@@ -2245,6 +2264,11 @@ class SettingsWindow(QMainWindow):
                     "Блоб хранилища МК (регион %d) не читается: %s",
                     region, exc,
                 )
+                # JSON не читается — конфигурацию не импортируем,
+                # но владельца исполнения по хвосту всё равно ставим
+                # (conflict/no-tail — ревью CM-R7).
+                if analysis is not None:
+                    self._apply_device_flex_state(analysis)
                 continue
             if not isinstance(blob, dict):
                 # Блоб старых версий — голый список (без обёртки
@@ -2255,16 +2279,50 @@ class SettingsWindow(QMainWindow):
                     blob.get("variables", blob)
                 )
             else:
-                self._flexible_tab.set_config(blob.get("rules", blob))
+                # Правила — по валидированной схеме анализа; легаси
+                # JSON-блоб (без хвоста) — список rules как раньше.
+                # Невалидная схема — вкладку НЕ затираем: conflict
+                # диагностируется бейджем, старые правила видны.
+                rules = analysis["rules"]
+                if rules is None:
+                    legacy = blob.get("rules")
+                    rules = legacy if isinstance(legacy, list) else None
+                if rules is not None:
+                    self._flexible_tab.set_config(rules)
+                # Владельца ставим ПОСЛЕ импорта правил: пересчёт
+                # managed-индексов идёт по свежему снимку — тем
+                # самым правилам, что лежат в блобе (ревью CM-R7).
+                self._apply_device_flex_state(analysis)
+
+    def _apply_device_flex_state(self, analysis: dict) -> None:
+        """Владелец исполнения программ ГЛ по итогам анализа блоба.
+
+        На прошивке протокола <12 хвост FLXB не исполняется — владелец
+        ПК независимо от содержимого области."""
+        try:
+            proto = self._serial_manager.device_protocol_version()
+        except Exception:  # noqa: BLE001
+            proto = 0
+        if proto < 12:
+            self._flexible_tab.set_device_flex_state("no-tail")
+        else:
+            self._flexible_tab.set_device_flex_state(analysis["state"])
 
     def _download_blob_cached(
         self, serial: str, region: int
     ) -> bytes | None:
-        """Тело блога области: из кэша по generation или из МК."""
+        """Тело блога области: из кэша по generation или из МК.
+
+        None — область НЕ прочитана (INFO/вычитка не удалась):
+        неизвестность, а не «пусто» (ревью CM-R5). b"" — INFO
+        подтвердил len=0: область заведомо пуста."""
         info = self._serial_manager.storage_info(region)
-        if info is None or info["len"] == 0:
+        if info is None:
             self._blob_cache.pop((serial, region), None)
             return None
+        if int(info.get("len", 0)) == 0:
+            self._blob_cache.pop((serial, region), None)
+            return b""
         key = (serial, region)
         cached = self._blob_cache.get(key)
         if cached is not None and cached[0] == info["gen"]:

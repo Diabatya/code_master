@@ -504,14 +504,18 @@ def build_flex_blob(rules: list[dict[str, Any]]) -> bytes:
 def parse_flex_blob(blob: bytes) -> tuple[bytes, int] | None:
     """Разбор контейнера FLXB → (JSON-часть, число записей).
 
-    None — блоб не FLXB либо ЛЮБАЯ часть повреждена: по такому блобу
-    нельзя считать программы исполняемыми камнем. Проверки жёстче
-    магии (ревью CM-R3): точная длина контейнера (лишние байты —
-    несоответствие), json_len > 0 и парсится в объект со списком
-    «rules», число записей ≤ FLEX_MAX_RECORDS, каждая запись —
-    валидная trigger_t v3 по контракту прошивки (магия, формат,
-    CRC8, ограничения полей). Прошивка применяет те же правила —
-    половина записей без другой половины невозможна."""
+    Проверяет ТОЛЬКО исполняемый контракт — то же, что
+    firmware/application/Src/trigger.c::append_flex: магия, версия
+    контейнера, count ≤ FLEX_MAX_RECORDS (отказ, не обрезание),
+    json_len > 0, точная длина 12 + json_len + count*90 (лишний
+    хвост и недостача — отказ), каждая запись — валидная trigger_t
+    v3 по контракту прошивки (магия/формат/CRC8/поля).
+
+    Содержимое JSON-части здесь НЕ проверяется — прошивка её не
+    читает, и расхождение «ПК отверг, МК исполняет» создавало бы
+    двойного владельца (ревью CM-R6). Валидность JSON-схемы —
+    отдельная зона: parse_flex_rules() для конфигурации ПК и
+    analyze_device_flex() для владельца исполнения."""
     if (
         not blob
         or len(blob) < _FLXB_HEADER_SIZE
@@ -523,21 +527,90 @@ def parse_flex_blob(blob: bytes) -> tuple[bytes, int] | None:
     if count > FLEX_MAX_RECORDS:
         return None
     json_len = int.from_bytes(blob[8:12], "little")
+    if json_len == 0 or json_len > len(blob) - _FLXB_HEADER_SIZE:
+        return None
     rec_off = _FLXB_HEADER_SIZE + json_len
-    if json_len == 0 or len(blob) != rec_off + count * TRIGGER_SIZE:
-        return None
-    json_part = blob[_FLXB_HEADER_SIZE:rec_off]
-    try:
-        doc = json.loads(json_part.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(doc, dict) or not isinstance(doc.get("rules"), list):
+    if len(blob) - rec_off != count * TRIGGER_SIZE:
         return None
     for i in range(count):
         start = rec_off + i * TRIGGER_SIZE
         if not record_fields_valid(blob[start:start + TRIGGER_SIZE]):
             return None
-    return json_part, count
+    return blob[_FLXB_HEADER_SIZE:rec_off], count
+
+
+def parse_flex_rules(json_part: bytes) -> list[dict[str, Any]] | None:
+    """JSON-часть контейнера → список правил, если схема валидна.
+
+    Схема (ревью CM-R7): объект с ключом «rules» — список словарей;
+    в каждом правиле события/условия/действия, если заданы, —
+    списки словарей (или легаси-поля event/condition/action —
+    словари), «active» — bool, «title» — строка. Повреждённый
+    элемент отвергается здесь, а не поздним исключением в UI."""
+    try:
+        doc = json.loads(json_part.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    rules = doc.get("rules")
+    if not isinstance(rules, list):
+        return None
+    for rule in rules:
+        if not isinstance(rule, dict):
+            return None
+        for key in ("events", "conditions", "actions"):
+            value = rule.get(key)
+            if value is not None and not (
+                isinstance(value, list)
+                and all(isinstance(e, dict) for e in value)
+            ):
+                return None
+        for key in ("event", "condition", "action"):
+            value = rule.get(key)
+            if value is not None and not isinstance(value, dict):
+                return None
+        if "active" in rule and not isinstance(rule["active"], bool):
+            return None
+        if "title" in rule and not isinstance(rule["title"], str):
+            return None
+    return rules
+
+
+def analyze_device_flex(blob: bytes) -> dict[str, Any]:
+    """Классификация содержимого области FLXH — владелец исполнения
+    программ ГЛ (ревью CM-R5..CM-R7).
+
+    state:
+      «no-tail»  — исполняемого хвоста нет (не FLXB или повреждён):
+                   прошивка такой контейнер отвергает целиком →
+                   камень исполняет НИЧЕГО, владелец — ПК;
+      «conflict» — хвост валиден и загружается прошивкой, но
+                   соответствие его правилам недоказуемо: JSON
+                   не читается по схеме либо байты хвоста не совпали
+                   с компиляцией JSON-правил. Владелец — камень
+                   (ПК вслепую не включается поверх работающего
+                   хвоста); путь восстановления — повторная запись;
+      «verified» — хвост валиден И побайтово совпадает с
+                   детерминированной компиляцией правил из JSON:
+                   камень исполняет именно эти программы (множество
+                   managed — индексы правил на камне).
+    Ключи rules/managed заполнены только когда JSON прочитан."""
+    parsed = parse_flex_blob(blob)
+    if parsed is None:
+        return {"state": "no-tail", "rules": None, "managed": []}
+    json_part, count = parsed
+    rules = parse_flex_rules(json_part)
+    if rules is None:
+        # Хвост исполняется, а конфигурация не читается — нельзя ни
+        # подтвердить владение, ни включить ПК вслепую.
+        return {"state": "conflict", "rules": None, "managed": []}
+    expected, managed = compile_rules(rules)
+    expected_tail = b"".join(pack_trigger(r) for r in expected)
+    actual_tail = blob[_FLXB_HEADER_SIZE + len(json_part):]
+    if actual_tail != expected_tail:
+        return {"state": "conflict", "rules": rules, "managed": []}
+    return {"state": "verified", "rules": rules, "managed": managed}
 
 
 def flexb_header_valid(header: bytes, blob_len: int) -> bool:

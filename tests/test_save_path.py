@@ -133,6 +133,10 @@ class _FakeTab:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.flexb: bool | None = None
+        self.flex_state: str | None = None
+        self.probe_failed = False
+        self.rules: list | None = None
+        self.variables: Any = None
 
     def _save_config(self) -> None:
         self.calls.append("save_config")
@@ -150,8 +154,29 @@ class _FakeTab:
     def get_config(self) -> list:
         return []
 
+    def set_device_flex_state(
+        self, state: str, managed: list | None = None
+    ) -> None:
+        self.flex_state = state
+        self.probe_failed = False
+        # «flexb» — бинарное «камень исполняет»: verified и conflict
+        # означают работающий хвост (conflict — владелец камень,
+        # хотя содержимое не верифицировано — ревью CM-R7).
+        self.flexb = state in ("verified", "conflict")
+
+    def mark_device_flex_probe_failed(self) -> None:
+        self.probe_failed = True
+
     def set_device_flexb(self, present: bool) -> None:
         self.flexb = bool(present)
+        self.flex_state = "verified" if present else "no-tail"
+
+    def set_config(self, rules: list) -> None:
+        self.calls.append("set_config")
+        self.rules = list(rules)
+
+    def import_config(self, variables: Any) -> None:
+        self.variables = variables
 
     def commit_runtime(self) -> None:
         self.calls.append("commit_runtime")
@@ -450,8 +475,198 @@ def test_commit_unknown_corrupt_blob_marks_pc_owner(window) -> None:
     опущен, программы не «мёртвы»."""
     w, serial, _c, _t, _d = window
     corrupt = bytearray(build_flex_blob([]))
-    corrupt[-1] ^= 0x5A  # битая запись/трейлер — контейнер невалиден
+    corrupt[4] ^= 0x5A  # версия контейнера битая — хвост не грузится
     serial.upload_outcomes[STORAGE_REGION_FLEX] = StorageCommitUnknown()
     serial.download_by_region[STORAGE_REGION_FLEX] = bytes(corrupt)
     assert w._save_current_config() is False
     assert w._flexible_tab.flexb is False
+
+
+# ---- CM-R5/R7: владелец исполнения — tri-state --------------------
+
+
+def _flex_info(length: int, gen: int = 7) -> dict:
+    return {"base": 0x08010000, "len": length, "gen": gen}
+
+
+def test_info_none_keeps_owner_and_marks_unconfirmed(window) -> None:
+    """storage_info = None — область НЕ прочитана, а не «пустая»:
+    прежний владелец сохраняется (keep-last), состояние
+    диагностируется как неподтверждённое (ревью CM-R5)."""
+    w, serial, _c, _t, _d = window
+    tab = w._flexible_tab
+    tab.set_device_flex_state("verified")      # keep-last: владелец был МК
+    serial.info_outcomes[STORAGE_REGION_FLEX] = None
+    w._refresh_device_flexb()
+    assert tab.flex_state == "verified"        # владелец не слетел на ПК
+    assert tab.flexb is True
+    assert tab.probe_failed is True            # диагностика неизвестности
+
+
+def test_info_exception_keeps_owner(window) -> None:
+    """Исключение storage_info — та же неизвестность: состояние не
+    меняется, помечается probe_failed (ревью CM-R5)."""
+    w, serial, _c, _t, _d = window
+    tab = w._flexible_tab
+    tab.set_device_flex_state("verified")
+    serial.info_outcomes[STORAGE_REGION_FLEX] = TimeoutError("usb gone")
+    w._refresh_device_flexb()
+    assert tab.flex_state == "verified"
+    assert tab.probe_failed is True
+
+
+def test_empty_info_confirms_empty_region(window) -> None:
+    """INFO с len=0 — подтверждённая пустая область: владелец — ПК,
+    это факт, а не неизвестность (ревью CM-R5)."""
+    w, serial, _c, _t, _d = window
+    tab = w._flexible_tab
+    tab.set_device_flex_state("verified")
+    serial.info_outcomes[STORAGE_REGION_FLEX] = _flex_info(0)
+    w._refresh_device_flexb()
+    assert tab.flex_state == "empty"
+    assert tab.flexb is False
+    assert tab.probe_failed is False
+
+
+def test_download_none_after_info_keeps_owner(window) -> None:
+    """INFO валиден, но вычитка вернула None — неизвестность:
+    владелец keep-last, состояние неподтверждённое (ревью CM-R5)."""
+    w, serial, _c, _t, _d = window
+    tab = w._flexible_tab
+    tab.set_device_flex_state("verified")
+    serial.info_outcomes[STORAGE_REGION_FLEX] = _flex_info(64)
+    serial.download_by_region[STORAGE_REGION_FLEX] = None
+    w._refresh_device_flexb()
+    assert tab.flex_state == "verified"
+    assert tab.probe_failed is True
+
+
+def test_valid_blob_marks_verified(window) -> None:
+    """Полная вычитка + валидация: хвост == компиляции JSON —
+    владелец «устройство», подтверждённо (ревью CM-R7)."""
+    w, serial, _c, _t, _d = window
+    blob = build_flex_blob([])
+    serial.info_outcomes[STORAGE_REGION_FLEX] = _flex_info(len(blob))
+    serial.download_by_region[STORAGE_REGION_FLEX] = blob
+    w._refresh_device_flexb()
+    assert w._flexible_tab.flex_state == "verified"
+    assert w._flexible_tab.flexb is True
+
+
+def test_legacy_json_blob_is_no_tail(window) -> None:
+    """Старый чисто-JSON блоб — исполняемого хвоста нет: владелец
+    ПК (камень не исполняет JSON), состояние «no-tail»."""
+    w, serial, _c, _t, _d = window
+    blob = json.dumps({"kind": "code_master_flex_logic",
+                       "format": 1, "rules": []}).encode("utf-8")
+    serial.info_outcomes[STORAGE_REGION_FLEX] = _flex_info(len(blob))
+    serial.download_by_region[STORAGE_REGION_FLEX] = blob
+    w._refresh_device_flexb()
+    assert w._flexible_tab.flex_state == "no-tail"
+    assert w._flexible_tab.flexb is False
+
+
+def test_tail_mismatch_is_conflict(window) -> None:
+    """Валидный контейнер, но хвост ≠ компиляции JSON (чужой хвост):
+    камень исполняет ЗАПИСИ — ПК вслепую не включается поверх;
+    состояние «conflict» требует повторной записи (ревью CM-R7)."""
+    w, serial, _c, _t, _d = window
+    blob = bytearray(build_flex_blob([]))
+    # Подменяем исполняемый хвост валидной записью от ДРУГИХ правил.
+    other = build_flex_blob(
+        [{
+            "title": "P", "active": True,
+            "events": [{"type": "frame", "id": "0x123", "channel": 0,
+                        "format": "std", "rtr": False, "dlc": 8,
+                        "data": ""}],
+            "actions": [{"type": "frame", "id": "0x456", "channel": 0,
+                         "format": "std", "rtr": False,
+                         "data": "AA BB", "count": 1, "delay": 0,
+                         "interval": 0}],
+        }]
+    )
+    blob[5] = other[5]                       # count
+    blob = blob[:12 + int.from_bytes(blob[8:12], "little")] + other[
+        12 + int.from_bytes(other[8:12], "little"):
+    ]
+    serial.info_outcomes[STORAGE_REGION_FLEX] = _flex_info(len(blob))
+    serial.download_by_region[STORAGE_REGION_FLEX] = bytes(blob)
+    w._refresh_device_flexb()
+    assert w._flexible_tab.flex_state == "conflict"
+    assert w._flexible_tab.flexb is True     # камень — владелец
+
+
+def test_download_blobs_info_none_marks_probe_failed(window) -> None:
+    """_download_config_blobs при нечитаемой области: владельца не
+    меняет, диагностирует неизвестность, конфиг не импортирует
+    (ревью CM-R5)."""
+    w, serial, _c, _t, _d = window
+    tab = w._flexible_tab
+    tab.set_device_flex_state("verified")
+    serial.info_outcomes[STORAGE_REGION_FLEX] = None
+    serial.info_outcomes[STORAGE_REGION_VAR] = None
+    w._download_config_blobs()
+    assert tab.flex_state == "verified"
+    assert tab.probe_failed is True
+    assert tab.rules is None                 # ничего не импортировали
+
+
+def test_download_blobs_empty_region_marks_empty(window) -> None:
+    """Подтверждённый len=0 в INFO — область пуста, владелец ПК."""
+    w, serial, _c, _t, _d = window
+    serial.info_outcomes[STORAGE_REGION_FLEX] = _flex_info(0)
+    serial.info_outcomes[STORAGE_REGION_VAR] = _flex_info(0)
+    w._download_config_blobs()
+    assert w._flexible_tab.flex_state == "empty"
+    assert w._flexible_tab.probe_failed is False
+
+
+def test_download_blobs_verified_imports_rules(window) -> None:
+    """Валидный FLXB: правила импортируются И владелец — устройство
+    (verified), в этом порядке — managed-индексы относятся к
+    импортированным правилам (ревью CM-R7)."""
+    w, serial, _c, _t, _d = window
+    tab = w._flexible_tab
+    rules = [{"title": "P1", "active": True,
+              "events": [{"type": "power"}],
+              "actions": [{"type": "frame", "id": "0x100",
+                           "channel": 0, "data": "01"}]}]
+    blob = build_flex_blob(rules)
+    serial.info_outcomes[STORAGE_REGION_FLEX] = _flex_info(len(blob))
+    serial.info_outcomes[STORAGE_REGION_VAR] = _flex_info(0)
+    serial.download_by_region[STORAGE_REGION_FLEX] = blob
+    w._download_config_blobs()
+    assert tab.rules == rules
+    assert tab.flex_state == "verified"
+    assert tab.flexb is True
+
+
+def test_download_blobs_corrupt_json_sets_conflict(window) -> None:
+    """Хвост валиден, а JSON битый — конфигурацию не импортируем
+    (старые правила на месте), но владелец — камень: conflict
+    (ревью CM-R7)."""
+    w, serial, _c, _t, _d = window
+    tab = w._flexible_tab
+    tab.rules = [{"title": "старые"}]
+    blob = bytearray(build_flex_blob([]))
+    # Портим JSON-часть (не хвост): контейнер грузится, правила нет.
+    blob[12] = ord("!")
+    blob[13] = ord("!")
+    serial.info_outcomes[STORAGE_REGION_FLEX] = _flex_info(len(blob))
+    serial.info_outcomes[STORAGE_REGION_VAR] = _flex_info(0)
+    serial.download_by_region[STORAGE_REGION_FLEX] = bytes(blob)
+    w._download_config_blobs()
+    assert tab.flex_state == "conflict"
+    assert tab.rules == [{"title": "старые"}]   # не затёрли
+
+
+def test_proto11_area_is_no_tail(window) -> None:
+    """Протокол 11 хранит блобы, но хвост не исполняет — владелец ПК
+    даже при валидном FLXB в области (ревью CM-R5/R7)."""
+    w, serial, _c, _t, _d = window
+    serial.proto = 11
+    blob = build_flex_blob([])
+    serial.info_outcomes[STORAGE_REGION_FLEX] = _flex_info(len(blob))
+    serial.download_by_region[STORAGE_REGION_FLEX] = blob
+    w._refresh_device_flexb()
+    assert w._flexible_tab.flex_state == "no-tail"

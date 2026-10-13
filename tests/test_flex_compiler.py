@@ -8,6 +8,7 @@ from core.flex_compiler import (
     FLEX_BLOB_MAGIC,
     FLEX_BLOB_VERSION,
     FLEX_MAX_RECORDS,
+    analyze_device_flex,
     build_flex_blob,
     compile_rule,
     compile_rules,
@@ -15,6 +16,7 @@ from core.flex_compiler import (
     flexb_header_valid,
     managed_flags,
     parse_flex_blob,
+    parse_flex_rules,
 )
 from core.trigger_protocol import (
     TRIGGER_F_TX_EVENT_DATA,
@@ -344,36 +346,87 @@ def test_flexb_extra_tail_rejected() -> None:
 
 
 def test_flexb_json_zero_and_schema() -> None:
-    """json_len=0, невалидный JSON и JSON без схемы (dict+rules) —
-    контейнер отвергается: владелец исполнения не определяется по
-    магии (CM-R3)."""
+    """parse_flex_blob проверяет ТОЛЬКО исполняемый контракт (как
+    firmware append_flex): json_len=0 и выход JSON за границы —
+    отказ; СОДЕРЖИМОЕ JSON прошивка не читает, и хост не должен
+    расходиться (CM-R6). Валидность схемы — parse_flex_rules."""
     blob = bytearray(build_flex_blob([_rule()]))
     json_len = int.from_bytes(blob[8:12], "little")
 
-    # json_len = 0
+    # json_len = 0 — отказ на обеих сторонах.
     bad = bytearray(blob)
     bad[8:12] = (0).to_bytes(4, "little")
     assert parse_flex_blob(bytes(bad)) is None
 
-    # Невалидный JSON той же длины
+    # json_len ≈ UINT32_MAX — переполнение 12+json_len не должно
+    # маскировать выход за границы (CM-R6).
     bad = bytearray(blob)
-    bad[12:12 + json_len] = b"!" * json_len
+    bad[8:12] = (0xFFFFFFF6).to_bytes(4, "little")
     assert parse_flex_blob(bytes(bad)) is None
 
-    # Валидный JSON, но не схема конфигурации (нет "rules")
-    doc = json.dumps({"kind": "x"}).encode("utf-8")
+    # Невалидный JSON той же длины — хвост исполняемый, контейнер
+    # принимается (прошивка загрузит записи); схема отвергается
+    # отдельным парсером.
     bad = bytearray(blob)
-    bad[8:12] = len(doc).to_bytes(4, "little")
-    bad[12:12 + json_len] = doc.ljust(json_len, b" ")
-    assert parse_flex_blob(bytes(bad[:12 + json_len])) is None
+    bad[12:12 + json_len] = b"!" * json_len
+    assert parse_flex_blob(bytes(bad)) is not None
+    assert parse_flex_rules(b"!" * json_len) is None
 
-    # Валидный dict-JSON без списка rules
-    doc = json.dumps({"kind": "code_master_flex_logic", "rules": 5}
-                     ).encode("utf-8")
+    # Валидный JSON, но не схема конфигурации (нет "rules").
+    assert parse_flex_rules(json.dumps({"kind": "x"}).encode()) is None
+    # dict-JSON без списка rules.
+    assert parse_flex_rules(
+        json.dumps({"kind": "code_master_flex_logic", "rules": 5}
+                   ).encode()
+    ) is None
+    # Правило не-dict и элемент списка не-dict — отказ схемы.
+    assert parse_flex_rules(
+        json.dumps({"rules": ["oops"]}).encode()
+    ) is None
+    assert parse_flex_rules(
+        json.dumps({"rules": [{"title": "P", "events": "oops"}]}
+                   ).encode()
+    ) is None
+    # UTF-8 мусор.
+    assert parse_flex_rules(b"\xff\xfe") is None
+
+
+def test_analyze_device_flex_states() -> None:
+    """Классификация владельца (CM-R7): verified — хвост ==
+    компиляции JSON; conflict — хвост загружается прошивкой, но не
+    верифицирован; no-tail — исполняемых записей нет."""
+    rules = [_rule()]
+    blob = build_flex_blob(rules)
+    a = analyze_device_flex(blob)
+    assert a["state"] == "verified"
+    assert a["managed"] == [True]
+
+    # Легаси-JSON и мусор — исполняемого хвоста нет.
+    assert analyze_device_flex(b'{"rules":[]}')["state"] == "no-tail"
+    assert analyze_device_flex(b"\x00" * 40)["state"] == "no-tail"
+    assert analyze_device_flex(blob + b"EXTRA")["state"] == "no-tail"
+
+    # Битый JSON при валидном хвосте — conflict: камень исполняет
+    # записи, а их соответствие конфигурации недоказуемо.
     bad = bytearray(blob)
-    bad[8:12] = len(doc).to_bytes(4, "little")
-    bad[12:12 + json_len] = doc.ljust(json_len, b" ")
-    assert parse_flex_blob(bytes(bad[:12 + json_len])) is None
+    bad[12] = ord("!")
+    bad[13] = ord("!")
+    a = analyze_device_flex(bytes(bad))
+    assert a["state"] == "conflict"
+    assert a["rules"] is None
+
+    # Хвост от ДРУГИХ правил при сохранённом JSON — conflict.
+    other = build_flex_blob(
+        [_rule(actions=[_frame_action(data="FF")])]
+    )
+    json_len = int.from_bytes(blob[8:12], "little")
+    other_json_len = int.from_bytes(other[8:12], "little")
+    franken = bytearray(blob[:12 + json_len])
+    franken[5] = other[5]
+    franken += other[12 + other_json_len:]
+    a = analyze_device_flex(bytes(franken))
+    assert a["state"] == "conflict"
+    assert a["rules"] is not None      # JSON читается, но хвост чужой
 
 
 def test_flexb_record_crc_and_fields() -> None:

@@ -93,10 +93,15 @@ static sent_frame_t s_sent[256];
 static int s_sent_count;
 static int s_tx_fail;          /* >0: CanBridge_Transmit fails N times */
 static int s_tx_fail_always;   /* nonzero: transmit never succeeds */
+static int s_tx_fail_channel;  /* 0: s_tx_fail hits any channel;
+                                  1/2: only that wire channel —
+                                  CAN1/CAN2 independence (CM-R8) */
 
 uint8_t CanBridge_Transmit(const can_frame_t *frame)
 {
-  if (s_tx_fail_always || s_tx_fail > 0) {
+  if (s_tx_fail_always
+      || (s_tx_fail > 0 && (s_tx_fail_channel == 0
+                            || frame->channel == s_tx_fail_channel))) {
     if (s_tx_fail > 0) {
       s_tx_fail--;
     }
@@ -154,18 +159,24 @@ static void fix_crc(trigger_t *t)
 }
 
 /* FLXB container: "FLXB" + ver + count + reserved + json_len + json +
- * packed records — the layout append_flex() parses from FLXH. */
+ * packed records — the layout append_flex() parses from FLXH. The JSON
+ * part uses the SAME schema core/flex_compiler.py::build_flex_blob
+ * emits (kind/format/rules) — the harness must feed production code
+ * containers identical to what the PC writes (review CM-R6). */
 static uint8_t s_blob[4096];
 static uint32_t build_flex_blob(const trigger_t *records, uint8_t count)
 {
-  const char *json = "{}";
-  uint32_t json_len = 2U;
+  const char *json =
+      "{\"kind\":\"code_master_flex_logic\",\"format\":1,"
+      "\"rules\":[]}";
+  uint32_t json_len = (uint32_t)strlen(json);
   memcpy(s_blob, "FLXB", 4);
   s_blob[4] = 1U;           /* container version */
   s_blob[5] = count;
   s_blob[6] = s_blob[7] = 0;
   memcpy(&s_blob[8], &json_len, 4);
   memcpy(&s_blob[12], json, json_len);
+  (void)json;
   uint32_t off = 12U + json_len;
   for (uint8_t i = 0; i < count; i++) {
     memcpy(&s_blob[off], &records[i], sizeof(trigger_t));
@@ -183,6 +194,7 @@ static void load_flex(const trigger_t *records, uint8_t count)
   s_sent_count = 0;
   s_tx_fail = 0;
   s_tx_fail_always = 0;
+  s_tx_fail_channel = 0;
   s_tick = 1000;
   memset(s_triggers, 0, sizeof(s_triggers));
   memset(s_pending, 0, sizeof(s_pending));
@@ -387,6 +399,127 @@ static void test_tx_failure_retries_and_drops(void)
   CHECK(s_dropped_count >= 1U,
         "exhausted retries must count as dropped");
   s_tx_fail_always = 0;
+}
+
+/* CM-R8: a failed attempt must NOT shift the series schedule.
+ * delay=50, count=3, interval=20; event at t=1000 → planned
+ * 1050/1070/1090. The 1050 attempt is rejected once by the bus —
+ * the send lands at 1051, but the repeats MUST stay at 1070/1090. */
+static void test_retry_keeps_series_schedule(void)
+{
+  trigger_t r;
+  make_flex_record(&r, 0U, 0x123U, 0U, 0x456U);
+  r.delay_ms = 50U;
+  r.tx_count = 3U;
+  r.tx_interval_ms = 20U;
+  fix_crc(&r);
+  load_flex(&r, 1U);
+
+  const uint8_t a[1] = {0x11};
+  can_frame_t fa = mk_frame(0U, 0x123U, 1U, a);
+  Trigger_OnFrame(&fa);           /* armed at 1050 */
+  run_ms(49);                     /* t=1049 */
+  s_tx_fail = 1;                  /* the 1050 attempt is rejected */
+  run_ms(60);                     /* t=1110 */
+  CHECK(s_sent_count == 3, "series must complete after a retry");
+  if (s_sent_count == 3) {
+    CHECK(s_sent[0].tick == 1051U
+          && s_sent[1].tick == 1070U
+          && s_sent[2].tick == 1090U,
+          "a failed attempt shifts only the attempt, not the "
+          "series (1051,1070,1090 — not 1051,1071,1091)");
+  }
+
+  /* interval=0: все повторы планируются на один и тот же срок —
+   * идут по одному за тик опроса (документированная гранулярность:
+   * Poll делает одну отправку на серию за проход). Отказ первой
+   * попытки сдвигает только её — залпа и потерь нет. */
+  r.tx_interval_ms = 0U;
+  fix_crc(&r);
+  load_flex(&r, 1U);
+  Trigger_OnFrame(&fa);           /* armed at 1050 */
+  run_ms(49);
+  s_tx_fail = 1;                  /* отказ ровно на плановый срок */
+  run_ms(10);
+  CHECK(s_sent_count == 3, "interval=0 series must complete");
+  if (s_sent_count == 3) {
+    CHECK(s_sent[0].tick == 1051U
+          && s_sent[1].tick == 1052U
+          && s_sent[2].tick == 1053U,
+          "interval=0: one send per poll tick after the deadline");
+  }
+}
+
+/* CM-R8: каналы независимы — отказ CAN2 отодвигает только серию
+ * CAN2 и только на время ретрая; серия CAN1 идёт по плану. */
+static void test_retry_channels_independent(void)
+{
+  trigger_t recs[2];
+  make_flex_record(&recs[0], 0U, 0x100U, 0U, 0x200U); /* CAN1 → CAN1 */
+  make_flex_record(&recs[1], 0U, 0x100U, 1U, 0x201U); /* CAN1 → CAN2 */
+  for (uint8_t i = 0; i < 2U; i++) {
+    recs[i].delay_ms = 50U;
+    recs[i].tx_count = 2U;
+    recs[i].tx_interval_ms = 20U;
+    fix_crc(&recs[i]);
+  }
+  load_flex(recs, 2U);
+
+  const uint8_t a[1] = {0x11};
+  can_frame_t fa = mk_frame(0U, 0x100U, 1U, a);
+  Trigger_OnFrame(&fa);           /* обе серии вооружены на 1050 */
+  run_ms(49);                     /* t=1049 */
+  s_tx_fail_channel = 2;          /* глухой только CAN2 */
+  s_tx_fail = 1;
+  run_ms(30);                     /* до t=1080 */
+  CHECK(s_sent_count == 4, "both channels must complete series");
+  if (s_sent_count == 4) {
+    CHECK(s_sent[0].tick == 1050U && s_sent[0].channel == 1U,
+          "CAN1 send on schedule despite CAN2 outage");
+    CHECK(s_sent[1].tick == 1051U && s_sent[1].channel == 2U,
+          "CAN2 retry lands 1ms later");
+    CHECK(s_sent[2].tick == 1070U && s_sent[2].channel == 1U
+          && s_sent[3].tick == 1070U && s_sent[3].channel == 2U,
+          "repeats on both channels keep the planned 1070");
+  }
+}
+
+/* CM-R8: two series on a dead-then-alive bus keep independent
+ * schedules; a long outage drops the whole series after the bounded
+ * retry window and counts every unsent frame. */
+static void test_retry_outage_policy(void)
+{
+  trigger_t r;
+  make_flex_record(&r, 0U, 0x123U, 0U, 0x456U);
+  r.delay_ms = 50U;
+  r.tx_count = 2U;
+  r.tx_interval_ms = 20U;
+  fix_crc(&r);
+  load_flex(&r, 1U);
+
+  const uint8_t a[1] = {0x11};
+  const uint8_t b[1] = {0x22};
+  can_frame_t fa = mk_frame(0U, 0x123U, 1U, a);
+  can_frame_t fb = mk_frame(0U, 0x123U, 1U, b);
+
+  s_tx_fail_always = 1;
+  Trigger_OnFrame(&fa);           /* series A armed at 1050 */
+  s_tick += 10;
+  Trigger_OnFrame(&fb);           /* series B armed at 1060 */
+  /* ~75 ms of bus silence covers both planned starts (1050/1060)
+   * plus the 20 ms retry window: both series exhaust retries and
+   * are dropped — bounded, counted, no endless loop. */
+  run_ms(TRIGGER_TX_RETRY_MAX + 55U);
+  CHECK(s_sent_count == 0, "dead bus must not produce sends");
+  CHECK(s_dropped_count == 4U,
+        "both series drop fully (2 sends each) after bounded retries");
+  s_tx_fail_always = 0;
+
+  /* Bus recovers: a NEW event fires a fresh series normally — the
+   * drop did not poison the record. */
+  Trigger_OnFrame(&fa);
+  run_ms(70);
+  CHECK(s_sent_count == 2, "record must fire again after recovery");
 }
 
 /* Queue overflow: more firings than FLEX_QUEUE_DEPTH — the overflow is
@@ -650,6 +783,31 @@ static void test_flxb_validation(void)
   Trigger_OnFrame(&f);
   CHECK(s_sent_count == 0, "json_len=0 must reject");
 
+  /* json_len ≈ UINT32_MAX: before the fix rec_off = 12 + json_len
+   * overflowed to a small number and the "exact length" check could
+   * be passed with crafted garbage. Rejected (CM-R6). */
+  memcpy(bad, s_blob, len);
+  {
+    uint32_t huge = 0xFFFFFFF6U;
+    memcpy(&bad[8], &huge, 4);
+  }
+  flex_from_blob(bad, len);
+  Trigger_OnFrame(&f);
+  CHECK(s_sent_count == 0,
+        "json_len near UINT32_MAX must reject (overflow guard)");
+
+  /* Corrupt JSON CONTENT is accepted: the firmware contract covers
+   * the executable tail only — the MCU never parses JSON (same set
+   * as the PC's parse_flex_blob; JSON schema lives in PC-only
+   * parse_flex_rules, CM-R6). */
+  memcpy(bad, s_blob, len);
+  bad[12] = '!';
+  bad[13] = '!';
+  flex_from_blob(bad, len);
+  Trigger_OnFrame(&f);
+  CHECK(s_sent_count == 1,
+        "corrupt JSON content does not invalidate the exec tail");
+
   /* Corrupted record CRC → whole container rejected (all-or-nothing:
    * a half-loaded program set is neither fully device-executed nor
    * consistent with the PC's managed flags). */
@@ -704,6 +862,9 @@ int main(void)
   test_identical_frames_not_suppressed();
   test_event_between_repeats();
   test_tx_failure_retries_and_drops();
+  test_retry_keeps_series_schedule();
+  test_retry_channels_independent();
+  test_retry_outage_policy();
   test_queue_overflow_counted();
   test_pad8_dlc_not_a_change();
   test_full_data_tracking();

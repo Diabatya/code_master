@@ -3363,7 +3363,15 @@ class RuleRowWidget(QWidget):
             "device": (
                 tr("устройство"), "#7FBF7F",
                 tr("Исполняется устройством автономно — работает "
-                   "без приложения"),
+                   "без приложения") + (
+                    f"; {reason}" if reason else ""
+                ),
+            ),
+            "conflict": (
+                tr("конфликт"), "#C96A6A",
+                tr("Устройство исполняет программу, но её содержимое "
+                   "не совпадает с конфигурацией приложения — "
+                   "пересохраните настройки"),
             ),
             "pc": (
                 tr("ПК"), "#7FA8C9",
@@ -3902,10 +3910,22 @@ class FlexibleLogicTab(QWidget):
         # исполняет — иначе действие отрабатывало бы дважды
         # (как device_managed у триггеров — отчёт мастера).
         self._device_managed: set[int] = set()
-        # В камне реально лежит контейнер FLXB — только тогда
-        # скомпилированные программы живут на устройстве. Старый
-        # чисто-JSON блоб записей не несёт: программы исполняет ПК.
-        self._device_flexb = False
+        # Подтверждённое состояние области FLXH (ревью CM-R5/R7):
+        #   «empty»    — INFO подтвердил len=0, камень исполняет
+        #                ничего, программы исполняет ПК;
+        #   «no-tail»  — область прочитана, исполняемого хвоста нет
+        #                (не FLXB или контейнер повреждён): ПК;
+        #   «verified» — хвост валиден и побайтово совпадает с
+        #                компиляцией JSON-конфигурации: камень
+        #                исполняет именно эти программы;
+        #   «conflict» — хвост валиден и загружается прошивкой, но
+        #                не верифицирован против JSON: камень что-то
+        #                исполняет — ПК вслепую не включается поверх.
+        # _device_flex_unconfirmed — последняя проверка области
+        # не удалась: состояние не меняем (keep-last), только
+        # диагностируем — слепой перевод на ПК порождает дубли.
+        self._device_flex_state = "no-tail"
+        self._device_flex_unconfirmed = False
         self._rule_counters: list[int] = []
         self._row_widgets: list[RuleRowWidget] = []
         self._internal_rules: list[dict[str, Any]] = []
@@ -4151,7 +4171,8 @@ class FlexibleLogicTab(QWidget):
             proto = self._serial_manager.device_protocol_version()
             flags = (
                 managed_flags(self._runtime_rules, proto)
-                if self._device_flexb else []
+                if self._device_flex_state in ("verified", "conflict")
+                else []
             )
         except Exception:  # noqa: BLE001
             flags = []
@@ -4185,27 +4206,77 @@ class FlexibleLogicTab(QWidget):
                 )
                 if not entry.get("active", True):
                     row.set_executor("off", None)
-                elif entry.get("managed") and self._device_flexb:
-                    row.set_executor("device", None)
+                elif i in self._device_managed:
+                    if self._device_flex_state == "conflict":
+                        row.set_executor("conflict", None)
+                    else:
+                        row.set_executor(
+                            "device",
+                            tr("владелец не подтверждён — чтение "
+                               "области не удалось")
+                            if self._device_flex_unconfirmed else None,
+                        )
                 else:
                     reason = entry.get("reason")
-                    if entry.get("managed") and not self._device_flexb:
-                        reason = tr(
-                            "в устройстве нет исполняемой копии — "
-                            "запишите настройки"
+                    if entry.get("managed"):
+                        reason = {
+                            "empty": tr(
+                                "область программ в устройстве пуста — "
+                                "запишите настройки"
+                            ),
+                            "no-tail": tr(
+                                "в устройстве нет исполняемой копии — "
+                                "запишите настройки"
+                            ),
+                        }.get(self._device_flex_state, reason)
+                    if self._device_flex_unconfirmed:
+                        reason = (
+                            f"{reason}; " if reason else ""
+                        ) + tr(
+                            "владелец не подтверждён — чтение "
+                            "области не удалось"
                         )
                     row.set_executor("pc", reason)
             except Exception:  # noqa: BLE001
                 row._executor_label.setVisible(False)
 
+    def set_device_flex_state(
+        self, state: str, managed: list[int] | None = None
+    ) -> None:
+        """Подтверждённое состояние области FLXH — по ПОЛНОЙ
+        вычитке и валидации содержимого (ревью CM-R5/R7):
+        «empty» / «no-tail» / «verified» / «conflict».
+        managed — индексы программ, исполняемых камнем, когда они
+        известны из анализа блоба (иначе пересчёт по снимку
+        записанных правил)."""
+        if state not in ("empty", "no-tail", "verified", "conflict"):
+            raise ValueError(f"device flex state: {state}")
+        self._device_flex_state = state
+        self._device_flex_unconfirmed = False
+        if managed is not None:
+            self._device_managed = set(managed)
+            self._update_executor_badges()
+        else:
+            self._refresh_device_managed()
+
+    def mark_device_flex_probe_failed(self) -> None:
+        """INFO/вычитка области не удалась — владелец исполнения
+        неизвестен. Состояние НЕ меняем (keep-last): перевод на
+        «исполняет ПК» вслепую дал бы дубли, если камень продолжает
+        исполнять хвост (ревью CM-R5)."""
+        self._device_flex_unconfirmed = True
+        self._update_executor_badges()
+
+    def device_flex_state(self) -> tuple[str, bool]:
+        """(подтверждённое состояние, флаг «последняя проверка не
+        удалась») — для диагностики и тестов."""
+        return self._device_flex_state, self._device_flex_unconfirmed
+
     def set_device_flexb(self, present: bool) -> None:
-        """В блобе FLXH лежит контейнер FLXB — камень исполняет
-        скомпилированные программы сам. Вызывается при опознании
-        устройства, вычитке и записи блоба."""
-        if self._device_flexb == bool(present):
-            return
-        self._device_flexb = bool(present)
-        self._refresh_device_managed()
+        """Совместимость со старым бинарным API: True — в камне
+        подтверждён исполняемый контейнер, False — его точно нет.
+        Неизвестность передаётся mark_device_flex_probe_failed()."""
+        self.set_device_flex_state("verified" if present else "no-tail")
 
     def _rebuild_rows(self) -> None:
         """Пересоздаёт виджеты строк из self._rules."""
