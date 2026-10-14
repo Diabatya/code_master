@@ -6,6 +6,7 @@
 """
 
 import contextlib
+import hashlib
 import time
 from typing import Any
 from collections.abc import Callable
@@ -46,7 +47,6 @@ from core.storage_scan import (
     StoragePlanError,
     find_storage_regions,
     plan_storage_relocation,
-    region_generation,
     region_kind,
 )
 from models.logger import get_logger
@@ -1063,47 +1063,52 @@ class Bootloader:
             status("Чтение областей хранилища")
             tail, found = self._scan_marker_storage()
 
-            # CM-N9: повторная попытка после обрыва — живой Flash
-            # областей уже может не содержать (код перезаписал страницы,
-            # restore оборвался). Поднимаем недостающие виды областей из
-            # резерва ЭТОГО устройства на ПК: манифест сопоставляется по
-            # отпечатку страницы идентификации, дамп проверяется sha256.
+            # CM-N9/CM-N12/CM-N13: повторная попытка после обрыва —
+            # живой Flash областей уже может не содержать (код
+            # перезаписал страницы, restore оборвался), либо содержит
+            # блок с валидным заголовком и битым payload. Резерв ПК
+            # применяется только при доказанной принадлежности
+            # (отпечаток страницы идентификации + sha256 образа этой
+            # операции) и только когда живое состояние этого
+            # требует: битый payload, отсутствующий вид или старое
+            # поколение при незавершённой операции (APP1 инвалиден).
+            # Исправная Flash с сознательно отсутствующим видом его
+            # из истории не воскрешает.
             restored: dict[str, bytes] = {}
             fingerprints = self._update_fingerprints(info_seg)
+            interrupted = not getattr(self, "_last_app1_valid", True)
+            image_sha256 = hashlib.sha256(code).hexdigest()
             backup_regions = storage_backup.find_matching_backup(
-                fingerprints
+                fingerprints, image_sha256=image_sha256,
             )
             if backup_regions:
-                live_kinds = {region_kind(b) for _, b in found}
-                newest_bak: dict[str, tuple[int, bytes]] = {}
-                for b_addr, b_blob in backup_regions:
-                    kind = region_kind(b_blob)
-                    prev = newest_bak.get(kind)
-                    if prev is None or region_generation(
-                        b_blob
-                    ) >= region_generation(prev[1]):
-                        newest_bak[kind] = (b_addr, b_blob)
-                for kind, (b_addr, b_blob) in newest_bak.items():
-                    if kind in live_kinds or kind == "trg2":
-                        continue
-                    found.append((b_addr, b_blob))
-                    restored[kind] = b_blob
+                found, restored = storage_backup.merge_backup_regions(
+                    found, backup_regions, interrupted=interrupted,
+                )
                 if restored:
                     status(
-                        "Часть областей поднята из резерва ПК: "
+                        "Области подняты из подтверждённого резерва ПК: "
                         + ", ".join(sorted(restored))
                     )
                     logger.info(
                         "Восстановление хранилища из PC-резерва: %s",
                         sorted(restored),
                     )
-            elif not getattr(self, "_last_app1_valid", True):
-                # APP1 инвалиден (незавершённое обновление), живых
-                # областей/резерва нет — честно логируем: это обычная
-                # прошивка БЕЗ сохранённых настроек, а не восстановление.
+            elif interrupted:
+                # APP1 инвалиден (незавершённое обновление), а резерв
+                # не подтверждён для этого устройства/образа — честно
+                # сообщаем в статус: это прошивка БЕЗ восстановления,
+                # а не «восстановление из несуществующего резерва».
+                status(
+                    "Внимание: предыдущее обновление не завершено, а "
+                    "подтверждённого резерва хранилища для этого "
+                    "устройства нет — настройки не восстановятся "
+                    "автоматически (возможен явный выбор файла "
+                    "резерва оператором)"
+                )
                 logger.warning(
-                    "Метаданные APP1 невалидны и областей хранилища "
-                    "не найдено — обновление без восстановления данных"
+                    "Метаданные APP1 невалидны, а подходящего резерва "
+                    "нет — обновление без восстановления данных"
                 )
 
             try:
@@ -1137,6 +1142,7 @@ class Bootloader:
                         found,
                         fingerprints,
                         restored_blobs=restored,
+                        image_sha256=image_sha256,
                     )
                 except OSError as exc:
                     raise BootloaderError(

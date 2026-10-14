@@ -182,10 +182,14 @@ def plan_storage_relocation(
       - TRG2 (легаси) — фиксированный адрес, двигается только
         вместе с ним (зона вне записи — всегда остаётся).
 
-    Поколения: переносится новейшее (прошивка сканирует и берёт
-    max generation — старшие копии история). Старые поколения,
-    накрытые образом или целью пересадки, помечаются dropped —
-    актуальные данные при этом не теряются.
+    Поколения: переносится новейшее ЦЕЛОСТНОЕ (прошивка сканирует и
+    берёт max generation — старшие копии история); битый payload не
+    вытесняет валидную копию любого поколения (CM-N12). Старые
+    поколения, накрытые образом или целью пересадки, помечаются
+    dropped — актуальные данные при этом не теряются. Если лучшая
+    копия вида повреждена и валидной альтернативы нет — отказ
+    (StoragePlanError) до стирания: неподтверждённое восстановление
+    не завершается записью APP1.
 
     force_write — виды областей, которые обязаны попасть в moves даже
     если целевой адрес совпадает с исходным: области, поднятые из
@@ -198,7 +202,7 @@ def plan_storage_relocation(
                 страницы план гарантированно не стирает);
       dropped:  [(addr, blob, причина)] — устаревшие поколения,
                 накрытые записью;
-      warnings: [str] — нефатальные замечания (битый payload и пр.).
+      warnings: [str] — нефатальные замечания.
     Raises StoragePlanError: область сохранить невозможно (нет места,
       фиксированный адрес занят образом и т.п.) — запись отменяется.
     Инвариант: каждая актуальная (новейшее поколение) область ровно
@@ -210,6 +214,10 @@ def plan_storage_relocation(
     img_lo, img_hi = code_addr, code_end
 
     # Новейшее поколение каждой области; остальные — история.
+    # Целостность важнее поколения (CM-N12): блок с валидным CRC8
+    # заголовка, но битым CRC32 полезной нагрузки (обрыв посреди
+    # записи) не вытесняет валидную копию — ни более старую в живой
+    # Flash, ни поднятую из подтверждённого резерва ПК.
     newest: dict[str, tuple[int, bytes]] = {}
     dropped: list[tuple[int, bytes, str]] = []
     for addr, blob in sorted(found):
@@ -220,14 +228,42 @@ def plan_storage_relocation(
             # Фиксированный адрес 0x0803E000 — выше зоны записи
             # AN3155, физически неперезаписываем: всегда «на месте».
             continue
+        ok = region_payload_ok(blob)
         prev = newest.get(kind)
-        if prev is None or region_generation(blob) >= region_generation(prev[1]):
+        better = prev is None or (ok and not region_payload_ok(prev[1])) or (
+            ok == region_payload_ok(prev[1])
+            and region_generation(blob) >= region_generation(prev[1])
+        )
+        if better:
             if prev is not None:
-                dropped.append((prev[0], prev[1],
-                                f"{kind}: старое поколение"))
+                why = (
+                    f"{kind}: повреждённый payload"
+                    if not region_payload_ok(prev[1])
+                    else f"{kind}: старое поколение"
+                )
+                dropped.append((prev[0], prev[1], why))
             newest[kind] = (addr, blob)
         else:
-            dropped.append((addr, blob, f"{kind}: старое поколение"))
+            why = (
+                f"{kind}: повреждённый payload"
+                if not ok
+                else f"{kind}: старое поколение"
+            )
+            dropped.append((addr, blob, why))
+
+    # CM-N12: выбранная (лучшая из имеющихся) копия повреждена —
+    # целостность этого вида подтвердить нельзя: явный отказ в
+    # «безопасном сохранении», а не запись APP1 поверх битых данных.
+    # Обновление отменяется до стирания; продолжение без данных —
+    # отдельная явная операция (preserve_storage=False).
+    for kind, (addr, blob) in newest.items():
+        if not region_payload_ok(blob):
+            raise StoragePlanError(
+                f"{kind} @0x{addr:08X}: CRC32 полезной нагрузки не "
+                "сошёлся и валидной копии (живая Flash или "
+                "подтверждённый резерв ПК) нет — восстановление "
+                "не подтверждено, обновление отменено до стирания"
+            )
 
     warnings: list[str] = []
     moves: list[tuple[int, int, bytes]] = []
@@ -266,12 +302,6 @@ def plan_storage_relocation(
         else:
             keep.append((addr, blob))
         occupied.append((dst, dst_end))
-        if not region_payload_ok(blob):
-            warnings.append(
-                f"{kind} @0x{addr:08X}: CRC32 полезной нагрузки не "
-                "сошёлся — область сохранена дословно, прошивка "
-                "проигнорирует её при чтении"
-            )
 
     def try_keep(addr: int, blob: bytes, kind: str) -> bool:
         """Область можно оставить на месте, если её спан не накрывают
@@ -282,11 +312,6 @@ def plan_storage_relocation(
                 return False
         keep.append((addr, blob))
         occupied.append((lo, hi))
-        if not region_payload_ok(blob):
-            warnings.append(
-                f"{kind} @0x{addr:08X}: CRC32 полезной нагрузки не "
-                "сошёлся — область оставлена на месте"
-            )
         return True
 
     # 1. CFGH — каноничная страница за кодом (резерв всегда).
@@ -350,19 +375,8 @@ def plan_storage_relocation(
                     )
             moves.append((addr, dst, blob))
             addr = dst
-            if not region_payload_ok(blob):
-                warnings.append(
-                    f"var @0x{addr:08X}: CRC32 полезной нагрузки не "
-                    "сошёлся — область перенесена дословно, прошивка "
-                    "проигнорирует её при чтении"
-                )
         else:
             keep.append((addr, blob))
-            if not region_payload_ok(blob):
-                warnings.append(
-                    f"var @0x{addr:08X}: CRC32 полезной нагрузки не "
-                    "сошёлся — область оставлена на месте"
-                )
         # Полный спан цепочки — резерв для будущих целей TRGH/EVLH.
         occupied.append((addr, flash_end))
         var_base = addr

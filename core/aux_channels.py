@@ -208,8 +208,10 @@ def resolve_aux_from_vars(
     (``out_mode``/``pwm_freq``/``pwm_duty`` — см. _AuxDialog).
     Переменной нет — явные параметры действия сохраняются (честный
     override остаётся видимым в редакторе).
+    ``aux_resolved`` — действие уже несёт применённый снимок
+    параметров: повторный резолв не выполняется (CM-N14).
     Возвращает новый dict — входное действие не мутируется."""
-    if not action.get("aux_use_var"):
+    if not action.get("aux_use_var") or action.get("aux_resolved"):
         return action
     channel = _int(action.get("aux_channel", 1)) or 1
     for cfg in aux_configs or []:
@@ -224,6 +226,11 @@ def resolve_aux_from_vars(
         )
         out["aux_pwm_freq"] = _int(cfg.get("pwm_freq"))
         out["aux_pwm_duty"] = _int(cfg.get("pwm_duty"))
+        # Маркер применённого снимка (CM-N14): действие уже
+        # содержит резолвнутые параметры — повторный резолв по
+        # черновым настройкам переменных запрещён. Правки настроек
+        # выхода вступают в силу только следующей записью в МК.
+        out["aux_resolved"] = True
         # Срок работы из действия сохраняется: настройки переменной
         # задают форму сигнала, длительность — вопрос программы.
         return out

@@ -118,16 +118,26 @@ def test_restored_blobs_embedded_in_manifest(tmp_path: Path) -> None:
 
 
 def test_anonymous_backup_single_candidate(tmp_path: Path) -> None:
-    """Устройство без страницы идентификации: единственный резерв
-    без отпечатка принимается; резерв с чужим отпечатком — нет."""
+    """CM-N13: анонимный резерв («единственный файл») больше НЕ
+    принимается автоматически — принадлежность устройства не
+    доказана. Явный выбор файла оператором работает через
+    load_backup_file (целостность проверяется всегда)."""
     cfg = _region(CFG_MAGIC, 40)
     storage_backup.dump_backup(
         cfg, BASE, [(BASE, cfg)], set(), directory=tmp_path,
     )
-    found = storage_backup.find_matching_backup(
+    assert storage_backup.find_matching_backup(
         set(), directory=tmp_path
+    ) is None
+    assert storage_backup.find_matching_backup(
+        {"fp-board-B"}, directory=tmp_path
+    ) is None
+    manifest = storage_backup.list_backup_manifests(tmp_path)[0]
+    regions = storage_backup.load_backup_file(manifest)
+    assert regions is not None
+    assert any(
+        region_kind(b) == "cfg" for _a, b in regions
     )
-    assert found is not None
 
 
 def test_manifest_contains_provenance(tmp_path: Path) -> None:

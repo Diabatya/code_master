@@ -42,6 +42,7 @@ OUT1-4 («Вкл»/«Выкл»/«Подать импульсы»/«Вкл ШИ�
 from __future__ import annotations
 
 import contextlib
+import copy
 import time
 from typing import Any
 
@@ -77,6 +78,7 @@ from core.aux_channels import (
     AUX_MAP_VERSION,
     migrate_rules,
     resolve_aux_from_vars,
+    resolve_rule_actions,
 )
 from core.serial_manager import SerialManager
 from models.config import Config
@@ -4211,13 +4213,24 @@ class FlexibleLogicTab(QWidget):
         new_runtime = (
             list(active) if isinstance(active, list) else list(rules)
         )
+        # CM-N14: исполняемый снимок несёт ПРИМЕНЁННЫЕ aux-параметры.
+        # Легаси-конфиги без маркера резолвим один раз по текущему
+        # снимку настроек выхода и помечаем aux_resolved; помеченные
+        # действия повторно не резолвятся — иначе правки черновика
+        # переменных молча меняли бы записанную программу.
+        aux_snapshot = self._aux_configs()
+        new_runtime = [
+            resolve_rule_actions(copy.deepcopy(r), aux_snapshot)
+            if isinstance(r, dict) else r
+            for r in new_runtime
+        ]
         if new_runtime != self._runtime_rules:
             # Сменился исполняемый снимок — новое поколение:
             # запланированные действия прошлых правил не стреляют
             # (ревью CM-R12).
             self._new_exec_generation()
         self._runtime_rules = new_runtime
-        self._runtime_aux_configs = self._aux_configs()
+        self._runtime_aux_configs = aux_snapshot
         self._refresh_device_managed()
         self._rule_counters = [0] * len(rules)
         self._rebuild_rows()
@@ -4244,12 +4257,19 @@ class FlexibleLogicTab(QWidget):
     def _update_dirty_badges(self) -> None:
         """Оранжевый треугольник на программе, отличающейся от
         записанной в МК (снимок _runtime_rules — отчёт мастера:
-        замена кнопки «Что изменится»)."""
+        замена кнопки «Что изменится»). Снимок резолвнутый
+        (aux_resolved): черновик сравниваем в том же виде —
+        «из настроек выхода» резолвится по ТЕКУЩИМ настройкам,
+        чтобы правка параметров выхода тоже давала индикатор
+        расхождения с записанной версией (CM-N14)."""
+        aux_cfgs = self._aux_configs()
         for i, row in enumerate(self._row_widgets):
             try:
+                rule = row.get_rule()
                 dirty = (
                     i >= len(self._runtime_rules)
-                    or row.get_rule() != self._runtime_rules[i]
+                    or resolve_rule_actions(rule, aux_cfgs)
+                    != self._runtime_rules[i]
                 )
             except Exception:  # noqa: BLE001
                 dirty = False
@@ -4278,7 +4298,9 @@ class FlexibleLogicTab(QWidget):
             self._config.set("flexible_rules_active", list(rules))
         self._load_config()
 
-    def commit_runtime(self) -> None:
+    def commit_runtime(
+        self, resolved_rules: list[dict[str, Any]] | None = None
+    ) -> None:
         """Фиксирует снимок исполняемой программы — вызывается
         окном настроек только после успешной записи FLXH-блоба в МК.
 
@@ -4286,19 +4308,41 @@ class FlexibleLogicTab(QWidget):
         «flexible_rules» (черновик), а исполняется последняя
         записанная в камень версия (отчёт мастера: ввод цифр в
         событии численной переменной не должен запускать программу
-        до сохранения)."""
+        до сохранения).
+
+        resolved_rules — точный снимок, ушедший в устройство
+        (actions[]/action уже резолвнуты «из настроек выхода» и
+        помечены aux_resolved): исполняется ОН, а не повторный
+        резолв черновика по текущим настройкам переменных
+        (CM-N14). Без аргумента резолвим черновик по снимку
+        настроек выхода на момент записи — та же семантика."""
         self._save_config()
-        new_runtime = self._collect_rules()
+        aux_snapshot = self._aux_configs()
+        if resolved_rules is None:
+            new_runtime = [
+                resolve_rule_actions(r, aux_snapshot)
+                if isinstance(r, dict) else r
+                for r in self._collect_rules()
+            ]
+        else:
+            new_runtime = resolved_rules
+        # Глубокая копия: снимок не должен разделять dict'ы действий
+        # с редактором/кодом записи — правки черновика после commit
+        # исполняемую программу не меняют.
+        new_runtime = copy.deepcopy(new_runtime)
         if new_runtime != self._runtime_rules:
             # Новый исполняемый снимок — новое поколение: действия,
             # запланированные прежними правилами (в т.ч. уже ушедшими
             # на МК), не исполняются на ПК повторно (ревью CM-R12).
+            # Поколение учитывает ПРИМЕНЁННЫЕ aux-параметры: смена
+            # только настроек выхода тоже инвалидирует старые таймеры
+            # (CM-N14).
             self._new_exec_generation()
         self._runtime_rules = new_runtime
         # Момент применения «из настроек выхода» — запись в камень:
         # снимок настроек фиксируется здесь, черновые правки
         # переменных позже не меняют исполняемые параметры (CM-N10).
-        self._runtime_aux_configs = self._aux_configs()
+        self._runtime_aux_configs = copy.deepcopy(aux_snapshot)
         self._config.set("flexible_rules_active", self._runtime_rules)
         self._refresh_device_managed()
         self._rules_dirty = True
@@ -4515,6 +4559,25 @@ class FlexibleLogicTab(QWidget):
                 # страховка против кривого вызова.
                 state = "conflict"
             else:
+                # CM-N14: вычитанный из камня JSON уже содержит
+                # применённые параметры «из настроек выхода» —
+                # помечаем aux_resolved, чтобы runtime не перерезолвил
+                # их по текущему черновику переменных; deepcopy —
+                # снимок не разделяет dict'ы с источником. Нормализация
+                # ДО сравнения: без неё маркер давал бы ложную смену
+                # снимка при повторной вычитке того же блоба (CM-R14).
+                runtime_snapshot = copy.deepcopy(rules)
+                for _rule in runtime_snapshot:
+                    if not isinstance(_rule, dict):
+                        continue
+                    for _act in list(
+                        _rule.get("actions") or []
+                    ) + [_rule.get("action")]:
+                        if (
+                            isinstance(_act, dict)
+                            and _act.get("aux_use_var")
+                        ):
+                            _act["aux_resolved"] = True
                 # managed — список bool по индексам правил (как у
                 # compile_rules): set(managed) дал бы {True, False},
                 # где `0 in`/`1 in` истинны по равенству — все
@@ -4526,7 +4589,7 @@ class FlexibleLogicTab(QWidget):
                 }
                 if (
                     self._device_flex_state == "verified"
-                    and self._runtime_rules == rules
+                    and self._runtime_rules == runtime_snapshot
                     and self._device_managed == managed_idx
                 ):
                     # Повторная вычитка ТОГО ЖЕ блоба на том же
@@ -4541,7 +4604,7 @@ class FlexibleLogicTab(QWidget):
                 # действия, запланированные старыми правилами, не
                 # имеют права стрелять под новым владением (CM-R12 п.5).
                 self._new_exec_generation()
-                self._runtime_rules = [dict(r) for r in rules]
+                self._runtime_rules = runtime_snapshot
                 self._runtime_aux_configs = self._aux_configs()
                 self._config.set(
                     "flexible_rules_active", self._runtime_rules
@@ -5466,9 +5529,11 @@ class FlexibleLogicTab(QWidget):
             # CM-N7: «из настроек выхода» — режим и ШИМ-параметры
             # берутся из настроек выхода переменной этого канала
             # (вкладка «Переменные»); без переменной — явный
-            # override действия. CM-N10: резолв по снимку момента
-            # записи — черновые правки «Переменных» не меняют
-            # сохранённую программу.
+            # override действия. CM-N10/CM-N14: резолв по снимку
+            # момента записи и только для ещё не резолвнутых
+            # действий — aux_resolved несёт применённые параметры,
+            # черновые правки «Переменных» сохранённую программу
+            # не меняют.
             action = resolve_aux_from_vars(
                 action, self._runtime_aux_configs
             )

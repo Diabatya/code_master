@@ -2196,22 +2196,60 @@ class _ValuePage(QWidget):
             [self.data_from, self.data_to],
         )
         raw = getattr(row, "live_raw", None) if row is not None else None
-        self.live_hex_label.setText(
-            "0x—" if raw is None else f"0x{raw:X}"
-        )
+        stale = bool(getattr(row, "_stale_shown", False))
+        # RAW просроченного кадра не выдаём за свежий — та же
+        # пометка «устарело», что у числа (CM-N15).
+        hex_text = "0x—" if raw is None else f"0x{raw:X}"
+        if stale and raw is not None:
+            hex_text += tr(" (устарело)")
+        self.live_hex_label.setText(hex_text)
         if self._kind != "numeric":
             # «Динамическая»: рядом с сырым значением — имя из таблицы
             # привязки, если значение совпало (отчёт мастера).
-            name = self._binding_name(raw) if raw is not None else ""
+            # CM-N15: невалидный кадр — статус, а не залипшее имя.
+            if row is not None and not getattr(row, "live_valid", True):
+                name = getattr(row, "_live_text", "—")
+            else:
+                name = (
+                    self._binding_name(raw) if raw is not None else ""
+                )
+                if stale and name:
+                    name += tr(" (устарело)")
             self.live_label.setText(name or "—")
             return
-        if row is None or len(self.read_points()) < 2:
-            self.live_label.setText("0.00")
+        # CM-N15: редактор повторяет контракт валидности строки —
+        # невалидный/неполный кадр показывает статус, а не залипшее
+        # «0.00»; декодер угла не требует обычных точек калибровки.
+        if row is None:
+            self.live_label.setText("—")
+            return
+        if not getattr(row, "live_valid", False):
+            self.live_label.setText(getattr(row, "_live_text", "—"))
             return
         live = getattr(row, "live_value", None)
-        self.live_label.setText(
-            "0.00" if live is None else f"{live:.2f}"
+        if live is None:
+            self.live_label.setText("—")
+            return
+        steering = variable_decode.is_steering(
+            {
+                "out_range": str(self.out_range.currentData() or ""),
+                "steering": getattr(self, "steering_cfg", {}) or {},
+            }
         )
+        if steering:
+            # Подпись декодера уже содержит градусы и RAW-HEX —
+            # показываем как в строке.
+            text = getattr(row, "_live_text", f"{live:.2f}")
+        elif len(self.read_points()) < 2:
+            # Без таблицы привязки число не определено — прочерк,
+            # а не выглядящий валидным «0.00».
+            self.live_label.setText("—")
+            return
+        else:
+            text = f"{live:.2f}"
+        if stale:
+            text += tr(" (устарело)")
+        self.live_label.setText(text)
 
     # ---- конфиг ---------------------------------------------------------
 
@@ -2423,7 +2461,17 @@ class _ImpulsePage(QWidget):
         _set_live_data_html(self.live_data_label, data, self.data)
         row = self._get_row() if self._get_row is not None else None
         live = getattr(row, "live_value", None) if row is not None else None
-        self.flag_label.setText("1" if live else "0")
+        # CM-N15: тот же контракт, что у строки — до первого кадра и
+        # при невалидном кадре прочерк/статус, а не уверенный «0».
+        if row is not None and not getattr(row, "live_valid", True):
+            self.flag_label.setText(getattr(row, "_live_text", "—"))
+        elif live is None:
+            self.flag_label.setText("—")
+        else:
+            text = "1" if live else "0"
+            if getattr(row, "_stale_shown", False):
+                text += tr(" (устарело)")
+            self.flag_label.setText(text)
 
     def read(self) -> dict[str, Any]:
         return {

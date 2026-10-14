@@ -340,3 +340,52 @@ class TestResolveRuleActionsCMN10:
         data = rec["tx_data"]
         assert int.from_bytes(data[0:2], "little") == 50
         assert data[2] == 25
+
+
+class TestResolvedMarkerCMN14:
+    """CM-N14: резолв «из настроек выхода» помечает действие
+    aux_resolved; повторный резолв помеченного действия — no-op,
+    runtime исполняет зафиксированный снимок, а не черновик."""
+
+    @staticmethod
+    def _vars(freq: int = 50, duty: int = 25) -> list[dict]:
+        return [{"type": "aux", "channel": 2, "out_mode": "pwm",
+                 "pwm_freq": freq, "pwm_duty": duty}]
+
+    def test_resolved_action_marked(self) -> None:
+        rule = {
+            "actions": [{"aux_enabled": True, "aux_use_var": True,
+                         "aux_channel": 2, "aux_mode": "on"}],
+        }
+        out = resolve_rule_actions(rule, self._vars())
+        assert out["actions"][0]["aux_resolved"] is True
+        # Намерение aux_use_var сохраняется — редактор видит выбор.
+        assert out["actions"][0]["aux_use_var"] is True
+
+    def test_resolve_is_idempotent_on_marked(self) -> None:
+        """Действие с aux_resolved не перерезолвится по НОВЫМ
+        настройкам — параметры зафиксированы на момент записи."""
+        resolved = resolve_aux_from_vars(
+            {"aux_enabled": True, "aux_use_var": True,
+             "aux_channel": 2, "aux_mode": "on"},
+            self._vars(freq=50, duty=25),
+        )
+        assert resolved["aux_pwm_freq"] == 50
+        # Черновик настроек изменился — резолвнутое действие стабильно.
+        again = resolve_aux_from_vars(resolved, self._vars(freq=999, duty=99))
+        assert again["aux_pwm_freq"] == 50 and again["aux_pwm_duty"] == 25
+        # И на уровне правила.
+        rule_out = resolve_rule_actions(
+            {"actions": [resolved]}, self._vars(freq=999, duty=99)
+        )
+        assert rule_out["actions"][0]["aux_pwm_freq"] == 50
+
+    def test_unresolved_still_resolves(self) -> None:
+        """Без маркера поведение прежнее — резолв по снимку
+        настроек (легаси-правила, действия без переменной)."""
+        out = resolve_aux_from_vars(
+            {"aux_enabled": True, "aux_use_var": True,
+             "aux_channel": 2, "aux_mode": "on"},
+            self._vars(freq=777, duty=70),
+        )
+        assert out["aux_pwm_freq"] == 777

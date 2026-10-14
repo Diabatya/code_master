@@ -9,6 +9,7 @@ Bootloader.flash_firmware с физической симуляцией Flash-м�
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import zlib
@@ -567,6 +568,13 @@ class TestStoragePlanCMN1:
         из резервного чтения второй попытки (она видит ещё живую
         область — стирание идёт только под образ)."""
         sim = FlashSim()
+        # Страница идентификации — источник отпечатка: без неё
+        # принадлежность резерва не доказана и восстановление не
+        # применяется автоматически (CM-N13).
+        page = bytearray(b"\xFF" * PAGE)
+        page[0:12] = b"TESTDEVICE01"
+        sim.erase(DEVICE_INFO_PAGE_ADDR, PAGE)
+        sim.write(DEVICE_INFO_PAGE_ADDR, bytes(page))
         old_end = self._plant(sim, 3)
         cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
         sim.erase(old_end, PAGE)
@@ -603,9 +611,12 @@ class TestStoragePlanCMN1:
         new_end = APPLICATION_BASE_ADDR + 4 * PAGE
         assert sim.read(new_end, len(cfg_blob)) == cfg_blob
 
-    def test_corrupt_payload_preserved_verbatim(self) -> None:
-        """Битый payload CRC: область сохраняется дословно (warning),
-        а не «чинится» и не пропадает молча."""
+    def test_corrupt_payload_aborts_before_erase(self) -> None:
+        """Битый payload CRC без подтверждённого резерва (CM-N12):
+        явный отказ в «безопасном сохранении» — обновление отменено
+        ДО стирания, APP1 не активируется поверх битых данных.
+        «Продолжить без данных» — отдельная явная операция
+        (preserve_storage=False)."""
         sim = FlashSim()
         old_end = self._plant(sim, 3)
         cfg_blob = bytearray(_store_region(CFG_MAGIC, 40, fill=0x42))
@@ -613,14 +624,21 @@ class TestStoragePlanCMN1:
         sim.erase(old_end, PAGE)
         sim.write(old_end, bytes(cfg_blob))
         bl = _bl_on_sim(sim)
+        sim.ops.clear()
         path = _tmp_bin(_app_code(4 * PAGE, 0x22))
         try:
-            bl.flash_firmware(path, APPLICATION_BASE_ADDR, page_size=PAGE,
-                              skip_blank=False, preserve_storage=True)
+            with pytest.raises(BootloaderError, match="не сошёлся"):
+                bl.flash_firmware(
+                    path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                    skip_blank=False, preserve_storage=True,
+                )
         finally:
             os.unlink(path)
-        new_end = APPLICATION_BASE_ADDR + 4 * PAGE
-        assert sim.read(new_end, len(cfg_blob)) == bytes(cfg_blob)
+        # Ничего не стёрто и не записано — устройство не тронуто.
+        assert not [op for op in sim.ops if op[0] == "e"]
+        assert sim.read(old_end, len(cfg_blob)) == bytes(cfg_blob)
+        meta = sim.read(APP_METADATA_PAGE_ADDR, 4)
+        assert meta == APP_METADATA_MAGIC.to_bytes(4, "little")
 
 
 class TestStorageBackupCMN9:
@@ -747,3 +765,311 @@ class TestStorageBackupCMN9:
             directory=tmp_path,
         )
         assert found is None
+
+    def test_healthy_flash_does_not_resurrect_missing_kind(
+        self,
+    ) -> None:
+        """CM-N13: исправная Flash (APP1 валиден) с сознательно
+        отсутствующим видом области НЕ получает его из истории —
+        резерв применяется только при незавершённой операции."""
+        sim = FlashSim()
+        TestStorageBackupCMN9._plant_id_page(sim)
+        TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        old_end = APPLICATION_BASE_ADDR + 3 * PAGE
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        code = _app_code(4 * PAGE, 0x22)
+        # Первое обновление создаёт резерв с VARH в манифесте — имитируем
+        # «в резерве есть вид, которого на живой Flash давно нет».
+        var_blob = _store_region(VAR_MAGIC, 30, fill=0x55)
+        var_addr = FLASH_END_ADDR - 2 * PAGE
+        tail_bytes = bytearray(b"\xFF" * (var_addr + 2 * PAGE
+                                          - APPLICATION_BASE_ADDR))
+        tail_bytes[3 * PAGE : 4 * PAGE] = cfg_blob
+        tail_bytes[var_addr - APPLICATION_BASE_ADDR:] = var_blob
+        storage_backup.dump_backup(
+            bytes(tail_bytes),
+            APPLICATION_BASE_ADDR,
+            [(old_end, cfg_blob), (var_addr, var_blob)],
+            {storage_backup.device_fingerprint(
+                sim.read(DEVICE_INFO_PAGE_ADDR, PAGE)) or ""},
+            image_sha256=__import__("hashlib").sha256(code).hexdigest(),
+        )
+        bl = _bl_on_sim(sim)
+        path = _tmp_bin(code)
+        try:
+            regions = bl.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=True,
+            )
+        finally:
+            os.unlink(path)
+        # VARH не воскрешён — вид отсутствовал на здоровой Flash.
+        written_kinds = {
+            storage_backup.region_kind(b) for _a, b in regions
+        }
+        assert "var" not in written_kinds
+        tail = sim.read(APPLICATION_BASE_ADDR,
+                        FLASH_END_ADDR - APPLICATION_BASE_ADDR)
+        from core.storage_scan import find_storage_regions
+        assert "var" not in {
+            storage_backup.region_kind(b)
+            for _a, b in find_storage_regions(tail, APPLICATION_BASE_ADDR)
+        }
+
+
+class TestPartialWriteRecoveryCMN12:
+    """CM-N12: обрыв ПОСРЕДИ записи области — заголовок с валидным
+    CRC8 записан, payload CRC32 не сошёлся. Такой блок не должен
+    вытеснять валидную копию из подтверждённого резерва."""
+
+    @staticmethod
+    def _plant_id_page(sim: FlashSim) -> None:
+        page = bytearray(b"\xFF" * PAGE)
+        page[0:12] = b"TESTDEVICE01"
+        sim.erase(DEVICE_INFO_PAGE_ADDR, PAGE)
+        sim.write(DEVICE_INFO_PAGE_ADDR, bytes(page))
+
+    def test_partial_region_write_retry_restores_from_backup(
+        self,
+    ) -> None:
+        """Сценарий ревью: код 3 стр + CFGH + FLXH; обновление до 4 стр;
+        первая попытка создаёт резерв, стирает и пишет CFGH на 32
+        байта, затем обрыв. Повторная попытка видит «живой» CFGH с
+        валидным заголовком и битым payload — обязана восстановить
+        валидный блоб из резерва и довести APP1 до валидного."""
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        old_end = TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 80, fill=0x42)
+        flx_blob = _store_region(FLX_MAGIC, 80, fill=0x77)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        sim.erase(old_end + PAGE, PAGE)
+        sim.write(old_end + PAGE, flx_blob)
+
+        code = _app_code(4 * PAGE, 0x22)
+        new_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        bl = _bl_on_sim(sim)
+        real_write = bl.write_memory
+        failed = {"done": False}
+
+        def _dying_write(addr: int, data: bytes) -> None:
+            if addr == new_end and not failed["done"]:
+                # Первые 32 байта — заголовок (CRC8 валиден) + кусок
+                # payload; CRC32 полного payload не сойдётся.
+                real_write(addr, data[:32])
+                failed["done"] = True
+                raise OSError("port lost")
+            real_write(addr, data)
+
+        bl.write_memory = _dying_write  # type: ignore[method-assign]
+        path = _tmp_bin(code)
+        try:
+            with pytest.raises(OSError):
+                bl.flash_firmware(
+                    path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                    skip_blank=False, preserve_storage=True,
+                )
+        finally:
+            os.unlink(path)
+
+        # Состояние после обрыва: CFGH виден сканеру (валидный CRC8),
+        # но payload бит; FLXH стёрт кодом/стиранием.
+        from core.storage_scan import (
+            find_storage_regions,
+            region_kind,
+            region_payload_ok,
+        )
+        tail = sim.read(
+            APPLICATION_BASE_ADDR,
+            FLASH_END_ADDR - APPLICATION_BASE_ADDR,
+        )
+        live = find_storage_regions(tail, APPLICATION_BASE_ADDR)
+        kinds = {region_kind(b): region_payload_ok(b) for _a, b in live}
+        assert kinds.get("cfg") is False  # «живой», но битый
+        assert "flex" not in kinds
+        # APP1 инвалиден — операция не завершена.
+        meta = sim.read(APP_METADATA_PAGE_ADDR, 4)
+        assert meta != APP_METADATA_MAGIC.to_bytes(4, "little")
+
+        # Повторная попытка: валидные блобы из PC-резерва, readback.
+        bl2 = _bl_on_sim(sim)
+        path = _tmp_bin(code)
+        try:
+            regions = bl2.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=True,
+            )
+        finally:
+            os.unlink(path)
+        assert sim.read(new_end, len(cfg_blob)) == cfg_blob
+        assert sim.read(new_end + PAGE, len(flx_blob)) == flx_blob
+        written = {b for _a, b in regions}
+        assert cfg_blob in written and flx_blob in written
+        meta = sim.read(APP_METADATA_PAGE_ADDR, 4)
+        assert meta == APP_METADATA_MAGIC.to_bytes(4, "little")
+
+    def test_corrupt_live_newer_generation_still_restored(
+        self,
+    ) -> None:
+        """Битая живая область со СТАРШИМ поколением не вытесняет
+        валидный резерв младшего — целостность важнее поколения."""
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        old_end = TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 80, fill=0x42, gen=2)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+
+        code = _app_code(4 * PAGE, 0x22)
+        new_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        # Резерв содержит валидный gen=2; живая копия после обрыва —
+        # gen=3 с битым payload (более новая запись оборвалась).
+        fp = storage_backup.device_fingerprint(
+            sim.read(DEVICE_INFO_PAGE_ADDR, PAGE)
+        ) or ""
+        tail_bytes = bytearray(
+            b"\xFF" * (old_end - APPLICATION_BASE_ADDR + PAGE)
+        )
+        tail_bytes[old_end - APPLICATION_BASE_ADDR:] = cfg_blob
+        storage_backup.dump_backup(
+            bytes(tail_bytes),
+            APPLICATION_BASE_ADDR,
+            [(old_end, cfg_blob)],
+            {fp},
+            image_sha256=__import__("hashlib").sha256(code).hexdigest(),
+        )
+        # Живая Flash: CFGH gen=3, заголовок валиден, payload бит.
+        corrupt = bytearray(_store_region(CFG_MAGIC, 80, fill=0x33, gen=3))
+        corrupt[25] ^= 0xFF
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, bytes(corrupt))
+        # APP1 инвалиден — операция не завершена.
+        sim.erase(APP_METADATA_PAGE_ADDR, PAGE)
+
+        bl = _bl_on_sim(sim)
+        path = _tmp_bin(code)
+        try:
+            bl.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=True,
+            )
+        finally:
+            os.unlink(path)
+        # Победил валидный резерв gen=2, а не битый gen=3.
+        assert sim.read(new_end, len(cfg_blob)) == cfg_blob
+
+
+class TestBackupOwnershipCMN13:
+    """CM-N13: резерв применяется только при доказанной
+    принадлежности — отпечаток устройства + образ операции."""
+
+    def test_anonymous_backup_never_auto_applied(self, tmp_path) -> None:
+        """Анонимный резерв (плата A без страницы идентификации) не
+        применяется автоматически — ни на неопознанном устройстве,
+        ни на устройстве B с отпечатком, даже будучи единственным
+        файлом в каталоге."""
+        cfg = _store_region(CFG_MAGIC, 40, fill=0x42)
+        storage_backup.dump_backup(
+            cfg + b"\xFF" * 100, APPLICATION_BASE_ADDR,
+            [(APPLICATION_BASE_ADDR, cfg)],
+            set(),  # анонимный резерв
+            directory=tmp_path,
+        )
+        # Неопознанное устройство: отпечатков нет — «единственный
+        # файл» не является доказательством принадлежности.
+        assert storage_backup.find_matching_backup(
+            set(), directory=tmp_path
+        ) is None
+        # Устройство B с непустым отпечатком — тоже отказ.
+        assert storage_backup.find_matching_backup(
+            {"fp-board-B"}, directory=tmp_path
+        ) is None
+        # Явный выбор файла оператором — работает (целостность
+        # проверяется всегда).
+        manifest = storage_backup.list_backup_manifests(tmp_path)[0]
+        regions = storage_backup.load_backup_file(manifest)
+        assert regions is not None
+        blobs = {storage_backup.region_kind(b) for _a, b in regions}
+        assert "cfg" in blobs
+
+    def test_other_image_backup_rejected(self, tmp_path) -> None:
+        """Резерв от другой операции (другой образ) не применяется
+        даже при совпадающем отпечатке устройства."""
+        cfg = _store_region(CFG_MAGIC, 40, fill=0x42)
+        storage_backup.dump_backup(
+            cfg + b"\xFF" * 100, APPLICATION_BASE_ADDR,
+            [(APPLICATION_BASE_ADDR, cfg)],
+            {"fp-dev"},
+            image_sha256="aa" * 32,
+            directory=tmp_path,
+        )
+        # Тот же образ — находится.
+        assert storage_backup.find_matching_backup(
+            {"fp-dev"}, image_sha256="aa" * 32, directory=tmp_path
+        ) is not None
+        # Другой образ операции — отказ.
+        assert storage_backup.find_matching_backup(
+            {"fp-dev"}, image_sha256="bb" * 32, directory=tmp_path
+        ) is None
+
+    def test_corrupt_inline_blob_rejected(self, tmp_path) -> None:
+        """Inline blob_b64 с битым sha256 отклоняется так же строго,
+        как повреждённый внешний .bin (паритет целостности)."""
+        cfg = _store_region(CFG_MAGIC, 40, fill=0x42)
+        var = _store_region(VAR_MAGIC, 30, fill=0x55)
+        storage_backup.dump_backup(
+            cfg + b"\xFF" * 100, APPLICATION_BASE_ADDR,
+            [(APPLICATION_BASE_ADDR, cfg),
+             (APPLICATION_BASE_ADDR + PAGE, var)],
+            {"fp"}, restored_blobs={"var": var},
+            directory=tmp_path,
+        )
+        manifest = storage_backup.list_backup_manifests(tmp_path)[0]
+        m = json.loads(manifest.read_text(encoding="utf-8"))
+        import base64
+        for r in m["regions"]:
+            if r.get("origin") == "backup":
+                raw = bytearray(base64.b64decode(r["blob_b64"]))
+                raw[25] ^= 0xFF
+                r["blob_b64"] = base64.b64encode(bytes(raw)).decode()
+        manifest.write_text(json.dumps(m), encoding="utf-8")
+        assert storage_backup.find_matching_backup(
+            {"fp"}, directory=tmp_path
+        ) is None
+
+    def test_merge_healthy_live_never_crashes(self) -> None:
+        """Здоровая живая область + подходящий резерв при завершённой
+        операции: merge ничего не добавляет и НЕ падает
+        (ветка «живое валидно, резерв не новее» — раньше UnboundLocalError
+        на неинициализированном need). Перепрошивка того же образа —
+        частый путь, где резерв всегда находится по image_sha256."""
+        cfg = _store_region(CFG_MAGIC, 40, fill=0x42)
+        var = _store_region(VAR_MAGIC, 30, fill=0x55)
+        live = [(APPLICATION_BASE_ADDR, cfg)]
+        bak = [(APPLICATION_BASE_ADDR + PAGE, cfg),
+               (APPLICATION_BASE_ADDR + 2 * PAGE, var)]
+        merged, restored = storage_backup.merge_backup_regions(
+            list(live), bak, interrupted=False,
+        )
+        assert restored == {}
+        assert merged == live
+        # Незавершённая операция: отсутствующий вид поднимается,
+        # здоровый живой того же поколения не дублируется.
+        merged2, restored2 = storage_backup.merge_backup_regions(
+            list(live), bak, interrupted=True,
+        )
+        assert set(restored2) == {"var"}
+        kinds = [storage_backup.region_kind(b) for _, b in merged2]
+        assert kinds.count("cfg") == 1
+        assert kinds.count("var") == 1
+        # Незавершённая операция + резерв новее живого — дописываем.
+        cfg_new = _store_region(CFG_MAGIC, 40, fill=0x77, gen=2)
+        _m3, restored3 = storage_backup.merge_backup_regions(
+            list(live),
+            [(APPLICATION_BASE_ADDR + PAGE, cfg_new)],
+            interrupted=True,
+        )
+        assert set(restored3) == {"cfg"}

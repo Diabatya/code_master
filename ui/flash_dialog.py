@@ -1,5 +1,6 @@
 """Профессиональный диалог прошивки микроконтроллера и HEX-редактор."""
 
+import hashlib
 import re
 import tempfile
 import time
@@ -75,13 +76,13 @@ from core.storage_backup import (
     device_fingerprint as _device_fingerprint,
     dump_backup as _dump_backup,
     find_matching_backup as _find_matching_backup,
+    merge_backup_regions as _merge_backup_regions,
 )
 from core.storage_scan import (
     STORE_PAGE as _STORE_PAGE,
     StoragePlanError as _StoragePlanError,
     find_storage_regions as _find_storage_regions,
     plan_storage_relocation as _plan_storage_relocation,
-    region_generation as _region_generation,
     region_kind as _region_kind,
 )
 from core.stm32_info import (
@@ -1222,6 +1223,22 @@ class FlashWorker(QThread):
                     )
 
                 if app_touched:
+                    # Признак «предыдущее обновление завершено» снимаем
+                    # ДО гашения magic — после записи нулей отличить
+                    # здоровую Flash от оборванной операции уже нельзя
+                    # (CM-N13: резерв воскрешает отсутствующие виды
+                    # хранилища только при незавершённой операции).
+                    dfu_app1_valid = False
+                    try:
+                        meta_prev = bytes(
+                            dfu.upload(APP_METADATA_PAGE_ADDR, 16)
+                        )
+                        dfu_app1_valid = (
+                            int.from_bytes(meta_prev[0:4], "little")
+                            == APP_METADATA_MAGIC
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                     # UPDATE_STARTED: гасим magic метаданных до стирания —
                     # при обрыве питания bootloader не запустит недописанное
                     # application (строгая проверка bl_metadata_is_valid).
@@ -1368,32 +1385,43 @@ class FlashWorker(QThread):
                         fp = _device_fingerprint(intended_cfg)
                         if fp:
                             fps.add(fp)
+                        # CM-N12/CM-N13: резерв применяется только при
+                        # доказанной принадлежности (отпечаток + образ
+                        # операции) и только где живое состояние этого
+                        # требует — битый payload, отсутствующий вид
+                        # или старшее поколение при незавершённой
+                        # операции (APP1 был инвалиден до нашего гашения).
+                        image_hasher = hashlib.sha256()
+                        for s_addr, s_data in sorted(segments):
+                            image_hasher.update(s_addr.to_bytes(8, "little"))
+                            image_hasher.update(bytes(s_data))
+                        interrupted = not dfu_app1_valid
                         restored: dict[str, bytes] = {}
-                        backup_regions = _find_matching_backup(fps)
+                        backup_regions = _find_matching_backup(
+                            fps, image_sha256=image_hasher.hexdigest(),
+                        )
                         if backup_regions:
-                            live_kinds = {
-                                _region_kind(b) for _, b in found
-                            }
-                            newest_bak: dict[str, tuple[int, bytes]] = {}
-                            for b_addr, b_blob in backup_regions:
-                                k = _region_kind(b_blob)
-                                prev = newest_bak.get(k)
-                                if prev is None or _region_generation(
-                                    b_blob
-                                ) >= _region_generation(prev[1]):
-                                    newest_bak[k] = (b_addr, b_blob)
-                            for k, (b_addr, b_blob) in newest_bak.items():
-                                if k in live_kinds or k == "trg2":
-                                    continue
-                                found.append((b_addr, b_blob))
-                                restored[k] = b_blob
+                            found, restored = _merge_backup_regions(
+                                found, backup_regions,
+                                interrupted=interrupted,
+                            )
                             if restored:
                                 self.log_line.emit(
                                     tr(
-                                        "USB DFU: области из резерва "
-                                        "ПК: {0}"
+                                        "USB DFU: области из подтверждённого "
+                                        "резерва ПК: {0}"
                                     ).format(", ".join(sorted(restored)))
                                 )
+                        elif interrupted:
+                            self.log_line.emit(
+                                tr(
+                                    "USB DFU: предыдущее обновление не "
+                                    "завершено, а подтверждённого резерва "
+                                    "хранилища для этого устройства нет — "
+                                    "настройки не восстановятся "
+                                    "автоматически"
+                                )
+                            )
                         if found:
                             # Резерв до mass erase (CM-N9): обрыв
                             # оставляет стёртую Flash — повторная
@@ -1402,6 +1430,7 @@ class FlashWorker(QThread):
                                 _dump_backup(
                                     tail, scan_base, found, fps,
                                     restored_blobs=restored,
+                                    image_sha256=image_hasher.hexdigest(),
                                 )
                             except OSError as exc:
                                 return False, tr(
