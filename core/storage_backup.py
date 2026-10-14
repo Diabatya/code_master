@@ -193,6 +193,30 @@ def list_backup_manifests(directory: Path | None = None) -> list[Path]:
     )
 
 
+def manifest_info(manifest_path: str | Path) -> dict | None:
+    """Метаданные резерва для показа оператору при явном выборе
+    (CM-N17): дата создания, отпечатки устройства, sha256 образа
+    операции и список областей (вид/адрес/поколение/размер).
+    Битый/неполный манифест — None."""
+    m = _load_manifest(Path(manifest_path))
+    if m is None:
+        return None
+    return {
+        "created": m.get("created") or "",
+        "fingerprints": list(m.get("fingerprints") or []),
+        "image_sha256": m.get("image_sha256") or "",
+        "regions": [
+            {
+                "kind": r.get("kind") or "?",
+                "addr": r.get("addr") or "?",
+                "generation": r.get("generation", 0),
+                "size": r.get("size", 0),
+            }
+            for r in m.get("regions", [])
+        ],
+    }
+
+
 def load_backup_file(manifest_path: str | Path) -> list[tuple[int, bytes]] | None:
     """Явно выбранный оператором резерв — БЕЗ проверки отпечатка и
     образа: соответствие устройству/операции берёт на себя выбор
@@ -263,24 +287,36 @@ def merge_backup_regions(
     backup_regions: list[tuple[int, bytes]],
     *,
     interrupted: bool,
+    operator_directed: bool = False,
 ) -> tuple[list[tuple[int, bytes]], dict[str, bytes]]:
     """Сливает области PC-резерва в карту живых областей — политика
     CM-N12/CM-N13, общая для CDC/UART и DFU путей.
 
     Новейшее поколение резервного вида применяется когда:
-      - живых областей этого вида нет вообще — ТОЛЬКО при
-        незавершённой операции (interrupted): исправная Flash с
-        сознательно отсутствующим видом не воскрешает его из истории;
+      - живых областей этого вида нет вообще — при незавершённой
+        операции (interrupted) ЛИБО при явном выборе резерва
+        оператором (operator_directed — CM-N17): исправная Flash с
+        сознательно отсутствующим видом не воскрешает его из истории
+        автоматически, но явно выбранный резерв — команда на
+        восстановление;
       - все живые копии вида повреждены (payload CRC32) — битый блок
         не вытесняет валидный резерв независимо от поколения;
-      - операция незавершена и поколение резерва старше лучшей
-        ЖИВОЙ валидной копии — незавершённое сохранение дописывается.
+      - операция незавершена/выбрана оператором и поколение резерва
+        старше лучшей ЖИВОЙ валидной копии — незавершённое сохранение
+        дописывается.
     Битый резервный блоб замены не делает.
 
     Возвращает (found, restored): found дополняется блобами резерва
     (планировщик выберет целостное/новейшее поколение), restored —
     kind → blob для force_write (страницы физически могут быть
-    стёрты/повреждены — «оставить на месте» недопустимо)."""
+    стёрты/повреждены — «оставить на месте» недопустимо).
+
+    При operator_directed резерв выбран ЯВНО: область с битым payload
+    в нём — не «пропустить молча», а отказать до стирания (CM-N17) —
+    оператор заказывал восстановление конкретных данных, частичный
+    результат выдавал бы повреждённое за восстановленное. Выбрасывает
+    ValueError."""
+    allowed_missing = interrupted or operator_directed
     live: dict[str, list[tuple[int, bytes]]] = {}
     for addr, blob in found:
         live.setdefault(region_kind(blob), []).append((addr, blob))
@@ -288,6 +324,11 @@ def merge_backup_regions(
     for b_addr, b_blob in backup_regions:
         kind = region_kind(b_blob)
         if kind == "?":
+            if operator_directed:
+                raise ValueError(
+                    f"область резерва 0x{b_addr:08X} не похожа на "
+                    "маркерное хранилище — резерв отклонён"
+                )
             continue
         prev = newest_bak.get(kind)
         if prev is None or region_generation(b_blob) >= region_generation(
@@ -297,14 +338,19 @@ def merge_backup_regions(
     restored: dict[str, bytes] = {}
     for kind, (b_addr, b_blob) in newest_bak.items():
         if kind == "trg2" or not region_payload_ok(b_blob):
+            if operator_directed and kind != "trg2":
+                raise ValueError(
+                    f"область «{kind}» резерва 0x{b_addr:08X} повреждена "
+                    "(payload CRC32 не сошёлся) — резерв отклонён"
+                )
             continue
         entries = live.get(kind) or []
         live_ok = [e for e in entries if region_payload_ok(e[1])]
         if not entries:
-            need = interrupted
+            need = allowed_missing
         else:
             need = not live_ok or (
-                interrupted
+                allowed_missing
                 and region_generation(b_blob)
                 > max(region_generation(b) for _, b in live_ok)
             )

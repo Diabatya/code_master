@@ -889,6 +889,7 @@ class Bootloader:
         skip_blank: bool = True,
         status_callback: Callable[[str], None] | None = None,
         preserve_storage: bool = True,
+        explicit_backup: list[tuple[int, bytes]] | None = None,
     ) -> list[tuple[int, bytes]]:
         """Записывает файл прошивки в память STM32.
 
@@ -915,6 +916,15 @@ class Bootloader:
                 полностью 0xFF (см. erase_pages()).
             status_callback: Функция для текстового статуса этапа
                 (подключение/стирание/запись/метаданные).
+            explicit_backup: Явно выбранные оператором области резерва
+                [(addr, blob)] — из storage_backup.load_backup_file
+                (CM-N17). Принадлежность подтверждает выбор оператора
+                (UI показывает предупреждение); целостность уже
+                проверена при чтении файла. Заданный резерв включает
+                сохранение хранилища даже при preserve_storage=False и
+                поднимает недостающие/повреждённые виды через общий
+                план (force_write + readback). None — обычный путь
+                автопоиска find_matching_backup.
 
         Raises:
             BootloaderError: при ошибке прошивки или запрещённой области.
@@ -1059,7 +1069,8 @@ class Bootloader:
         # стирания, устройство не повреждено.
         saved_storage: list[tuple[int, int, bytes]] = []
         storage_backup_path: str | None = None
-        if preserve_storage and code:
+        restored: dict[str, bytes] = {}
+        if (preserve_storage or explicit_backup is not None) and code:
             status("Чтение областей хранилища")
             tail, found = self._scan_marker_storage()
 
@@ -1074,42 +1085,74 @@ class Bootloader:
             # поколение при незавершённой операции (APP1 инвалиден).
             # Исправная Flash с сознательно отсутствующим видом его
             # из истории не воскрешает.
-            restored: dict[str, bytes] = {}
+            # CM-N17: резерв, ЯВНО выбранный оператором, принадлежность
+            # подтверждает выбор (предупреждение показано в UI);
+            # недостающие виды восстанавливаются по команде оператора
+            # и без признака незавершённой операции.
             fingerprints = self._update_fingerprints(info_seg)
             interrupted = not getattr(self, "_last_app1_valid", True)
             image_sha256 = hashlib.sha256(code).hexdigest()
-            backup_regions = storage_backup.find_matching_backup(
-                fingerprints, image_sha256=image_sha256,
-            )
-            if backup_regions:
-                found, restored = storage_backup.merge_backup_regions(
-                    found, backup_regions, interrupted=interrupted,
-                )
-                if restored:
-                    status(
-                        "Области подняты из подтверждённого резерва ПК: "
-                        + ", ".join(sorted(restored))
+            if explicit_backup is not None:
+                try:
+                    found, restored = storage_backup.merge_backup_regions(
+                        found, explicit_backup, interrupted=interrupted,
+                        operator_directed=True,
                     )
-                    logger.info(
-                        "Восстановление хранилища из PC-резерва: %s",
-                        sorted(restored),
-                    )
-            elif interrupted:
-                # APP1 инвалиден (незавершённое обновление), а резерв
-                # не подтверждён для этого устройства/образа — честно
-                # сообщаем в статус: это прошивка БЕЗ восстановления,
-                # а не «восстановление из несуществующего резерва».
+                except ValueError as exc:
+                    # Непригодный резерв — отказ до первого стирания:
+                    # «восстановить частично» = «заявить восстановление
+                    # повреждённого». Устройство не тронуто.
+                    raise BootloaderError(
+                        f"Выбранная резервная копия непригодна: {exc} — "
+                        "запись отменена, устройство не повреждено"
+                    ) from exc
                 status(
-                    "Внимание: предыдущее обновление не завершено, а "
-                    "подтверждённого резерва хранилища для этого "
-                    "устройства нет — настройки не восстановятся "
-                    "автоматически (возможен явный выбор файла "
-                    "резерва оператором)"
+                    "Резерв выбран оператором вручную: областей "
+                    f"{len(explicit_backup)}"
+                    + (
+                        ", к восстановлению: " + ", ".join(sorted(restored))
+                        if restored else ", все виды уже есть на Flash"
+                    )
                 )
-                logger.warning(
-                    "Метаданные APP1 невалидны, а подходящего резерва "
-                    "нет — обновление без восстановления данных"
+                logger.info(
+                    "Явно выбранный резерв оператора: областей=%d, "
+                    "к восстановлению=%s",
+                    len(explicit_backup), sorted(restored),
                 )
+            else:
+                backup_regions = storage_backup.find_matching_backup(
+                    fingerprints, image_sha256=image_sha256,
+                )
+                if backup_regions:
+                    found, restored = storage_backup.merge_backup_regions(
+                        found, backup_regions, interrupted=interrupted,
+                    )
+                    if restored:
+                        status(
+                            "Области подняты из подтверждённого резерва ПК: "
+                            + ", ".join(sorted(restored))
+                        )
+                        logger.info(
+                            "Восстановление хранилища из PC-резерва: %s",
+                            sorted(restored),
+                        )
+                elif interrupted:
+                    # APP1 инвалиден (незавершённое обновление), а резерв
+                    # не подтверждён для этого устройства/образа — честно
+                    # сообщаем в статус: это прошивка БЕЗ восстановления,
+                    # а не «восстановление из несуществующего резерва».
+                    status(
+                        "Внимание: предыдущее обновление не завершено, а "
+                        "подтверждённого резерва хранилища для этого "
+                        "устройства нет — настройки не восстановятся "
+                        "автоматически (возможен явный выбор файла "
+                        "резерва оператором — кнопка «Восстановить из "
+                        "резервной копии…» в диалоге прошивки)"
+                    )
+                    logger.warning(
+                        "Метаданные APP1 невалидны, а подходящего резерва "
+                        "нет — обновление без восстановления данных"
+                    )
 
             try:
                 plan = plan_storage_relocation(
@@ -1225,6 +1268,23 @@ class Bootloader:
                     "обновление не считается безопасным"
                 )
             regions.append((dst, blob))
+        # CM-N17: сообщение о восстановлении — только ПОСЛЕ реально
+        # записанных и вычитанных обратно областей. «Резерв проверен»
+        # и «настройки восстановлены» — разные факты.
+        if saved_storage:
+            kinds = sorted(
+                {region_kind(b) for _o, _d, b in saved_storage}
+            )
+            msg = (
+                "Настройки устройства восстановлены в Flash "
+                f"(записано и вычитано обратно): {', '.join(kinds)}"
+            )
+            if restored:
+                msg += (
+                    "; из резервной копии ПК: "
+                    + ", ".join(sorted(restored))
+                )
+            status(msg)
         if meta is not None:
             # Метаданные — последним шагом: валидный APP1 служит «флагом
             # завершённого обновления» (bl_metadata_is_valid).

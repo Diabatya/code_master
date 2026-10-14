@@ -1073,3 +1073,209 @@ class TestBackupOwnershipCMN13:
             interrupted=True,
         )
         assert set(restored3) == {"cfg"}
+
+
+class TestExplicitBackupCMN17:
+    """CM-N17: явно выбранный оператором резерв идёт тем же pipeline
+    (merge → план → стирание → запись → readback), но принадлежность
+    подтверждает выбор оператора — поэтому недостающие виды
+    восстанавливаются и на исправной Flash без признака прерванной
+    операции. Непригодный резерв — отказ до первого стирания."""
+
+    @staticmethod
+    def _plant_id_page(sim: FlashSim) -> None:
+        page = bytearray(b"\xFF" * PAGE)
+        page[0:12] = b"TESTDEVICE01"
+        sim.erase(DEVICE_INFO_PAGE_ADDR, PAGE)
+        sim.write(DEVICE_INFO_PAGE_ADDR, bytes(page))
+
+    def test_explicit_backup_restores_missing_kind(self) -> None:
+        """Исправная Flash (APP1 валиден, незавершённости нет), VARH
+        отсутствует — автоматика его не воскресила бы (CM-N13), но
+        явно выбранный оператором резерв — команда на восстановление."""
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        old_end = TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        var_blob = _store_region(VAR_MAGIC, 30, fill=0x55)
+        var_src = FLASH_END_ADDR - 2 * PAGE
+
+        bl = _bl_on_sim(sim)
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            regions = bl.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=True,
+                explicit_backup=[(var_src, var_blob)],
+            )
+        finally:
+            os.unlink(path)
+        # VARH записан на канонический якорь storage.c, CFGH за кодом.
+        from core.storage_scan import find_storage_regions
+        tail = sim.read(APPLICATION_BASE_ADDR,
+                        FLASH_END_ADDR - APPLICATION_BASE_ADDR)
+        live = dict(find_storage_regions(tail, APPLICATION_BASE_ADDR))
+        kinds = {a: storage_backup.region_kind(b) for a, b in live.items()}
+        assert "var" in kinds.values()
+        assert sim.read(FLASH_END_ADDR - 18 * 1024, len(var_blob)) == var_blob
+        new_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        assert sim.read(new_end, len(cfg_blob)) == cfg_blob
+        written = {b for _a, b in regions}
+        assert var_blob in written and cfg_blob in written
+
+    def test_explicit_backup_enables_preserve_without_checkbox(self) -> None:
+        """explicit_backup сам включает сохранение хранилища:
+        «восстановить данные» — это preserve-операция, состояние
+        чекбокса не должно молча отменять выбор оператора."""
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        old_end = TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        var_blob = _store_region(VAR_MAGIC, 30, fill=0x55)
+
+        bl = _bl_on_sim(sim)
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            bl.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=False,
+                explicit_backup=[(FLASH_END_ADDR - 2 * PAGE, var_blob)],
+            )
+        finally:
+            os.unlink(path)
+        from core.storage_scan import find_storage_regions
+        tail = sim.read(APPLICATION_BASE_ADDR,
+                        FLASH_END_ADDR - APPLICATION_BASE_ADDR)
+        kinds = {
+            storage_backup.region_kind(b)
+            for _a, b in find_storage_regions(tail, APPLICATION_BASE_ADDR)
+        }
+        assert "var" in kinds and "cfg" in kinds
+        new_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        assert sim.read(new_end, len(cfg_blob)) == cfg_blob
+
+    def test_explicit_backup_corrupt_payload_aborts_before_erase(
+        self,
+    ) -> None:
+        """Резерв с битым payload CRC32 — отказ до первого стирания:
+        «частичное восстановление» выдавало бы повреждённое за
+        восстановленное."""
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        old_end = TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        corrupt = bytearray(_store_region(VAR_MAGIC, 30, fill=0x55))
+        corrupt[25] ^= 0xFF  # заголовок цел, payload бит
+
+        bl = _bl_on_sim(sim)
+        sim.ops.clear()
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            with pytest.raises(BootloaderError, match="непригодна"):
+                bl.flash_firmware(
+                    path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                    skip_blank=False, preserve_storage=True,
+                    explicit_backup=[
+                        (FLASH_END_ADDR - 2 * PAGE, bytes(corrupt))
+                    ],
+                )
+        finally:
+            os.unlink(path)
+        assert not [op for op in sim.ops if op[0] == "e"]
+        assert sim.read(old_end, len(cfg_blob)) == cfg_blob
+
+    def test_explicit_backup_no_room_aborts_before_erase(self) -> None:
+        """Резерв, который физически не размещается под новым образом —
+        отказ до стирания, устройство не тронуто."""
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        old_end = TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        # VARH в сто страниц: зазор 4-страничного образа его не вмещает.
+        huge_var = _store_region(VAR_MAGIC, 100 * PAGE, fill=0x55)
+
+        bl = _bl_on_sim(sim)
+        sim.ops.clear()
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            with pytest.raises(BootloaderError, match="разместить"):
+                bl.flash_firmware(
+                    path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                    skip_blank=False, preserve_storage=True,
+                    explicit_backup=[
+                        (FLASH_END_ADDR - 100 * PAGE, huge_var)
+                    ],
+                )
+        finally:
+            os.unlink(path)
+        assert not [op for op in sim.ops if op[0] == "e"]
+        assert sim.read(old_end, len(cfg_blob)) == cfg_blob
+
+    def test_explicit_backup_does_not_downgrade_healthy_newer(
+        self,
+    ) -> None:
+        """Явный резерв восстанавливает отсутствующие/повреждённые виды,
+        но не откатывает живую копию со СТАРШИМ поколением — полный
+        откат настроек делается стиранием, а не «тихим» затираем
+        более свежей конфигурации."""
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        old_end = TestStoragePlanCMN1._plant(sim, 3)
+        cfg_new = _store_region(CFG_MAGIC, 40, fill=0x42, gen=5)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_new)
+        cfg_old = _store_region(CFG_MAGIC, 40, fill=0x99, gen=2)
+
+        bl = _bl_on_sim(sim)
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            bl.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=True,
+                explicit_backup=[(old_end, cfg_old)],
+            )
+        finally:
+            os.unlink(path)
+        # Живое gen=5 осталось выбранным (целостность+поколение) —
+        # резерв gen=2 его не заменил.
+        new_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        assert sim.read(new_end, len(cfg_new)) == cfg_new
+
+    def test_restore_button_cancel_does_not_flash(
+        self, monkeypatch
+    ) -> None:
+        """Отмена на любом шаге выбора (список, подтверждение, битый
+        файл) — _on_flash не вызывается: ни чтения устройства, ни
+        стирания, ни записи не происходит."""
+        from ui.flash_dialog import FlashDialog
+
+        fake = MagicMock()
+        fake._pick_backup_manifest.return_value = None  # любой отказ
+        FlashDialog._on_restore_from_backup(fake)
+        fake._on_flash.assert_not_called()
+        fake._log.assert_not_called()
+
+    def test_restore_button_confirm_routes_to_flash(
+        self, monkeypatch
+    ) -> None:
+        """Подтверждённый выбор передаёт области резерва в общий
+        _on_flash — не обходной путь и не молчаливый даунгрейд до
+        обычной прошивки."""
+        from ui.flash_dialog import FlashDialog
+
+        var_blob = _store_region(VAR_MAGIC, 30, fill=0x55)
+        picked = ([(0x0803E000, var_blob)], "storage-20250101.json")
+        fake = MagicMock()
+        fake._pick_backup_manifest.return_value = picked
+        FlashDialog._on_restore_from_backup(fake)
+        fake._on_flash.assert_called_once_with(
+            explicit_backup_regions=picked[0]
+        )

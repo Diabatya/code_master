@@ -36,12 +36,14 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -73,9 +75,13 @@ from core.can_protocol import (
 # адресов — сканер вынесен в core/storage_scan.py, им пользуется и
 # CDC/UART-путь сохранения областей (Bootloader.flash_firmware).
 from core.storage_backup import (
+    backup_dir as _backup_dir,
     device_fingerprint as _device_fingerprint,
     dump_backup as _dump_backup,
     find_matching_backup as _find_matching_backup,
+    list_backup_manifests as _list_backup_manifests,
+    load_backup_file as _load_backup_file,
+    manifest_info as _manifest_info,
     merge_backup_regions as _merge_backup_regions,
 )
 from core.storage_scan import (
@@ -731,6 +737,7 @@ class FlashWorker(QThread):
         config: Config,
         verify: bool = True,
         preserve_triggers: bool = False,
+        explicit_backup_regions: list[tuple[int, bytes]] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -739,6 +746,14 @@ class FlashWorker(QThread):
         self._config = config
         self._verify = verify
         self._preserve_triggers = preserve_triggers
+        # CM-N17: явно выбранный оператором резерв — уже проверенный
+        # список областей (load_backup_file). Его наличие само включает
+        # сохранение хранилища: «восстановить данные» — это и есть
+        # preserve-операция, чекбокс не обязателен.
+        self._explicit_backup_regions = explicit_backup_regions
+        self._preserve_storage_effective = (
+            preserve_triggers or explicit_backup_regions is not None
+        )
         self._current_index = 0
         self._total = len(files)
 
@@ -985,7 +1000,8 @@ class FlashWorker(QThread):
                 regions = bl.flash_firmware(
                     bin_path, base, page_size=page_size, skip_blank=skip_blank,
                     status_callback=self.log_line.emit,
-                    preserve_storage=self._preserve_triggers,
+                    preserve_storage=self._preserve_storage_effective,
+                    explicit_backup=self._explicit_backup_regions,
                 )
                 if self._verify:
                     self.log_line.emit(
@@ -1049,7 +1065,8 @@ class FlashWorker(QThread):
                 regions = bl.flash_firmware(
                     bin_path, base, page_size=page_size, skip_blank=skip_blank,
                     status_callback=self.log_line.emit,
-                    preserve_storage=self._preserve_triggers,
+                    preserve_storage=self._preserve_storage_effective,
+                    explicit_backup=self._explicit_backup_regions,
                 )
                 if self._verify:
                     self.log_line.emit(
@@ -1265,7 +1282,7 @@ class FlashWorker(QThread):
                     saved_regions = []
                     self.log_line.emit(
                         tr("USB DFU: сохранение bootloader/config/хранилища...")
-                        if self._preserve_triggers
+                        if self._preserve_storage_effective
                         else tr("USB DFU: сохранение bootloader/config...")
                     )
                     for p_addr, p_size in preserve:
@@ -1295,7 +1312,7 @@ class FlashWorker(QThread):
                         if any(b != 0xFF for b in blob):
                             saved_regions.append((p_addr, blob))
 
-                    if self._preserve_triggers:
+                    if self._preserve_storage_effective:
                         # Маркерное хранилище: области триггеров (TRGH),
                         # переменных (VARH), гибкой логики (FLXH) и журнала
                         # (EVLH) не имеют фиксированных адресов — сканируем
@@ -1397,31 +1414,63 @@ class FlashWorker(QThread):
                             image_hasher.update(bytes(s_data))
                         interrupted = not dfu_app1_valid
                         restored: dict[str, bytes] = {}
-                        backup_regions = _find_matching_backup(
-                            fps, image_sha256=image_hasher.hexdigest(),
-                        )
-                        if backup_regions:
-                            found, restored = _merge_backup_regions(
-                                found, backup_regions,
-                                interrupted=interrupted,
-                            )
-                            if restored:
-                                self.log_line.emit(
-                                    tr(
-                                        "USB DFU: области из подтверждённого "
-                                        "резерва ПК: {0}"
-                                    ).format(", ".join(sorted(restored)))
+                        if self._explicit_backup_regions is not None:
+                            # CM-N17: резерв выбран оператором явно —
+                            # принадлежность подтверждает выбор
+                            # (предупреждение показано при выборе),
+                            # целостность проверена load_backup_file.
+                            try:
+                                found, restored = _merge_backup_regions(
+                                    found, self._explicit_backup_regions,
+                                    interrupted=interrupted,
+                                    operator_directed=True,
                                 )
-                        elif interrupted:
+                            except ValueError as exc:
+                                # Непригодный резерв — отказ до mass
+                                # erase, устройство не тронуто.
+                                return False, tr(
+                                    "USB DFU: выбранная резервная копия "
+                                    "непригодна ({0}) — запись отменена, "
+                                    "устройство не повреждено"
+                                ).format(exc)
                             self.log_line.emit(
                                 tr(
-                                    "USB DFU: предыдущее обновление не "
-                                    "завершено, а подтверждённого резерва "
-                                    "хранилища для этого устройства нет — "
-                                    "настройки не восстановятся "
-                                    "автоматически"
+                                    "USB DFU: резерв выбран оператором "
+                                    "вручную — к восстановлению: {0}"
+                                ).format(
+                                    ", ".join(sorted(restored))
+                                    if restored
+                                    else tr("все виды уже есть на Flash")
                                 )
                             )
+                        else:
+                            backup_regions = _find_matching_backup(
+                                fps, image_sha256=image_hasher.hexdigest(),
+                            )
+                            if backup_regions:
+                                found, restored = _merge_backup_regions(
+                                    found, backup_regions,
+                                    interrupted=interrupted,
+                                )
+                                if restored:
+                                    self.log_line.emit(
+                                        tr(
+                                            "USB DFU: области из подтверждённого "
+                                            "резерва ПК: {0}"
+                                        ).format(", ".join(sorted(restored)))
+                                    )
+                            elif interrupted and not found:
+                                self.log_line.emit(
+                                    tr(
+                                        "USB DFU: предыдущее обновление не "
+                                        "завершено, а подтверждённого резерва "
+                                        "хранилища для этого устройства нет — "
+                                        "настройки не восстановятся "
+                                        "автоматически (явный выбор файла — "
+                                        "кнопка «Восстановить из резервной "
+                                        "копии…»)"
+                                    )
+                                )
                         if found:
                             # Резерв до mass erase (CM-N9): обрыв
                             # оставляет стёртую Flash — повторная
@@ -1530,15 +1579,38 @@ class FlashWorker(QThread):
 
                 if app_touched:
                     # Возвращаем сохранённые области, которых нет в образе.
+                    # Readback обязателен: «восстановлено» заявляется только
+                    # после вычитки записанного (CM-N17 — как у CDC-пути).
                     for p_addr, blob in saved_regions:
                         dfu.download(p_addr, blob)
                         dfu.abort()
+                        if bytes(dfu.upload(p_addr, len(blob))) != blob:
+                            return False, tr(
+                                "USB DFU: область 0x{0:08X} не вычиталась "
+                                "обратно — восстановление хранилища НЕ "
+                                "подтверждено"
+                            ).format(p_addr)
                     if saved_regions:
+                        storage_kinds = sorted(
+                            {
+                                _region_kind(b)
+                                for _a, b in saved_regions
+                                if _region_kind(b) != "?"
+                            }
+                        )
                         self.log_line.emit(
-                            tr("USB DFU: восстановлено областей: {0}").format(
+                            tr("USB DFU: восстановлено областей: {0} "
+                               "(вычитка подтверждена)").format(
                                 len(saved_regions)
                             )
                         )
+                        if storage_kinds:
+                            self.log_line.emit(
+                                tr(
+                                    "USB DFU: настройки устройства "
+                                    "восстановлены в Flash: {0}"
+                                ).format(", ".join(storage_kinds))
+                            )
 
                 self.log_line.emit(tr("USB DFU: запись {0} байт...").format(total_bytes))
                 offset = 0
@@ -2034,6 +2106,18 @@ class FlashDialog(QDialog):
         self._preserve_triggers_checkbox.toggled.connect(
             lambda checked: self._config.set("preserve_triggers", bool(checked))
         )
+        # CM-N17: явное восстановление из файла резервной копии — когда
+        # автоматическая привязка резерва недоказуема (потеряна страница
+        # идентификации) или оператор хочет вернуть конкретный снимок.
+        self._restore_backup_button = QPushButton(
+            tr("Восстановить из резервной копии…")
+        )
+        self._restore_backup_button.setToolTip(
+            tr("Выбрать файл резервной копии хранилища вручную и "
+               "восстановить его области (настройки, переменные, ГЛ, "
+               "триггеры, журнал) при прошивке — когда автоматика не "
+               "смогла доказать принадлежность резерва устройству")
+        )
 
         # Файлы прошивки
         self._files_group = QGroupBox(tr("Файлы прошивки"))
@@ -2100,6 +2184,7 @@ class FlashDialog(QDialog):
         config_layout.addWidget(self._config_button)
         config_layout.addWidget(self._verify_checkbox)
         config_layout.addWidget(self._preserve_triggers_checkbox)
+        config_layout.addWidget(self._restore_backup_button)
         config_layout.addStretch()
         layout.addLayout(config_layout)
 
@@ -2140,6 +2225,9 @@ class FlashDialog(QDialog):
         self._down_button.clicked.connect(self._on_move_down)
         self._remove_button.clicked.connect(self._on_remove)
         self._flash_button.clicked.connect(self._on_flash)
+        self._restore_backup_button.clicked.connect(
+            self._on_restore_from_backup
+        )
         self._read_button.clicked.connect(self._on_read_firmware)
         self._read_config_button.clicked.connect(self._on_read_config)
         self._erase_button.clicked.connect(self._on_erase_flash)
@@ -2599,9 +2687,155 @@ class FlashDialog(QDialog):
             logger.warning("Прямая запись конфигурации недоступна, использую bootloader: %s", exc)
             return False
 
-    def _on_flash(self) -> None:
+    def _pick_backup_manifest(self) -> tuple[list[tuple[int, bytes]], str] | None:
+        """Явный выбор файла резервной копии оператором (CM-N17).
+
+        Диалог показывает манифесты из каталога резервов (дата,
+        отпечатки устройства, sha256 образа операции, список областей),
+        читает выбранный через load_backup_file — целостность .bin и
+        вложенных блобов проверяется всегда, повреждённый резерв не
+        применяется и вручную. Затем обязательное подтверждение:
+        автоматическая принадлежность устройству не доказана, выбор —
+        ответственность оператора.
+
+        Возвращает (области, имя_файла) либо None при отмене/отказе —
+        ничего при этом не стирается и не пишется."""
+        manifests = _list_backup_manifests()
+        if not manifests:
+            QMessageBox.information(
+                self,
+                tr("Резервные копии хранилища"),
+                tr("Файлов резервных копий нет ({0}).\nРезерв создаётся "
+                   "автоматически при каждой прошивке с сохранением "
+                   "данных хранилища.").format(_backup_dir()),
+            )
+            return None
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("Выбор резервной копии хранилища"))
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
+            tr("Выберите резервную копию для восстановления:")
+        ))
+        lst = QListWidget(dlg)
+        details = QLabel(dlg)
+        details.setWordWrap(True)
+        lay.addWidget(lst, 1)
+        lay.addWidget(details)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel,
+            parent=dlg,
+        )
+        lay.addWidget(buttons)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+
+        paths: list = []
+        for m_path in manifests:
+            info = _manifest_info(m_path)
+            if info is None:
+                label = m_path.name + tr(" — манифест повреждён")
+            else:
+                kinds = ", ".join(r["kind"] for r in info["regions"]) or "-"
+                fps = ", ".join(info["fingerprints"]) or tr("анонимный")
+                label = (
+                    f"{m_path.name} — {tr('области')}: {kinds}; "
+                    f"{tr('устройство')}: {fps}"
+                )
+            item = QListWidgetItem(label, lst)
+            item.setData(Qt.ItemDataRole.UserRole, len(paths))
+            paths.append(m_path)
+
+        def _show_details() -> None:
+            item = lst.currentItem()
+            if item is None:
+                details.setText("")
+                return
+            info = _manifest_info(paths[item.data(Qt.ItemDataRole.UserRole)])
+            if info is None:
+                details.setText(tr("Манифест не читается"))
+                return
+            lines = [
+                tr("Создан: {0}").format(info["created"]),
+                tr("Отпечатки устройства: {0}").format(
+                    ", ".join(info["fingerprints"]) or tr("нет (анонимный)")
+                ),
+                tr("Образ операции (sha256): {0}…").format(
+                    (info["image_sha256"] or tr("не указан"))[:16]
+                ),
+                tr("Области:"),
+            ]
+            for r in info["regions"]:
+                lines.append(
+                    "  {} @ {}, gen={}, {} B".format(
+                        r["kind"], r["addr"], r["generation"], r["size"]
+                    )
+                )
+            details.setText("\n".join(lines))
+
+        lst.currentItemChanged.connect(lambda *_a: _show_details())
+        if lst.count():
+            lst.setCurrentRow(0)
+        if dlg.exec() != QDialog.DialogCode.Accepted or lst.currentItem() is None:
+            return None
+
+        m_path = paths[lst.currentItem().data(Qt.ItemDataRole.UserRole)]
+        regions = _load_backup_file(m_path)
+        if regions is None:
+            QMessageBox.warning(
+                self,
+                tr("Резервная копия"),
+                tr("Файл резервной копии повреждён или неполон "
+                   "(манифест/дамп/sha256 не сошлись) — восстановление "
+                   "невозможно: {0}").format(m_path.name),
+            )
+            return None
+
+        info = _manifest_info(m_path) or {}
+        kinds = ", ".join(sorted({r["kind"] for r in info.get("regions", [])}))
+        answer = QMessageBox.warning(
+            self,
+            tr("Подтверждение восстановления"),
+            tr("Будет восстановлен резерв «{0}» ({1}).\n\n"
+               "Автоматическая проверка принадлежности этого резерва "
+               "именно ЭТОМУ устройству НЕ пройдена (или резерв анонимен) — "
+               "подтвердите, что копия принадлежит подключённой плате.\n"
+               "Чужой резерв перезапишет настройки устройства.\n\n"
+               "Продолжить восстановление при прошивке?").format(
+                m_path.name, kinds or "-",
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return None
+        return regions, m_path.name
+
+    def _on_restore_from_backup(self) -> None:
+        """«Восстановить из резервной копии…» — явный путь CM-N17:
+        выбор манифеста → подтверждение → прошивка с передачей
+        проверенных областей резерва в общий pipeline. Отмена любого
+        шага ничего не стирает и не пишет."""
+        picked = self._pick_backup_manifest()
+        if picked is None:
+            return
+        regions, name = picked
+        self._log(
+            tr("Резервная копия выбрана оператором: {0} "
+               "({1} областей)").format(name, len(regions))
+        )
+        self._on_flash(explicit_backup_regions=regions)
+
+    def _on_flash(
+        self,
+        explicit_backup_regions: list[tuple[int, bytes]] | None = None,
+    ) -> None:
         method = self._method_combo.currentData()
-        if self._try_direct_config_write(method):
+        # Явное восстановление из резервной копии всегда идёт через
+        # прошивку — «записать конфигурацию без перепрошивки» не может
+        # применить резерв и не должно его молча проглотить.
+        if explicit_backup_regions is None and self._try_direct_config_write(method):
             return
         if self._is_any_worker_running():
             QMessageBox.warning(
@@ -2640,6 +2874,7 @@ class FlashDialog(QDialog):
         self._read_button.setEnabled(False)
         self._read_config_button.setEnabled(False)
         self._erase_button.setEnabled(False)
+        self._restore_backup_button.setEnabled(False)
         self._progress_bar.setValue(0)
         self._flash_worker = FlashWorker(
             prepared,
@@ -2647,6 +2882,7 @@ class FlashDialog(QDialog):
             self._config,
             verify=self._verify_checkbox.isChecked(),
             preserve_triggers=self._preserve_triggers_checkbox.isChecked(),
+            explicit_backup_regions=explicit_backup_regions,
             parent=self,
         )
         self._flash_worker.log_line.connect(self._log)
@@ -2742,6 +2978,7 @@ class FlashDialog(QDialog):
         self._read_button.setEnabled(True)
         self._read_config_button.setEnabled(True)
         self._erase_button.setEnabled(True)
+        self._restore_backup_button.setEnabled(True)
         self._log(message)
         self._restore_serial_port()
         if success:

@@ -120,12 +120,18 @@ def region_payload_ok(blob: bytes) -> bool:
 
     find_storage_regions проверяет только CRC8 заголовка — целостность
     данных отдельная проверка. TRGH/TRG2 возвращают True (их записи
-    верифицирует прошивка — у заголовка пула есть только CRC8)."""
+    верифицирует прошивка — у заголовка пула есть только CRC8).
+    payload_crc == 0 — «контроль не заявлен» (EVLH: записи журнала
+    валидируются поштучно своим crc8) — тот же контракт, что у
+    прошивки в Storage_Init/Storage_CfgRead (CM-N16: payload_crc==0
+    НЕ считается повреждением)."""
     kind = region_kind(blob)
     if kind not in ("cfg", "flex", "var", "evlog") or len(blob) < 20:
         return True
     payload_len = int.from_bytes(blob[8:12], "little")
     payload_crc = int.from_bytes(blob[12:16], "little")
+    if payload_crc == 0:
+        return True
     if 20 + payload_len > len(blob):
         return False
     return zlib.crc32(blob[20 : 20 + payload_len]) == payload_crc
