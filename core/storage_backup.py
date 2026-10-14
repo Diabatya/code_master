@@ -181,6 +181,29 @@ def _load_backup_regions(m: dict, m_path: Path) -> list[tuple[int, bytes]] | Non
     return regions
 
 
+def check_backup_regions_arg(value: object, name: str = "explicit_backup") -> None:
+    """Граница явного резерва (CM-N18): допустимы None либо список пар
+    (int addr, bytes blob). Всё прочее — bool от Qt-сигнала clicked,
+    строка пути и т.п. — отвергается понятной ошибкой ДО любых
+    операций с устройством: параметр-данные не должен молча принимать
+    нерелевантное значение сигнатуры."""
+    if value is None:
+        return
+    ok = isinstance(value, (list, tuple)) and all(
+        isinstance(item, tuple)
+        and len(item) == 2
+        and isinstance(item[0], int)
+        and not isinstance(item[0], bool)
+        and isinstance(item[1], (bytes, bytearray))
+        for item in value
+    )
+    if not ok:
+        raise ValueError(
+            f"{name}: ожидается None или список (addr, bytes) областей "
+            f"резерва — получено {type(value).__name__}"
+        )
+
+
 def list_backup_manifests(directory: Path | None = None) -> list[Path]:
     """Файлы манифестов резервов, новейшие первыми — для явного
     выбора оператором (восстановление с неподтверждённой

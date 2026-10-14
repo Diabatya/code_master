@@ -929,6 +929,13 @@ class Bootloader:
         Raises:
             BootloaderError: при ошибке прошивки или запрещённой области.
         """
+        # CM-N18: граница типов — Qt-совместимая сигнатура может подсунуть
+        # bool от clicked; неподходящее значение отвергается до первого
+        # обращения к устройству, а не внутри merge.
+        try:
+            storage_backup.check_backup_regions_arg(explicit_backup)
+        except ValueError as exc:
+            raise BootloaderError(str(exc)) from exc
         firmware, file_base = load_firmware_bytes(firmware_path)
         if not firmware:
             raise BootloaderError("Файл прошивки пуст")
@@ -1000,6 +1007,22 @@ class Bootloader:
             ok, reason = validate_write_region(code_addr, len(code))
             if not ok:
                 raise BootloaderError(f"Запрещённая область записи: {reason}")
+
+        # CM-N19: явное восстановление из резервной копии требует
+        # application-образ. Config-only запись (страница идентификации
+        # без кода) и сегмент «приложения» целиком из 0xFF резерв
+        # применить не могут — молча записать только info-страницу
+        # значило бы отчитаться успехом невыполненной операции.
+        # Отказ ДО подключения/стирания/записи, устройство не тронуто.
+        if explicit_backup is not None and not (
+            code and any(b != 0xFF for b in code)
+        ):
+            raise BootloaderError(
+                "Восстановление из резервной копии требует образ "
+                "application — config-only запись резерв не применяет. "
+                "Выберите файл прошивки (запись отменена, устройство "
+                "не повреждено)"
+            )
 
         def status(text: str) -> None:
             logger.info("Этап: %s", text)

@@ -76,6 +76,7 @@ from core.can_protocol import (
 # CDC/UART-путь сохранения областей (Bootloader.flash_firmware).
 from core.storage_backup import (
     backup_dir as _backup_dir,
+    check_backup_regions_arg as _check_backup_regions_arg,
     device_fingerprint as _device_fingerprint,
     dump_backup as _dump_backup,
     find_matching_backup as _find_matching_backup,
@@ -750,6 +751,12 @@ class FlashWorker(QThread):
         # список областей (load_backup_file). Его наличие само включает
         # сохранение хранилища: «восстановить данные» — это и есть
         # preserve-операция, чекбокс не обязателен.
+        # CM-N18: граница типов — сюда могут попасть данные Qt-сигнала
+        # (clicked → bool). Неподходящее значение — ошибка до любых
+        # операций с устройством, а не TypeError в глубине merge.
+        _check_backup_regions_arg(
+            explicit_backup_regions, "explicit_backup_regions"
+        )
         self._explicit_backup_regions = explicit_backup_regions
         self._preserve_storage_effective = (
             preserve_triggers or explicit_backup_regions is not None
@@ -1136,6 +1143,25 @@ class FlashWorker(QThread):
                 start < meta_end and start + len(data) > APP_METADATA_PAGE_ADDR
                 for start, data in segments
             )
+            # CM-N19: явный резерв требует реальный application-образ.
+            # Config-only сегмент и «application» целиком из 0xFF резерв
+            # не применяют — молча записать только info-страницу значило
+            # бы отчитаться успехом невыполненной операции. Отказ до
+            # find_dfu_device/erase/write — устройство не тронуто.
+            has_app_image = any(
+                any(
+                    b != 0xFF
+                    for b in data[max(0, APPLICATION_BASE_ADDR - start):]
+                )
+                for start, data in segments
+            )
+            if self._explicit_backup_regions is not None and not has_app_image:
+                return False, tr(
+                    "USB DFU: восстановление из резервной копии требует "
+                    "образ application — запись только конфигурации резерв "
+                    "не применяет. Выберите файл прошивки (запись отменена, "
+                    "устройство не повреждено)"
+                )
             segments.sort(
                 key=lambda s: 1 if s[0] < meta_end and s[0] + len(s[1]) > APP_METADATA_PAGE_ADDR else 0
             )
@@ -2224,7 +2250,12 @@ class FlashDialog(QDialog):
         self._up_button.clicked.connect(self._on_move_up)
         self._down_button.clicked.connect(self._on_move_down)
         self._remove_button.clicked.connect(self._on_remove)
-        self._flash_button.clicked.connect(self._on_flash)
+        # CM-N18: clicked(bool) передаёт checked — его НЕЛЬЗЯ отдавать в
+        # _on_flash как explicit_backup_regions: False is not None ломал
+        # обычную прошивку (TypeError в merge). Сигнал отбрасываем в
+        # lambda; аргумент резерва keyword-only и задаётся только
+        # кнопкой «Восстановить из резервной копии…».
+        self._flash_button.clicked.connect(lambda _c=False: self._on_flash())
         self._restore_backup_button.clicked.connect(
             self._on_restore_from_backup
         )
@@ -2817,6 +2848,19 @@ class FlashDialog(QDialog):
         выбор манифеста → подтверждение → прошивка с передачей
         проверенных областей резерва в общий pipeline. Отмена любого
         шага ничего не стирает и не пишет."""
+        # CM-N19: без файла прошивки _collect_files_for_flash соберёт
+        # config-only HEX, который резерв применить не может — откажем
+        # понятно ДО выбора манифеста (проверка продублирована и в
+        # Bootloader/DFU — UI-if не единственная защита).
+        if self._files_list.count() == 0:
+            QMessageBox.warning(
+                self,
+                tr("Восстановление из резервной копии"),
+                tr("Восстановление из резервной копии требует файл "
+                   "прошивки application — добавьте его в список. "
+                   "Запись только конфигурации резерв не применяет."),
+            )
+            return
         picked = self._pick_backup_manifest()
         if picked is None:
             return
@@ -2829,6 +2873,7 @@ class FlashDialog(QDialog):
 
     def _on_flash(
         self,
+        *,
         explicit_backup_regions: list[tuple[int, bytes]] | None = None,
     ) -> None:
         method = self._method_combo.currentData()

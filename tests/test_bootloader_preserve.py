@@ -1279,3 +1279,262 @@ class TestExplicitBackupCMN17:
         fake._on_flash.assert_called_once_with(
             explicit_backup_regions=picked[0]
         )
+
+
+class TestExplicitBackupContractCMN19:
+    """CM-N19: явный резерв без application-образа — понятный отказ до
+    первого erase/write, а не «успешная» запись только info-страницы."""
+
+    @staticmethod
+    def _plant_id_page(sim: FlashSim) -> None:
+        page = bytearray(b"\xFF" * PAGE)
+        page[0:12] = b"TESTDEVICE01"
+        sim.erase(DEVICE_INFO_PAGE_ADDR, PAGE)
+        sim.write(DEVICE_INFO_PAGE_ADDR, bytes(page))
+
+    def test_config_only_image_with_explicit_backup_refused(self) -> None:
+        """Образ только страницы идентификации + явный резерв —
+        BootloaderError до стирания; устройство и APP1 не тронуты."""
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        old_code = _app_code(2 * PAGE, 0x11)
+        _flash_app(sim, old_code)
+        var_blob = _store_region(VAR_MAGIC, 30, fill=0x55)
+
+        info_page = bytearray(b"\xFF" * PAGE)
+        info_page[0:4] = (0x43464730).to_bytes(4, "little")  # CFG0
+        info_page[1024:1028] = (0x56455231).to_bytes(4, "little")  # VER1
+        bl = _bl_on_sim(sim)
+        sim.ops.clear()
+        path = _tmp_bin(bytes(info_page))
+        try:
+            with pytest.raises(BootloaderError, match="application"):
+                bl.flash_firmware(
+                    path, DEVICE_INFO_PAGE_ADDR, page_size=PAGE,
+                    skip_blank=False, preserve_storage=True,
+                    explicit_backup=[(0x0803B800, var_blob)],
+                )
+        finally:
+            os.unlink(path)
+        assert not [op for op in sim.ops if op[0] == "e"]
+        meta = sim.read(APP_METADATA_PAGE_ADDR, 4)
+        assert meta == APP_METADATA_MAGIC.to_bytes(4, "little")
+        assert sim.read(APPLICATION_BASE_ADDR, len(old_code)) == old_code
+
+    def test_all_ff_application_segment_with_backup_refused(self) -> None:
+        """Сегмент «application» целиком из 0xFF — не образ: явный резерв
+        отклоняется до стирания, как и config-only."""
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        _flash_app(sim, _app_code(2 * PAGE, 0x11))
+        var_blob = _store_region(VAR_MAGIC, 30, fill=0x55)
+
+        # Intel HEX с явной базой — guess_firmware_base для .bin
+        # переключил бы адрес на bootloader-образ.
+        from intelhex import IntelHex
+        ih = IntelHex()
+        ih.puts(APPLICATION_BASE_ADDR, bytes([0xFF] * (4 * PAGE)))
+        fd_, path = tempfile.mkstemp(suffix=".hex")
+        os.close(fd_)
+        ih.write_hex_file(path)
+
+        bl = _bl_on_sim(sim)
+        sim.ops.clear()
+        try:
+            with pytest.raises(BootloaderError, match="application"):
+                bl.flash_firmware(
+                    path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                    skip_blank=False, preserve_storage=True,
+                    explicit_backup=[(0x0803B800, var_blob)],
+                )
+        finally:
+            os.unlink(path)
+        assert not [op for op in sim.ops if op[0] == "e"]
+        meta = sim.read(APP_METADATA_PAGE_ADDR, 4)
+        assert meta == APP_METADATA_MAGIC.to_bytes(4, "little")
+
+    def test_config_only_without_backup_still_works(self) -> None:
+        """Обычная config-only запись без явного резерва — прежнее
+        поведение: страница пишется, APP1 не портится."""
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        old_code = _app_code(2 * PAGE, 0x11)
+        _flash_app(sim, old_code)
+
+        info_page = bytearray(b"\xFF" * PAGE)
+        info_page[0:4] = (0x43464730).to_bytes(4, "little")
+        info_page[1024:1028] = (0x56455231).to_bytes(4, "little")
+        bl = _bl_on_sim(sim)
+        path = _tmp_bin(bytes(info_page))
+        try:
+            regions = bl.flash_firmware(
+                path, DEVICE_INFO_PAGE_ADDR, page_size=PAGE,
+                skip_blank=False,
+            )
+        finally:
+            os.unlink(path)
+        assert regions  # страница реально записана
+        meta = sim.read(APP_METADATA_PAGE_ADDR, 4)
+        assert meta == APP_METADATA_MAGIC.to_bytes(4, "little")
+
+    def test_bool_backup_rejected_before_any_device_op(self) -> None:
+        """CM-N18: bool (как у Qt clicked) на границе flash_firmware —
+        понятный отказ до чтения файла и до любых операций с Flash."""
+        sim = FlashSim()
+        bl = _bl_on_sim(sim)
+        sim.ops.clear()
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            with pytest.raises(BootloaderError, match="explicit_backup"):
+                bl.flash_firmware(
+                    path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                    skip_blank=False, explicit_backup=False,
+                )
+        finally:
+            os.unlink(path)
+        assert sim.ops == []  # ни чтения, ни стирания, ни записи
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    """QApplication для настоящего FlashWorker (QThread/Signal)."""
+    pytest.importorskip("PySide6")
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    yield app
+
+
+class TestExplicitBackupWorkerPath:
+    """CM-N17/N18 сквозной путь: настоящий FlashWorker._flash_uart/
+    _flash_usb_cdc → настоящий Bootloader.flash_firmware на FlashSim —
+    выбранный резерв доезжает до Flash через production-код."""
+
+    @staticmethod
+    def _plant_id_page(sim: FlashSim) -> None:
+        page = bytearray(b"\xFF" * PAGE)
+        page[0:12] = b"TESTDEVICE01"
+        sim.erase(DEVICE_INFO_PAGE_ADDR, PAGE)
+        sim.write(DEVICE_INFO_PAGE_ADDR, bytes(page))
+
+    @staticmethod
+    def _worker(qapp, sim: FlashSim, regions) -> tuple:
+        """Настоящий FlashWorker с sim-bound Bootloader'ом."""
+        import ui.flash_dialog as fd
+
+        bl = _bl_on_sim(sim)
+        bl.verify = lambda a, d: sim.read(a, len(d)) == d
+        bl.go = lambda: None
+
+        config = MagicMock()
+        config.get = lambda k, d=None: {"port": "COM5"}.get(k, d)
+        w = fd.FlashWorker(
+            [], "usb_cdc", config, verify=False,
+            preserve_triggers=True, explicit_backup_regions=regions,
+        )
+        return w, bl
+
+    def test_usb_cdc_worker_delivers_explicit_backup(
+        self, qapp, monkeypatch
+    ) -> None:
+        """_flash_usb_cdc → Bootloader.open (подменён) → настоящий
+        flash_firmware получает explicit_backup и восстанавливает
+        отсутствующий VARH на исправной Flash."""
+        import ui.flash_dialog as fd
+
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        old_end = TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        var_blob = _store_region(VAR_MAGIC, 30, fill=0x55)
+
+        worker, bl = self._worker(
+            qapp, sim, [(FLASH_END_ADDR - 2 * PAGE, var_blob)]
+        )
+        monkeypatch.setattr(
+            fd.Bootloader, "find_device_port",
+            staticmethod(lambda *_a, **_kw: "COM5"),
+        )
+        monkeypatch.setattr(
+            fd.Bootloader, "open", staticmethod(lambda *_a, **_kw: bl)
+        )
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            ok, msg = worker._flash_usb_cdc(path)
+        finally:
+            os.unlink(path)
+        assert ok, msg
+        from core.storage_scan import find_storage_regions
+        tail = sim.read(APPLICATION_BASE_ADDR,
+                        FLASH_END_ADDR - APPLICATION_BASE_ADDR)
+        kinds = {
+            storage_backup.region_kind(b)
+            for _a, b in find_storage_regions(tail, APPLICATION_BASE_ADDR)
+        }
+        assert "var" in kinds and "cfg" in kinds
+
+    def test_uart_worker_delivers_explicit_backup(
+        self, qapp, monkeypatch
+    ) -> None:
+        """Тот же путь через _flash_uart — паритет транспортов."""
+        import ui.flash_dialog as fd
+
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        old_end = TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        var_blob = _store_region(VAR_MAGIC, 30, fill=0x55)
+
+        worker, bl = self._worker(
+            qapp, sim, [(FLASH_END_ADDR - 2 * PAGE, var_blob)]
+        )
+        monkeypatch.setattr(
+            fd.Bootloader, "open", staticmethod(lambda *_a, **_kw: bl)
+        )
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            ok, msg = worker._flash_uart(path)
+        finally:
+            os.unlink(path)
+        assert ok, msg
+        assert sim.read(
+            FLASH_END_ADDR - 18 * 1024, len(var_blob)
+        ) == var_blob
+
+    def test_uart_worker_config_only_with_backup_fails(
+        self, qapp, monkeypatch
+    ) -> None:
+        """CM-N19 сквозной: worker + настоящий flash_firmware на
+        config-only образе — честный отказ, erase_count=0."""
+        import ui.flash_dialog as fd
+
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        _flash_app(sim, _app_code(2 * PAGE, 0x11))
+        var_blob = _store_region(VAR_MAGIC, 30, fill=0x55)
+
+        worker, bl = self._worker(
+            qapp, sim, [(0x0803B800, var_blob)]
+        )
+        monkeypatch.setattr(
+            fd.Bootloader, "open", staticmethod(lambda *_a, **_kw: bl)
+        )
+        info_page = bytearray(b"\xFF" * PAGE)
+        info_page[0:4] = (0x43464730).to_bytes(4, "little")
+        fd_, cfg_path = tempfile.mkstemp(suffix=".bin")
+        os.write(fd_, bytes(info_page))
+        os.close(fd_)
+        sim.ops.clear()
+        try:
+            ok, msg = worker._flash_uart(cfg_path)
+        finally:
+            os.unlink(cfg_path)
+        assert not ok
+        assert "application" in msg or "резерв" in msg
+        assert not [op for op in sim.ops if op[0] == "e"]
