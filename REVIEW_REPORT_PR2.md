@@ -112,6 +112,7 @@ Flash с сознательно отсутствующим видом его н�
 - C-харнессы: `test_trigger_flash`, `test_device_config`, `test_event_log_ring`, `test_trigger_flex` (+aux-сценарии), `test_aux_out` (настоящий `aux_out.c`), `test_storage_select` (настоящий `storage.c`, mmap-дамп, 9 сценариев) — все PASS. На macOS arm64 `test_storage_select` собирается `cc -arch x86_64 -Wl,-pagezero_size,0x4000` и работает через Rosetta (фиксированный mmap 0x08000000); в CI на x86_64 Linux хватает обычного `cc`
 - ARM-сборки: application text **46568 B** (+3188 к базе v1.1.72 = 43380 B, бюджет 224K), bootloader text 19440 B без изменений
 - GUI smoke: настоящий `MainWindow` + `FlashDialog` созданы/показаны offscreen в изолированных XDG-каталогах, кнопка восстановления активна
+- CI: run **38629560179** на `f91ae73` — build-linux, build-windows, build-macos, test-python, build-firmware ✓; release пропущен
 
 ## Восстановление хранилища — практическая процедура
 
