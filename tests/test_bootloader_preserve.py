@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from core import storage_backup
 from core.bootloader import Bootloader, BootloaderError
 from core.stm32_info import (
     APP_METADATA_MAGIC,
@@ -24,6 +25,7 @@ from core.stm32_info import (
     APPLICATION_BASE_ADDR,
     BOOTLOADER_BASE_ADDR,
     DEVICE_INFO_PAGE_ADDR,
+    EVENT_LOG_ADDR,
     FLASH_END_ADDR,
 )
 from core.trigger_protocol import crc8
@@ -31,6 +33,17 @@ from core.trigger_protocol import crc8
 PAGE = 2048
 CFG_MAGIC = 0x43464748
 FLX_MAGIC = 0x464C5848
+VAR_MAGIC = 0x56415248
+
+
+@pytest.fixture(autouse=True)
+def _backup_dir(tmp_path, monkeypatch):
+    """Резервы хранилища — в tmp_path, а не в реальный каталог
+    пользователя: тесты не должны мусорить в ~/Library/..."""
+    monkeypatch.setattr(
+        storage_backup, "backup_dir", lambda: tmp_path
+    )
+    return tmp_path
 
 
 def _store_region(
@@ -417,6 +430,113 @@ class TestStoragePlanCMN1:
         assert not [op for op in sim.ops if op[0] == "e"]
         assert sim.read(old_end, len(cfg_blob)) == cfg_blob
 
+    def test_varh_occupies_full_span_to_flash_end(self) -> None:
+        """CM-N8: VARH резервирует [base, FLASH_END) целиком — цель
+        FLXH на его base конфликтует, область пересаживается наверх,
+        а не остаётся «висеть» под перезаписью."""
+        sim = FlashSim()
+        old_end = TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        flx_blob = _store_region(FLX_MAGIC, 60, fill=0x77)
+        var_blob = _store_region(VAR_MAGIC, 30, fill=0x55)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        sim.erase(old_end + PAGE, PAGE)
+        sim.write(old_end + PAGE, flx_blob)
+        # VARH по низкому адресу — сразу за FLXH (раскладка после
+        # старых обновлений с укороченным хвостом).
+        var_addr = old_end + 2 * PAGE
+        sim.erase(var_addr, PAGE)
+        sim.write(var_addr, var_blob)
+
+        bl = _bl_on_sim(sim)
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            bl.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=True,
+            )
+        finally:
+            os.unlink(path)
+
+        new_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        # Цели CFGH/FLXH заняли старые адреса CFGH/FLXH/VARH — VARH
+        # пересажен на самый верх записываемой зоны и цел.
+        assert sim.read(new_end, len(cfg_blob)) == cfg_blob
+        assert sim.read(new_end + PAGE, len(flx_blob)) == flx_blob
+        var_dst = EVENT_LOG_ADDR - len(var_blob)
+        assert sim.read(var_dst, len(var_blob)) == var_blob
+        # Повторный скан видит VARH как валидную область.
+        from core.storage_scan import find_storage_regions
+
+        tail = sim.read(new_end, FLASH_END_ADDR - new_end)
+        kinds = {b[:4] for _a, b in find_storage_regions(tail, new_end)}
+        assert VAR_MAGIC.to_bytes(4, "little") in kinds
+
+    def test_varh_no_room_aborts_before_erase(self) -> None:
+        """VARH конфликтует, а места для пересадки нет — честный
+        отказ до стирания, а не молчаливая потеря региона."""
+        sim = FlashSim()
+        old_end = TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        # VARH на 24 страницы — места за огромным образом не хватает.
+        var_blob = _store_region(VAR_MAGIC, 24 * PAGE - 20, fill=0x55)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        var_addr = old_end + PAGE
+        for i in range(0, len(var_blob), PAGE):
+            sim.erase(var_addr + i, PAGE)
+            sim.write(var_addr + i, var_blob[i : i + PAGE])
+
+        bl = _bl_on_sim(sim)
+        sim.ops.clear()
+        # Образ оставляет 20 страниц до write_limit: CFGH + VARH(24)
+        # не помещаются — отказ.
+        free_pages = 20
+        code_pages = (
+            EVENT_LOG_ADDR - APPLICATION_BASE_ADDR
+        ) // PAGE - free_pages
+        path = _tmp_bin(_app_code(code_pages * PAGE, 0x22))
+        try:
+            with pytest.raises(BootloaderError, match="разместить|VARH"):
+                bl.flash_firmware(
+                    path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                    preserve_storage=True,
+                )
+        finally:
+            os.unlink(path)
+        assert not [op for op in sim.ops if op[0] == "e"]
+        assert sim.read(var_addr, len(var_blob)) == var_blob
+
+    def test_oldest_varh_generation_dropped_newest_relocated(self) -> None:
+        """Два поколения VARH: в план попадает новейшее, старое —
+        dropped (актуальные данные не теряются)."""
+        sim = FlashSim()
+        old_end = TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        var_old = _store_region(VAR_MAGIC, 30, fill=0x11, gen=1)
+        var_new = _store_region(VAR_MAGIC, 30, fill=0x99, gen=5)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        sim.erase(old_end + PAGE, PAGE)
+        sim.write(old_end + PAGE, var_old)
+        # Новейшая копия VARH лежит наверху (каноничная позиция).
+        var_top = EVENT_LOG_ADDR - len(var_new)
+        sim.erase(var_top, PAGE)
+        sim.write(var_top, var_new)
+
+        bl = _bl_on_sim(sim)
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            bl.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=True,
+            )
+        finally:
+            os.unlink(path)
+        # Новейшее поколение живо наверху.
+        assert sim.read(var_top, len(var_new)) == var_new
+
     def test_short_read_aborts_before_erase(self) -> None:
         """Короткий ответ read_memory без исключения — неполный дамп."""
         sim = FlashSim()
@@ -501,3 +621,129 @@ class TestStoragePlanCMN1:
             os.unlink(path)
         new_end = APPLICATION_BASE_ADDR + 4 * PAGE
         assert sim.read(new_end, len(cfg_blob)) == bytes(cfg_blob)
+
+
+class TestStorageBackupCMN9:
+    """Регрессии CM-N9: резерв на ПК переживает обрыв обновления —
+    повторная попытка восстанавливает области ЭТОГО устройства по
+    отпечатку страницы идентификации."""
+
+    @staticmethod
+    def _plant_id_page(sim: FlashSim) -> None:
+        """Непустая страница идентификации — источник отпечатка."""
+        page = bytearray(b"\xFF" * PAGE)
+        page[0:12] = b"TESTDEVICE01"
+        sim.erase(DEVICE_INFO_PAGE_ADDR, PAGE)
+        sim.write(DEVICE_INFO_PAGE_ADDR, bytes(page))
+
+    def test_abort_during_restore_retry_recovers_from_backup(
+        self,
+    ) -> None:
+        """Обрыв на записи восстановления: код уже на месте, области
+        хранилища стёрты. Повторный flash_firmware (новый процесс —
+        байтов в памяти нет) поднимает CFGH/FLXH из PC-резерва."""
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        old_end = TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        flx_blob = _store_region(FLX_MAGIC, 60, fill=0x77)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        sim.erase(old_end + PAGE, PAGE)
+        sim.write(old_end + PAGE, flx_blob)
+
+        bl = _bl_on_sim(sim)
+        new_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        real_write = bl.write_memory
+
+        def _dying_write(addr: int, data: bytes) -> None:
+            if addr == new_end:
+                raise OSError("port lost")
+            real_write(addr, data)
+
+        bl.write_memory = _dying_write  # type: ignore[method-assign]
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            with pytest.raises(OSError):
+                bl.flash_firmware(
+                    path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                    skip_blank=False, preserve_storage=True,
+                )
+        finally:
+            os.unlink(path)
+        # Обе области в живой Flash потеряны: CFGH затёрт кодом,
+        # FLXH — стёртой страницей неудавшегося восстановления.
+        from core.storage_scan import find_storage_regions
+
+        tail = sim.read(APPLICATION_BASE_ADDR,
+                        FLASH_END_ADDR - APPLICATION_BASE_ADDR)
+        assert find_storage_regions(
+            tail, APPLICATION_BASE_ADDR
+        ) == []
+
+        # Повторная попытка — другой объект Bootloader (байтов резерва
+        # в памяти нет): области приходят из файла на ПК.
+        bl2 = _bl_on_sim(sim)
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            regions = bl2.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=True,
+            )
+        finally:
+            os.unlink(path)
+        assert sim.read(new_end, len(cfg_blob)) == cfg_blob
+        assert sim.read(new_end + PAGE, len(flx_blob)) == flx_blob
+        written = {b for _a, b in regions}
+        assert cfg_blob in written and flx_blob in written
+
+    def test_backup_write_failure_aborts_before_erase(
+        self, monkeypatch
+    ) -> None:
+        """Сбой записи резерва на ПК — обновление отменяется ДО
+        первого стирания: без файла восстановиться нечем."""
+        sim = FlashSim()
+        old_end = TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+
+        def _broken_dump(*_a: object, **_kw: object) -> str:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(storage_backup, "dump_backup", _broken_dump)
+        bl = _bl_on_sim(sim)
+        sim.ops.clear()
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            with pytest.raises(BootloaderError, match="резерв"):
+                bl.flash_firmware(
+                    path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                    preserve_storage=True,
+                )
+        finally:
+            os.unlink(path)
+        assert not [op for op in sim.ops if op[0] == "e"]
+        assert sim.read(old_end, len(cfg_blob)) == cfg_blob
+
+    def test_foreign_device_backup_not_applied(self, tmp_path) -> None:
+        """Резерв чужого устройства (другой отпечаток) повторная
+        попытка не применяет — чужие настройки не заливаются."""
+        sim = FlashSim()
+        self._plant_id_page(sim)
+        TestStoragePlanCMN1._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        # Прямой резерв «чужого» устройства в общий каталог.
+        storage_backup.dump_backup(
+            cfg_blob + b"\xFF" * 100,
+            APPLICATION_BASE_ADDR,
+            [(APPLICATION_BASE_ADDR, cfg_blob)],
+            {"other-device-fingerprint"},
+            directory=tmp_path,
+        )
+        live = sim.read(DEVICE_INFO_PAGE_ADDR, PAGE)
+        found = storage_backup.find_matching_backup(
+            {storage_backup.device_fingerprint(live) or ""},
+            directory=tmp_path,
+        )
+        assert found is None

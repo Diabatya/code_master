@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+import time
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any
@@ -1891,11 +1892,14 @@ class _ValuePage(QWidget):
             self._emit_changed()
 
     def _update_steering_btn(self) -> None:
-        """Кнопка «Декодер…» видна только в режиме угла руля —
-        выбор делителей не трогает остальные режимы."""
+        """Кнопка «Декодер…» открывает настройку кратности из режимов
+        «Угол руля (кратность)» и «Градусы» — маршрут задания: декодер
+        доступен при выборе «Градусы» (CM-N2, ревью round 2).
+        Включённый декодер в режиме «Градусы» замещает таблицу точек
+        как источник угла; без него «Градусы» работают по-старому."""
         if getattr(self, "steering_btn", None) is not None:
             self.steering_btn.setVisible(
-                self.out_range.currentData() == "steering"
+                self.out_range.currentData() in ("degrees", "steering")
             )
 
     def _set_sblp(self, mode: str) -> None:
@@ -3995,6 +3999,13 @@ class _VariableRow(QFrame):
         # Сырое HEX-значение DATA того же кадра — показываем рядом
         # с десятичным над графиком привязки (отчёт мастера).
         self.live_raw: int | None = None
+        # Достоверность показанного числа (CM-N11): невалидный кадр
+        # обнуляет live_value и ставит статус-текст; отметка времени
+        # последнего валидного значения нужна таймауту stale_ms.
+        self.live_valid = False
+        self._last_valid_ts = 0.0
+        self._stale_shown = False
+        self._live_text = "—"
         # «Импульсная переменная»: таймер вспышки «1» на 0.5 с
         # при совпадении DATA на шине (отчёт мастера).
         self._pulse_timer = QTimer(self)
@@ -4057,17 +4068,41 @@ class _VariableRow(QFrame):
 
     def set_live_value(
         self,
-        value: float,
+        value: float | None,
         raw: int | None = None,
         text: str | None = None,
+        *,
+        valid: bool = True,
     ) -> None:
         """Онлайн-значение переменной из CAN — дублируется в строке
         рядом с названием (отчёт мастера). ``text`` — готовая подпись
-        (имя привязки «Динамической переменной»); без неё — число."""
-        self.live_value = value
+        (имя привязки «Динамической переменной»); без неё — число.
+
+        ``valid=False`` — явный невалидный контракт (CM-N11): числовое
+        значение обнуляется (``live_value=None``), подпись — статус
+        ошибки; залипшего прошлого числа не остаётся."""
+        self.live_value = value if valid else None
+        self.live_valid = valid
         self.live_raw = raw
+        self._stale_shown = False
+        if valid:
+            self._last_valid_ts = time.monotonic()
+        self._live_text = (
+            text
+            if text is not None
+            else (f"{value:.2f}" if value is not None else "—")
+        )
+        self._state_label.setText(self._live_text)
+
+    def mark_stale(self) -> None:
+        """Пометить показанное значение устаревшим (CM-N11): число
+        остаётся видимым, но с явной отметкой — условия ГЛ его уже
+        не используют, и отображение это отражает."""
+        if self._stale_shown:
+            return
+        self._stale_shown = True
         self._state_label.setText(
-            text if text is not None else f"{value:.2f}"
+            tr("{0} (устарело)").format(self._live_text)
         )
 
     def pulse(self) -> None:
@@ -4610,9 +4645,43 @@ class VariablesTab(QWidget):
         if self._serial_manager is not None:
             self._serial_manager.new_can_frames.connect(self._on_can_frames)
 
+        # Таймаут свежести показанных значений (CM-N11): переменные с
+        # настроенным stale_ms помечаются «(устарело)» — число не
+        # выдаётся за актуальное, когда кадры давно не приходили.
+        self._stale_timer = QTimer(self)
+        self._stale_timer.setInterval(200)
+        self._stale_timer.timeout.connect(self._mark_stale_rows)
+        self._stale_timer.start()
+
         self._restore()
 
     # ---- онлайн-значения из CAN ----------------------------------------
+
+    @staticmethod
+    def _var_status_text(status: str) -> str:
+        """Человекочитаемая подпись машинного статуса декодера
+        (CM-N11) — вместо сырого кода вроде «no-class»."""
+        return {
+            "no-data": tr("нет данных"),
+            "no-field": tr("поле не задано"),
+            "incomplete": tr("неполный кадр"),
+            "conflict": tr("конфликт классов"),
+            "no-class": tr("вне классов"),
+            "no-calibration": tr("нет калибровки"),
+            "disabled": tr("выкл"),
+        }.get(status, status)
+
+    def _mark_stale_rows(self) -> None:
+        """Пометка «устарело» для значений с настроенным stale_ms —
+        прошло больше времени без валидного кадра (CM-N11)."""
+        now = time.monotonic()
+        for col in (self._read_col, self._ctrl_col, self._aux_col):
+            for row in list(getattr(col, "_rows", [])):
+                if not row.live_valid or row._stale_shown:
+                    continue
+                stale = variable_decode.stale_ms(row.config)
+                if stale and now - row._last_valid_ts > stale / 1000.0:
+                    row.mark_stale()
 
     def _show_aux_channels(self) -> None:
         """Диалог состояния выходов: CMD_AUX_GET (режимы/уровни) +
@@ -4716,7 +4785,7 @@ class VariablesTab(QWidget):
                 fid = hex_to_int(str(cfg.get("id", "")))
                 points = cfg.get("points") or []
                 used = cfg.get("bytes") or []
-                steering = cfg.get("out_range") == "steering"
+                steering = variable_decode.is_steering(cfg)
                 # Таблица привязки декодеру угла не нужна — значение
                 # берётся из калибровки декодера (CM-N3).
                 if fid is None or not used or (not points and not steering):
@@ -4763,13 +4832,20 @@ class VariablesTab(QWidget):
                     # неполное поле значения не даёт.
                     res = variable_decode.decode_var_value(cfg, data)
                     if not res["complete"]:
+                        # CM-N11: неполный кадр — явный статус, а не
+                        # залипшее прошлое число.
+                        row.set_live_value(
+                            None, valid=False,
+                            text=self._var_status_text(res["status"]),
+                        )
                         continue
                     raw = res["raw"]
                     if steering:
                         # «Угол руля»: класс по делителям (кратность),
                         # нейтраль → 0°, градусы только из калибровки;
                         # статус показываем текстом при невалидном
-                        # значении.
+                        # значении — живое число при этом НЕВАЛИДНО
+                        # (live_value=None, CM-N11).
                         if res["valid"]:
                             row.set_live_value(
                                 res["value"], raw,
@@ -4780,7 +4856,10 @@ class VariablesTab(QWidget):
                             )
                         else:
                             row.set_live_value(
-                                0.0, raw, text=tr(res["status"])
+                                None, raw, valid=False,
+                                text=self._var_status_text(
+                                    res["status"]
+                                ),
                             )
                     elif cfg.get("out_range") == "degrees":
                         # «Градусы»: значение декодируется по

@@ -71,11 +71,17 @@ from core.can_protocol import (
 # Маркерное хранилище (storage.c): области не имеют фиксированных
 # адресов — сканер вынесен в core/storage_scan.py, им пользуется и
 # CDC/UART-путь сохранения областей (Bootloader.flash_firmware).
+from core.storage_backup import (
+    device_fingerprint as _device_fingerprint,
+    dump_backup as _dump_backup,
+    find_matching_backup as _find_matching_backup,
+)
 from core.storage_scan import (
     STORE_PAGE as _STORE_PAGE,
     StoragePlanError as _StoragePlanError,
     find_storage_regions as _find_storage_regions,
     plan_storage_relocation as _plan_storage_relocation,
+    region_generation as _region_generation,
     region_kind as _region_kind,
 )
 from core.stm32_info import (
@@ -1323,6 +1329,87 @@ class FlashWorker(QThread):
                                 "устройство не повреждено"
                             ).format(len(tail), FLASH_END_ADDR - scan_base)
                         found = _find_storage_regions(tail, scan_base)
+                        # CM-N9: повторная попытка после обрыва mass
+                        # erase — живой Flash областей уже не
+                        # содержит. Недостающие виды поднимаем из
+                        # резерва этого устройства на ПК (отпечаток
+                        # страницы идентификации + sha256 дампа).
+                        fps: set[str] = set()
+                        try:
+                            live_cfg = bytes(
+                                dfu.upload(
+                                    DEVICE_CONFIG_PAGE_ADDR,
+                                    DEVICE_CONFIG_PAGE_SIZE,
+                                )
+                            )
+                            fp = _device_fingerprint(live_cfg)
+                            if fp:
+                                fps.add(fp)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        intended_cfg = next(
+                            (
+                                d
+                                for s, d in segments
+                                if s <= DEVICE_CONFIG_PAGE_ADDR
+                                < s + len(d)
+                            ),
+                            None,
+                        )
+                        if intended_cfg is None:
+                            intended_cfg = next(
+                                (
+                                    b
+                                    for a, b in saved_regions
+                                    if a == DEVICE_CONFIG_PAGE_ADDR
+                                ),
+                                None,
+                            )
+                        fp = _device_fingerprint(intended_cfg)
+                        if fp:
+                            fps.add(fp)
+                        restored: dict[str, bytes] = {}
+                        backup_regions = _find_matching_backup(fps)
+                        if backup_regions:
+                            live_kinds = {
+                                _region_kind(b) for _, b in found
+                            }
+                            newest_bak: dict[str, tuple[int, bytes]] = {}
+                            for b_addr, b_blob in backup_regions:
+                                k = _region_kind(b_blob)
+                                prev = newest_bak.get(k)
+                                if prev is None or _region_generation(
+                                    b_blob
+                                ) >= _region_generation(prev[1]):
+                                    newest_bak[k] = (b_addr, b_blob)
+                            for k, (b_addr, b_blob) in newest_bak.items():
+                                if k in live_kinds or k == "trg2":
+                                    continue
+                                found.append((b_addr, b_blob))
+                                restored[k] = b_blob
+                            if restored:
+                                self.log_line.emit(
+                                    tr(
+                                        "USB DFU: области из резерва "
+                                        "ПК: {0}"
+                                    ).format(", ".join(sorted(restored)))
+                                )
+                        if found:
+                            # Резерв до mass erase (CM-N9): обрыв
+                            # оставляет стёртую Flash — повторная
+                            # попытка восстановит области из файла.
+                            try:
+                                _dump_backup(
+                                    tail, scan_base, found, fps,
+                                    restored_blobs=restored,
+                                )
+                            except OSError as exc:
+                                return False, tr(
+                                    "USB DFU: не удалось записать "
+                                    "резервную копию хранилища ({0}) — "
+                                    "запись отменена, устройство не "
+                                    "повреждено"
+                                ).format(exc)
                         # CM-N1: mass erase сносит ВСЁ — каждую живую
                         # область (новейшее поколение) возвращаем по
                         # общему плану размещения: CFGH за новым концом

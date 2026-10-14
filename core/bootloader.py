@@ -6,10 +6,7 @@
 """
 
 import contextlib
-import json
 import time
-from datetime import datetime
-from pathlib import Path
 from typing import Any
 from collections.abc import Callable
 
@@ -44,6 +41,7 @@ from core.stm32_info import (
     parse_device_config,
     seed_device_config_page,
 )
+from core import storage_backup
 from core.storage_scan import (
     StoragePlanError,
     find_storage_regions,
@@ -57,56 +55,6 @@ logger = get_logger(__name__)
 
 ACK = 0x79
 NACK = 0x1F
-
-
-def _dump_storage_backup(
-    tail: bytes, scan_base: int, found: list[tuple[int, bytes]]
-) -> str | None:
-    """Резервная копия маркерного хранилища на ПК до стирания.
-
-    Обрыв связи посреди обновления оставляет устройство в bootloader
-    (APP1 инвалиден) — но байты хранилища, прочитанные в память
-    процесса, пропали бы вместе с приложением. Файл переживает
-    закрытие: повторная прошивка с этим же компьютера (или ручное
-    восстановление через CMD_STORAGE_*) может поднять области.
-
-    Пишем полный дамп хвоста Flash + JSON-манифест областей рядом —
-    восстановление не зависит от повторного сканирования битой
-    Flash."""
-    try:
-        from platformdirs import user_data_dir
-
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup_dir = (
-            Path(user_data_dir("CodeMaster", appauthor=False, ensure_exists=True))
-            / "storage_backups"
-        )
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        bin_path = backup_dir / f"storage-{stamp}.bin"
-        bin_path.write_bytes(tail)
-        manifest = {
-            "created": stamp,
-            "dump_base": f"0x{scan_base:08X}",
-            "regions": [
-                {
-                    "addr": f"0x{addr:08X}",
-                    "offset": f"0x{addr - scan_base:X}",
-                    "size": len(blob),
-                    "kind": region_kind(blob),
-                    "generation": region_generation(blob),
-                }
-                for addr, blob in found
-            ],
-        }
-        (backup_dir / f"storage-{stamp}.json").write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8"
-        )
-        return str(bin_path)
-    except Exception as exc:  # noqa: BLE001
-        # Резерв не удался — это не повод отменять обновление: области
-        # прочитаны и будут восстановлены штатно; но честно логируем.
-        logger.warning("Резервная копия хранилища не записана: %s", exc)
-        return None
 
 
 class BootloaderError(Exception):
@@ -873,9 +821,11 @@ class Bootloader:
         Короткий ответ без исключения считается неполным дампом —
         отказ до стирания (CM-N1)."""
         scan_base = APPLICATION_BASE_ADDR
+        app1_valid = False
         try:
             meta = self.read_memory(APP_METADATA_PAGE_ADDR, 16)
             magic = int.from_bytes(meta[0:4], "little")
+            app1_valid = magic == APP_METADATA_MAGIC
             if len(meta) >= 16 and magic in (APP_METADATA_MAGIC, 0):
                 image_size = int.from_bytes(meta[8:12], "little")
                 if 0 < image_size < FLASH_END_ADDR - APPLICATION_BASE_ADDR:
@@ -886,6 +836,7 @@ class Bootloader:
                     )
         except Exception as exc:  # noqa: BLE001
             logger.debug("Метаданные приложения не прочитаны: %s", exc)
+        self._last_app1_valid = app1_valid
         try:
             tail = self.read_memory(scan_base, FLASH_END_ADDR - scan_base)
         except Exception as exc:  # noqa: BLE001
@@ -904,6 +855,31 @@ class Bootloader:
             )
         self._last_storage_scan_base = scan_base
         return tail, find_storage_regions(tail, scan_base)
+
+    def _update_fingerprints(self, info_seg: bytes | None) -> set[str]:
+        """Отпечатки устройства для резерва/восстановления хранилища.
+
+        Текущая страница идентификации плюс страница, которую запишет
+        это обновление (уже объединённая с сохранённой идентичностью):
+        обрыв мог стереть живую страницу до её записи — тогда резерв
+        находится по «будущему» отпечатку (CM-N9)."""
+        fps: set[str] = set()
+        try:
+            live = self.read_memory(
+                DEVICE_INFO_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE
+            )
+            fp = storage_backup.device_fingerprint(live)
+            if fp:
+                fps.add(fp)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Страница идентификации для отпечатка не прочитана: %s", exc
+            )
+        if info_seg is not None:
+            fp = storage_backup.device_fingerprint(info_seg)
+            if fp:
+                fps.add(fp)
+        return fps
 
     def flash_firmware(
         self,
@@ -1086,9 +1062,54 @@ class Bootloader:
         if preserve_storage and code:
             status("Чтение областей хранилища")
             tail, found = self._scan_marker_storage()
+
+            # CM-N9: повторная попытка после обрыва — живой Flash
+            # областей уже может не содержать (код перезаписал страницы,
+            # restore оборвался). Поднимаем недостающие виды областей из
+            # резерва ЭТОГО устройства на ПК: манифест сопоставляется по
+            # отпечатку страницы идентификации, дамп проверяется sha256.
+            restored: dict[str, bytes] = {}
+            fingerprints = self._update_fingerprints(info_seg)
+            backup_regions = storage_backup.find_matching_backup(
+                fingerprints
+            )
+            if backup_regions:
+                live_kinds = {region_kind(b) for _, b in found}
+                newest_bak: dict[str, tuple[int, bytes]] = {}
+                for b_addr, b_blob in backup_regions:
+                    kind = region_kind(b_blob)
+                    prev = newest_bak.get(kind)
+                    if prev is None or region_generation(
+                        b_blob
+                    ) >= region_generation(prev[1]):
+                        newest_bak[kind] = (b_addr, b_blob)
+                for kind, (b_addr, b_blob) in newest_bak.items():
+                    if kind in live_kinds or kind == "trg2":
+                        continue
+                    found.append((b_addr, b_blob))
+                    restored[kind] = b_blob
+                if restored:
+                    status(
+                        "Часть областей поднята из резерва ПК: "
+                        + ", ".join(sorted(restored))
+                    )
+                    logger.info(
+                        "Восстановление хранилища из PC-резерва: %s",
+                        sorted(restored),
+                    )
+            elif not getattr(self, "_last_app1_valid", True):
+                # APP1 инвалиден (незавершённое обновление), живых
+                # областей/резерва нет — честно логируем: это обычная
+                # прошивка БЕЗ сохранённых настроек, а не восстановление.
+                logger.warning(
+                    "Метаданные APP1 невалидны и областей хранилища "
+                    "не найдено — обновление без восстановления данных"
+                )
+
             try:
                 plan = plan_storage_relocation(
-                    found, code_addr, len(code), page_size=page_size
+                    found, code_addr, len(code), page_size=page_size,
+                    force_write=set(restored),
                 )
             except StoragePlanError as exc:
                 raise BootloaderError(
@@ -1103,13 +1124,26 @@ class Bootloader:
             for d_addr, _d_blob, why in plan["dropped"]:
                 logger.info("Область 0x%08X не переносится: %s", d_addr, why)
             if found:
-                # Резервная копия на ПК ДО стирания: обрыв связи в
-                # середине оставляет устройство в bootloader, но байты
-                # хранилища в памяти процесса пропадут вместе с ним —
-                # файл переживает закрытие приложения (CM-N1).
-                storage_backup_path = _dump_storage_backup(
-                    tail, self._last_storage_scan_base, found
-                )
+                # Резервная копия на ПК ДО стирания (CM-N1/CM-N9):
+                # обрыв связи в середине оставляет устройство в
+                # bootloader, байты хранилища в памяти процесса пропадут
+                # вместе с ним — файл переживает закрытие приложения.
+                # Честная политика: резерв не записался — деструктивных
+                # действий не делаем (отказ до первого стирания).
+                try:
+                    storage_backup_path = storage_backup.dump_backup(
+                        tail,
+                        self._last_storage_scan_base,
+                        found,
+                        fingerprints,
+                        restored_blobs=restored,
+                    )
+                except OSError as exc:
+                    raise BootloaderError(
+                        "Не удалось записать резервную копию хранилища "
+                        f"на ПК ({exc}) — запись отменена до стирания, "
+                        "устройство не повреждено"
+                    ) from exc
                 status(f"Резерв хранилища: {storage_backup_path}")
                 status(
                     f"Областей хранилища: {len(found)} "

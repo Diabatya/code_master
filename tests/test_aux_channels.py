@@ -23,6 +23,7 @@ from core.aux_channels import (
     migrate_rules,
     quantize_pwm,
     resolve_aux_from_vars,
+    resolve_rule_actions,
     to_legacy_channel,
     to_new_channel,
 )
@@ -247,3 +248,95 @@ class TestResolveAuxFromVars:
     def test_no_use_var_noop(self) -> None:
         action = {"aux_channel": 3, "aux_mode": "off"}
         assert resolve_aux_from_vars(action, self._vars()) is action
+
+
+class TestResolveRuleActionsCMN10:
+    """Резолв «из настроек выхода» обязан покрывать КАЖДОЕ действие
+    каждого правила — и список actions[], и легаси action — чтобы
+    JSON-снимок, хвост FLXB и PC-runtime несли одинаковые применённые
+    параметры (CM-N10)."""
+
+    @staticmethod
+    def _vars() -> list[dict]:
+        return [
+            {"type": "aux", "channel": 2, "out_mode": "pwm",
+             "pwm_freq": 50, "pwm_duty": 25},
+            {"type": "aux", "channel": 3, "out_mode": "off"},
+        ]
+
+    def test_every_action_in_list_resolved(self) -> None:
+        rule = {
+            "title": "R",
+            "actions": [
+                {"type": "aux", "aux_enabled": True,
+                 "aux_use_var": True, "aux_channel": 2,
+                 "aux_mode": "on"},
+                {"type": "aux", "aux_enabled": True,
+                 "aux_use_var": True, "aux_channel": 3,
+                 "aux_mode": "on"},
+                # Явный override — не трогаем.
+                {"type": "aux", "aux_enabled": True,
+                 "aux_channel": 5, "aux_mode": "pwm",
+                 "aux_pwm_freq": 100, "aux_pwm_duty": 10},
+            ],
+        }
+        out = resolve_rule_actions(rule, self._vars())
+        a0, a1, a2 = out["actions"]
+        assert a0["aux_mode"] == "pwm"
+        assert a0["aux_pwm_freq"] == 50 and a0["aux_pwm_duty"] == 25
+        assert a1["aux_mode"] == "off"
+        assert a2["aux_mode"] == "pwm" and a2["aux_pwm_freq"] == 100
+        # Входное правило не мутировано — редактор видит исходные
+        # «из настроек выхода», а не запечённые параметры.
+        assert rule["actions"][0]["aux_mode"] == "on"
+
+    def test_legacy_action_resolved_too(self) -> None:
+        rule = {
+            "actions": [{"aux_use_var": True, "aux_channel": 2,
+                         "aux_mode": "on"}],
+            "action": {"aux_use_var": True, "aux_channel": 2,
+                       "aux_mode": "on"},
+        }
+        out = resolve_rule_actions(rule, self._vars())
+        assert out["actions"][0]["aux_mode"] == "pwm"
+        assert out["action"]["aux_mode"] == "pwm"
+
+    def test_json_and_tail_share_snapshot(self) -> None:
+        """build_flex_blob на резолвнутых правилах: JSON-часть и
+        исполняемый хвост несут одинаковые параметры ШИМ."""
+        import json as _json
+
+        from core.flex_compiler import (
+            build_flex_blob,
+            parse_flex_blob,
+        )
+        from core.trigger_protocol import unpack_trigger
+
+        rule = {
+            "title": "PWM", "active": True,
+            "events": [{"type": "frame", "id": "100",
+                        "data": "01", "channel": 0}],
+            "conditions": [{"type": "none"}],
+            "actions": [{
+                "type": "aux", "aux_enabled": True,
+                "aux_use_var": True, "aux_channel": 2,
+                "aux_mode": "on",
+            }],
+        }
+        resolved = resolve_rule_actions(rule, self._vars())
+        blob = build_flex_blob([resolved], protocol=13)
+        parsed = parse_flex_blob(blob)
+        assert parsed is not None
+        json_part, count = parsed
+        doc = _json.loads(json_part.decode("utf-8"))
+        j_action = doc["rules"][0]["actions"][0]
+        assert j_action["aux_mode"] == "pwm"
+        assert j_action["aux_pwm_freq"] == 50
+        assert j_action["aux_pwm_duty"] == 25
+        # Хвост: запись несёт те же применённые параметры.
+        rec_off = 12 + int.from_bytes(blob[8:12], "little")
+        rec = unpack_trigger(blob[rec_off:rec_off + 90])
+        assert rec["tx_aux"] and rec["tx_dlc"] == 3
+        data = rec["tx_data"]
+        assert int.from_bytes(data[0:2], "little") == 50
+        assert data[2] == 25

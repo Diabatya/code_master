@@ -165,6 +165,7 @@ def plan_storage_relocation(
     page_size: int = STORE_PAGE,
     flash_end: int = FLASH_END_ADDR,
     write_limit: int = EVENT_LOG_ADDR,
+    force_write: set[str] | frozenset[str] = frozenset(),
 ) -> dict:
     """План пересадки маркерных областей под новый образ кода.
 
@@ -186,6 +187,11 @@ def plan_storage_relocation(
     накрытые образом или целью пересадки, помечаются dropped —
     актуальные данные при этом не теряются.
 
+    force_write — виды областей, которые обязаны попасть в moves даже
+    если целевой адрес совпадает с исходным: области, поднятые из
+    PC-резерва после обрыва обновления (CM-N9), — физически их страницы
+    могут быть стёрты, поэтому «оставить на месте» недопустимо.
+
     Возвращает dict:
       moves:    [(orig_addr, dst_addr, blob)] — записать после кода;
       keep:     [(addr, blob)] — области, остающиеся на месте (их
@@ -195,6 +201,10 @@ def plan_storage_relocation(
       warnings: [str] — нефатальные замечания (битый payload и пр.).
     Raises StoragePlanError: область сохранить невозможно (нет места,
       фиксированный адрес занят образом и т.п.) — запись отменяется.
+    Инвариант: каждая актуальная (новейшее поколение) область ровно
+    один раз оказывается в moves или keep — «область есть, но в плане
+    нет» недопустимо (CM-N8). В финале вся карта целей проверяется на
+    пересечения и границы.
     """
     code_end = -(-(code_addr + code_len) // page_size) * page_size
     img_lo, img_hi = code_addr, code_end
@@ -248,7 +258,10 @@ def plan_storage_relocation(
                     f"{kind}: цель пересадки 0x{dst:08X} накрывает "
                     f"живую область 0x{addr2:08X} — план противоречив"
                 )
-        if dst != addr:
+        if dst != addr or kind in force_write:
+            # force_write: область поднята из резерва ПК — её страницы
+            # физически могут быть стёрты, поэтому она должна попасть
+            # в moves и быть записана, даже если адрес прежний (CM-N9).
             moves.append((addr, dst, blob))
         else:
             keep.append((addr, blob))
@@ -296,33 +309,146 @@ def plan_storage_relocation(
         place(addr, blob, flex_dst, "flex")
         flex_end_new = flex_dst + len(blob)
 
-    # 3. VARH — прижата к верху Flash, движению не подлежит.
+    # 3. VARH — прижата к верху Flash. В семантике прошивки цепочка
+    #    занимает ВЕСЬ спан [base, FLASH_END) (storage.c: s_var.end =
+    #    STORE_FLASH_END — старшие поколения append-записи лежат выше
+    #    base), поэтому «оставить на месте» допустимо только когда все
+    #    назначенные цели лежат ниже её base — иначе цель пересадки
+    #    молча сотрёт живой блок (CM-N8).
     var_base = flash_end
     if "var" in newest:
         addr, blob = newest["var"]
-        if _spans_overlap(addr, addr + len(blob), img_lo, img_hi):
-            raise StoragePlanError(
-                f"VARH @0x{addr:08X} накрыт новым образом — область "
-                "привязана к концу Flash и пересадке не подлежит; "
-                "обновление отменено"
+        conflict = any(
+            _spans_overlap(addr, flash_end, o_lo, o_hi)
+            for o_lo, o_hi in occupied
+        )
+        if conflict or "var" in force_write:
+            # Пересадка на самый высокий записываемый адрес — каноника
+            # «у верха Flash». Для CDC-пути верх записи ограничен
+            # AN3155 (write_limit); нет места — честный отказ, а не
+            # молчаливая потеря данных. Без конфликта с картой
+            # force_write-область (из резерва ПК) перезаписывается по
+            # прежнему адресу, если он достижим для записи.
+            dst = (
+                addr
+                if not conflict and addr + len(blob) <= write_limit
+                else min(write_limit, flash_end) - len(blob)
             )
-        try_keep(addr, blob, "var")
+            if dst < img_hi:
+                raise StoragePlanError(
+                    f"VARH @0x{addr:08X} конфликтует с картой "
+                    "размещения, а пересадка у верхней границы "
+                    f"(0x{dst:08X}) накрывает образ — обновление "
+                    "отменено"
+                )
+            for o_lo, o_hi in occupied:
+                if _spans_overlap(dst, dst + len(blob), o_lo, o_hi):
+                    raise StoragePlanError(
+                        f"VARH: цель пересадки 0x{dst:08X} накрывает "
+                        f"занятую область 0x{o_lo:08X}–0x{o_hi:08X} — "
+                        "обновление отменено"
+                    )
+            moves.append((addr, dst, blob))
+            addr = dst
+            if not region_payload_ok(blob):
+                warnings.append(
+                    f"var @0x{addr:08X}: CRC32 полезной нагрузки не "
+                    "сошёлся — область перенесена дословно, прошивка "
+                    "проигнорирует её при чтении"
+                )
+        else:
+            keep.append((addr, blob))
+            if not region_payload_ok(blob):
+                warnings.append(
+                    f"var @0x{addr:08X}: CRC32 полезной нагрузки не "
+                    "сошёлся — область оставлена на месте"
+                )
+        # Полный спан цепочки — резерв для будущих целей TRGH/EVLH.
+        occupied.append((addr, flash_end))
         var_base = addr
 
     # 4. Центр зазора — якорь TRGH (конец) и EVLH (начало).
     center = _gap_center(flex_end_new, var_base, page_size)
 
     # 5. TRGH — остаётся или садится концом на новый центр.
+    #    force_write (область из резерва ПК): обязательно в moves —
+    #    по прежнему адресу, если он свободен и записываем, иначе на
+    #    каноничную цель.
     if "trgh" in newest:
         addr, blob = newest["trgh"]
-        if not try_keep(addr, blob, "trgh"):
+        if "trgh" in force_write:
+            place(addr, blob, addr, "trgh") \
+                if addr + len(blob) <= write_limit \
+                and not any(
+                    _spans_overlap(addr, addr + len(blob), o_lo, o_hi)
+                    for o_lo, o_hi in occupied
+                ) \
+                else place(addr, blob, center - len(blob), "trgh")
+        elif not try_keep(addr, blob, "trgh"):
             place(addr, blob, center - len(blob), "trgh")
 
     # 6. EVLH — остаётся или начинается с нового центра.
     if "evlog" in newest:
         addr, blob = newest["evlog"]
-        if not try_keep(addr, blob, "evlog"):
+        if "evlog" in force_write:
+            place(addr, blob, addr, "evlog") \
+                if addr + len(blob) <= write_limit \
+                and not any(
+                    _spans_overlap(addr, addr + len(blob), o_lo, o_hi)
+                    for o_lo, o_hi in occupied
+                ) \
+                else place(addr, blob, center, "evlog")
+        elif not try_keep(addr, blob, "evlog"):
             place(addr, blob, center, "evlog")
+
+    # Инвариант итоговой карты (CM-N8): каждая актуальная область
+    # ровно один раз в moves/keep; все цели попарно не пересекаются и
+    # лежат в границах. Спан VARH учитывается до конца Flash — как в
+    # прошивке (s_var.end = STORE_FLASH_END).
+    # Резерв CFGH (cfg_slot) в финальную карту не входит: сама
+    # область CFGH размещается ровно на этом спане, а «резерв без
+    # области» уже защищён проверками occupied при размещении.
+    spans: list[tuple[int, int, str]] = [(img_lo, img_hi, "образ")]
+    placed: set[str] = set()
+    for _orig, dst, blob in moves:
+        kind = region_kind(blob)
+        placed.add(kind)
+        if dst + len(blob) > write_limit:
+            raise StoragePlanError(
+                f"{kind}: цель 0x{dst:08X}–0x{dst + len(blob):08X} "
+                f"выше границы записи 0x{write_limit:08X} — "
+                "обновление отменено"
+            )
+        spans.append(
+            (dst, flash_end if kind == "var" else dst + len(blob), kind)
+        )
+    for a, blob in keep:
+        kind = region_kind(blob)
+        placed.add(kind)
+        if a + len(blob) > flash_end:
+            raise StoragePlanError(
+                f"{kind}: область 0x{a:08X}–0x{a + len(blob):08X} "
+                f"выходит за конец Flash 0x{flash_end:08X} — "
+                "обновление отменено"
+            )
+        spans.append(
+            (a, flash_end if kind == "var" else a + len(blob), kind)
+        )
+    for kind in newest:
+        if kind not in placed:
+            raise StoragePlanError(
+                f"{kind}: актуальная область не попала в план "
+                "размещения — обновление отменено (молчаливая потеря "
+                "данных недопустима)"
+            )
+    spans.sort()
+    for (lo1, hi1, k1), (lo2, hi2, k2) in zip(spans, spans[1:], strict=False):
+        if lo2 < hi1:
+            raise StoragePlanError(
+                f"карта размещения противоречива: {k1} "
+                f"(0x{lo1:08X}–0x{hi1:08X}) пересекается с {k2} "
+                f"(0x{lo2:08X}–0x{hi2:08X}) — обновление отменено"
+            )
 
     return {
         "moves": sorted(moves, key=lambda m: m[1]),

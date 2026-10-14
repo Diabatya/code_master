@@ -40,7 +40,7 @@ from core.aux_channels import (
     AUX_MAP_VERSION,
     migrate_aux_variables,
     migrate_rules,
-    resolve_aux_from_vars,
+    resolve_rule_actions,
 )
 from core.flex_compiler import (
     analyze_device_flex,
@@ -2182,14 +2182,11 @@ class SettingsWindow(QMainWindow):
                 self._variables_tab, "aux_channel_configs", None
             )
             aux_cfgs = _aux_cfgs_fn() if callable(_aux_cfgs_fn) else []
+            # Резолвится КАЖДОЕ действие списка actions (его читает
+            # компилятор) и легаси action — JSON-снимок и хвост FLXB
+            # несут одинаковые применённые параметры (CM-N10).
             rules_for_blob = [
-                {
-                    **rule,
-                    "action": resolve_aux_from_vars(
-                        rule.get("action") or {}, aux_cfgs
-                    ),
-                }
-                for rule in rules
+                resolve_rule_actions(rule, aux_cfgs) for rule in rules
             ]
             flex_blob = build_flex_blob(rules_for_blob, protocol=proto)
         else:

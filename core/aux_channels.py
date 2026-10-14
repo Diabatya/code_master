@@ -230,6 +230,29 @@ def resolve_aux_from_vars(
     return action
 
 
+def resolve_rule_actions(
+    rule: dict[str, Any], aux_configs: list[dict[str, Any]] | None
+) -> dict[str, Any]:
+    """Правило с резолвом «из настроек выхода» в КАЖДОМ действии.
+
+    get_config отдаёт два представления действий: канонический список
+    ``actions`` (его читает компилятор) и легаси-объединённый
+    ``action`` (его читает PC-runtime). Резолвить надо оба — иначе
+    исполняемый хвост FLXB и JSON-снимок расходятся (CM-N10).
+    Возвращает новый dict — входное правило не мутируется."""
+    out = dict(rule)
+    actions = rule.get("actions")
+    if isinstance(actions, list) and actions:
+        out["actions"] = [
+            resolve_aux_from_vars(a, aux_configs) if isinstance(a, dict) else a
+            for a in actions
+        ]
+    legacy = rule.get("action")
+    if isinstance(legacy, dict) and legacy:
+        out["action"] = resolve_aux_from_vars(legacy, aux_configs)
+    return out
+
+
 def _int(value: Any) -> int:
     try:
         return int(value or 0)

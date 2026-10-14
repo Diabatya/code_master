@@ -3993,6 +3993,12 @@ class FlexibleLogicTab(QWidget):
         # полей сюда не попадают, программа отрабатывает по
         # записанной в камень версии (отчёт мастера).
         self._runtime_rules: list[dict[str, Any]] = []
+        # Снимок настроек выхода доп. каналов, действовавший при
+        # фиксации runtime-правил: «из настроек выхода» резолвится по
+        # нему — черновые правки вкладки «Переменные» не должны менять
+        # параметры уже сохранённой программы без явной перезаписи
+        # (CM-N10). Обновляется вместе с _runtime_rules.
+        self._runtime_aux_configs: list[dict[str, Any]] = []
         # Индексы программ, исполняемых камнем (скомпилированы в
         # записи FLXB, прошивка protocol>=12): приложение их не
         # исполняет — иначе действие отрабатывало бы дважды
@@ -4211,6 +4217,7 @@ class FlexibleLogicTab(QWidget):
             # (ревью CM-R12).
             self._new_exec_generation()
         self._runtime_rules = new_runtime
+        self._runtime_aux_configs = self._aux_configs()
         self._refresh_device_managed()
         self._rule_counters = [0] * len(rules)
         self._rebuild_rows()
@@ -4288,6 +4295,10 @@ class FlexibleLogicTab(QWidget):
             # на МК), не исполняются на ПК повторно (ревью CM-R12).
             self._new_exec_generation()
         self._runtime_rules = new_runtime
+        # Момент применения «из настроек выхода» — запись в камень:
+        # снимок настроек фиксируется здесь, черновые правки
+        # переменных позже не меняют исполняемые параметры (CM-N10).
+        self._runtime_aux_configs = self._aux_configs()
         self._config.set("flexible_rules_active", self._runtime_rules)
         self._refresh_device_managed()
         self._rules_dirty = True
@@ -4531,6 +4542,7 @@ class FlexibleLogicTab(QWidget):
                 # имеют права стрелять под новым владением (CM-R12 п.5).
                 self._new_exec_generation()
                 self._runtime_rules = [dict(r) for r in rules]
+                self._runtime_aux_configs = self._aux_configs()
                 self._config.set(
                     "flexible_rules_active", self._runtime_rules
                 )
@@ -5454,8 +5466,12 @@ class FlexibleLogicTab(QWidget):
             # CM-N7: «из настроек выхода» — режим и ШИМ-параметры
             # берутся из настроек выхода переменной этого канала
             # (вкладка «Переменные»); без переменной — явный
-            # override действия.
-            action = resolve_aux_from_vars(action, self._aux_configs())
+            # override действия. CM-N10: резолв по снимку момента
+            # записи — черновые правки «Переменных» не меняют
+            # сохранённую программу.
+            action = resolve_aux_from_vars(
+                action, self._runtime_aux_configs
+            )
             aux_delay = int(action.get("aux_delay", 0) or 0)
             channel = int(action.get("aux_channel", 1) or 1)
             mode_name = str(action.get("aux_mode", "on"))
