@@ -6,7 +6,6 @@ import json
 
 from core.flex_compiler import (
     FLEX_BLOB_MAGIC,
-    FLEX_BLOB_VERSION,
     FLEX_MAX_RECORDS,
     analyze_device_flex,
     build_flex_blob,
@@ -331,7 +330,7 @@ def test_extract_flex_json_broken_container() -> None:
     """Повреждённый FLXB (невалидный заголовок) возвращается целиком —
     JSON-парсер вызывающего явно откажет, а не съест мусор."""
     blob = bytearray(build_flex_blob([_rule()]))
-    blob[4] = FLEX_BLOB_VERSION + 1
+    blob[4] = 0xEE  # заведомо невалидная версия (v1/v2 — легальны)
     assert extract_flex_json(bytes(blob)) == bytes(blob)
 
 

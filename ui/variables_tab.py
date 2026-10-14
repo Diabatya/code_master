@@ -49,7 +49,9 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QRegularExpressionValidator
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -76,7 +78,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.aux_channels import AUX_PINS, migrate_aux_variables
 from core.can_protocol import pack_can_frame
+from core import steering_decoder
 from models.config import (
     Config,
     pack_config_file,
@@ -123,7 +127,7 @@ def _tokens_match(tokens: list[str], data: bytes) -> bool:
 # «Config Variable» (отчёт мастера); вид конфига и устройство хранятся
 # ВНУТРИ файла, имя свободное.
 _CONFIG_INFO_KIND = "codemaster_config_info"
-_CONFIG_INFO_VERSION = 2
+_CONFIG_INFO_VERSION = 3  # 3 = новая разметка номеров доп. каналов (CM-HW-02)
 _CONFIG_INFO_NAME = "Config Variable.kmc"
 
 
@@ -856,6 +860,184 @@ def _parse_axis_value(text: str) -> float | None:
     return None
 
 
+class _SteeringDecoderDialog(QDialog):
+    """Декодер угла поворота руля по кратности сырого значения
+    (CM-HW-04): таблица делителей 2..20 с независимым выбором класса
+    «+»/«−» в каждой строке, код нейтрали, направление и калибровка
+    «|сырое| → |градусы|».
+
+    Выбор байтов и порядок старшинства задаёт переменная (DATA от/до +
+    SBLP) — диалог работает с уже собранным целым значением."""
+
+    def __init__(self, cfg: dict[str, Any], font: QFont,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        from core import steering_decoder as sd
+
+        conf = sd.normalize_config(cfg)
+        self.setWindowTitle(tr("Декодер угла руля"))
+        self.setModal(True)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+
+        hint = QLabel(tr(
+            "Класс значения — по делителям: кратное одному из делителей "
+            "класса «+»/«−» принадлежит ему; совпадение в обоих — "
+            "конфликт (невалидно), ни в одном — «вне классов». Угол "
+            "— только из калибровки, без неё статус «нет калибровки»."
+        ))
+        hint.setFont(font)
+        hint.setWordWrap(True)
+        _selectable(hint)
+        layout.addWidget(hint)
+
+        # Таблица делителей: DEC | HEX | класс (—/+/−), строки
+        # независимы — правка одной не трогает остальные.
+        layout.addWidget(QLabel(tr("Делители (2…20):")))
+        self._div_table = QTableWidget(19, 4)
+        self._div_table.setFont(font)
+        self._div_table.setHorizontalHeaderLabels(
+            [tr("Делитель"), "HEX", "«+»", "«−»"]
+        )
+        self._div_table.verticalHeader().setVisible(False)
+        self._div_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        pos = set(conf["divisors_pos"])
+        neg = set(conf["divisors_neg"])
+        self._div_radios: list[tuple[int, QRadioButton, QRadioButton]] = []
+        for i, div in enumerate(range(sd.DIVISOR_MIN, sd.DIVISOR_MAX + 1)):
+            item = QTableWidgetItem(str(div))
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._div_table.setItem(i, 0, item)
+            hx = QTableWidgetItem(f"0x{div:X}")
+            hx.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._div_table.setItem(i, 1, hx)
+            group = QButtonGroup(self._div_table)
+            rb_pos = QRadioButton()
+            rb_neg = QRadioButton()
+            rb_none = QRadioButton()
+            rb_none.setChecked(True)
+            for b in (rb_pos, rb_neg, rb_none):
+                group.addButton(b)
+            if div in pos:
+                rb_pos.setChecked(True)
+            elif div in neg:
+                rb_neg.setChecked(True)
+            cell_p = QWidget()
+            lay_p = QHBoxLayout(cell_p)
+            lay_p.setContentsMargins(0, 0, 0, 0)
+            lay_p.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay_p.addWidget(rb_pos)
+            cell_n = QWidget()
+            lay_n = QHBoxLayout(cell_n)
+            lay_n.setContentsMargins(0, 0, 0, 0)
+            lay_n.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay_n.addWidget(rb_neg)
+            self._div_table.setCellWidget(i, 2, cell_p)
+            self._div_table.setCellWidget(i, 3, cell_n)
+            self._div_radios.append((div, rb_pos, rb_neg))
+        self._div_table.resizeColumnsToContents()
+        self._div_table.setFixedHeight(210)
+        layout.addWidget(self._div_table)
+
+        misc = QHBoxLayout()
+        misc.addWidget(QLabel(tr("Код нейтрали:")))
+        self._neutral = QLineEdit(str(conf["neutral"]))
+        self._neutral.setFont(font)
+        self._neutral.setFixedWidth(90)
+        self._neutral.setToolTip(
+            tr("DEC или HEX (0x…): сырое значение, равное коду, "
+               "декодируется как 0°")
+        )
+        misc.addWidget(self._neutral)
+        self._dir_left = QCheckBox(tr("«−» — поворот влево"))
+        self._dir_left.setFont(font)
+        self._dir_left.setChecked(conf["left_is_negative"])
+        self._dir_left.setToolTip(
+            tr("Снята — отрицательный класс показывается положительными "
+               "градусами (правый руль/иная ориентация датчика)")
+        )
+        misc.addWidget(self._dir_left)
+        misc.addStretch()
+        layout.addLayout(misc)
+
+        # Калибровка: |сырое| → |градусы|; DEC или HEX (0x…).
+        cal_row = QHBoxLayout()
+        cal_row.addWidget(QLabel(tr("Калибровка |сырое| → |°|:")))
+        self._interp = QCheckBox(tr("интерполяция между точками"))
+        self._interp.setFont(font)
+        self._interp.setChecked(conf["interpolate"])
+        cal_row.addWidget(self._interp)
+        cal_row.addStretch()
+        layout.addLayout(cal_row)
+        self._calib_table = QTableWidget(0, 2)
+        self._calib_table.setFont(font)
+        self._calib_table.setHorizontalHeaderLabels(
+            [tr("|сырое| (DEC/HEX)"), tr("|угол| °")]
+        )
+        self._calib_table.horizontalHeader().setStretchLastSection(True)
+        self._calib_table.setFixedHeight(120)
+        for x, y in conf["calib"]:
+            r = self._calib_table.rowCount()
+            self._calib_table.insertRow(r)
+            self._calib_table.setItem(r, 0, QTableWidgetItem(f"{x:g}"))
+            self._calib_table.setItem(r, 1, QTableWidgetItem(f"{y:g}"))
+        layout.addWidget(self._calib_table)
+        add_row = QHBoxLayout()
+        add_btn = QPushButton(tr("＋ точка"))
+        add_btn.setFont(font)
+        add_btn.clicked.connect(lambda: self._calib_table.insertRow(
+            self._calib_table.rowCount()
+        ))
+        add_row.addWidget(add_btn)
+        add_row.addStretch()
+        layout.addLayout(add_row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._conf = conf
+
+    def config(self) -> dict[str, Any]:
+        """Нормализованная конфигурация декодера из полей диалога."""
+        cfg = dict(self._conf)
+        pos, neg = [], []
+        for div, rb_pos, rb_neg in self._div_radios:
+            if rb_pos.isChecked():
+                pos.append(div)
+            elif rb_neg.isChecked():
+                neg.append(div)
+        cfg["divisors_pos"] = pos
+        cfg["divisors_neg"] = neg
+        try:
+            text = self._neutral.text().strip()
+            cfg["neutral"] = (
+                int(text, 16)
+                if text.lower().startswith("0x") else int(text)
+            )
+        except ValueError:
+            pass
+        cfg["left_is_negative"] = self._dir_left.isChecked()
+        cfg["interpolate"] = self._interp.isChecked()
+        calib: list[tuple[float, float]] = []
+        for r in range(self._calib_table.rowCount()):
+            xi = self._calib_table.item(r, 0)
+            yi = self._calib_table.item(r, 1)
+            if xi is None or yi is None:
+                continue
+            x = _parse_axis_value(xi.text())
+            y = _parse_axis_value(yi.text())
+            if x is not None and y is not None:
+                calib.append((x, y))
+        cfg["calib"] = calib
+        return cfg
+
+
 class _HoverTip(QLabel):
     """Плавно появляющаяся закруглённая табличка-подсказка над
     графиком (отчёт мастера: не «выскакивает резко»)."""
@@ -1435,13 +1617,23 @@ class _ValuePage(QWidget):
             self.out_range.setFont(font)
             self.out_range.addItem(tr("От 0 до бесконечности (∞)"), "inf")
             self.out_range.addItem(tr("Градусы"), "degrees")
+            self.out_range.addItem(tr("Угол руля (кратность)"), "steering")
             self.out_range.setToolTip(
                 tr("Допустимый диапазон выводимого числа")
             )
             self.out_range.currentIndexChanged.connect(
-                lambda _i: self._on_edits_changed()
+                lambda _i: self._on_out_range_changed()
             )
             line1.addWidget(self.out_range)
+            self.steering_cfg: dict[str, Any] = {}
+            self.steering_btn = QPushButton(tr("Декодер…"))
+            self.steering_btn.setFont(font)
+            self.steering_btn.setFixedHeight(28)
+            self.steering_btn.setToolTip(tr(
+                "Делители, нейтраль и калибровка угла поворота руля"
+            ))
+            self.steering_btn.clicked.connect(self._edit_steering)
+            line1.addWidget(self.steering_btn)
         line1.addStretch()
         layout.addLayout(line1)
 
@@ -1646,12 +1838,34 @@ class _ValuePage(QWidget):
         # Начальное состояние SBLP: без двух байтов в вычислении
         # кнопка неактивна (отчёт мастера).
         self._update_sblp_enabled()
+        self._update_steering_btn()
 
     # ---- внутреннее -----------------------------------------------------
 
     def _emit_changed(self) -> None:
         if self._on_changed is not None:
             self._on_changed()
+
+    def _on_out_range_changed(self) -> None:
+        self._update_steering_btn()
+        self._on_edits_changed()
+
+    def _edit_steering(self) -> None:
+        """Диалог настройки декодера угла руля (CM-HW-04)."""
+        dialog = _SteeringDecoderDialog(
+            self.steering_cfg, self.font(), self
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.steering_cfg = dialog.config()
+            self._emit_changed()
+
+    def _update_steering_btn(self) -> None:
+        """Кнопка «Декодер…» видна только в режиме угла руля —
+        выбор делителей не трогает остальные режимы."""
+        if getattr(self, "steering_btn", None) is not None:
+            self.steering_btn.setVisible(
+                self.out_range.currentData() == "steering"
+            )
 
     def _set_sblp(self, mode: str) -> None:
         """Переключает режим SBLP: повторный клик по выбранному
@@ -1820,7 +2034,7 @@ class _ValuePage(QWidget):
             ok = bool(self._HEX_CELL_RE.match(text))
             unbounded = (
                 getattr(self, "out_range", None) is not None
-                and self.out_range.currentData() in ("inf", "degrees")
+                and self.out_range.currentData() in ("inf", "degrees", "steering")
             )
             if ok and self._kind == "numeric" and text and not unbounded:
                 value = self._point_raw(text)
@@ -1892,7 +2106,7 @@ class _ValuePage(QWidget):
         # (отчёт мастера).
         unbounded = (
             getattr(self, "out_range", None) is not None
-            and self.out_range.currentData() in ("inf", "degrees")
+            and self.out_range.currentData() in ("inf", "degrees", "steering")
         )
         out_of_range = False
         for row in range(self.points_table.rowCount()):
@@ -1988,6 +2202,8 @@ class _ValuePage(QWidget):
                 out_mode = "degrees"
             idx = self.out_range.findData(out_mode)
             self.out_range.setCurrentIndex(idx if idx >= 0 else 0)
+            self.steering_cfg = dict(config.get("steering") or {})
+            self._update_steering_btn()
         self.points_table.setRowCount(0)
         for point in config.get("points") or []:
             try:
@@ -2021,6 +2237,8 @@ class _ValuePage(QWidget):
         if self._kind == "numeric":
             cfg["sblp"] = self._sblp
             cfg["out_range"] = str(self.out_range.currentData() or "inf")
+            if cfg["out_range"] == "steering" or self.steering_cfg:
+                cfg["steering"] = dict(self.steering_cfg)
             cfg["points"] = self.read_points()
         else:
             # «Динамическая переменная»: пары (сырое значение, имя).
@@ -3333,6 +3551,141 @@ _AUX_FUNCTIONS = (
 _TYPE_FLAG = "flag"
 
 
+class _AuxChannelsDialog(QDialog):
+    """Состояние семи каналов выхода с устройства (CMD_AUX_GET) и
+    владение спорными пинами (CMD_AUX_MAP) — протокол 13.
+
+    Строки: канал (новая нумерация), физический пин, режим AUX_MODE_*,
+    «работает» (логическое состояние — ШИМ в нуле и 0% duty считаются
+    активными), уровень на пине. Спорные пины PA14/PD2/PB3 отдаются
+    каналам галочками владения; снятая галочка возвращает пин
+    SWD/TERM-функции. Маска хранится в CFGH — переживает перезагрузку
+    и обновление."""
+
+    _SHARED = (  # (канал, бит владения, чем делится пин)
+        (1, 0x01, "SWD (SWCLK)"),
+        (6, 0x20, "CAN2 TERM"),
+        (7, 0x40, "CAN1 TERM"),
+    )
+    _MODES = ("off", "on", "pulse", "pwm")
+
+    def __init__(self, serial_manager, font: QFont,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._sm = serial_manager
+        self.setWindowTitle(tr("Каналы выхода устройства"))
+        self.setMinimumWidth(430)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        state = serial_manager.read_aux_state() if serial_manager else None
+        if state is None:
+            hint = QLabel(tr(
+                "Устройство не поддерживает расширенные каналы "
+                "(протокол 13) или не отвечает — обновите прошивку."
+            ))
+            hint.setFont(font)
+            hint.setWordWrap(True)
+            _selectable(hint)
+            layout.addWidget(hint)
+            close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            close.rejected.connect(self.reject)
+            close.clicked.connect(self.reject)
+            layout.addWidget(close)
+            return
+
+        owned = state["owned"]
+        active = state["active"]
+        level = state["level"]
+        modes = state["modes"]
+
+        table = QTableWidget(7, 5)
+        table.setFont(font)
+        table.setHorizontalHeaderLabels(
+            [tr("Канал"), tr("Пин"), tr("Режим"), tr("Работает"),
+             tr("Уровень")]
+        )
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        for ch in range(1, 8):
+            r = ch - 1
+            mode = modes[r] if r < len(modes) else 0
+            cells = (
+                str(ch),
+                AUX_PINS[ch],
+                self._MODES[mode] if mode < len(self._MODES) else "?",
+                "✓" if active & (1 << r) else "—",
+                "1" if level & (1 << r) else "0",
+            )
+            for c, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(r, c, item)
+        table.resizeColumnsToContents()
+        table.setFixedHeight(
+            table.verticalHeader().defaultSectionSize() * 7
+            + table.horizontalHeader().height() + 4
+        )
+        layout.addWidget(table)
+
+        layout.addWidget(QLabel(tr("Владение спорными пинами:")))
+        self._own_checks: dict[int, QCheckBox] = {}
+        for ch, bit, conflict in self._SHARED:
+            cb = QCheckBox(
+                tr("{0} ({1}) — отдать каналу {2}: {1} отключён")
+                .format(AUX_PINS[ch], conflict, ch)
+            )
+            cb.setFont(font)
+            cb.setChecked(bool(owned & bit))
+            cb.setToolTip(tr(
+                "Снятая галочка возвращает пин функции {0}"
+            ).format(conflict))
+            layout.addWidget(cb)
+            self._own_checks[bit] = cb
+        warn = QLabel(tr(
+            "PA14 — отладочный SWCLK: после отдачи каналу прошивка по "
+            "SWD недоступна до перезагрузки с неотданным пином "
+            "(маска хранится в CFGH и применяется при старте)."
+        ))
+        warn.setFont(font)
+        warn.setWordWrap(True)
+        warn.setStyleSheet("color: #B03030;")
+        _selectable(warn)
+        layout.addWidget(warn)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Apply
+            | QDialogButtonBox.StandardButton.Close
+        )
+        apply_btn = buttons.button(QDialogButtonBox.StandardButton.Apply)
+        apply_btn.setText(tr("Применить владение"))
+        apply_btn.clicked.connect(self._apply_ownership)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _apply_ownership(self) -> None:
+        mask = 0
+        for bit, cb in self._own_checks.items():
+            if cb.isChecked():
+                mask |= bit
+        actual = self._sm.set_aux_pins_mask(mask)
+        if actual is None:
+            QMessageBox.warning(
+                self, tr("Владение пинами"),
+                tr("Команда CMD_AUX_MAP не подтверждена устройством")
+            )
+            return
+        for bit, cb in self._own_checks.items():
+            cb.setChecked(bool(actual & bit))
+        QMessageBox.information(
+            self, tr("Владение пинами"),
+            tr("Применено: маска 0x{0:02X}").format(actual)
+        )
+
+
 class _AuxDialog(QDialog):
     """Настройка строки третьей колонки («Дополнительные каналы
     входа, выхода и переменные» — отчёт мастера): имя + вид.
@@ -3385,7 +3738,9 @@ class _AuxDialog(QDialog):
         row.addWidget(QLabel(tr("Пин (канал):")))
         self._channel = QSpinBox()
         self._channel.setFont(font)
-        self._channel.setRange(1, 8)
+        # Семь выходов в новой нумерации (CM-HW-02, aux_channels.py):
+        # 1=PA14, 2=PA15, 3=PC10, 4=PC11, 5=PC12, 6=PD2, 7=PB3.
+        self._channel.setRange(1, 7)
         self._channel.setValue(int(config.get("channel", 1) or 1))
         self._channel.setFixedWidth(64)
         row.addWidget(self._channel)
@@ -4056,13 +4411,20 @@ class VariablesTab(QWidget):
         # размещает settings_window через save_variables_button.
         self._save_btn = QPushButton(tr("Сохранить переменные"))
         self._clear_btn = QPushButton(tr("Очистить"))
-        for btn in (self._save_btn, self._clear_btn):
+        self._aux_state_btn = QPushButton(tr("Каналы выхода…"))
+        self._aux_state_btn.setToolTip(tr(
+            "Состояние семи выходов с устройства и владение "
+            "спорными пинами PA14/PD2/PB3 (протокол 13)"
+        ))
+        for btn in (self._save_btn, self._clear_btn, self._aux_state_btn):
             btn.setFont(self._font)
             btn.setFixedHeight(30)
+        btn_row.addWidget(self._aux_state_btn)
         btn_row.addWidget(self._clear_btn)
         btn_row.addStretch()
         self._save_btn.clicked.connect(self._save_file)
         self._clear_btn.clicked.connect(self._clear_all)
+        self._aux_state_btn.clicked.connect(self._show_aux_channels)
         layout.addLayout(btn_row)
 
         self._hint = QLabel(tr(
@@ -4102,6 +4464,13 @@ class VariablesTab(QWidget):
         self._restore()
 
     # ---- онлайн-значения из CAN ----------------------------------------
+
+    def _show_aux_channels(self) -> None:
+        """Диалог состояния выходов: CMD_AUX_GET (режимы/уровни) +
+        CMD_AUX_MAP (владение спорными пинами) — CM-HW-02."""
+        _AuxChannelsDialog(
+            self._serial_manager, self._font, self
+        ).exec()
 
     def _on_can_frames(self, frames: list[dict[str, Any]]) -> None:
         """Пересчитывает значения байтовых переменных по приходящим
@@ -4264,6 +4633,26 @@ class VariablesTab(QWidget):
                             degrees = _degrees_decode(model, raw)
                             if degrees is not None:
                                 row.set_live_value(degrees, raw)
+                        elif cfg.get("out_range") == "steering":
+                            # «Угол руля»: класс по делителям
+                            # (кратность), нейтраль → 0°, градусы
+                            # только из калибровки; статус показываем
+                            # текстом при невалидном значении.
+                            res = steering_decoder.decode_raw(
+                                raw, cfg.get("steering")
+                            )
+                            if res["valid"]:
+                                row.set_live_value(
+                                    res["angle"], raw,
+                                    text=(
+                                        f'{res["angle"]:.1f}° '
+                                        f'({res["raw_hex"]})'
+                                    ),
+                                )
+                            else:
+                                row.set_live_value(
+                                    0.0, raw, text=tr(res["status"])
+                                )
                         else:
                             row.set_live_value(
                                 _map_points(points, raw), raw
@@ -4788,7 +5177,7 @@ class VariablesTab(QWidget):
         if (
             not isinstance(payload, dict)
             or payload.get("kind") != _CONFIG_INFO_KIND
-            or payload.get("format") not in (1, _CONFIG_INFO_VERSION)
+            or payload.get("format") not in (1, 2, _CONFIG_INFO_VERSION)
         ):
             if warn_format:
                 QMessageBox.warning(
@@ -4808,6 +5197,18 @@ class VariablesTab(QWidget):
             )
             return False
         variables = payload.get("variables") or {}
+        # Миграция разметки доп. каналов (CM-HW-02): файлы format<3
+        # хранят легаси-номера 1..4 — переводим, физический пин
+        # сохраняется.
+        try:
+            fmt = int(payload.get("format", 1) or 1)
+        except (TypeError, ValueError):
+            fmt = 1
+        if isinstance(variables, dict) and fmt < 3:
+            variables = dict(variables)
+            variables["aux"] = migrate_aux_variables(
+                variables.get("aux"), 1
+            )
         if isinstance(variables, dict):
             self.import_config(variables)
         notes = payload.get("id_notes")

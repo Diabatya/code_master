@@ -60,12 +60,20 @@ from core.firmware_utils import (
     validate_application_vector,
 )
 from core.can_protocol import (
+
     CFG_WRITE_TRAILER,
     CMD_CFG_READ,
     CMD_CFG_WRITE,
     DEVICE_TYPE_ANALOG,
     DEVICE_TYPE_BASIC,
     DEVICE_TYPE_CAN_FD,
+)
+# Маркерное хранилище (storage.c): области не имеют фиксированных
+# адресов — сканер вынесен в core/storage_scan.py, им пользуется и
+# CDC/UART-путь сохранения областей (Bootloader.flash_firmware).
+from core.storage_scan import (
+    STORE_PAGE as _STORE_PAGE,
+    find_storage_regions as _find_storage_regions,
 )
 from core.stm32_info import (
     APPLICATION_BASE_ADDR,
@@ -82,7 +90,6 @@ from core.stm32_info import (
     LEGACY_CONFIG_PAGE_ADDR,
     STM32_FLASH_SIZES,
     STM32_PAGE_SIZES,
-    TRIGGER_REGION_ADDR,
     build_app_metadata,
     build_device_config_page,
     merge_device_config_page,
@@ -145,66 +152,6 @@ def _flash_size_for_chip_id(chip_id: int | None) -> str:
     if chip_id is None:
         return tr("Неизвестно")
     return f"{CHIP_FLASH_SIZE_KB.get(chip_id, tr('Неизвестно'))} KB"
-
-
-# Маркерное хранилище (storage.c): области не имеют фиксированных
-# адресов — только 20-байтовый заголовок в начале страницы.
-_STORE_PAGE = 2048
-_STORE_MAGICS = (0x56415248, 0x464C5848, 0x45564C48, 0x43464748)
-# VARH, FLXH, EVLH, CFGH (настройки приложения сразу за кодом)
-_STORE_MAX_PAYLOAD = 48 * 1024
-_TRIG_HEADER_MAGIC = 0x54524748  # "TRGH"
-_TRIG_MAGIC_LEGACY = 0x54524732  # "TRG2"
-_TRIG_MAX_RECORDS = 70
-
-
-def _find_storage_regions(blob: bytes, base_addr: int) -> list[tuple[int, bytes]]:
-    """Сканирует дамп Flash постранично и возвращает [(addr, образ)] всех
-    валидных маркерных областей хранилища — для восстановления после
-    mass erase. TRGH (триггеры) имеет свой 16-байтовый заголовок, остальные
-    области — общий store_header_t (20 Б) с магиком VARH/FLXH/EVLH/CFGH.
-    Легаси-пул триггеров (записи TRG2 без заголовка) ищется по своему
-    фиксированному адресу и сохраняется целиком."""
-    from core.trigger_protocol import crc8
-
-    regions: list[tuple[int, bytes]] = []
-    for off in range(0, len(blob) - 19, _STORE_PAGE):
-        magic = int.from_bytes(blob[off : off + 4], "little")
-        if magic == _TRIG_HEADER_MAGIC:
-            version, count = blob[off + 4], blob[off + 5]
-            if (
-                version in (3, 4)
-                and count <= _TRIG_MAX_RECORDS
-                and crc8(blob[off : off + 15]) == blob[off + 15]
-            ):
-                stride = 90 if version == 4 else 82
-                size = -(-(16 + count * stride) // _STORE_PAGE) * _STORE_PAGE
-                if off + size <= len(blob):
-                    regions.append((base_addr + off, blob[off : off + size]))
-        elif magic in _STORE_MAGICS:
-            payload_len = int.from_bytes(blob[off + 8 : off + 12], "little")
-            version = int.from_bytes(blob[off + 16 : off + 18], "little")
-            if (
-                version == 1
-                and payload_len <= _STORE_MAX_PAYLOAD
-                and crc8(blob[off : off + 19]) == blob[off + 19]
-            ):
-                size = -(-(20 + payload_len) // _STORE_PAGE) * _STORE_PAGE
-                if off + size <= len(blob):
-                    regions.append((base_addr + off, blob[off : off + size]))
-    # Легаси-пул триггеров v2 — записи без заголовка по фиксированному
-    # адресу; сохраняем весь старый диапазон до конца Flash (прошивка
-    # при старте смигрирует записи в маркерную область).
-    legacy_off = TRIGGER_REGION_ADDR - base_addr
-    if (
-        0 <= legacy_off <= len(blob) - 4
-        and int.from_bytes(blob[legacy_off : legacy_off + 4], "little")
-        == _TRIG_MAGIC_LEGACY
-    ):
-        regions.append(
-            (TRIGGER_REGION_ADDR, blob[legacy_off : FLASH_END_ADDR - base_addr])
-        )
-    return regions
 
 
 def _format_chip_id(value: int | None) -> str:
@@ -1028,6 +975,7 @@ class FlashWorker(QThread):
                 regions = bl.flash_firmware(
                     bin_path, base, page_size=page_size, skip_blank=skip_blank,
                     status_callback=self.log_line.emit,
+                    preserve_storage=self._preserve_triggers,
                 )
                 if self._verify:
                     self.log_line.emit(
@@ -1091,6 +1039,7 @@ class FlashWorker(QThread):
                 regions = bl.flash_firmware(
                     bin_path, base, page_size=page_size, skip_blank=skip_blank,
                     status_callback=self.log_line.emit,
+                    preserve_storage=self._preserve_triggers,
                 )
                 if self._verify:
                     self.log_line.emit(

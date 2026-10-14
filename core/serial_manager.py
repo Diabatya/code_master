@@ -7,15 +7,21 @@ SerialManager инкапсулирует работу с pyserial.Serial (или
 import contextlib
 import threading
 import time
+from typing import Any
+
 from PySide6.QtCore import QObject, QThread, Signal, QTimer
 
+from core.aux_channels import to_legacy_channel
 from core.can_protocol import (
     CMD_CAN_MODE,
     CMD_CAN_SPEED,
     CMD_CAN_STATS,
     CMD_TRIGGER_COMMIT,
     CMD_TRIGGER_ENABLE,
+    CMD_AUX_GET,
+    CMD_AUX_MAP,
     CMD_AUX_SET,
+    CMD_AUX_SET_EXT,
     CMD_TRIGGER_NAME_COMMIT,
     CMD_TRIGGER_NAME_WRITE,
     CMD_TRIGGER_STAGE,
@@ -944,13 +950,42 @@ class SerialManager(QObject):
         pwm_duty_pct: int = 0,
         pwm_time_ms: int = 0,
     ) -> bool:
-        """CMD_AUX_SET: доп. канал OUT1-4 — вкл/выкл/импульсы/ШИМ.
+        """Доп. канал выхода — вкл/выкл/импульсы/ШИМ.
 
-        Пакет [0xD3][15][payload] уходит fire-and-forget через send_data:
-        ack ответа не нужен действию ГЛ, а само переключение GPIO дальше
-        делает МК автономно (aux_out.c), без связи с ПК. Пауза до начала
-        действия отрабатывается на стороне ПК через QTimer — сюда команда
-        приходит уже «в момент»."""
+        ``channel`` — номер в НОВОЙ нумерации протокола 13
+        (1=PA14, 2=PA15, 3=PC10, 4=PC11, 5=PC12, 6=PD2, 7=PB3 —
+        core/aux_channels.py). Прошивке протокола >=13 уходит
+        CMD_AUX_SET_EXT с тем же номером; протоколу <=12 — легаси
+        CMD_AUX_SET с переводом в старую разметку (новые 3/4/5/2 →
+        легаси 1/2/3/4 = те же физические пины PC10/PC11/PC12/PA15).
+        Каналы 1/6/7 на старой прошивке не существуют — False,
+        без молчаливой переадресации (CM-HW-02).
+
+        Пакет уходит fire-and-forget через send_data: ack ответа не
+        нужен действию ГЛ, а переключение GPIO дальше делает МК
+        автономно (aux_out.c), без связи с ПК. Пауза до начала
+        действия отрабатывается на стороне ПК через QTimer — сюда
+        команда приходит уже «в момент»."""
+        proto = self.device_protocol_version()
+        if proto >= 13:
+            cmd = CMD_AUX_SET_EXT
+        else:
+            legacy = to_legacy_channel(channel)
+            if legacy is None:
+                logger.info(
+                    "AUX: канал №%d недоступен на прошивке протокола %d "
+                    "— команда пропущена", channel, proto,
+                )
+                return False
+            channel = legacy
+            cmd = CMD_AUX_SET
+            # Легаси-контракт: срок работы — только у ШИМ; «вкл на
+            # время» старой прошивкой не выражается — честный отказ
+            # вместо молчаливого «навсегда».
+            if mode == 1 and pwm_time_ms:
+                return False
+            if mode == 3 and not pwm_duty_pct:
+                return False  # duty 0 старый контракт отвергал
         payload = (
             channel.to_bytes(1, "little")
             + mode.to_bytes(1, "little")
@@ -961,7 +996,48 @@ class SerialManager(QObject):
             + int(pwm_duty_pct).to_bytes(1, "little")
             + int(pwm_time_ms).to_bytes(4, "little")
         )
-        return self.send_data(bytes((CMD_AUX_SET, len(payload))) + payload)
+        return self.send_data(bytes((cmd, len(payload))) + payload)
+
+    def read_aux_state(self) -> dict[str, Any] | None:
+        """CMD_AUX_GET → состояние каналов новой нумерации.
+
+        Возвращает ``{owned, active, level, modes}`` (битовые маски и
+        список режимов AUX_MODE_* по каналам 1..7) или None — команда
+        не поддерживается (протокол <13) либо нет ответа. Локальному
+        зеркалу ПК предпочтительнее доверять камню: режим с авторолью
+        (импульсы, ШИМ со сроком) завершается без ПК."""
+        if self.device_protocol_version() < 13:
+            return None
+        try:
+            data = self.request_control(CMD_AUX_GET, b"")
+        except Exception:  # noqa: BLE001
+            return None
+        if not data or len(data) < 10:
+            return None
+        return {
+            "owned": data[0],
+            "active": data[1],
+            "level": data[2],
+            "modes": list(data[3:10]),
+        }
+
+    def set_aux_pins_mask(self, mask: int) -> int | None:
+        """CMD_AUX_MAP: владение спорными пинами PA14/PD2/PB3.
+
+        Записывает aux_pins_mask в CFGH (переживает перезагрузку и
+        обновление) и применяет на лету. Возвращает фактическую маску
+        владения из ответа или None при отказе/отсутствии поддержки."""
+        if self.device_protocol_version() < 13:
+            return None
+        try:
+            data = self.request_control(
+                CMD_AUX_MAP, bytes((int(mask) & 0xFF,))
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if not data:
+            return None
+        return data[0]
 
     def request_sys_reset(self) -> None:
         """CMD_SYS_RESET: перезагрузка устройства (кнопка «Перезагрузить

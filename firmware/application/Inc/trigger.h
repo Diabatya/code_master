@@ -92,6 +92,25 @@ extern "C" {
  * подставляются в ответ — в т.ч. в повторах серии (семантика ГЛ
  * «X = байт из пришедшего кадра»). Протокол 12. */
 #define TRIGGER_F_TX_EVENT_DATA 0x20U
+/* rx_flags бит 6 — событие перехода доп. канала (FLXB v2, протокол 13):
+ * rx_channel = канал 1..7, rx_dlc = 1 («канал включился» —
+ * OFF→ON/PWM/PULSE) или 2 («выключился» — активный→OFF, включая
+ * авто-выключение по сроку). Остальные rx-поля нулевые; кадры шины
+ * такую запись не возбуждают. Протокол 13. */
+#define TRIGGER_F_RX_AUX_EVENT 0x40U
+/* src_flags бит 2 — действие = команда доп. каналу (FLXB v2):
+ * tx_channel = канал 1..7, tx_dlc = режим AUX_MODE_*, параметры в
+ * tx_data: PWM — freq u16 [0..1], duty [2], duration u32 [3..6];
+ * PULSE — on u16 [0..1], off u16 [2..3], count u16 [4..5];
+ * ON — duration u32 [0..3]; OFF — без параметров. tx_count/interval
+ * для aux-команд = 1/0. Протокол 13. */
+#define TRIGGER_F_TX_AUX       0x04U
+/* src_flags бит 3 — условие по доп. каналу (FLXB v2, только при
+ * cache_enabled==0): src_channel = канал 1..7, src_dlc = 1 (условие
+ * «работает») или 2 («не работает»). Проверяется в момент события
+ * по логическому состоянию AuxOut_IsActive — низкая фаза ШИМ и ШИМ
+ * 0% остаются «работает». Протокол 13. */
+#define TRIGGER_F_COND_AUX     0x08U
 /* Предел по RAM, а не по пулу: триггеры, staging-буфер и кэши живут в
  * ОЗУ — 70 записей ≈ 3 страницы пула из 4 (четвёртая остаётся запасом
  * на рост записи/пула). При росте RAM-бюджета можно поднять до 99. */
@@ -108,6 +127,11 @@ extern "C" {
  * Ограничена RAM; переполнение считается в dropped-статистике, а не
  * теряет команду молча (ревью CM-R1). */
 #define FLEX_QUEUE_DEPTH      16U
+/* Бюджет разбора событий доп. каналов за один Trigger_Poll — защита
+ * от кольцевых программ ГЛ («вкл A → выкл B; выкл B → вкл A»): каскад
+ * обрезается до бюджета за проход, остальное ждёт следующего Poll.
+ * Протокол 13. */
+#define FLEX_AUX_EVENTS_PER_POLL 8U
 /* Легаси-регион v2: 49 слотов × 82 Б с 0x0803E000 (читается один раз
  * при миграции, затем страницы возвращаются в пул). */
 #define TRIGGER_LEGACY_ADDR   0x0803E000U
@@ -189,6 +213,12 @@ uint8_t Trigger_FlashValidCount(void);
  * arms any matching response (respecting its configured delay_ms). Must
  * be called from the main loop only, never from IRQ context. */
 void Trigger_OnFrame(const can_frame_t *frame);
+
+/* Событие перехода доп. канала (FLXB v2, протокол 13): матчит записи
+ * хвоста ГЛ с TRIGGER_F_RX_AUX_EVENT — channel 1..7, is_on = новое
+ * логическое состояние. Вызывается только из Trigger_Poll — бюджет
+ * каскада FLEX_AUX_EVENTS_PER_POLL ограничивает кольцевые программы. */
+void Trigger_OnAuxEvent(uint8_t channel, uint8_t is_on);
 
 /* Однократно вооружает все включённые триггеры с rx_flags&
  * TRIGGER_F_FIRE_ON_BOOT — «сработка после старта устройства».

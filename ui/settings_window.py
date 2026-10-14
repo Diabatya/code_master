@@ -36,6 +36,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.aux_channels import (
+    AUX_MAP_VERSION,
+    migrate_aux_variables,
+    migrate_rules,
+)
 from core.flex_compiler import (
     analyze_device_flex,
     build_flex_blob,
@@ -1850,6 +1855,9 @@ class SettingsWindow(QMainWindow):
             # (отчёт мастера: «опять привязываются переменные»).
             data = self._config.all()
             data.pop("variables", None)
+            # Пометка разметки номеров доп. каналов (CM-HW-02): файлы
+            # без ключа — легаси-нумерация и мигрируются при загрузке.
+            data["aux_map_version"] = AUX_MAP_VERSION
             name = data.get("device_name") or data.get("device_type_name") or ""
             serial = data.get("device_serial") or data.get("serial_number") or ""
             Path(path).write_bytes(pack_config_file(data, name, serial))
@@ -1933,6 +1941,19 @@ class SettingsWindow(QMainWindow):
         # старых файлов, сохранённых до разделения.
         payload.pop("variables", None)
         try:
+            # Миграция номеров доп. каналов (CM-HW-02): файл без
+            # aux_map_version хранит легаси-разметку 1..4 — переводим
+            # в новую до импорта, физический пин сохраняется.
+            try:
+                aux_map_ver = int(payload.get("aux_map_version", 0) or 0)
+            except (TypeError, ValueError):
+                aux_map_ver = 0
+            if aux_map_ver < AUX_MAP_VERSION:
+                rules_in_file = payload.get("flexible_rules")
+                if isinstance(rules_in_file, list):
+                    payload["flexible_rules"] = migrate_rules(
+                        rules_in_file, aux_map_ver
+                    )
             self._config.import_data(payload)
             self._config.set("last_config_dir", os.path.dirname(path))
             # Диагностика полевых «пропали триггеры»: в логе видно, когда
@@ -2136,7 +2157,9 @@ class SettingsWindow(QMainWindow):
         var_blob = json.dumps(
             {
                 "kind": "code_master_variables",
-                "format": 1,
+                # format — разметка номеров доп. каналов: 2 = новая
+                # нумерация 1..7 (CM-HW-02, aux_channels.py).
+                "format": AUX_MAP_VERSION,
                 "variables": self._variables_tab.export_config(),
             },
             ensure_ascii=False,
@@ -2151,7 +2174,7 @@ class SettingsWindow(QMainWindow):
             # исполняет программы ГЛ автономно, без ПК (отчёт
             # мастера: «ГЛ должен работать без приложения, как
             # триггеры»).
-            flex_blob = build_flex_blob(rules)
+            flex_blob = build_flex_blob(rules, protocol=proto)
         else:
             # Протокол 11 хранит блобы, но FLXB-записей не исполняет —
             # пишем прежний JSON, исполнение ГЛ остаётся на ПК.
@@ -2311,9 +2334,21 @@ class SettingsWindow(QMainWindow):
                 # kind/format): отдаём содержимое напрямую.
                 blob = {"variables": blob, "rules": blob}
             if region == STORAGE_REGION_VAR:
-                self._variables_tab.import_config(
-                    blob.get("variables", blob)
-                )
+                variables = blob.get("variables", blob)
+                # Миграция разметки доп. каналов (CM-HW-02): блоб
+                # format<2 хранит легаси-номера — переводим,
+                # физический пин сохраняется.
+                try:
+                    var_fmt = int(blob.get("format", 1) or 1)
+                except (TypeError, ValueError):
+                    var_fmt = 1
+                if isinstance(variables, dict) and var_fmt < AUX_MAP_VERSION:
+                    migrated = dict(variables)
+                    migrated["aux"] = migrate_aux_variables(
+                        variables.get("aux"), var_fmt
+                    )
+                    variables = migrated
+                self._variables_tab.import_config(variables)
             else:
                 # Правила — по валидированной схеме анализа; легаси
                 # JSON-блоб (без хвоста) — список rules как раньше.

@@ -27,18 +27,22 @@ from core.firmware_utils import (
 )
 from core.stm32_info import (
     APPLICATION_BASE_ADDR,
+    APP_METADATA_MAGIC,
     APP_METADATA_PAGE_ADDR,
     APP_METADATA_PAGE_SIZE,
     BOOTLOADER_BASE_ADDR,
     DEVICE_CONFIG_PAGE_ADDR_LEGACY,
     DEVICE_CONFIG_PAGE_SIZE,
     DEVICE_INFO_PAGE_ADDR,
+    EVENT_LOG_ADDR,
+    FLASH_END_ADDR,
     LEGACY_CONFIG_PAGE_ADDR,
     build_app_metadata,
     merge_device_config_page,
     parse_device_config,
     seed_device_config_page,
 )
+from core.storage_scan import find_storage_regions, region_is_cfg
 from models.logger import get_logger
 
 logger = get_logger(__name__)
@@ -797,6 +801,39 @@ class Bootloader:
                 self._progress_callback(min(100, int(written / total * 100)))
         return written
 
+    def _scan_marker_storage(self) -> list[tuple[int, bytes]]:
+        """Маркерные области хранилища в записываемой зоне Flash.
+
+        Области VARH/FLXH/CFGH/TRGH находятся сканированием страниц за
+        концом кода (как Storage_Init) — фиксированных адресов нет.
+        Сканируем [старый конец кода, EVENT_LOG_ADDR): верхние страницы
+        (0x0803C000+) AN3155 не стирает и не пишет — они переживают
+        обновление физически. Конец старого кода берём из метаданных
+        APP1 (image_size); без валидных метаданных — весь диапазон."""
+        scan_base = APPLICATION_BASE_ADDR
+        try:
+            meta = self.read_memory(APP_METADATA_PAGE_ADDR, 16)
+            magic = int.from_bytes(meta[0:4], "little")
+            if len(meta) >= 16 and magic in (APP_METADATA_MAGIC, 0):
+                image_size = int.from_bytes(meta[8:12], "little")
+                if 0 < image_size < FLASH_END_ADDR - APPLICATION_BASE_ADDR:
+                    scan_base = max(
+                        APPLICATION_BASE_ADDR,
+                        APPLICATION_BASE_ADDR
+                        + image_size // 2048 * 2048 - 2048,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Метаданные приложения не прочитаны: %s", exc)
+        try:
+            tail = self.read_memory(scan_base, EVENT_LOG_ADDR - scan_base)
+        except Exception as exc:  # noqa: BLE001
+            raise BootloaderError(
+                f"Не удалось прочитать область хранилища перед "
+                f"стиранием ({exc}) — запись отменена, устройство "
+                f"не повреждено"
+            ) from exc
+        return find_storage_regions(tail, scan_base)
+
     def flash_firmware(
         self,
         firmware_path: str,
@@ -804,6 +841,7 @@ class Bootloader:
         page_size: int = 2048,
         skip_blank: bool = True,
         status_callback: Callable[[str], None] | None = None,
+        preserve_storage: bool = True,
     ) -> list[tuple[int, bytes]]:
         """Записывает файл прошивки в память STM32.
 
@@ -962,6 +1000,50 @@ class Bootloader:
         # трогать метаданные: инвалидация без последующей записи валидных
         # метаданных убила бы загрузку приложения.
         is_app_update = bool(code) and any(b != 0xFF for b in code)
+
+        # CM-CDC-01: маркерное хранилище (CFGH/FLXH/TRGH) якорится за
+        # концом кода и живёт в записываемой зоне — рост образа стирает
+        # эти страницы. Сохраняем области, накрываемые образом, до
+        # первого деструктивного шага и планируем точки восстановления:
+        # CFGH первым за НОВЫМ концом кода (якорь storage.c), остальные
+        # следом в порядке исходных адресов. Не влезло — отказ до
+        # стирания, устройство не повреждено.
+        saved_storage: list[tuple[int, bytes]] = []
+        if preserve_storage and code:
+            status("Чтение областей хранилища")
+            found = self._scan_marker_storage()
+            code_end = -(-(code_addr + len(code)) // page_size) * page_size
+            img_lo, img_hi = code_addr, code_end
+            covered = [
+                (a, b) for a, b in found
+                if a < img_hi and a + len(b) > img_lo
+            ]
+            if covered:
+                cursor = code_end
+                placed: list[tuple[int, int, bytes]] = []
+                # CFGH всегда первой за кодом (Storage_CfgBase/якорь
+                # FLXH) — остальные области за ней по старшинству.
+                for orig, blob in sorted(
+                    covered, key=lambda item: (not region_is_cfg(item[1]), item[0])
+                ):
+                    placed.append((orig, cursor, blob))
+                    cursor += len(blob)
+                if cursor > EVENT_LOG_ADDR:
+                    raise BootloaderError(
+                        "Области хранилища не помещаются за новым образом "
+                        f"(до 0x{EVENT_LOG_ADDR:08X}) — запись отменена, "
+                        "устройство не повреждено"
+                    )
+                saved_storage = placed
+                status(f"Областей хранилища к сохранению: {len(placed)}")
+                logger.info(
+                    "Сохранение областей хранилища: %s",
+                    ", ".join(
+                        f"0x{o:08X}→0x{n:08X} ({len(b)} Б)"
+                        for o, n, b in placed
+                    ),
+                )
+
         meta = meta_seg
         if is_app_update:
             status("Подготовка обновления")
@@ -1006,6 +1088,23 @@ class Bootloader:
                 DEVICE_INFO_PAGE_ADDR, info_seg, written, total, skip_blank
             )
             regions.append((DEVICE_INFO_PAGE_ADDR, info_seg))
+        # Восстановление маркерного хранилища — после кода, до
+        # метаданных: обрыв на этом шаге оставляет приложение
+        # невалидным (bootloader повторит обновление), а не «живым»
+        # со стёртой конфигурацией. Целевые страницы стираем явно —
+        # там могли лежать старые поколения областей. Readback обязателен:
+        # без подтверждения обновление не считается безопасным.
+        for _orig, dst, blob in saved_storage:
+            status(f"Восстановление хранилища 0x{dst:08X}")
+            self.erase_pages(dst, blob, page_size=page_size, skip_blank=False)
+            self.write_memory(dst, blob)
+            if self.read_memory(dst, len(blob)) != blob:
+                raise BootloaderError(
+                    f"Хранилище 0x{dst:08X} не записалось обратно "
+                    "(verify mismatch) — конфигурация утеряна, "
+                    "обновление не считается безопасным"
+                )
+            regions.append((dst, blob))
         if meta is not None:
             # Метаданные — последним шагом: валидный APP1 служит «флагом
             # завершённого обновления» (bl_metadata_is_valid).

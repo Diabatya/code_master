@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.can_protocol import pack_can_frame
+from core.aux_channels import AUX_CH_COUNT, AUX_MAP_VERSION, migrate_rules
 from core.serial_manager import SerialManager
 from models.config import Config
 from core.flex_compiler import executor_info, managed_flags
@@ -2116,9 +2117,12 @@ class _CondItem(QWidget):
         aux_row.addWidget(_small_label(tr("Доп канал №"), font))
         self.aux_channel = QSpinBox()
         self.aux_channel.setFont(font)
-        self.aux_channel.setRange(1, 8)
+        self.aux_channel.setRange(1, AUX_CH_COUNT)
         self.aux_channel.setValue(1)
         self.aux_channel.setFixedWidth(64)
+        self.aux_channel.setToolTip(tr(
+            "1=PA14, 2=PA15, 3=PC10, 4=PC11, 5=PC12, 6=PD2, 7=PB3"
+        ))
         aux_row.addWidget(self.aux_channel)
         self.aux_state = QComboBox()
         self.aux_state.setFont(font)
@@ -2588,10 +2592,12 @@ class _ActionItem(QWidget):
         top.addWidget(_small_label(tr("Канал №"), font))
         self.aux_channel = QSpinBox()
         self.aux_channel.setFont(font)
-        self.aux_channel.setRange(1, 4)
+        self.aux_channel.setRange(1, AUX_CH_COUNT)
         self.aux_channel.setValue(1)
         self.aux_channel.setFixedWidth(64)
-        self.aux_channel.setToolTip(tr("OUT1…OUT4"))
+        self.aux_channel.setToolTip(tr(
+            "1=PA14, 2=PA15, 3=PC10, 4=PC11, 5=PC12, 6=PD2, 7=PB3"
+        ))
         top.addWidget(self.aux_channel)
         self.aux_mode = QComboBox()
         self.aux_mode.setFont(font)
@@ -2614,14 +2620,41 @@ class _ActionItem(QWidget):
         plain = QWidget()
         plain_layout = QVBoxLayout(plain)
         plain_layout.setContentsMargins(0, 0, 0, 0)
+        plain_layout.setSpacing(2)
+        # «Время включения» для «Вкл»: снятая галочка — до команды
+        # «Выкл»/снятия питания; установленная — авто-выключение МК
+        # через указанный срок (CM-HW-02: нулевой срок бессрочность
+        # молча не означает — для неё галочка снята).
+        on_row = QHBoxLayout()
+        self.aux_on_time_en = QCheckBox(tr("время включения"))
+        self.aux_on_time_en.setFont(font)
+        self.aux_on_time_en.setToolTip(
+            tr("Снята — работает до команды «Выкл»; "
+               "установлена — выключается через указанное время")
+        )
+        on_row.addWidget(self.aux_on_time_en)
+        self.aux_on_time = QSpinBox()
+        self.aux_on_time.setFont(font)
+        self.aux_on_time.setRange(1, 999999)
+        self.aux_on_time.setValue(100)
+        self.aux_on_time.setSuffix(tr(" мс"))
+        self.aux_on_time.setFixedWidth(96)
+        self.aux_on_time.setEnabled(False)
+        on_row.addWidget(self.aux_on_time)
+        on_row.addStretch()
+        plain_layout.addLayout(on_row)
         plain_hint = QLabel(
-            tr("«Вкл» — до команды «Выкл» или до снятия питания МК")
+            tr("«Вкл» без срока — до команды «Выкл» или до снятия "
+               "питания МК")
         )
         plain_hint.setFont(font)
         plain_hint.setStyleSheet("color: #9A9AA5;")
         plain_hint.setWordWrap(True)
         plain_layout.addWidget(plain_hint)
         plain_layout.addStretch()
+        self.aux_on_time_en.toggled.connect(self.aux_on_time.setEnabled)
+        self.aux_on_time_en.toggled.connect(mark_dirty)
+        self.aux_on_time.valueChanged.connect(mark_dirty)
 
         pulse = QWidget()
         pulse_layout = QVBoxLayout(pulse)
@@ -2663,15 +2696,17 @@ class _ActionItem(QWidget):
         pwm_row = QHBoxLayout()
         self.aux_pwm_freq = QSpinBox()
         self.aux_pwm_freq.setFont(font)
-        self.aux_pwm_freq.setRange(1, 20000)
-        self.aux_pwm_freq.setValue(1000)
+        # Программный ШИМ (aux_out.c, шаг 1 мс): потолок 500 Гц —
+        # честный предел, большего МК не выдаёт.
+        self.aux_pwm_freq.setRange(1, 500)
+        self.aux_pwm_freq.setValue(500)
         self.aux_pwm_freq.setSuffix(tr(" Гц"))
         self.aux_pwm_freq.setFixedWidth(96)
         pwm_row.addWidget(_small_label(tr("Частота"), font))
         pwm_row.addWidget(self.aux_pwm_freq)
         self.aux_pwm_duty = QSpinBox()
         self.aux_pwm_duty.setFont(font)
-        self.aux_pwm_duty.setRange(1, 100)
+        self.aux_pwm_duty.setRange(0, 100)
         self.aux_pwm_duty.setValue(50)
         self.aux_pwm_duty.setSuffix(" %")
         self.aux_pwm_duty.setFixedWidth(80)
@@ -3142,11 +3177,16 @@ class _ActionItem(QWidget):
                 "aux_pulse_count": self.aux_pulse_count.value(),
                 "aux_pwm_freq": self.aux_pwm_freq.value(),
                 "aux_pwm_duty": self.aux_pwm_duty.value(),
-                # Без галочки «время включения» — 0: ШИМ до «Выкл»
-                # (отчёт мастера).
+                # Без галочки «время включения» — 0: до «Выкл»
+                # (нулевой срок бессрочность молча не означает —
+                # CM-HW-02).
                 "aux_pwm_time": (
                     self.aux_pwm_time.value()
                     if self.aux_pwm_time_en.isChecked() else 0
+                ),
+                "aux_on_time": (
+                    self.aux_on_time.value()
+                    if self.aux_on_time_en.isChecked() else 0
                 ),
             }
         elif atype == _ACT_CACHE:
@@ -3254,6 +3294,9 @@ class _ActionItem(QWidget):
             pwm_time = int(action.get("aux_pwm_time", 0) or 0)
             self.aux_pwm_time_en.setChecked(pwm_time > 0)
             self.aux_pwm_time.setValue(max(1, pwm_time))
+            on_time = int(action.get("aux_on_time", 0) or 0)
+            self.aux_on_time_en.setChecked(on_time > 0)
+            self.aux_on_time.setValue(max(1, on_time))
             self._refresh_pulse_graph()
         elif atype == _ACT_CACHE:
             # Легаси: у старого действия были свои настройки кадра —
@@ -3293,6 +3336,10 @@ class _ActionItem(QWidget):
                 text = tr("Вкл импульсы доп канал №{0}").format(ch)
             elif mode == "pwm":
                 text = tr("ВКЛ ШИМ №{0}").format(ch)
+            elif self.aux_on_time_en.isChecked():
+                text = tr("Вкл доп канал №{0} на {1} мс").format(
+                    ch, self.aux_on_time.value()
+                )
             else:
                 text = tr("Вкл доп канал №{0}").format(ch)
         elif atype == _ACT_VAR:
@@ -3847,6 +3894,7 @@ class RuleRowWidget(QWidget):
             "aux_pwm_freq": 1000,
             "aux_pwm_duty": 50,
             "aux_pwm_time": 0,
+            "aux_on_time": 0,
             "cache_enabled": False,
             "cache_channel": 2,
             "cache_extended": False,
@@ -4098,6 +4146,14 @@ class FlexibleLogicTab(QWidget):
         rules = self._config.get("flexible_rules", [])
         if not isinstance(rules, list):
             rules = []
+        # Миграция нумерации доп. каналов (CM-HW-02): конфигурация без
+        # пометки aux_map_version хранит легаси-номера 1..4 (PC10/PC11/
+        # PC12/PA15) — переводим в новую карту 1..7, физический пин
+        # сохраняется. Миграция версионируется и идемпотентна.
+        aux_map_ver = int(self._config.get("aux_map_version", 0) or 0)
+        if aux_map_ver < AUX_MAP_VERSION:
+            rules = migrate_rules(rules, aux_map_ver) or rules
+            self._config.set("aux_map_version", AUX_MAP_VERSION)
         self._rules = rules
         # Исполняемый снимок: «flexible_rules_active» — то, что
         # реально записано/вычитано из МК; на старых конфигах ключа
@@ -4105,6 +4161,9 @@ class FlexibleLogicTab(QWidget):
         # (отчёт мастера: программа отрабатывает только после
         # записи в камень).
         active = self._config.get("flexible_rules_active")
+        if aux_map_ver < AUX_MAP_VERSION and isinstance(active, list):
+            active = migrate_rules(active, aux_map_ver)
+            self._config.set("flexible_rules_active", active)
         new_runtime = (
             list(active) if isinstance(active, list) else list(rules)
         )
@@ -4132,6 +4191,9 @@ class FlexibleLogicTab(QWidget):
         """Сохраняет программы в общую конфигурацию."""
         self._rules = self._collect_rules()
         self._config.set("flexible_rules", self._rules)
+        # Разметка номеров доп. каналов новая (CM-HW-02) — помечаем,
+        # чтобы загрузка не мигрировала уже новую нумерацию.
+        self._config.set("aux_map_version", AUX_MAP_VERSION)
         self._update_dirty_badges()
 
     def _update_dirty_badges(self) -> None:
@@ -5324,13 +5386,21 @@ class FlexibleLogicTab(QWidget):
             mode = {"off": 0, "on": 1, "pulse": 2, "pwm": 3}.get(
                 mode_name, 1
             )
+            # Срок работы: у «Вкл» своё поле aux_on_time («включить на
+            # T мс», CM-HW-02), у ШИМ — aux_pwm_time; импульсы
+            # завершаются по количеству.
+            run_time = (
+                int(action.get("aux_on_time", 0) or 0)
+                if mode == 1
+                else int(action.get("aux_pwm_time", 0) or 0)
+            )
             kwargs = {
                 "pulse_on_ms": int(action.get("aux_pulse_on", 0) or 0),
                 "pulse_off_ms": int(action.get("aux_pulse_off", 0) or 0),
                 "pulse_count": int(action.get("aux_pulse_count", 0) or 0),
                 "pwm_freq_hz": int(action.get("aux_pwm_freq", 0) or 0),
                 "pwm_duty_pct": int(action.get("aux_pwm_duty", 0) or 0),
-                "pwm_time_ms": int(action.get("aux_pwm_time", 0) or 0),
+                "pwm_time_ms": run_time,
             }
 
             aux_gen = self._exec_generation
@@ -5353,9 +5423,13 @@ class FlexibleLogicTab(QWidget):
                     )
                     return
                 # ПК-зеркало состояния — для условий «Доп канал N
-                # активен» (уровень на ноге следует за mode).
-                self._aux_states[ch] = 0 if m == 0 else 1
-                self._serial_manager.send_aux(ch, m, **kw)
+                # активен»: логическая активность, не уровень ноги
+                # (низкая фаза ШИМ и ШИМ 0% — «работает», единая
+                # трактовка с МК). Команды, отвергнутые на выходе
+                # (канала нет в прошивке/маске — send_aux False),
+                # зеркало не трогают.
+                if self._serial_manager.send_aux(ch, m, **kw):
+                    self._aux_states[ch] = 0 if m == 0 else 1
                 logger.info(
                     "ГЛ: доп канал №%d → %s", ch, mn,
                 )

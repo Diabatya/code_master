@@ -50,7 +50,10 @@
 #define CMD_TRIGGER_NAME_READ    0xD0U /* [index] → [len][имя]: имя из config-страницы */
 #define CMD_TRIGGER_NAME_WRITE   0xD1U /* [index][len][имя]: RAM-зеркало, Flash по COMMIT */
 #define CMD_TRIGGER_NAME_COMMIT  0xD2U /* запись таблицы имён во Flash (страница конфига) */
-#define CMD_AUX_SET              0xD3U /* доп. канал OUT1-4: вкл/выкл/импульсы/ШИМ (aux_out.h) */
+#define CMD_AUX_SET              0xD3U /* доп. канал, ЛЕГАСИ-нумерация 1..4 = PC10/PC11/PC12/PA15 */
+#define CMD_AUX_SET_EXT          0xDBU /* доп. канал 1..7 новой нумерации (CM-HW-02, proto 13) */
+#define CMD_AUX_GET              0xDCU /* → [owned][active][level][modes×7] состояние каналов */
+#define CMD_AUX_MAP              0xDDU /* [mask] — владение спорными пинами PA14/PD2/PB3 (CFGH) */
 #define CMD_SYS_RESET            0xD4U /* перезагрузка устройства (кнопка в «Мониторинге») */
 /* Маркерное хранилище блобов (storage.h): переменные и программы ГЛ
  * живут во Flash камня — PC сериализует их в JSON-блобы, прошивка
@@ -633,7 +636,7 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * версии ПК читают только первые 16 байт. */
       uint8_t out[84] = {
         s_device_version,
-        12U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
+        13U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
              * деструктивных команд; 4 = записи триггеров v3 (90 Б —
              * fire_limit + флаги эха), старым прошивкам хост шлёт 82 Б;
              * 5 = имена триггеров (CMD_TRIGGER_NAME_*) в config-странице;
@@ -654,7 +657,11 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
              * CFGH (настройки приложения за кодом);
              * 12 = контейнер FLXB в блобе FLXH: скомпилированные
              * записи ГЛ исполняются на МК автономно (хвост списка
-             * триггеров, за пользовательской частью) */
+             * триггеров, за пользовательской частью);
+             * 13 = семь доп. каналов выхода: CMD_AUX_SET_EXT/GET/MAP,
+             * срок работы Вкл, ШИМ 0%, владение спорными пинами
+             * (PA14/PD2/PB3) из CFGH, aux-события/действия в
+             * автономной ГЛ (записи FLXB v2) */
         0U,
         1U,
         cfg->reserved[0],
@@ -763,25 +770,108 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     }
 
     case CMD_AUX_SET: {
-      /* [channel 1..4][mode 0..3][on u16][off u16][count u16]
-       * [pwm_freq u16][duty u8][pwm_time u32] — 15 байт. Само действие
-       * дальше крутит AuxOut_Poll() — команда только ставит программу. */
-      if (payload_len < 15U) {
+      /* ЛЕГАСИ-контракт (proto < 13): каналы 1..4 = физические пины
+       * PC10/PC11/PC12/PA15 — старые приложения ездят по тем же пинам,
+       * молчаливой переадресации на новую нумерацию нет (CM-HW-02).
+       * Семантика тоже старая: срок работы — только у ШИМ, duty=0
+       * отвергается. Новая нумерация/семантика — CMD_AUX_SET_EXT. */
+      if (payload_len < 15U || payload[0] < 1U || payload[0] > 4U) {
         send_new_cmd_response(cmd, 0x01U, NULL, 0U);
         break;
       }
+      uint8_t mode = payload[1];
+      uint8_t duty = payload[10];
       uint32_t pwm_time = (uint32_t)payload[11]
           | ((uint32_t)payload[12] << 8)
           | ((uint32_t)payload[13] << 16)
           | ((uint32_t)payload[14] << 24);
+      if (mode == 3U && duty == 0U) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U); /* старый контракт */
+        break;
+      }
+      if (mode != 3U) {
+        pwm_time = 0U; /* в легаси срок поддерживал только ШИМ */
+      }
       uint8_t ok = AuxOut_Set(
-          payload[0], payload[1],
+          AUX_LEGACY_TO_NEW(payload[0]), mode,
           (uint16_t)(payload[2] | ((uint16_t)payload[3] << 8)),
           (uint16_t)(payload[4] | ((uint16_t)payload[5] << 8)),
           (uint16_t)(payload[6] | ((uint16_t)payload[7] << 8)),
           (uint16_t)(payload[8] | ((uint16_t)payload[9] << 8)),
-          payload[10], pwm_time);
+          duty, pwm_time);
       send_new_cmd_response(cmd, ok ? 0x00U : 0x01U, NULL, 0U);
+      break;
+    }
+
+    case CMD_AUX_SET_EXT: {
+      /* proto>=13: [ch 1..7][mode 0..3][on u16][off u16][count u16]
+       * [pwm_freq u16][duty u8][time u32] — та же 15-байтовая
+       * раскладка, но каналы в НОВОЙ нумерации (aux_out.h), срок
+       * работы применим к Вкл и ШИМ (0 = до «Выкл»; нулевой срок
+       * бессрочности не выражает — для бессрочного «Вкл» есть
+       * отдельный режим), duty ШИМ допускает 0..100 (0% = канал
+       * активен, уровень всегда низкий). Статусы: 0x00 ok,
+       * 0x01 неверные параметры, 0x02 пин не отдан каналу (TERM/SWD). */
+      if (payload_len < 15U) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      uint8_t channel = payload[0];
+      if (!AuxOut_IsAvailable(channel)) {
+        send_new_cmd_response(cmd, 0x02U, NULL, 0U);
+        break;
+      }
+      uint32_t run_time = (uint32_t)payload[11]
+          | ((uint32_t)payload[12] << 8)
+          | ((uint32_t)payload[13] << 16)
+          | ((uint32_t)payload[14] << 24);
+      uint8_t ok = AuxOut_Set(
+          channel, payload[1],
+          (uint16_t)(payload[2] | ((uint16_t)payload[3] << 8)),
+          (uint16_t)(payload[4] | ((uint16_t)payload[5] << 8)),
+          (uint16_t)(payload[6] | ((uint16_t)payload[7] << 8)),
+          (uint16_t)(payload[8] | ((uint16_t)payload[9] << 8)),
+          payload[10], run_time);
+      send_new_cmd_response(cmd, ok ? 0x00U : 0x01U, NULL, 0U);
+      break;
+    }
+
+    case CMD_AUX_GET: {
+      /* → [owned_mask][active_mask][level_mask][mode×7] — актуальное
+       * состояние каналов для ПК (условия «работает/не работает» и
+       * отображение; не требует держать локальное зеркало). */
+      uint8_t out[10];
+      out[0] = AuxOut_OwnedMask();
+      out[1] = 0U;
+      out[2] = 0U;
+      for (uint8_t ch = 1U; ch <= AUX_CH_COUNT; ch++) {
+        if (AuxOut_IsActive(ch)) {
+          out[1] |= (uint8_t)(1U << (ch - 1U));
+        }
+        if (AuxOut_Get(ch)) {
+          out[2] |= (uint8_t)(1U << (ch - 1U));
+        }
+        out[2 + ch] = AuxOut_GetMode(ch);
+      }
+      send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
+      break;
+    }
+
+    case CMD_AUX_MAP: {
+      /* [mask] — владение спорными пинами (AUX_OWN_*): бит = пин отдан
+       * каналу (PA14 уходит из SWD, PD2/PB3 — из-под TERM). Пишется в
+       * CFGH (переживает перезагрузку/обновление), применяется сразу.
+       * Ответ: [status][owned_mask]. */
+      if (payload_len < 1U) {
+        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
+        break;
+      }
+      uint8_t ok = DeviceConfig_SetAuxPinsMask(payload[0]);
+      if (ok) {
+        AuxOut_ApplyOwnedMask(DeviceConfig_GetAuxPinsMask());
+      }
+      uint8_t out[1] = { AuxOut_OwnedMask() };
+      send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, out, 1U);
       break;
     }
 
@@ -1085,7 +1175,7 @@ static uint16_t try_parse_one(void)
    * мусором, команда уходила в «drop + resync» без ответа. Полевые
    * симптомы: «Таймаут ответа на команду 0xD4» при перезагрузке и
    * молча не сохраняющиеся в камень переменные/программы ГЛ. */
-  if (marker >= 0xC0U && marker <= 0xDAU) {
+  if (marker >= 0xC0U && marker <= 0xDEU) {
     if (avail < 2U) {
       return wait_more_or_resync();
     }
