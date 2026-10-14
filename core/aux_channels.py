@@ -150,6 +150,86 @@ def migrate_aux_variables(aux_configs: list[dict[str, Any]] | None,
     return out
 
 
+# ---- ШИМ: единая сетка квантования ПК/МК (CM-N6) -------------------
+# Программный ШИМ на HAL_GetTick: период и фазы — целые миллисекунды.
+# Достижимые заполнения — решётка k*100/period; firmware округляет
+# запрошенный duty до ближайшего узла, а фактические фазы отдаёт в
+# CMD_AUX_GET. Формула зеркалит aux_out.c::aux_pwm_period_ms/Set.
+AUX_PWM_MAX_FREQ_HZ = 500
+AUX_PWM_MIN_PERIOD_MS = 2
+AUX_MAX_DURATION_MS = 0x7FFFFFFF
+
+
+def quantize_pwm(freq_hz: int, duty_pct: int) -> tuple[int, int, int] | None:
+    """(period_ms, on_ms, off_ms) фактического сигнала или None.
+
+    None — параметры недостижимы (freq вне 1..500, duty вне 0..100).
+    Иначе — та же сетка, что применит прошивка: duty квантуется до
+    ближайшего узла on = round(period*duty/100); на 500 Гц узлы —
+    только 0/50/100%."""
+    if not (1 <= int(freq_hz) <= AUX_PWM_MAX_FREQ_HZ):
+        return None
+    if not (0 <= int(duty_pct) <= 100):
+        return None
+    period = max(AUX_PWM_MIN_PERIOD_MS, (1000 + freq_hz // 2) // freq_hz)
+    on = min(period, (period * duty_pct + 50) // 100)
+    return period, int(on), int(period - on)
+
+
+def effective_duty(freq_hz: int, duty_pct: int) -> float | None:
+    """Фактическое заполнение после квантования (%) — для отображения
+    «применено on/period», не «запрошено». None — недостижимо."""
+    q = quantize_pwm(freq_hz, duty_pct)
+    if q is None:
+        return None
+    period, on, _off = q
+    return on * 100.0 / period
+
+
+def aux_pin_conflict(channel: int) -> str | None:
+    """Причина ограничения доступности канала для UI (CM-N4/CM-N7):
+    None — свободен; иначе текст конфликта. PB3/PD2 физически едут на
+    транзисторы терминаторов на существующих платах — до подтверждения
+    новой разводки канал на них = переключение терминатора."""
+    return {
+        1: "SWCLK (SWD отладка) — включение отключает отладчик до reset",
+        6: "PD2 на транзисторе терминатора CAN2 (плата ≤v1.x)",
+        7: "PB3 на транзисторе терминатора CAN1 (плата ≤v1.x)",
+    }.get(int(channel))
+
+
+# ---- Настройки выхода переменной → действие ГЛ (CM-N7) -------------
+
+def resolve_aux_from_vars(
+    action: dict[str, Any], aux_configs: list[dict[str, Any]] | None
+) -> dict[str, Any]:
+    """Действие «Доп канал» с ``aux_use_var``: режим и параметры ШИМ
+    берутся из настроек выхода переменной того же канала
+    (``out_mode``/``pwm_freq``/``pwm_duty`` — см. _AuxDialog).
+    Переменной нет — явные параметры действия сохраняются (честный
+    override остаётся видимым в редакторе).
+    Возвращает новый dict — входное действие не мутируется."""
+    if not action.get("aux_use_var"):
+        return action
+    channel = _int(action.get("aux_channel", 1)) or 1
+    for cfg in aux_configs or []:
+        if cfg.get("type") != "aux":
+            continue
+        if _int(cfg.get("channel")) != channel:
+            continue
+        out = dict(action)
+        out_mode = str(cfg.get("out_mode", "on") or "on")
+        out["aux_mode"] = (
+            out_mode if out_mode in ("off", "on", "pwm") else "on"
+        )
+        out["aux_pwm_freq"] = _int(cfg.get("pwm_freq"))
+        out["aux_pwm_duty"] = _int(cfg.get("pwm_duty"))
+        # Срок работы из действия сохраняется: настройки переменной
+        # задают форму сигнала, длительность — вопрос программы.
+        return out
+    return action
+
+
 def _int(value: Any) -> int:
     try:
         return int(value or 0)

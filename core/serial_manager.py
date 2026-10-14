@@ -11,7 +11,7 @@ from typing import Any
 
 from PySide6.QtCore import QObject, QThread, Signal, QTimer
 
-from core.aux_channels import to_legacy_channel
+from core.aux_channels import AUX_MAX_DURATION_MS, to_legacy_channel
 from core.can_protocol import (
     CMD_CAN_MODE,
     CMD_CAN_SPEED,
@@ -966,6 +966,8 @@ class SerialManager(QObject):
         автономно (aux_out.c), без связи с ПК. Пауза до начала
         действия отрабатывается на стороне ПК через QTimer — сюда
         команда приходит уже «в момент»."""
+        if pwm_time_ms > AUX_MAX_DURATION_MS or pwm_time_ms < 0:
+            return False  # та же граница, что у МК (CM-N5)
         proto = self.device_protocol_version()
         if proto >= 13:
             cmd = CMD_AUX_SET_EXT
@@ -1014,12 +1016,26 @@ class SerialManager(QObject):
             return None
         if not data or len(data) < 10:
             return None
-        return {
+        out: dict[str, Any] = {
             "owned": data[0],
             "active": data[1],
             "level": data[2],
             "modes": list(data[3:10]),
         }
+        # Расширенный ответ (CM-N6): фактические фазы on/off мс по
+        # каналам — ПК показывает применённый сигнал, а не запрошенный.
+        if len(data) >= 10 + 4 * 7:
+            on_ms = [
+                data[10 + i * 2] | (data[11 + i * 2] << 8)
+                for i in range(7)
+            ]
+            off_ms = [
+                data[10 + 14 + i * 2] | (data[11 + 14 + i * 2] << 8)
+                for i in range(7)
+            ]
+            out["on_ms"] = on_ms
+            out["off_ms"] = off_ms
+        return out
 
     def set_aux_pins_mask(self, mask: int) -> int | None:
         """CMD_AUX_MAP: владение спорными пинами PA14/PD2/PB3.

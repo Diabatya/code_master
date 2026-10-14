@@ -1,22 +1,27 @@
 """Декодер угла поворота руля по кратности сырого CAN-значения
-(CM-HW-04).
+(CM-HW-04, переработан по CM-N2).
 
 Модель кодирования (типовая для датчиков угла в CAN): сырое целое
-значение делится на классы по делителю — значения, кратные одному
-набору делителей, означают поворот в одну сторону, кратные другому —
-в другую; отдельный код — нейтраль (нулевой угол, не обязательно 0).
+значение делится на два класса знака угла «+»/«−» таблицами условий
+кратности; отдельный код — нейтраль (нулевой угол, не обязательно 0).
 
-Настройка — таблица 19 строк по делителям 2..20: у каждой строки
-независимый выбор класса «+» или «−» (взаимоисключающе, третье
-состояние — строка не участвует). Требования по классу объединяются
-по ИЛИ внутри класса (значение кратное ХОТЯ БЫ одному делителю
-класса принадлежит ему), классы между собой — исключающе:
-совпадение в обоих — «конфликт», ни в одном — «вне классов».
+Таблицы знаков — ДВЕ НЕЗАВИСИМЫЕ, по десять строк-делителей
+2,4,6,…,20; у каждой строки три состояния: «Кратно», «Не кратно»,
+строка не участвует. Требования ВЫБРАННЫХ строк внутри таблицы
+объединяются по И (AND): класс совпал, только если выполнены все его
+условия. Пример исходного задания: «−» = {кратно 8}; «+» = {кратно 4
+И не кратно 8} → 8/16 отрицательные, 12/20 положительные, 10 — вне
+классов. Ненастроенная таблица (без выбранных строк) не совпадает ни
+с чем; совпадение обеих таблиц — «conflict», ни одной — «no-class».
 
-Конфигурация декодера (dict):
-    enabled        bool   — декодер включён
-    divisors_pos   [int]  — делители 2..20 класса «+»
-    divisors_neg   [int]  — делители 2..20 класса «−»
+Формат конфигурации версионируется:
+    version        int    — 2 (текущая); 1/отсутствие — легаси-поля
+                            divisors_pos/divisors_neg (списки, раньше
+                            объединялись ИЛИ) мигрируются в таблицы
+                            «кратно d» по AND — уже НЕ ИЛИ: повторная
+                            проверка конфигурации оператором нужна
+                            (семантика изменена намеренно, см. CM-N2)
+    signs          {"pos": {d: "div"|"not"}, "neg": {…}} — таблицы
     neutral        int    — код нейтрали (может быть ≠ 0)
     byte_from      int    — первый байт значения в кадре (0..7)
     byte_len       int    — длина поля в байтах (1..8)
@@ -30,8 +35,12 @@
     interpolate    bool   — разрешить линейную интерполяцию между
                            точками калибровки (иначе — только точное
                            совпадение |raw| с точкой)
+    stale_ms       int    — время жизни декодированного значения для
+                           условий ГЛ; просроченное значение не
+                           удовлетворяет численным условиям
+                           (0 = не устаревает, CM-N3)
 
-Результат decode() — dict:
+Результат decode()/decode_raw() — dict:
     valid     bool            — значение годное для отображения и
                               условий ГЛ (invalid/conflict/обрыв
                               кадра/нет калибровки → False)
@@ -53,6 +62,9 @@ from __future__ import annotations
 
 from typing import Any
 
+CONFIG_VERSION = 2
+# Десять чётных делителей 2..20 — строки таблиц знаков (CM-N2).
+DIVISORS = (2, 4, 6, 8, 10, 12, 14, 16, 18, 20)
 DIVISOR_MIN = 2
 DIVISOR_MAX = 20
 
@@ -65,24 +77,55 @@ STATUS_NO_CALIBRATION = "no-calibration"
 STATUS_DISABLED = "disabled"
 STATUS_NO_DATA = "no-data"
 
+_REQ_DIV = "div"
+_REQ_NOT = "not"
 
-def normalize_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
-    """Конфигурация декодера → нормализованный dict с дефолтами.
 
-    Мусорные делители (вне 2..20, дубли, нечисла) выкидываются —
-    повреждённая строка не ломает весь декодер."""
-    cfg = cfg if isinstance(cfg, dict) else {}
+def _migrate_signs_v1(cfg: dict[str, Any]) -> dict[str, dict[int, str]]:
+    """Легаси-списки divisors_pos/divisors_neg → таблицы требований.
 
-    def _divisors(key: str) -> list[int]:
-        out: list[int] = []
+    Семантика v1 — ИЛИ по списку; v2 — И по выбранным строкам, поэтому
+    перенос механический (каждый делитель → «кратно»): для списков из
+    нескольких делителей результат строже старого поведения — честнее
+    «недоклассифицировать», чем продолжать широкое ИЛИ (CM-N2)."""
+    out: dict[str, dict[int, str]] = {"pos": {}, "neg": {}}
+    for sign, key in (("pos", "divisors_pos"), ("neg", "divisors_neg")):
         for v in cfg.get(key) or []:
             try:
                 d = int(v)
             except (TypeError, ValueError):
                 continue
-            if DIVISOR_MIN <= d <= DIVISOR_MAX and d not in out:
-                out.append(d)
-        return sorted(out)
+            if DIVISOR_MIN <= d <= DIVISOR_MAX:
+                out[sign][d] = _REQ_DIV
+    return out
+
+
+def normalize_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
+    """Конфигурация декодера → нормализованный dict с дефолтами.
+
+    Мусорные строки (делитель вне 2..20, неизвестное требование,
+    нечисла) выкидываются — повреждённая строка не ломает весь
+    декодер. Поля легаси-формата (divisors_pos/neg, version 1)
+    мигрируются в signs."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+
+    def _signs() -> dict[str, dict[int, str]]:
+        raw = cfg.get("signs")
+        if isinstance(raw, dict):
+            out: dict[str, dict[int, str]] = {"pos": {}, "neg": {}}
+            for sign in ("pos", "neg"):
+                table = raw.get(sign)
+                if not isinstance(table, dict):
+                    continue
+                for d_key, req in table.items():
+                    try:
+                        d = int(d_key)
+                    except (TypeError, ValueError):
+                        continue
+                    if d in DIVISORS and req in (_REQ_DIV, _REQ_NOT):
+                        out[sign][d] = req
+            return out
+        return _migrate_signs_v1(cfg)
 
     def _calib() -> list[tuple[float, float]]:
         points: list[tuple[float, float]] = []
@@ -109,10 +152,14 @@ def normalize_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
         byte_from, byte_len = 0, 2
     byte_from = min(max(byte_from, 0), 7)
     byte_len = min(max(byte_len, 1), 8 - byte_from)
+    try:
+        stale_ms = int(cfg.get("stale_ms", 0) or 0)
+    except (TypeError, ValueError):
+        stale_ms = 0
     return {
         "enabled": bool(cfg.get("enabled")),
-        "divisors_pos": _divisors("divisors_pos"),
-        "divisors_neg": _divisors("divisors_neg"),
+        "version": CONFIG_VERSION,
+        "signs": _signs(),
         "neutral": neutral,
         "byte_from": byte_from,
         "byte_len": byte_len,
@@ -120,6 +167,7 @@ def normalize_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
         "left_is_negative": bool(cfg.get("left_is_negative", True)),
         "calib": _calib(),
         "interpolate": bool(cfg.get("interpolate")),
+        "stale_ms": max(stale_ms, 0),
     }
 
 
@@ -142,16 +190,35 @@ def extract_raw(data: bytes, cfg: dict[str, Any]) -> int | None:
     )
 
 
+def _sign_matches(reqs: dict[int, str], raw: int) -> bool:
+    """Все выбранные требования таблицы выполнены (AND).
+
+    Пустая таблица не совпадает ни с чем — иначе ненастроенный знак
+    «выигрывал» бы любое значение и классификация превращалась бы в
+    «всё — конфликт»."""
+    if not reqs:
+        return False
+    for d, req in reqs.items():
+        if req == _REQ_DIV:
+            if raw % d != 0:
+                return False
+        else:  # «не кратно»
+            if raw % d == 0:
+                return False
+    return True
+
+
 def classify(raw: int, cfg: dict[str, Any]) -> str:
-    """Класс значения по кратности: pos/neg/neutral/none/conflict.
+    """Класс значения по таблицам знаков: pos/neg/neutral/none/conflict.
 
     Нейтраль проверяется первой — её код не участвует в делителях.
-    Попадание в оба класса одновременно — конфликт, значение
+    Совпадение обеих таблиц одновременно — конфликт, значение
     невалидно (нельзя молча выбрать сторону)."""
     if raw == cfg["neutral"]:
         return STATUS_NEUTRAL
-    in_pos = any(raw % d == 0 for d in cfg["divisors_pos"])
-    in_neg = any(raw % d == 0 for d in cfg["divisors_neg"])
+    signs = cfg["signs"]
+    in_pos = _sign_matches(signs["pos"], raw)
+    in_neg = _sign_matches(signs["neg"], raw)
     if in_pos and in_neg:
         return STATUS_CONFLICT
     if in_pos:
@@ -188,6 +255,31 @@ def calibrate(abs_raw: int, cfg: dict[str, Any]) -> float | None:
     return None
 
 
+def _result(raw: int | None, conf: dict[str, Any]) -> dict[str, Any]:
+    """Общий хвост decode(): класс → калибровка → знаковый угол."""
+    raw_hex = f"0x{int(raw):X}" if raw is not None else ""
+    cls = classify(int(raw), conf)
+    if cls == STATUS_NEUTRAL:
+        return {"valid": True, "angle": 0.0, "raw": int(raw),
+                "raw_hex": raw_hex, "cls": "neutral",
+                "status": STATUS_NEUTRAL}
+    if cls in (STATUS_NO_CLASS, STATUS_CONFLICT):
+        return {"valid": False, "angle": None, "raw": int(raw),
+                "raw_hex": raw_hex, "cls": cls, "status": cls}
+    magnitude = calibrate(abs(int(raw)), conf)
+    if magnitude is None:
+        return {"valid": False, "angle": None, "raw": int(raw),
+                "raw_hex": raw_hex, "cls": cls,
+                "status": STATUS_NO_CALIBRATION}
+    # Направление: класс «−» → отрицательные градусы при
+    # left_is_negative, иначе наоборот — ориентация «влево/вправо»
+    # у разных авто разная, поэтому выносится в настройку.
+    neg_side = -1.0 if conf["left_is_negative"] else 1.0
+    angle = magnitude * (neg_side if cls == "neg" else -neg_side)
+    return {"valid": True, "angle": angle, "raw": int(raw),
+            "raw_hex": raw_hex, "cls": cls, "status": STATUS_OK}
+
+
 def decode(data: bytes | None,
            cfg: dict[str, Any] | None) -> dict[str, Any]:
     """Кадр → декодированный угол с статусом качества.
@@ -204,27 +296,7 @@ def decode(data: bytes | None,
         status = STATUS_NO_DATA if not data else STATUS_INCOMPLETE
         return {"valid": False, "angle": None, "raw": None,
                 "raw_hex": "", "cls": None, "status": status}
-    raw_hex = "0x{0:0{1}X}".format(raw, conf["byte_len"] * 2)
-    cls = classify(raw, conf)
-    if cls == STATUS_NEUTRAL:
-        return {"valid": True, "angle": 0.0, "raw": raw,
-                "raw_hex": raw_hex, "cls": "neutral",
-                "status": STATUS_NEUTRAL}
-    if cls in (STATUS_NO_CLASS, STATUS_CONFLICT):
-        return {"valid": False, "angle": None, "raw": raw,
-                "raw_hex": raw_hex, "cls": cls, "status": cls}
-    magnitude = calibrate(abs(raw), conf)
-    if magnitude is None:
-        return {"valid": False, "angle": None, "raw": raw,
-                "raw_hex": raw_hex, "cls": cls,
-                "status": STATUS_NO_CALIBRATION}
-    # Направление: класс «−» → отрицательные градусы при
-    # left_is_negative, иначе наоборот — ориентация «влево/вправо»
-    # у разных авто разная, поэтому выносится в настройку.
-    neg_side = -1.0 if conf["left_is_negative"] else 1.0
-    angle = magnitude * (neg_side if cls == "neg" else -neg_side)
-    return {"valid": True, "angle": angle, "raw": raw,
-            "raw_hex": raw_hex, "cls": cls, "status": STATUS_OK}
+    return _result(raw, conf)
 
 
 def decode_raw(raw: int | None,
@@ -240,21 +312,4 @@ def decode_raw(raw: int | None,
     if raw is None:
         return {"valid": False, "angle": None, "raw": None,
                 "raw_hex": "", "cls": None, "status": STATUS_NO_DATA}
-    raw_hex = f"0x{int(raw):X}"
-    cls = classify(int(raw), conf)
-    if cls == STATUS_NEUTRAL:
-        return {"valid": True, "angle": 0.0, "raw": int(raw),
-                "raw_hex": raw_hex, "cls": "neutral",
-                "status": STATUS_NEUTRAL}
-    if cls in (STATUS_NO_CLASS, STATUS_CONFLICT):
-        return {"valid": False, "angle": None, "raw": int(raw),
-                "raw_hex": raw_hex, "cls": cls, "status": cls}
-    magnitude = calibrate(abs(int(raw)), conf)
-    if magnitude is None:
-        return {"valid": False, "angle": None, "raw": int(raw),
-                "raw_hex": raw_hex, "cls": cls,
-                "status": STATUS_NO_CALIBRATION}
-    neg_side = -1.0 if conf["left_is_negative"] else 1.0
-    angle = magnitude * (neg_side if cls == "neg" else -neg_side)
-    return {"valid": True, "angle": angle, "raw": int(raw),
-            "raw_hex": raw_hex, "cls": cls, "status": STATUS_OK}
+    return _result(int(raw), conf)

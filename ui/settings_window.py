@@ -40,6 +40,7 @@ from core.aux_channels import (
     AUX_MAP_VERSION,
     migrate_aux_variables,
     migrate_rules,
+    resolve_aux_from_vars,
 )
 from core.flex_compiler import (
     analyze_device_flex,
@@ -2174,7 +2175,23 @@ class SettingsWindow(QMainWindow):
             # исполняет программы ГЛ автономно, без ПК (отчёт
             # мастера: «ГЛ должен работать без приложения, как
             # триггеры»).
-            flex_blob = build_flex_blob(rules, protocol=proto)
+            # «Из настроек выхода» (CM-N7): параметры действия доп.
+            # канала берутся из переменной канала — камень получает
+            # уже применённые режим/ШИМ, не ссылку на переменную.
+            _aux_cfgs_fn = getattr(
+                self._variables_tab, "aux_channel_configs", None
+            )
+            aux_cfgs = _aux_cfgs_fn() if callable(_aux_cfgs_fn) else []
+            rules_for_blob = [
+                {
+                    **rule,
+                    "action": resolve_aux_from_vars(
+                        rule.get("action") or {}, aux_cfgs
+                    ),
+                }
+                for rule in rules
+            ]
+            flex_blob = build_flex_blob(rules_for_blob, protocol=proto)
         else:
             # Протокол 11 хранит блобы, но FLXB-записей не исполняет —
             # пишем прежний JSON, исполнение ГЛ остаётся на ПК.

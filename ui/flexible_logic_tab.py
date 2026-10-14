@@ -71,7 +71,13 @@ from PySide6.QtWidgets import (
 )
 
 from core.can_protocol import pack_can_frame
-from core.aux_channels import AUX_CH_COUNT, AUX_MAP_VERSION, migrate_rules
+from core import variable_decode
+from core.aux_channels import (
+    AUX_CH_COUNT,
+    AUX_MAP_VERSION,
+    migrate_rules,
+    resolve_aux_from_vars,
+)
 from core.serial_manager import SerialManager
 from models.config import Config
 from core.flex_compiler import executor_info, managed_flags
@@ -2606,6 +2612,17 @@ class _ActionItem(QWidget):
         self.aux_mode.addItem(tr("Подать импульсы"), "pulse")
         self.aux_mode.addItem(tr("Вкл ШИМ"), "pwm")
         top.addWidget(self.aux_mode)
+        # CM-N7: режим может браться из настроек выхода переменной
+        # канала (вкладка «Переменные»); поля ниже — явный override,
+        # остаются запасным вариантом, если переменной нет.
+        self.aux_use_var = QCheckBox(tr("из настроек выхода"))
+        self.aux_use_var.setFont(font)
+        self.aux_use_var.setToolTip(tr(
+            "Режим и параметры ШИМ — из настроек выхода переменной "
+            "этого канала (вкладка «Переменные»); поля режима ниже "
+            "останутся запасным вариантом"
+        ))
+        top.addWidget(self.aux_use_var)
         top.addWidget(_small_label(tr("Пауза до действия"), font))
         self.aux_delay = QSpinBox()
         self.aux_delay.setFont(font)
@@ -2740,6 +2757,8 @@ class _ActionItem(QWidget):
         self._stack.addWidget(page)
 
         self.aux_channel.valueChanged.connect(mark_dirty)
+        self.aux_use_var.toggled.connect(mark_dirty)
+        self.aux_use_var.toggled.connect(self._refresh_aux_override)
         self.aux_mode.currentIndexChanged.connect(self._on_aux_mode)
         self.aux_mode.currentIndexChanged.connect(mark_dirty)
         self.aux_delay.valueChanged.connect(mark_dirty)
@@ -3035,6 +3054,15 @@ class _ActionItem(QWidget):
         self._update_abort_visibility()
         self._update_summary()
 
+    def _refresh_aux_override(self, *_args) -> None:
+        """«Из настроек выхода»: явные поля режима — видимый
+        запасной вариант (override), при включённой галочке они
+        подсвечены как неактивные (CM-N7)."""
+        use_var = self.aux_use_var.isChecked()
+        self.aux_mode.setEnabled(not use_var)
+        self._aux_stack.setEnabled(not use_var)
+        self._update_summary()
+
     def _update_abort_visibility(self) -> None:
         """У «Выкл» доп канала настройки «Прервать если» не нужны —
         скрываются (отчёт мастера)."""
@@ -3170,6 +3198,9 @@ class _ActionItem(QWidget):
                 "type": _ACT_AUX,
                 "aux_enabled": True,
                 "aux_channel": self.aux_channel.value(),
+                # CM-N7: режим из настроек выхода переменной канала;
+                # явные поля ниже — видимый запасной вариант.
+                "aux_use_var": self.aux_use_var.isChecked(),
                 "aux_mode": self.aux_mode.currentData(),
                 "aux_delay": self.aux_delay.value(),
                 "aux_pulse_on": self.aux_pulse_on.value(),
@@ -3273,6 +3304,7 @@ class _ActionItem(QWidget):
             self.fr_between.setValue(int(action.get("between", 0) or 0))
         elif atype == _ACT_AUX:
             self.aux_channel.setValue(int(action.get("aux_channel", 1) or 1))
+            self.aux_use_var.setChecked(bool(action.get("aux_use_var")))
             midx = self.aux_mode.findData(action.get("aux_mode", "on"))
             self.aux_mode.setCurrentIndex(midx if midx >= 0 else 0)
             self.aux_delay.setValue(int(action.get("aux_delay", 0) or 0))
@@ -3342,6 +3374,8 @@ class _ActionItem(QWidget):
                 )
             else:
                 text = tr("Вкл доп канал №{0}").format(ch)
+            if self.aux_use_var.isChecked():
+                text += tr(" (настройки выхода)")
         elif atype == _ACT_VAR:
             text = self.var.get_name() or tr("Переменная")
         elif atype == _ACT_FLAG:
@@ -4004,6 +4038,10 @@ class FlexibleLogicTab(QWidget):
         self._variables_tab = None
         self._static_states: dict[str, int] = {}
         self._dyn_values: dict[str, float] = {}
+        # Метка свежести численного значения (monotonic) — политика
+        # устаревания декодера угла (stale_ms, CM-N3): просроченное
+        # значение численным условиям не отвечает.
+        self._dyn_ts: dict[str, float] = {}
         # Кэши байтов «Динамических переменных» (имя → {позиция: байт}):
         # каждый подошедший кадр перезаписывает только указанные
         # оператором позиции DATA (отчёт мастера).
@@ -4422,6 +4460,7 @@ class FlexibleLogicTab(QWidget):
             self._aux_states.clear()
             self._static_states.clear()
             self._dyn_values.clear()
+            self._dyn_ts.clear()
             self._dyn_cache_bytes.clear()
             self._tick = 0
 
@@ -4605,6 +4644,13 @@ class FlexibleLogicTab(QWidget):
         data = self._variables_tab.export_config()
         return (data.get("read") or []) + (data.get("control") or [])
 
+    def _aux_configs(self) -> list[dict[str, Any]]:
+        """Настройки доп. каналов третьей колонки «Переменных» —
+        для «из настроек выхода» (CM-N7)."""
+        tab = self._variables_tab
+        aux = getattr(tab, "aux_channel_configs", None)
+        return aux() if callable(aux) else []
+
     def _update_variable_states(self, frame_id: int, data: bytes) -> dict[str, int]:
         """Обновляет состояния переменных по пришедшему кадру.
         Возвращает статические переменные, сменившие состояние
@@ -4674,15 +4720,23 @@ class FlexibleLogicTab(QWidget):
                 hi = str(var.get("to", "")).split()
                 if not _tokens_range_match(lo, hi, data):
                     continue
-                # «Численная переменная»: сырое значение — СУММА
-                # выбранных байтов кадра (отчёт мастера).
-                raw = 0
-                for pos in var.get("bytes") or []:
-                    if 0 <= pos < len(data):
-                        raw += data[pos]
-                self._dyn_values[name] = _interpolate(
-                    var.get("points"), raw
-                )
+                # «Численная переменная»: RAW — по единому контракту
+                # (SBLP-склейка или сумма, CM-N3). Неполное поле или
+                # невалидный декод («конфликт»/«нет калибровки» у
+                # угла руля) — численного значения НЕТ: условия по
+                # такой переменной не выполняются.
+                res = variable_decode.decode_var_value(var, data)
+                if not res["valid"]:
+                    self._dyn_values.pop(name, None)
+                    self._dyn_ts.pop(name, None)
+                    continue
+                if res["value"] is not None:
+                    self._dyn_values[name] = res["value"]
+                else:
+                    self._dyn_values[name] = _interpolate(
+                        var.get("points"), res["raw"]
+                    )
+                self._dyn_ts[name] = time.monotonic()
         return changed
 
     def _capture_cache_vars(
@@ -4929,6 +4983,23 @@ class FlexibleLogicTab(QWidget):
         tokens = str(event.get("data", "")).split()
         return _tokens_match(tokens, bytes(frame["data"]))
 
+    def _dyn_current(self, name: str) -> Any:
+        """Текущее значение динамической переменной для условий ГЛ —
+        только валидное и не просроченное (политика устаревания
+        ``stale_ms`` декодера угла руля, CM-N3)."""
+        if name not in self._dyn_values:
+            return None
+        for var in self._variable_defs():
+            if str(var.get("name", "")).strip() != name:
+                continue
+            ms = variable_decode.stale_ms(var)
+            if ms > 0:
+                ts = self._dyn_ts.get(name)
+                if ts is None or time.monotonic() - ts > ms / 1000.0:
+                    return None
+            break
+        return self._dyn_values[name]
+
     def _condition_passed(self, cond: dict[str, Any]) -> bool:
         """ПРИ: проверка текущего состояния перед действием."""
         ctype = cond.get("type", _COND_NONE)
@@ -4941,13 +5012,13 @@ class FlexibleLogicTab(QWidget):
             # условия списком из таблицы привязки). Пустое состояние —
             # легаси «Активно»: переменная в любом именованном
             # состоянии.
-            current = self._dyn_values.get(str(cond.get("var", "")))
+            current = self._dyn_current(str(cond.get("var", "")))
             state = str(cond.get("state", "")).strip()
             if state:
                 return str(current) == state
             return bool(current)
         if ctype == _COND_NUM:
-            value = self._dyn_values.get(str(cond.get("var", "")))
+            value = self._dyn_current(str(cond.get("var", "")))
             if value is None:
                 return False
             try:
@@ -5258,7 +5329,7 @@ class FlexibleLogicTab(QWidget):
             )
         if etype in (_EVENT_DYN, _EVENT_NUM):
             name = str(abort.get("var", "")).strip()
-            current = self._dyn_values.get(name)
+            current = self._dyn_current(name)
             if current is None:
                 return False
             try:
@@ -5380,6 +5451,11 @@ class FlexibleLogicTab(QWidget):
         #    импульсы и ШИМ крутит сам МК (aux_out.c). «Пауза до
         #    действия» — PC-таймер, как у фреймов.
         if action.get("aux_enabled"):
+            # CM-N7: «из настроек выхода» — режим и ШИМ-параметры
+            # берутся из настроек выхода переменной этого канала
+            # (вкладка «Переменные»); без переменной — явный
+            # override действия.
+            action = resolve_aux_from_vars(action, self._aux_configs())
             aux_delay = int(action.get("aux_delay", 0) or 0)
             channel = int(action.get("aux_channel", 1) or 1)
             mode_name = str(action.get("aux_mode", "on"))
@@ -5732,9 +5808,9 @@ class FlexibleLogicTab(QWidget):
             )
         if etype in (_EVENT_DYN, _EVENT_NUM):
             name = str(event.get("var", "")).strip()
-            if name not in self._dyn_values:
+            current = self._dyn_current(name)
+            if current is None:
                 return False
-            current = self._dyn_values[name]
             try:
                 threshold = float(
                     str(event.get("value", "")).replace(",", ".")

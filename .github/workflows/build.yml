@@ -151,6 +151,11 @@ jobs:
             firmware/application/tests/test_trigger_flex.c \
             -o /tmp/test_trigger_flex
           /tmp/test_trigger_flex
+          cc -I firmware/application/tests/stubs -I firmware/application/Inc \
+            -I firmware/application/Src \
+            firmware/application/tests/test_aux_out.c \
+            -o /tmp/test_aux_out
+          /tmp/test_aux_out
       - name: Verify application metadata
         run: |
           python3 -m pip install intelhex

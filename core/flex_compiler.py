@@ -33,7 +33,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from core.aux_channels import AUX_MAP_VERSION, migrate_rules
+from core.aux_channels import (
+    AUX_MAP_VERSION,
+    AUX_MAX_DURATION_MS,
+    migrate_rules,
+)
 from core.trigger_protocol import (
     TRIGGER_SIZE,
     pack_trigger,
@@ -179,6 +183,8 @@ def _aux_action_to_tx(action: dict[str, Any]) -> dict[str, Any] | None:
     data = bytearray(8)
     if mode == 1:  # Вкл — с опциональным сроком «включить на T мс»
         on_time = int(action.get("aux_on_time", 0) or 0)
+        if on_time > AUX_MAX_DURATION_MS:
+            return None  # та же граница, что у МК (CM-N5)
         data[0:4] = on_time.to_bytes(4, "little")
     elif mode == 2:  # импульсы
         try:
@@ -205,6 +211,8 @@ def _aux_action_to_tx(action: dict[str, Any]) -> dict[str, Any] | None:
         data[0:2] = freq.to_bytes(2, "little")
         data[2] = duty
         pwm_time = int(action.get("aux_pwm_time", 0) or 0)
+        if pwm_time > AUX_MAX_DURATION_MS:
+            return None
         data[3:7] = pwm_time.to_bytes(4, "little")
     # mode == 0 («Выкл») — параметры не нужны.
     return {

@@ -75,6 +75,19 @@ uint8_t AuxOut_Get(uint8_t channel);
 uint8_t AuxOut_IsActive(uint8_t channel);
 /* Текущий режим канала (AUX_MODE_*) — для CMD_AUX_GET. */
 uint8_t AuxOut_GetMode(uint8_t channel);
+/* Фактически применённые фазы канала (мс): для ШИМ — квантованные
+ * on/off (сетка целых мс, см. quantize_pwm на ПК), для PULSE —
+ * параметры серии, для ON — 0/0. CMD_AUX_GET отдаёт их хосту, чтобы
+ * UI показывал реальный сигнал, а не запрошенный (CM-N6). */
+void    AuxOut_GetTiming(uint8_t channel, uint16_t *on_ms_out,
+                         uint16_t *off_ms_out);
+/* Число фронтов, свёрнутых бюджетом Poll/скачком tick — диагностика
+ * точности ШИМ под нагрузкой (CM-N6). */
+uint32_t AuxOut_EdgesLate(void);
+
+/* Максимальный срок работы (мс): дельта дедлайна signed — предел
+ * wrap-safe контракта INT32_MAX (~24.8 суток). Больше — отказ 0x01. */
+#define AUX_MAX_DURATION_MS 0x7FFFFFFFUL
 
 /* Очередь событий переходов каналов для ГЛ: извлекает самое старое
  * событие (канал 1..7, is_on = новое логическое состояние). Возвращает

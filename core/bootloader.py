@@ -6,7 +6,10 @@
 """
 
 import contextlib
+import json
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 from collections.abc import Callable
 
@@ -34,7 +37,6 @@ from core.stm32_info import (
     DEVICE_CONFIG_PAGE_ADDR_LEGACY,
     DEVICE_CONFIG_PAGE_SIZE,
     DEVICE_INFO_PAGE_ADDR,
-    EVENT_LOG_ADDR,
     FLASH_END_ADDR,
     LEGACY_CONFIG_PAGE_ADDR,
     build_app_metadata,
@@ -42,13 +44,69 @@ from core.stm32_info import (
     parse_device_config,
     seed_device_config_page,
 )
-from core.storage_scan import find_storage_regions, region_is_cfg
+from core.storage_scan import (
+    StoragePlanError,
+    find_storage_regions,
+    plan_storage_relocation,
+    region_generation,
+    region_kind,
+)
 from models.logger import get_logger
 
 logger = get_logger(__name__)
 
 ACK = 0x79
 NACK = 0x1F
+
+
+def _dump_storage_backup(
+    tail: bytes, scan_base: int, found: list[tuple[int, bytes]]
+) -> str | None:
+    """Резервная копия маркерного хранилища на ПК до стирания.
+
+    Обрыв связи посреди обновления оставляет устройство в bootloader
+    (APP1 инвалиден) — но байты хранилища, прочитанные в память
+    процесса, пропали бы вместе с приложением. Файл переживает
+    закрытие: повторная прошивка с этим же компьютера (или ручное
+    восстановление через CMD_STORAGE_*) может поднять области.
+
+    Пишем полный дамп хвоста Flash + JSON-манифест областей рядом —
+    восстановление не зависит от повторного сканирования битой
+    Flash."""
+    try:
+        from platformdirs import user_data_dir
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_dir = (
+            Path(user_data_dir("CodeMaster", appauthor=False, ensure_exists=True))
+            / "storage_backups"
+        )
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        bin_path = backup_dir / f"storage-{stamp}.bin"
+        bin_path.write_bytes(tail)
+        manifest = {
+            "created": stamp,
+            "dump_base": f"0x{scan_base:08X}",
+            "regions": [
+                {
+                    "addr": f"0x{addr:08X}",
+                    "offset": f"0x{addr - scan_base:X}",
+                    "size": len(blob),
+                    "kind": region_kind(blob),
+                    "generation": region_generation(blob),
+                }
+                for addr, blob in found
+            ],
+        }
+        (backup_dir / f"storage-{stamp}.json").write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8"
+        )
+        return str(bin_path)
+    except Exception as exc:  # noqa: BLE001
+        # Резерв не удался — это не повод отменять обновление: области
+        # прочитаны и будут восстановлены штатно; но честно логируем.
+        logger.warning("Резервная копия хранилища не записана: %s", exc)
+        return None
 
 
 class BootloaderError(Exception):
@@ -79,6 +137,7 @@ class Bootloader:
         self.port = port
         self._progress_callback = progress_callback
         self._stop_requested = False
+        self._last_storage_scan_base = 0
 
     # Windows держит «Cannot configure port / PermissionError(13,
     # ERROR_GEN_FAILURE)» заметно дольше пары секунд после
@@ -801,15 +860,18 @@ class Bootloader:
                 self._progress_callback(min(100, int(written / total * 100)))
         return written
 
-    def _scan_marker_storage(self) -> list[tuple[int, bytes]]:
-        """Маркерные области хранилища в записываемой зоне Flash.
+    def _scan_marker_storage(self) -> tuple[bytes, list[tuple[int, bytes]]]:
+        """Дамп хвоста Flash и маркерные области в нём.
 
         Области VARH/FLXH/CFGH/TRGH находятся сканированием страниц за
         концом кода (как Storage_Init) — фиксированных адресов нет.
-        Сканируем [старый конец кода, EVENT_LOG_ADDR): верхние страницы
-        (0x0803C000+) AN3155 не стирает и не пишет — они переживают
-        обновление физически. Конец старого кода берём из метаданных
-        APP1 (image_size); без валидных метаданных — весь диапазон."""
+        Сканируем [старый конец кода, FLASH_END): верхние страницы
+        (0x0803C000+) AN3155 не стирает и не пишет, но их видимость
+        нужна плану размещения (якоря VARH/TRGH/EVLH считаются от
+        полной карты). Конец старого кода берём из метаданных
+        APP1 (image_size); без валидных метаданных — весь диапазон.
+        Короткий ответ без исключения считается неполным дампом —
+        отказ до стирания (CM-N1)."""
         scan_base = APPLICATION_BASE_ADDR
         try:
             meta = self.read_memory(APP_METADATA_PAGE_ADDR, 16)
@@ -825,14 +887,23 @@ class Bootloader:
         except Exception as exc:  # noqa: BLE001
             logger.debug("Метаданные приложения не прочитаны: %s", exc)
         try:
-            tail = self.read_memory(scan_base, EVENT_LOG_ADDR - scan_base)
+            tail = self.read_memory(scan_base, FLASH_END_ADDR - scan_base)
         except Exception as exc:  # noqa: BLE001
             raise BootloaderError(
                 f"Не удалось прочитать область хранилища перед "
                 f"стиранием ({exc}) — запись отменена, устройство "
                 f"не повреждено"
             ) from exc
-        return find_storage_regions(tail, scan_base)
+        # Короткий ответ без исключения — не полный дамп: регион мог
+        # оказаться «невидимым» и быть стёрт пересадкой (CM-N1).
+        if len(tail) != FLASH_END_ADDR - scan_base:
+            raise BootloaderError(
+                f"Чтение области хранилища вернуло {len(tail)} из "
+                f"{FLASH_END_ADDR - scan_base} байт — дамп неполный, "
+                "запись отменена, устройство не повреждено"
+            )
+        self._last_storage_scan_base = scan_base
+        return tail, find_storage_regions(tail, scan_base)
 
     def flash_firmware(
         self,
@@ -1001,47 +1072,56 @@ class Bootloader:
         # метаданных убила бы загрузку приложения.
         is_app_update = bool(code) and any(b != 0xFF for b in code)
 
-        # CM-CDC-01: маркерное хранилище (CFGH/FLXH/TRGH) якорится за
-        # концом кода и живёт в записываемой зоне — рост образа стирает
-        # эти страницы. Сохраняем области, накрываемые образом, до
-        # первого деструктивного шага и планируем точки восстановления:
-        # CFGH первым за НОВЫМ концом кода (якорь storage.c), остальные
-        # следом в порядке исходных адресов. Не влезло — отказ до
+        # CM-CDC-01/CM-N1: маркерное хранилище якорится за концом кода
+        # и живёт в записываемой зоне — рост образа стирает эти страницы,
+        # а цель пересадки может накрыть живую область, которую образ не
+        # трогал (сценарий ревью: CFGH, севший на страницу живого FLXH).
+        # Поэтому план размещения строится для ПОЛНОЙ карты живых
+        # областей (новейшее поколение каждого вида, каноничные якоря
+        # storage.c, пересечения и вместимость) — до первого
+        # деструктивного шага. Не влезло/противоречие — отказ до
         # стирания, устройство не повреждено.
-        saved_storage: list[tuple[int, bytes]] = []
+        saved_storage: list[tuple[int, int, bytes]] = []
+        storage_backup_path: str | None = None
         if preserve_storage and code:
             status("Чтение областей хранилища")
-            found = self._scan_marker_storage()
-            code_end = -(-(code_addr + len(code)) // page_size) * page_size
-            img_lo, img_hi = code_addr, code_end
-            covered = [
-                (a, b) for a, b in found
-                if a < img_hi and a + len(b) > img_lo
-            ]
-            if covered:
-                cursor = code_end
-                placed: list[tuple[int, int, bytes]] = []
-                # CFGH всегда первой за кодом (Storage_CfgBase/якорь
-                # FLXH) — остальные области за ней по старшинству.
-                for orig, blob in sorted(
-                    covered, key=lambda item: (not region_is_cfg(item[1]), item[0])
-                ):
-                    placed.append((orig, cursor, blob))
-                    cursor += len(blob)
-                if cursor > EVENT_LOG_ADDR:
-                    raise BootloaderError(
-                        "Области хранилища не помещаются за новым образом "
-                        f"(до 0x{EVENT_LOG_ADDR:08X}) — запись отменена, "
-                        "устройство не повреждено"
-                    )
-                saved_storage = placed
-                status(f"Областей хранилища к сохранению: {len(placed)}")
+            tail, found = self._scan_marker_storage()
+            try:
+                plan = plan_storage_relocation(
+                    found, code_addr, len(code), page_size=page_size
+                )
+            except StoragePlanError as exc:
+                raise BootloaderError(
+                    f"Не удалось разместить области хранилища под новым "
+                    f"образом: {exc} — запись отменена, устройство "
+                    f"не повреждено"
+                ) from exc
+            saved_storage = plan["moves"]
+            for warn in plan["warnings"]:
+                status(f"Внимание: {warn}")
+                logger.warning("%s", warn)
+            for d_addr, _d_blob, why in plan["dropped"]:
+                logger.info("Область 0x%08X не переносится: %s", d_addr, why)
+            if found:
+                # Резервная копия на ПК ДО стирания: обрыв связи в
+                # середине оставляет устройство в bootloader, но байты
+                # хранилища в памяти процесса пропадут вместе с ним —
+                # файл переживает закрытие приложения (CM-N1).
+                storage_backup_path = _dump_storage_backup(
+                    tail, self._last_storage_scan_base, found
+                )
+                status(f"Резерв хранилища: {storage_backup_path}")
+                status(
+                    f"Областей хранилища: {len(found)} "
+                    f"(пересадка: {len(saved_storage)})"
+                )
                 logger.info(
-                    "Сохранение областей хранилища: %s",
+                    "План хранилища: %s",
                     ", ".join(
-                        f"0x{o:08X}→0x{n:08X} ({len(b)} Б)"
-                        for o, n, b in placed
-                    ),
+                        f"{region_kind(b)} 0x{o:08X}→0x{n:08X}"
+                        for o, n, b in saved_storage
+                    )
+                    or "без пересадки",
                 )
 
         meta = meta_seg

@@ -33,16 +33,20 @@ CFG_MAGIC = 0x43464748
 FLX_MAGIC = 0x464C5848
 
 
-def _store_region(magic: int, payload_len: int, fill: int = 0x5A) -> bytes:
+def _store_region(
+    magic: int, payload_len: int, fill: int = 0x5A, gen: int = 1
+) -> bytes:
     """Валидная маркерная область на целое число страниц."""
     hdr = bytearray(20)
     hdr[0:4] = magic.to_bytes(4, "little")
-    hdr[4:8] = (1).to_bytes(4, "little")
+    hdr[4:8] = gen.to_bytes(4, "little")
     hdr[8:12] = payload_len.to_bytes(4, "little")
+    payload = bytes([fill] * payload_len)
+    hdr[12:16] = zlib.crc32(payload).to_bytes(4, "little")
     hdr[16:18] = (1).to_bytes(2, "little")
     hdr[19] = crc8(bytes(hdr[:19]))
     size = -(-(20 + payload_len) // PAGE) * PAGE
-    data = hdr + bytes([fill] * (size - 20))
+    data = hdr + payload + bytes([0xFF] * (size - 20 - payload_len))
     return bytes(data)
 
 
@@ -283,3 +287,217 @@ class TestStoragePreserve:
         ]
         # Код приложения не пострадал.
         assert sim.read(APPLICATION_BASE_ADDR, len(old_code)) == old_code
+
+
+class TestStoragePlanCMN1:
+    """Регрессии CM-N1: цель пересадки не должна стирать живую область,
+    которую образ не накрыл; план учитывает всю карту и поколения."""
+
+    @staticmethod
+    def _plant(sim: FlashSim, code_pages: int) -> int:
+        """Код + метаданные; возвращает конец кода (адрес)."""
+        code = _app_code(code_pages * PAGE, 0x11)
+        _flash_app(sim, code)
+        return APPLICATION_BASE_ADDR + code_pages * PAGE
+
+    def test_cfgh_relocation_does_not_kill_neighbor_flxh(self) -> None:
+        """Сценарий ревью: код 3стр + CFGH + FLXH соседние; новый код 4
+        стр → CFGH едет на старую страницу FLXH — FLXH обязан пережить."""
+        sim = FlashSim()
+        old_end = self._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42, gen=3)
+        flx_blob = _store_region(FLX_MAGIC, 60, fill=0x77, gen=5)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        sim.erase(old_end + PAGE, PAGE)
+        sim.write(old_end + PAGE, flx_blob)
+
+        bl = _bl_on_sim(sim)
+        sim.ops.clear()
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            bl.flash_firmware(path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                              skip_blank=False, preserve_storage=True)
+        finally:
+            os.unlink(path)
+
+        new_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        # Побайтово: обе области живы на каноничных позициях.
+        assert sim.read(new_end, len(cfg_blob)) == cfg_blob
+        assert sim.read(new_end + PAGE, len(flx_blob)) == flx_blob
+        # Маркеры обеих областей видны при повторном скане.
+        from core.storage_scan import find_storage_regions
+
+        tail = sim.read(new_end, FLASH_END_ADDR - new_end)
+        kinds = {b[:4] for _a, b in find_storage_regions(tail, new_end)}
+        assert CFG_MAGIC.to_bytes(4, "little") in kinds
+        assert FLX_MAGIC.to_bytes(4, "little") in kinds
+
+    def test_flxh_chain_moves_together(self) -> None:
+        """FLXH-цепочка из двух страниц переезжает целиком за CFGH."""
+        sim = FlashSim()
+        old_end = self._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        flx_blob = _store_region(FLX_MAGIC, 2500, fill=0x77)  # 2 стр.
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        for i in range(0, len(flx_blob), PAGE):
+            sim.erase(old_end + PAGE + i, PAGE)
+            sim.write(old_end + PAGE + i, flx_blob[i : i + PAGE])
+
+        bl = _bl_on_sim(sim)
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            bl.flash_firmware(path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                              skip_blank=False, preserve_storage=True)
+        finally:
+            os.unlink(path)
+        new_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        assert sim.read(new_end, len(cfg_blob)) == cfg_blob
+        assert sim.read(new_end + PAGE, len(flx_blob)) == flx_blob
+
+    def test_image_shrink_moves_cfg_down(self) -> None:
+        """Уменьшение образа: CFGH пересаживается ВНИЗ за новый конец."""
+        sim = FlashSim()
+        old_end = self._plant(sim, 5)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        bl = _bl_on_sim(sim)
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            bl.flash_firmware(path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                              skip_blank=False, preserve_storage=True)
+        finally:
+            os.unlink(path)
+        new_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        assert sim.read(new_end, len(cfg_blob)) == cfg_blob
+
+    def test_older_generation_dropped_newest_kept(self) -> None:
+        """Два поколения CFGH: переносится новейшее, старое — история."""
+        sim = FlashSim()
+        old_end = self._plant(sim, 3)
+        cfg_old = _store_region(CFG_MAGIC, 40, fill=0x42, gen=1)
+        cfg_new = _store_region(CFG_MAGIC, 40, fill=0x99, gen=7)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_old)
+        sim.erase(old_end + PAGE, PAGE)
+        sim.write(old_end + PAGE, cfg_new)
+        bl = _bl_on_sim(sim)
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            bl.flash_firmware(path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                              skip_blank=False, preserve_storage=True)
+        finally:
+            os.unlink(path)
+        new_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        assert sim.read(new_end, len(cfg_new)) == cfg_new
+
+    def test_no_room_aborts_before_erase(self) -> None:
+        """Хранилище не влезает за образ — отказ до стирания."""
+        sim = FlashSim()
+        old_end = self._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        bl = _bl_on_sim(sim)
+        sim.ops.clear()
+        # Образ до самого верха записываемой зоны — CFGH некуда деть.
+        from core.stm32_info import EVENT_LOG_ADDR
+
+        huge = _app_code(EVENT_LOG_ADDR - APPLICATION_BASE_ADDR, 0x22)
+        path = _tmp_bin(huge)
+        try:
+            with pytest.raises(BootloaderError, match="разместить|места"):
+                bl.flash_firmware(path, APPLICATION_BASE_ADDR,
+                                  page_size=PAGE, preserve_storage=True)
+        finally:
+            os.unlink(path)
+        # Ничего не стёрто — старый код и CFGH живы.
+        assert not [op for op in sim.ops if op[0] == "e"]
+        assert sim.read(old_end, len(cfg_blob)) == cfg_blob
+
+    def test_short_read_aborts_before_erase(self) -> None:
+        """Короткий ответ read_memory без исключения — неполный дамп."""
+        sim = FlashSim()
+        old_end = self._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+        bl = _bl_on_sim(sim)
+        real_read = bl.read_memory
+
+        def _short_read(addr: int, length: int) -> bytes:
+            return real_read(addr, length)[: max(0, length - 10)]
+
+        bl.read_memory = _short_read  # type: ignore[method-assign]
+        sim.ops.clear()
+        path = _tmp_bin(_app_code(5 * PAGE, 0x22))
+        try:
+            with pytest.raises(BootloaderError, match="неполный"):
+                bl.flash_firmware(path, APPLICATION_BASE_ADDR,
+                                  page_size=PAGE, preserve_storage=True)
+        finally:
+            os.unlink(path)
+        assert not [op for op in sim.ops if op[0] == "e"]
+        assert sim.read(old_end, len(cfg_blob)) == cfg_blob
+
+    def test_abort_then_retry_restores(self) -> None:
+        """Обрыв на записи кода → повторное обновление: CFGH спасён
+        из резервного чтения второй попытки (она видит ещё живую
+        область — стирание идёт только под образ)."""
+        sim = FlashSim()
+        old_end = self._plant(sim, 3)
+        cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x42)
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, cfg_blob)
+
+        bl = _bl_on_sim(sim)
+        real_erase = bl.erase_pages
+        calls = {"n": 0}
+
+        def _dying_erase(addr: int, data: bytes, **kw: object) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:  # обрыв на стирании кода
+                real_erase(addr, data[: len(data) // 2], **kw)
+                raise OSError("port lost")
+            real_erase(addr, data, **kw)
+
+        bl.erase_pages = _dying_erase  # type: ignore[method-assign]
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            with pytest.raises(OSError):
+                bl.flash_firmware(path, APPLICATION_BASE_ADDR,
+                                  page_size=PAGE, preserve_storage=True)
+        finally:
+            os.unlink(path)
+        # Повторная попытка — запись работает; CFGH пережил обрыв.
+        bl2 = _bl_on_sim(sim)
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            bl2.flash_firmware(path, APPLICATION_BASE_ADDR,
+                               page_size=PAGE, skip_blank=False,
+                               preserve_storage=True)
+        finally:
+            os.unlink(path)
+        new_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        assert sim.read(new_end, len(cfg_blob)) == cfg_blob
+
+    def test_corrupt_payload_preserved_verbatim(self) -> None:
+        """Битый payload CRC: область сохраняется дословно (warning),
+        а не «чинится» и не пропадает молча."""
+        sim = FlashSim()
+        old_end = self._plant(sim, 3)
+        cfg_blob = bytearray(_store_region(CFG_MAGIC, 40, fill=0x42))
+        cfg_blob[25] ^= 0xFF  # payload бит — заголовок цел
+        sim.erase(old_end, PAGE)
+        sim.write(old_end, bytes(cfg_blob))
+        bl = _bl_on_sim(sim)
+        path = _tmp_bin(_app_code(4 * PAGE, 0x22))
+        try:
+            bl.flash_firmware(path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                              skip_blank=False, preserve_storage=True)
+        finally:
+            os.unlink(path)
+        new_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        assert sim.read(new_end, len(cfg_blob)) == bytes(cfg_blob)

@@ -7,15 +7,22 @@
 
 from __future__ import annotations
 
+import pytest
+
 from core.aux_channels import (
     AUX_CH_COUNT,
     AUX_MAP_VERSION,
+    AUX_MAX_DURATION_MS,
     AUX_PINS,
     LEGACY_TO_NEW,
     NEW_TO_LEGACY,
+    aux_pin_conflict,
+    effective_duty,
     migrate_aux_variables,
     migrate_rule,
     migrate_rules,
+    quantize_pwm,
+    resolve_aux_from_vars,
     to_legacy_channel,
     to_new_channel,
 )
@@ -146,3 +153,97 @@ class TestMigrateCollections:
         twice = migrate_aux_variables(once, aux_map_version=AUX_MAP_VERSION)
         assert once == twice
         assert AUX_CH_COUNT == 7
+
+
+# ================= CM-N6/N7: сетка ШИМ и настройки выхода =========
+
+
+class TestPwmQuantization:
+    """Сетка квантования ШИМ ПК == формуле aux_out.c (CM-N6)."""
+
+    def test_500hz_grid(self) -> None:
+        # Период 2 мс → достижимы только 0/50/100%.
+        assert quantize_pwm(500, 50) == (2, 1, 1)
+        assert quantize_pwm(500, 1) == (2, 0, 2)     # 1% → 0%
+        assert quantize_pwm(500, 99) == (2, 2, 0)    # 99% → 100%
+        assert quantize_pwm(500, 0) == (2, 0, 2)
+        assert quantize_pwm(500, 100) == (2, 2, 0)
+
+    def test_noninteger_period(self) -> None:
+        # 333 Гц → round(1000/333)=3 мс; 50% → ближайший узел 2 мс.
+        assert quantize_pwm(333, 50) == (3, 2, 1)
+
+    def test_out_of_range(self) -> None:
+        assert quantize_pwm(0, 50) is None
+        assert quantize_pwm(501, 50) is None
+        assert quantize_pwm(100, 101) is None
+        assert quantize_pwm(100, -1) is None
+
+    def test_effective_duty(self) -> None:
+        assert effective_duty(500, 50) == 50.0
+        assert effective_duty(333, 50) == pytest.approx(66.666, abs=0.01)
+        assert effective_duty(0, 50) is None
+
+    def test_duration_cap_matches_firmware(self) -> None:
+        # INT32_MAX — та же граница, что AUX_MAX_DURATION_MS у МК.
+        assert AUX_MAX_DURATION_MS == 0x7FFFFFFF
+
+
+class TestPinConflicts:
+    def test_free_channels(self) -> None:
+        for ch in (2, 3, 4, 5):
+            assert aux_pin_conflict(ch) is None
+
+    def test_shared_pins_named(self) -> None:
+        assert "SWCLK" in aux_pin_conflict(1)
+        assert "CAN2" in aux_pin_conflict(6)
+        assert "CAN1" in aux_pin_conflict(7)
+
+
+class TestResolveAuxFromVars:
+    """Действие ГЛ «из настроек выхода» (CM-N7)."""
+
+    def _vars(self) -> list[dict]:
+        return [
+            {"type": "aux", "channel": 3, "out_mode": "pwm",
+             "pwm_freq": 250, "pwm_duty": 40},
+            {"type": "flag", "channel": 3, "storage": "ram"},
+        ]
+
+    def test_resolves_pwm_from_variable(self) -> None:
+        action = {"aux_enabled": True, "aux_channel": 3,
+                  "aux_use_var": True, "aux_mode": "on",
+                  "aux_pwm_freq": 500, "aux_pwm_duty": 100}
+        out = resolve_aux_from_vars(action, self._vars())
+        assert out["aux_mode"] == "pwm"
+        assert out["aux_pwm_freq"] == 250
+        assert out["aux_pwm_duty"] == 40
+        # Исходное действие не мутируется.
+        assert action["aux_mode"] == "on"
+
+    def test_off_on_modes(self) -> None:
+        vars_ = [{"type": "aux", "channel": 5, "out_mode": "off"}]
+        out = resolve_aux_from_vars(
+            {"aux_channel": 5, "aux_use_var": True, "aux_mode": "on"},
+            vars_,
+        )
+        assert out["aux_mode"] == "off"
+
+    def test_missing_variable_keeps_override(self) -> None:
+        action = {"aux_channel": 7, "aux_use_var": True,
+                  "aux_mode": "pwm", "aux_pwm_freq": 100,
+                  "aux_pwm_duty": 25}
+        out = resolve_aux_from_vars(action, self._vars())
+        assert out is action  # без переменной — явные параметры
+
+    def test_flag_variable_not_aux(self) -> None:
+        # Переменная-бит того же канала выходом не считается.
+        out = resolve_aux_from_vars(
+            {"aux_channel": 3, "aux_use_var": True, "aux_mode": "on"},
+            [{"type": "flag", "channel": 3}],
+        )
+        assert out["aux_mode"] == "on"
+
+    def test_no_use_var_noop(self) -> None:
+        action = {"aux_channel": 3, "aux_mode": "off"}
+        assert resolve_aux_from_vars(action, self._vars()) is action

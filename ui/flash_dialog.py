@@ -73,7 +73,10 @@ from core.can_protocol import (
 # CDC/UART-путь сохранения областей (Bootloader.flash_firmware).
 from core.storage_scan import (
     STORE_PAGE as _STORE_PAGE,
+    StoragePlanError as _StoragePlanError,
     find_storage_regions as _find_storage_regions,
+    plan_storage_relocation as _plan_storage_relocation,
+    region_kind as _region_kind,
 )
 from core.stm32_info import (
     APPLICATION_BASE_ADDR,
@@ -1313,16 +1316,55 @@ class FlashWorker(QThread):
                                 "перед стиранием ({0}) — запись отменена, "
                                 "устройство не повреждено"
                             ).format(exc)
+                        if len(tail) != FLASH_END_ADDR - scan_base:
+                            return False, tr(
+                                "USB DFU: чтение области хранилища вернуло {0} "
+                                "из {1} байт — дамп неполный, запись отменена, "
+                                "устройство не повреждено"
+                            ).format(len(tail), FLASH_END_ADDR - scan_base)
                         found = _find_storage_regions(tail, scan_base)
-                        for r_addr, r_blob in found:
-                            covered = any(
-                                start < r_addr + len(r_blob)
-                                and r_addr < start + len(data)
-                                for start, data in segments
+                        # CM-N1: mass erase сносит ВСЁ — каждую живую
+                        # область (новейшее поколение) возвращаем по
+                        # общему плану размещения: CFGH за новым концом
+                        # кода, FLXH за CFGH, VARH у верха, TRGH/EVLH
+                        # на центр зазора. «Область накрыта образом»
+                        # — не повод её терять: план её пересаживает.
+                        app_ends = [
+                            start + len(data)
+                            for start, data in segments
+                            if start >= APPLICATION_BASE_ADDR
+                        ]
+                        img_end = (
+                            -(-max(app_ends) // page_size) * page_size
+                            if app_ends
+                            else APPLICATION_BASE_ADDR
+                        )
+                        try:
+                            plan = _plan_storage_relocation(
+                                found,
+                                APPLICATION_BASE_ADDR,
+                                img_end - APPLICATION_BASE_ADDR,
+                                write_limit=FLASH_END_ADDR,
                             )
-                            if covered:
-                                continue  # область поставляет сам образ
-                            saved_regions.append((r_addr, r_blob))
+                        except _StoragePlanError as exc:
+                            return False, tr(
+                                "USB DFU: не удалось разместить области "
+                                "хранилища под новым образом: {0} — "
+                                "запись отменена, устройство не повреждено"
+                            ).format(exc)
+                        for warn in plan["warnings"]:
+                            self.log_line.emit(tr("USB DFU: {0}").format(warn))
+                        for _orig, dst, blob in plan["moves"]:
+                            saved_regions.append((dst, blob))
+                        for k_addr, blob in plan["keep"]:
+                            saved_regions.append((k_addr, blob))
+                        # Легаси-пул TRG2 по фиксированному адресу план
+                        # не двигает (для постраничного AN3155 он вне
+                        # зоны записи) — но mass erase стирает и его:
+                        # возвращаем байты на то же место.
+                        for r_addr, r_blob in found:
+                            if _region_kind(r_blob) == "trg2":
+                                saved_regions.append((r_addr, r_blob))
                         if found:
                             self.log_line.emit(
                                 tr("USB DFU: найдено областей хранилища: {0}").format(

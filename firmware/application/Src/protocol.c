@@ -837,13 +837,15 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     }
 
     case CMD_AUX_GET: {
-      /* → [owned_mask][active_mask][level_mask][mode×7] — актуальное
-       * состояние каналов для ПК (условия «работает/не работает» и
-       * отображение; не требует держать локальное зеркало). */
-      uint8_t out[10];
+      /* → [owned][active][level][mode×7][on_ms×7 u16][off_ms×7 u16]
+       * — актуальное состояние каналов для ПК (условия «работает/не
+       * работает» и отображение; не требует локального зеркала).
+       * on/off — ФАКТИЧЕСКИ применённые фазы (квантование ШИМ на
+       * целые мс, CM-N6): хост показывает реальный сигнал. Старый
+       * хост читает первые 10 байт — хвост не мешает. */
+      uint8_t out[10 + 2 * 2 * AUX_CH_COUNT];
+      memset(out, 0, sizeof(out));
       out[0] = AuxOut_OwnedMask();
-      out[1] = 0U;
-      out[2] = 0U;
       for (uint8_t ch = 1U; ch <= AUX_CH_COUNT; ch++) {
         if (AuxOut_IsActive(ch)) {
           out[1] |= (uint8_t)(1U << (ch - 1U));
@@ -852,6 +854,14 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
           out[2] |= (uint8_t)(1U << (ch - 1U));
         }
         out[2 + ch] = AuxOut_GetMode(ch);
+        uint16_t on_ms = 0U, off_ms = 0U;
+        AuxOut_GetTiming(ch, &on_ms, &off_ms);
+        uint8_t base = (uint8_t)(10U + (ch - 1U) * 2U);
+        out[base] = (uint8_t)(on_ms & 0xFFU);
+        out[base + 1U] = (uint8_t)(on_ms >> 8U);
+        base = (uint8_t)(10U + AUX_CH_COUNT * 2U + (ch - 1U) * 2U);
+        out[base] = (uint8_t)(off_ms & 0xFFU);
+        out[base + 1U] = (uint8_t)(off_ms >> 8U);
       }
       send_new_cmd_response(cmd, 0x00U, out, (uint8_t)sizeof(out));
       break;
@@ -869,6 +879,9 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
       uint8_t ok = DeviceConfig_SetAuxPinsMask(payload[0]);
       if (ok) {
         AuxOut_ApplyOwnedMask(DeviceConfig_GetAuxPinsMask());
+        /* Возврат отозванных TERM-пинов — немедленно, с последним
+         * запрошенным уровнем; отданные не трогаем (CM-N4). */
+        CanBridge_RestoreTermPins();
       }
       uint8_t out[1] = { AuxOut_OwnedMask() };
       send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, out, 1U);

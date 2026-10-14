@@ -51,7 +51,6 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen, QRegularExpressionValid
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -59,6 +58,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGraphicsOpacityEffect,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -78,9 +78,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.aux_channels import AUX_PINS, migrate_aux_variables
+from core.aux_channels import (
+    AUX_PINS,
+    aux_pin_conflict,
+    migrate_aux_variables,
+    quantize_pwm,
+)
 from core.can_protocol import pack_can_frame
 from core import steering_decoder
+from core import variable_decode
 from models.config import (
     Config,
     pack_config_file,
@@ -881,65 +887,75 @@ class _SteeringDecoderDialog(QDialog):
         layout.setSpacing(6)
 
         hint = QLabel(tr(
-            "Класс значения — по делителям: кратное одному из делителей "
-            "класса «+»/«−» принадлежит ему; совпадение в обоих — "
-            "конфликт (невалидно), ни в одном — «вне классов». Угол "
-            "— только из калибровки, без неё статус «нет калибровки»."
+            "Знак угла — две независимые таблицы условий: в строке "
+            "«Кратно»/«Не кратно» (обе можно снять — строка не "
+            "участвует). Выбранные условия внутри таблицы объединяются "
+            "по И. Совпадение обеих таблиц — «конфликт» (невалидно), "
+            "ни одной — «вне классов». Угол — только из калибровки."
         ))
         hint.setFont(font)
         hint.setWordWrap(True)
         _selectable(hint)
         layout.addWidget(hint)
 
-        # Таблица делителей: DEC | HEX | класс (—/+/−), строки
-        # независимы — правка одной не трогает остальные.
-        layout.addWidget(QLabel(tr("Делители (2…20):")))
-        self._div_table = QTableWidget(19, 4)
-        self._div_table.setFont(font)
-        self._div_table.setHorizontalHeaderLabels(
-            [tr("Делитель"), "HEX", "«+»", "«−»"]
-        )
-        self._div_table.verticalHeader().setVisible(False)
-        self._div_table.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers
-        )
-        pos = set(conf["divisors_pos"])
-        neg = set(conf["divisors_neg"])
-        self._div_radios: list[tuple[int, QRadioButton, QRadioButton]] = []
-        for i, div in enumerate(range(sd.DIVISOR_MIN, sd.DIVISOR_MAX + 1)):
-            item = QTableWidgetItem(str(div))
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._div_table.setItem(i, 0, item)
-            hx = QTableWidgetItem(f"0x{div:X}")
-            hx.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._div_table.setItem(i, 1, hx)
-            group = QButtonGroup(self._div_table)
-            rb_pos = QRadioButton()
-            rb_neg = QRadioButton()
-            rb_none = QRadioButton()
-            rb_none.setChecked(True)
-            for b in (rb_pos, rb_neg, rb_none):
-                group.addButton(b)
-            if div in pos:
-                rb_pos.setChecked(True)
-            elif div in neg:
-                rb_neg.setChecked(True)
-            cell_p = QWidget()
-            lay_p = QHBoxLayout(cell_p)
-            lay_p.setContentsMargins(0, 0, 0, 0)
-            lay_p.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lay_p.addWidget(rb_pos)
-            cell_n = QWidget()
-            lay_n = QHBoxLayout(cell_n)
-            lay_n.setContentsMargins(0, 0, 0, 0)
-            lay_n.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lay_n.addWidget(rb_neg)
-            self._div_table.setCellWidget(i, 2, cell_p)
-            self._div_table.setCellWidget(i, 3, cell_n)
-            self._div_radios.append((div, rb_pos, rb_neg))
-        self._div_table.resizeColumnsToContents()
-        self._div_table.setFixedHeight(210)
-        layout.addWidget(self._div_table)
+        # Две таблицы знаков (CM-N2): по десять чётных делителей,
+        # взаимоисключение только между «Кратно»/«Не кратно» одной
+        # строки одного знака — снять обе галочки можно (строка вне
+        # таблицы).
+        signs = conf["signs"]
+        self._sign_checks: dict[str, dict[int, tuple[QCheckBox, QCheckBox]]] = {}
+        tables_row = QHBoxLayout()
+        for sign, title in (
+            ("pos", tr("Класс «+» (таблица)")),
+            ("neg", tr("Класс «−» (таблица)")),
+        ):
+            box = QGroupBox(title)
+            box.setFont(font)
+            vb = QVBoxLayout(box)
+            table = QTableWidget(len(sd.DIVISORS), 4)
+            table.setFont(font)
+            table.setHorizontalHeaderLabels(
+                [tr("Делитель"), "DEC", tr("Кратно"), tr("Не кратно")]
+            )
+            table.verticalHeader().setVisible(False)
+            table.setEditTriggers(
+                QAbstractItemView.EditTrigger.NoEditTriggers
+            )
+            checks: dict[int, tuple[QCheckBox, QCheckBox]] = {}
+            for i, div in enumerate(sd.DIVISORS):
+                item = QTableWidgetItem(f"0x{div:X}")
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(i, 0, item)
+                dec = QTableWidgetItem(str(div))
+                dec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(i, 1, dec)
+                cb_div = QCheckBox()
+                cb_not = QCheckBox()
+                # «Кратно» и «Не кратно» одной строки исключают друг
+                # друга; повторный клик снимает выбор (третье
+                # состояние — строка вне таблицы).
+                cb_div.toggled.connect(
+                    lambda on, other=cb_not: on and other.setChecked(False)
+                )
+                cb_not.toggled.connect(
+                    lambda on, other=cb_div: on and other.setChecked(False)
+                )
+                cb_div.setChecked(signs[sign].get(div) == "div")
+                cb_not.setChecked(signs[sign].get(div) == "not")
+                for col, cb in ((2, cb_div), (3, cb_not)):
+                    cell = QWidget()
+                    lay = QHBoxLayout(cell)
+                    lay.setContentsMargins(0, 0, 0, 0)
+                    lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    lay.addWidget(cb)
+                    table.setCellWidget(i, col, cell)
+                checks[div] = (cb_div, cb_not)
+            table.resizeColumnsToContents()
+            table.setFixedHeight(230)
+            vb.addWidget(table)
+            tables_row.addWidget(box)
+            self._sign_checks[sign] = checks
+        layout.addLayout(tables_row)
 
         misc = QHBoxLayout()
         misc.addWidget(QLabel(tr("Код нейтрали:")))
@@ -959,6 +975,17 @@ class _SteeringDecoderDialog(QDialog):
                "градусами (правый руль/иная ориентация датчика)")
         )
         misc.addWidget(self._dir_left)
+        misc.addWidget(QLabel(tr("Таймаут, мс:")))
+        self._stale = QSpinBox()
+        self._stale.setFont(font)
+        self._stale.setRange(0, 600000)
+        self._stale.setValue(int(conf.get("stale_ms", 0) or 0))
+        self._stale.setToolTip(
+            tr("Свежесть значения для условий Гибкой логики: "
+               "просроченный угол не удовлетворяет численным "
+               "условиям. 0 — не устаревает")
+        )
+        misc.addWidget(self._stale)
         misc.addStretch()
         layout.addLayout(misc)
 
@@ -1006,14 +1033,17 @@ class _SteeringDecoderDialog(QDialog):
     def config(self) -> dict[str, Any]:
         """Нормализованная конфигурация декодера из полей диалога."""
         cfg = dict(self._conf)
-        pos, neg = [], []
-        for div, rb_pos, rb_neg in self._div_radios:
-            if rb_pos.isChecked():
-                pos.append(div)
-            elif rb_neg.isChecked():
-                neg.append(div)
-        cfg["divisors_pos"] = pos
-        cfg["divisors_neg"] = neg
+        cfg["version"] = steering_decoder.CONFIG_VERSION
+        signs: dict[str, dict[int, str]] = {"pos": {}, "neg": {}}
+        for sign, checks in self._sign_checks.items():
+            for div, (cb_div, cb_not) in checks.items():
+                if cb_div.isChecked():
+                    signs[sign][div] = "div"
+                elif cb_not.isChecked():
+                    signs[sign][div] = "not"
+        cfg["signs"] = signs
+        cfg.pop("divisors_pos", None)
+        cfg.pop("divisors_neg", None)
         try:
             text = self._neutral.text().strip()
             cfg["neutral"] = (
@@ -1024,6 +1054,7 @@ class _SteeringDecoderDialog(QDialog):
             pass
         cfg["left_is_negative"] = self._dir_left.isChecked()
         cfg["interpolate"] = self._interp.isChecked()
+        cfg["stale_ms"] = int(self._stale.value())
         calib: list[tuple[float, float]] = []
         for r in range(self._calib_table.rowCount()):
             xi = self._calib_table.item(r, 0)
@@ -3599,11 +3630,16 @@ class _AuxChannelsDialog(QDialog):
         level = state["level"]
         modes = state["modes"]
 
-        table = QTableWidget(7, 5)
+        # Расширенный ответ протокола 13 (CM-N6): фактические фазы
+        # сигнала в мс — показываем ПРИМЕНЁННЫЙ ШИМ, не запрошенный.
+        on_ms = state.get("on_ms") or []
+        off_ms = state.get("off_ms") or []
+
+        table = QTableWidget(7, 6)
         table.setFont(font)
         table.setHorizontalHeaderLabels(
             [tr("Канал"), tr("Пин"), tr("Режим"), tr("Работает"),
-             tr("Уровень")]
+             tr("Уровень"), tr("Фазы (мс)")]
         )
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(
@@ -3613,12 +3649,16 @@ class _AuxChannelsDialog(QDialog):
         for ch in range(1, 8):
             r = ch - 1
             mode = modes[r] if r < len(modes) else 0
+            phases = "—"
+            if mode in (2, 3) and r < len(on_ms) and r < len(off_ms):
+                phases = f"{on_ms[r]}+{off_ms[r]}"
             cells = (
                 str(ch),
                 AUX_PINS[ch],
                 self._MODES[mode] if mode < len(self._MODES) else "?",
                 "✓" if active & (1 << r) else "—",
                 "1" if level & (1 << r) else "0",
+                phases,
             )
             for c, text in enumerate(cells):
                 item = QTableWidgetItem(text)
@@ -3733,8 +3773,10 @@ class _AuxDialog(QDialog):
         self._stack = QStackedWidget()
 
         channel_page = QWidget()
-        row = QHBoxLayout(channel_page)
-        row.setContentsMargins(0, 0, 0, 0)
+        ch_layout = QVBoxLayout(channel_page)
+        ch_layout.setContentsMargins(0, 0, 0, 0)
+        ch_layout.setSpacing(6)
+        row = QHBoxLayout()
         row.addWidget(QLabel(tr("Пин (канал):")))
         self._channel = QSpinBox()
         self._channel.setFont(font)
@@ -3744,6 +3786,12 @@ class _AuxDialog(QDialog):
         self._channel.setValue(int(config.get("channel", 1) or 1))
         self._channel.setFixedWidth(64)
         row.addWidget(self._channel)
+        # Реальное имя пина и ограничение (SWCLK/TERM) — CM-N7:
+        # доступность показывается явно, а не «канал есть = пин
+        # свободен».
+        self._pin_label = QLabel()
+        self._pin_label.setFont(font)
+        row.addWidget(self._pin_label)
         row.addWidget(QLabel(tr("Функция канала:")))
         self._function = QComboBox()
         self._function.setFont(font)
@@ -3752,7 +3800,64 @@ class _AuxDialog(QDialog):
         fidx = self._function.findData(config.get("function", "analog_out"))
         self._function.setCurrentIndex(fidx if fidx >= 0 else 0)
         row.addWidget(self._function, 1)
+        ch_layout.addLayout(row)
+
+        # Настройки выхода (CM-N7): константа Выкл/Вкл или ШИМ с
+        # частотой и заполнением — действие ГЛ «из настроек выхода»
+        # берёт режим отсюда.
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel(tr("Режим выхода:")))
+        self._out_mode = QComboBox()
+        self._out_mode.setFont(font)
+        self._out_mode.addItem(tr("Выкл"), "off")
+        self._out_mode.addItem(tr("Вкл"), "on")
+        self._out_mode.addItem(tr("ШИМ"), "pwm")
+        midx = self._out_mode.findData(str(config.get("out_mode", "on")))
+        self._out_mode.setCurrentIndex(midx if midx >= 0 else 1)
+        mode_row.addWidget(self._out_mode)
+        mode_row.addStretch()
+        ch_layout.addLayout(mode_row)
+
+        self._pwm_row = QWidget()
+        pwm_row = QHBoxLayout(self._pwm_row)
+        pwm_row.setContentsMargins(0, 0, 0, 0)
+        pwm_row.addWidget(QLabel(tr("Частота:")))
+        self._pwm_freq = QSpinBox()
+        self._pwm_freq.setFont(font)
+        # Та же сетка, что у МК (quantize_pwm, aux_out.c): шаг 1 мс,
+        # потолок 500 Гц (CM-N6).
+        self._pwm_freq.setRange(1, 500)
+        self._pwm_freq.setValue(int(config.get("pwm_freq", 250) or 250))
+        self._pwm_freq.setSuffix(tr(" Гц"))
+        pwm_row.addWidget(self._pwm_freq)
+        pwm_row.addWidget(QLabel(tr("Заполнение:")))
+        self._pwm_duty = QSpinBox()
+        self._pwm_duty.setFont(font)
+        self._pwm_duty.setRange(0, 100)
+        self._pwm_duty.setValue(int(config.get("pwm_duty", 50) or 0))
+        self._pwm_duty.setSuffix(" %")
+        pwm_row.addWidget(self._pwm_duty)
+        self._applied = QLabel()
+        self._applied.setFont(font)
+        self._applied.setStyleSheet("color: #9A9AA5;")
+        pwm_row.addWidget(self._applied)
+        pwm_row.addStretch()
+        ch_layout.addWidget(self._pwm_row)
+
+        self._conflict = QLabel()
+        self._conflict.setFont(font)
+        self._conflict.setWordWrap(True)
+        self._conflict.setStyleSheet("color: #B03030;")
+        _selectable(self._conflict)
+        ch_layout.addWidget(self._conflict)
+        ch_layout.addStretch()
         self._stack.addWidget(channel_page)
+
+        self._channel.valueChanged.connect(self._refresh_aux_out)
+        self._out_mode.currentIndexChanged.connect(self._refresh_aux_out)
+        self._pwm_freq.valueChanged.connect(self._refresh_aux_out)
+        self._pwm_duty.valueChanged.connect(self._refresh_aux_out)
+        self._refresh_aux_out()
 
         flag_page = QWidget()
         flag_layout = QVBoxLayout(flag_page)
@@ -3814,6 +3919,37 @@ class _AuxDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _refresh_aux_out(self) -> None:
+        """Подписи пина/конфликта и фактические фазы ШИМ (CM-N7):
+        показываем ПРИМЕНЁННЫЙ сигнал после квантования в сетку
+        целых мс — не запрошенный."""
+        ch = self._channel.value()
+        pin = AUX_PINS.get(ch, "?")
+        conflict = aux_pin_conflict(ch)
+        self._pin_label.setText(pin)
+        mode = self._out_mode.currentData()
+        self._pwm_row.setVisible(mode == "pwm")
+        if conflict:
+            self._conflict.setText(
+                tr("⚠ {0}: {1}").format(pin, tr(conflict))
+            )
+        else:
+            self._conflict.setText("")
+        self._conflict.setVisible(bool(conflict))
+        if mode == "pwm":
+            q = quantize_pwm(self._pwm_freq.value(), self._pwm_duty.value())
+            if q is None:
+                self._applied.setText(tr("недостижимо"))
+            else:
+                period, on, off = q
+                self._applied.setText(
+                    tr("≈ {0}+{1} мс ({2:.1f}%)").format(
+                        on, off, on * 100.0 / period
+                    )
+                )
+        else:
+            self._applied.setText("")
+
     @property
     def config(self) -> dict[str, Any]:
         if self._kind.currentData() == _TYPE_FLAG:
@@ -3827,6 +3963,9 @@ class _AuxDialog(QDialog):
             "name": self._name_edit.text().strip(),
             "channel": self._channel.value(),
             "function": self._function.currentData(),
+            "out_mode": self._out_mode.currentData(),
+            "pwm_freq": self._pwm_freq.value(),
+            "pwm_duty": self._pwm_duty.value(),
         }
 
 
@@ -4019,15 +4158,25 @@ class _VariableRow(QFrame):
             )
             return
         if cfg_type == "aux":
-            # Доп. канал: вместо «0» показываем пин и функцию канала.
-            func = dict(_AUX_FUNCTIONS).get(
-                self.config.get("function", ""), ""
-            )
-            self._state_label.setText(
-                tr("Пин {0} · {1}").format(
-                    int(self.config.get("channel", 1) or 1), tr(func)
-                ).rstrip(" ·")
-            )
+            # Доп. канал: пин (реальное имя) + применённый режим
+            # выхода из настроек (CM-N7).
+            ch = int(self.config.get("channel", 1) or 1)
+            pin = AUX_PINS.get(ch, f"#{ch}")
+            out_mode = str(self.config.get("out_mode", "on") or "on")
+            if out_mode == "pwm":
+                q = quantize_pwm(
+                    int(self.config.get("pwm_freq", 0) or 0),
+                    int(self.config.get("pwm_duty", 0) or 0),
+                )
+                mode_text = (
+                    tr("ШИМ ≈{0:.0f}%").format(q[1] * 100.0 / q[0])
+                    if q else tr("ШИМ?")
+                )
+            elif out_mode == "off":
+                mode_text = tr("Выкл")
+            else:
+                mode_text = tr("Вкл")
+            self._state_label.setText(f"{pin} · {mode_text}")
             return
         if cfg_type == _TYPE_CACHE:
             # «Кэш переменная»: до записи — прочерки; после записи в
@@ -4567,7 +4716,10 @@ class VariablesTab(QWidget):
                 fid = hex_to_int(str(cfg.get("id", "")))
                 points = cfg.get("points") or []
                 used = cfg.get("bytes") or []
-                if fid is None or not points or not used:
+                steering = cfg.get("out_range") == "steering"
+                # Таблица привязки декодеру угла не нужна — значение
+                # берётся из калибровки декодера (CM-N3).
+                if fid is None or not used or (not points and not steering):
                     continue
                 hit = latest.get(
                     (fid, bool(cfg.get("extended", False)))
@@ -4605,58 +4757,44 @@ class VariablesTab(QWidget):
                             text=name or f"0x{raw:X}",
                         )
                 else:
-                    # «Численная переменная»: сырое значение —
-                    # СУММА выбранных байтов кадра (отчёт мастера);
-                    # в режиме SBLP — сборка по порядку старшинства
-                    # («Старший байт справа»: 09 03 → 9 + 3·256).
-                    sblp = str(cfg.get("sblp", "") or "")
-                    if sblp:
-                        window = bytes(
-                            data[i] for i in used if i < len(data)
-                        )
-                        decoded = _sblp_decode(window, sblp)
-                        if decoded is not None:
-                            raw = decoded
-                            seen = True
-                    else:
-                        for i in used:
-                            if i < len(data):
-                                raw += data[i]
-                                seen = True
-                    if seen:
-                        if cfg.get("out_range") == "degrees":
-                            # «Градусы»: значение декодируется по
-                            # выведенной из ≥3 точек циклической
-                            # зависимости; неизвестное семейство —
-                            # значение не показываем (отчёт мастера).
-                            model = _degrees_model(points)
-                            degrees = _degrees_decode(model, raw)
-                            if degrees is not None:
-                                row.set_live_value(degrees, raw)
-                        elif cfg.get("out_range") == "steering":
-                            # «Угол руля»: класс по делителям
-                            # (кратность), нейтраль → 0°, градусы
-                            # только из калибровки; статус показываем
-                            # текстом при невалидном значении.
-                            res = steering_decoder.decode_raw(
-                                raw, cfg.get("steering")
+                    # «Численная переменная»: RAW и полнота поля —
+                    # единый контракт с рантаймом ГЛ (CM-N3):
+                    # SBLP-склейка или сумма выбранных байтов;
+                    # неполное поле значения не даёт.
+                    res = variable_decode.decode_var_value(cfg, data)
+                    if not res["complete"]:
+                        continue
+                    raw = res["raw"]
+                    if steering:
+                        # «Угол руля»: класс по делителям (кратность),
+                        # нейтраль → 0°, градусы только из калибровки;
+                        # статус показываем текстом при невалидном
+                        # значении.
+                        if res["valid"]:
+                            row.set_live_value(
+                                res["value"], raw,
+                                text=(
+                                    f'{res["value"]:.1f}° '
+                                    f'({res["raw_hex"]})'
+                                ),
                             )
-                            if res["valid"]:
-                                row.set_live_value(
-                                    res["angle"], raw,
-                                    text=(
-                                        f'{res["angle"]:.1f}° '
-                                        f'({res["raw_hex"]})'
-                                    ),
-                                )
-                            else:
-                                row.set_live_value(
-                                    0.0, raw, text=tr(res["status"])
-                                )
                         else:
                             row.set_live_value(
-                                _map_points(points, raw), raw
+                                0.0, raw, text=tr(res["status"])
                             )
+                    elif cfg.get("out_range") == "degrees":
+                        # «Градусы»: значение декодируется по
+                        # выведенной из ≥3 точек циклической
+                        # зависимости; неизвестное семейство —
+                        # значение не показываем (отчёт мастера).
+                        model = _degrees_model(points)
+                        degrees = _degrees_decode(model, raw)
+                        if degrees is not None:
+                            row.set_live_value(degrees, raw)
+                    else:
+                        row.set_live_value(
+                            _map_points(points, raw), raw
+                        )
 
     def set_flag_live(self, name: str, value: int) -> None:
         """Онлайн-состояние бита «Переменная» из Гибкой логики —
