@@ -219,6 +219,12 @@ jobs:
           # в МК (VER1 в полном образе, отчёт мастера).
           VER=$(python3 -c "import re; print(re.search(r'VERSION = \"([^\"]+)\"', open('models/version.py').read()).group(1))")
           echo "version=$VER" >> $GITHUB_OUTPUT
+      - name: Render release notes
+        run: |
+          # Короткий явный body вместо generate_release_notes — без
+          # истории коммитов/PR в тексте релиза.
+          sed "s/{{VERSION}}/${{ steps.release_info.outputs.version }}/g" \
+            .github/RELEASE_NOTES.md > release_notes.md
       - name: Download all artifacts
         uses: actions/download-artifact@v7
         with:
@@ -252,6 +258,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: latest
           name: Latest build
+          bodyPath: release_notes.md
           prerelease: true
           allowUpdates: true
           replacesArtifacts: true
@@ -266,11 +273,15 @@ jobs:
           if ! gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             for i in 1 2 3; do
               gh release create latest --repo "$GITHUB_REPOSITORY" \
-                --title "Latest build" --prerelease --target "${GITHUB_SHA}" && break
+                --title "Latest build" --prerelease --target "${GITHUB_SHA}" \
+                --notes-file release_notes.md && break
               [ "$i" = 3 ] && exit 1
               sleep 15
             done
           fi
+          # body заменяется коротким файлом, а не дописывается к старому.
+          gh release edit latest --repo "$GITHUB_REPOSITORY" \
+            --notes-file release_notes.md
           for i in 1 2 3; do
             gh release upload latest dist/* --clobber --repo "$GITHUB_REPOSITORY" && exit 0
             [ "$i" = 3 ] && exit 1
@@ -286,6 +297,6 @@ jobs:
           files: |
             dist/*
           fail_on_unmatched_files: true
-          generate_release_notes: true
+          body_path: release_notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
