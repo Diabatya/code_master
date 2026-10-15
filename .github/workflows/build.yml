@@ -262,6 +262,7 @@ jobs:
           prerelease: true
           allowUpdates: true
           replacesArtifacts: true
+          removeArtifacts: true
           artifacts: |
             dist/*
       - name: Fallback release upload (gh CLI)
