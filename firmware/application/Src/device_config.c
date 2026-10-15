@@ -6,6 +6,7 @@
 #include "main.h"
 #include "device_config.h"
 #include "storage.h"
+#include "aux_out.h"
 
 static device_config_t s_config;
 static device_ext_config_t s_ext_config;
@@ -444,6 +445,25 @@ uint8_t DeviceConfig_SetCanMode(uint8_t channel, uint8_t silent,
   }
   *silent_p = s;
   *term_p = t;
+  return Storage_CfgWrite((const uint8_t *)&s_app_cfg,
+                          sizeof(s_app_cfg));
+}
+
+uint8_t DeviceConfig_GetAuxPinsMask(void)
+{
+  /* Только спорные пины управляются маской; биты каналов 2..5
+   * (AUX_OWN_ALWAYS) — всегда «отданы» и в маске не хранятся. */
+  return s_app_cfg.aux_pins_mask & ~(uint8_t)AUX_OWN_ALWAYS;
+}
+
+uint8_t DeviceConfig_SetAuxPinsMask(uint8_t mask)
+{
+  mask &= ~(uint8_t)AUX_OWN_ALWAYS; /* храним только биты спорных пинов */
+  if (s_app_cfg.aux_pins_mask == mask) {
+    return 1U;
+  }
+  s_app_cfg.aux_pins_mask = mask;
+  s_app_cfg.version = DEVICE_APP_CFG_VERSION;
   return Storage_CfgWrite((const uint8_t *)&s_app_cfg,
                           sizeof(s_app_cfg));
 }

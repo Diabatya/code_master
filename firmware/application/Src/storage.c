@@ -83,6 +83,12 @@ static uint32_t crc32_of(const uint8_t *data, uint32_t len)
    * переменные «сохранены», после перезапуска не читаются). */
   uint32_t crc = 0xFFFFFFFFUL;
   for (uint32_t i = 0; i < len; i++) {
+    /* Покорм IWDG каждые 4 КБ: полный проход больших блобов
+     * (до STORE_MAX_PAYLOAD) на старте и при коммите не должен
+     * перешагнуть ~1-секундный период сторожевого (CM-N16). */
+    if ((i & 0xFFFU) == 0xFFFU) {
+      App_KickWatchdog();
+    }
     crc ^= data[i];
     for (uint8_t bit = 0; bit < 8U; bit++) {
       crc = (crc & 1U) ? (crc >> 1) ^ 0xEDB88320UL : crc >> 1;
@@ -112,6 +118,23 @@ static uint32_t blob_pages(uint32_t payload_len)
 {
   return (STORE_HEADER_SIZE + payload_len + STORE_FLASH_PAGE - 1U)
          / STORE_FLASH_PAGE;
+}
+
+/* Целостность payload области блоба (CM-N16): заголовок CRC8 доказывает
+ * только сам заголовок — обрыв посреди записи оставляет валидный
+ * заголовок поверх недописанных/старых данных. Контракт единый с ПК
+ * (storage_scan.region_payload_ok): payload_crc == 0 — контроль не
+ * заявлен (EVLH: записи журнала валидируются поштучно своим crc8);
+ * иначе полезная нагрузка обязана сходиться с CRC32. Вызывать ТОЛЬКО
+ * после проверки, что спан блоба влезает в Flash (end <= FLASH_END):
+ * чтение за пределами хранилища недопустимо. */
+static uint8_t blob_intact(uint32_t page, const store_header_t *h)
+{
+  if (h->payload_crc == 0U) {
+    return 1U;
+  }
+  const uint8_t *p = (const uint8_t *)(page + STORE_HEADER_SIZE);
+  return crc32_of(p, h->payload_len) == h->payload_crc;
 }
 
 /* Страница CFGH резервируется за кодом ВСЕГДА (даже когда область ещё
@@ -183,14 +206,22 @@ void Storage_Init(void)
   /* Скан по страницам: заголовки VARH/FLXH/EVLH/TRGH различаются по
    * magic. Дубликаты поколений одной области (append-запись, обрыв
    * уплотнения) разрешаются большим generation — модуль запоминает
-   * только новейшее, старшие поколения остаются историей. */
+   * только новейшее, старшие поколения остаются историей.
+   * CM-N16: целостность важнее поколения — копия с валидным CRC8
+   * заголовка, но битым CRC32 payload (обрыв посреди записи обновления
+   * либо blob-коммита) выбору не участвует: иначе оставшийся за
+   * пределами стирания ПК битый блок более высокого поколения
+   * вытеснял бы целую младшую копию, и CfgRead/Trigger_ReloadFlex
+   * получали бы отказ по CRC уже после «успешного» обновления.
+   * Порядок проверок: границы спана ДО чтения payload (blob_intact
+   * читает только внутри [page, end) ⊂ Flash). */
   uint32_t best_trig_gen = 0U;
   for (uint32_t page = s_code_end; page < STORE_FLASH_END;
        page += STORE_FLASH_PAGE) {
     const store_header_t *h = (const store_header_t *)page;
     if (header_valid(h, STORE_MAGIC_VAR)) {
       uint32_t end = page + blob_pages(h->payload_len) * STORE_FLASH_PAGE;
-      if (end <= STORE_FLASH_END
+      if (end <= STORE_FLASH_END && blob_intact(page, h)
           && (s_var.base == 0U || h->generation >= s_var.generation)) {
         s_var.base = page;
         s_var.end = STORE_FLASH_END; /* цепочка занимает верх до конца */
@@ -199,7 +230,7 @@ void Storage_Init(void)
       }
     } else if (header_valid(h, STORE_MAGIC_FLEX)) {
       uint32_t end = page + blob_pages(h->payload_len) * STORE_FLASH_PAGE;
-      if (end <= STORE_FLASH_END
+      if (end <= STORE_FLASH_END && blob_intact(page, h)
           && (s_flex.base == 0U || h->generation >= s_flex.generation)) {
         s_flex.base = page;
         s_flex.end = end;
@@ -208,7 +239,7 @@ void Storage_Init(void)
       }
     } else if (header_valid(h, STORE_MAGIC_CFG)) {
       uint32_t end = page + blob_pages(h->payload_len) * STORE_FLASH_PAGE;
-      if (end <= STORE_FLASH_END
+      if (end <= STORE_FLASH_END && blob_intact(page, h)
           && (s_cfg.base == 0U || h->generation >= s_cfg.generation)) {
         s_cfg.base = page;
         s_cfg.end = end;

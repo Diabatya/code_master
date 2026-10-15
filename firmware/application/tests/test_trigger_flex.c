@@ -121,6 +121,92 @@ uint8_t CanBridge_Transmit(const can_frame_t *frame)
 
 void App_KickWatchdog(void) {}
 
+/* ---- AuxOut fake: logical state mirror, recorded commands and a
+ *      pushable event queue (CM-HW-03). IsActive tracks the logical
+ *      "channel works" state — the low PWM phase and 0% duty are
+ *      still active, matching aux_out.c semantics. ---------------- */
+static uint8_t s_aux_active[8];
+static uint8_t s_aux_level[8];
+static uint8_t s_aux_mode[8];
+static int s_aux_set_calls;
+static struct {
+  uint8_t channel, mode;
+  uint16_t pulse_on, pulse_off, pulse_count, pwm_freq;
+  uint8_t duty;
+  uint32_t time_ms;
+} s_aux_last;
+
+static struct { uint8_t ch; uint8_t on; } s_aux_ev[16];
+static int s_aux_ev_head, s_aux_ev_count;
+
+uint8_t AuxOut_Set(uint8_t channel, uint8_t mode,
+                   uint16_t pulse_on_ms, uint16_t pulse_off_ms,
+                   uint16_t pulse_count, uint16_t pwm_freq_hz,
+                   uint8_t pwm_duty_pct, uint32_t pwm_time_ms)
+{
+  s_aux_set_calls++;
+  s_aux_last.channel = channel;
+  s_aux_last.mode = mode;
+  s_aux_last.pulse_on = pulse_on_ms;
+  s_aux_last.pulse_off = pulse_off_ms;
+  s_aux_last.pulse_count = pulse_count;
+  s_aux_last.pwm_freq = pwm_freq_hz;
+  s_aux_last.duty = pwm_duty_pct;
+  s_aux_last.time_ms = pwm_time_ms;
+  if (channel >= 1U && channel <= 7U) {
+    s_aux_mode[channel] = mode;
+    s_aux_active[channel] = (mode != 0U) ? 1U : 0U;
+    s_aux_level[channel] = (mode == 1U) ? 1U : 0U;
+  }
+  return 1U;
+}
+
+uint8_t AuxOut_IsActive(uint8_t channel)
+{
+  return (channel <= 7U) ? s_aux_active[channel] : 0U;
+}
+
+uint8_t AuxOut_Get(uint8_t channel)
+{
+  return (channel <= 7U) ? s_aux_level[channel] : 0U;
+}
+
+uint8_t AuxOut_GetMode(uint8_t channel)
+{
+  return (channel <= 7U) ? s_aux_mode[channel] : 0U;
+}
+
+uint8_t AuxOut_TakeEvent(uint8_t *channel_out, uint8_t *is_on_out)
+{
+  if (s_aux_ev_count == 0) {
+    return 0U;
+  }
+  *channel_out = s_aux_ev[s_aux_ev_head].ch;
+  *is_on_out = s_aux_ev[s_aux_ev_head].on;
+  s_aux_ev_head = (s_aux_ev_head + 1) % 16;
+  s_aux_ev_count--;
+  return 1U;
+}
+
+uint32_t AuxOut_EventsDropped(void) { return 0U; }
+
+static void aux_push_event(uint8_t ch, uint8_t on)
+{
+  int tail = (s_aux_ev_head + s_aux_ev_count) % 16;
+  s_aux_ev[tail].ch = ch;
+  s_aux_ev[tail].on = on;
+  s_aux_ev_count++;
+}
+
+static void aux_reset(void)
+{
+  memset(s_aux_active, 0, sizeof(s_aux_active));
+  memset(s_aux_level, 0, sizeof(s_aux_level));
+  memset(s_aux_mode, 0, sizeof(s_aux_mode));
+  s_aux_set_calls = 0;
+  s_aux_ev_head = s_aux_ev_count = 0;
+}
+
 /* ---- The production implementation under test ---------------------- */
 #include "trigger.c"
 
@@ -164,14 +250,15 @@ static void fix_crc(trigger_t *t)
  * emits (kind/format/rules) — the harness must feed production code
  * containers identical to what the PC writes (review CM-R6). */
 static uint8_t s_blob[4096];
-static uint32_t build_flex_blob(const trigger_t *records, uint8_t count)
+static uint32_t build_flex_blob_ver(const trigger_t *records,
+                                    uint8_t count, uint8_t version)
 {
   const char *json =
       "{\"kind\":\"code_master_flex_logic\",\"format\":1,"
       "\"rules\":[]}";
   uint32_t json_len = (uint32_t)strlen(json);
   memcpy(s_blob, "FLXB", 4);
-  s_blob[4] = 1U;           /* container version */
+  s_blob[4] = version;      /* container version */
   s_blob[5] = count;
   s_blob[6] = s_blob[7] = 0;
   memcpy(&s_blob[8], &json_len, 4);
@@ -183,6 +270,11 @@ static uint32_t build_flex_blob(const trigger_t *records, uint8_t count)
     off += sizeof(trigger_t);
   }
   return off;
+}
+
+static uint32_t build_flex_blob(const trigger_t *records, uint8_t count)
+{
+  return build_flex_blob_ver(records, count, 1U);
 }
 
 /* Fresh engine state: no user records, the FLXB tail rebuilt from the
@@ -207,6 +299,7 @@ static void load_flex(const trigger_t *records, uint8_t count)
   s_user_count = 0U;
   s_fired_count = 0U;
   s_dropped_count = 0U;
+  aux_reset();
   Trigger_ReloadFlex();
 }
 
@@ -854,6 +947,185 @@ static void test_legacy_json_blob(void)
   CHECK(s_sent_count == 0, "legacy JSON blob must yield no flex records");
 }
 
+/* ---- CM-HW-03: aux-события/условия/действия (FLXB v2) --------------- */
+
+/* Запись «событие aux-перехода → кадр»: rx_aux_event по каналу/фронту
+ * (rx_dlc: 1 = «включился», 2 = «выключился»). */
+static void make_aux_event_record(trigger_t *t, uint8_t ch,
+                                  uint8_t edge, uint32_t tx_id)
+{
+  make_flex_record(t, 2U, 0U, 0U, tx_id);
+  t->rx_flags |= TRIGGER_F_RX_AUX_EVENT;
+  /* Кадровые поля приёма у aux-события обязаны быть нулевыми —
+   * trigger_fields_valid отбраковывает ненулевые mask/rtr/лимит. */
+  t->rx_channel = ch;
+  t->rx_dlc = edge;
+  t->rx_id_mask = 0U;
+  fix_crc(t);
+}
+
+/* Запись «кадр → aux-действие»: src_flags&TX_AUX, tx_channel = канал,
+ * tx_dlc = режим AUX_MODE_*, tx_data = параметры. */
+static void make_aux_action_record(trigger_t *t, uint32_t rx_id,
+                                   uint8_t ch, uint8_t mode,
+                                   const uint8_t params[8])
+{
+  make_flex_record(t, 2U, rx_id, 0U, 0U);
+  t->src_flags |= TRIGGER_F_TX_AUX;
+  t->tx_channel = ch;
+  t->tx_dlc = mode;
+  if (params != NULL) {
+    memcpy(t->tx_data, params, 8);
+  }
+  fix_crc(t);
+}
+
+/* Событие «канал включился» исполняет запись без CAN-кадра —
+ * автономный путь CM-HW-01: очередь aux_out → Trigger_Poll. */
+static void test_aux_event_fires_on_transition(void)
+{
+  trigger_t t;
+  make_aux_event_record(&t, 3U, 1U, 0x321U);
+  load_flex(&t, 1);
+
+  aux_push_event(3U, 1U);          /* канал 3 включился */
+  Trigger_Poll();                  /* очередь разбирается в Poll */
+  CHECK(s_sent_count == 1, "aux ON event must fire the record");
+  CHECK(s_sent[0].id == 0x321U, "aux event fired wrong tx id");
+
+  /* Повторное «включился» — повторная сработка (события не липкие). */
+  aux_push_event(3U, 1U);
+  Trigger_Poll();
+  CHECK(s_sent_count == 2, "aux ON event must re-fire");
+}
+
+/* Фронт «выключился» не срабатывает на «включился» и наоборот. */
+static void test_aux_event_edges_distinct(void)
+{
+  trigger_t t;
+  make_aux_event_record(&t, 2U, 2U, 0x111U);  /* ждём OFF */
+  load_flex(&t, 1);
+
+  aux_push_event(2U, 1U);          /* ON — не наш фронт */
+  Trigger_Poll();
+  CHECK(s_sent_count == 0, "OFF-edge record must ignore ON event");
+  aux_push_event(2U, 0U);          /* OFF — срабатывает */
+  Trigger_Poll();
+  CHECK(s_sent_count == 1, "OFF-edge record must fire on OFF");
+}
+
+/* Условие «доп. канал работает» (COND_AUX) фильтрует кадр по
+ * логической активности канала — AuxOut_IsActive, не уровень ноги. */
+static void test_aux_condition_gates_frame(void)
+{
+  trigger_t t;
+  make_flex_record(&t, 2U, 0x100U, 0U, 0x200U);
+  t.src_flags |= TRIGGER_F_COND_AUX;
+  t.src_channel = 5U;
+  t.src_dlc = 1U;                  /* «работает» */
+  fix_crc(&t);
+  load_flex(&t, 1);
+
+  const uint8_t d[1] = {0x01};
+  can_frame_t f = mk_frame(0U, 0x100U, 1U, d);
+  s_aux_active[5] = 0U;
+  Trigger_OnFrame(&f);
+  CHECK(s_sent_count == 0, "aux condition off must gate the frame");
+
+  s_aux_active[5] = 1U;
+  Trigger_OnFrame(&f);
+  CHECK(s_sent_count == 1, "aux condition on must pass the frame");
+
+  /* «не работает» — src_dlc=2: зеркальное условие. */
+  trigger_t t2;
+  make_flex_record(&t2, 2U, 0x100U, 0U, 0x200U);
+  t2.src_flags |= TRIGGER_F_COND_AUX;
+  t2.src_channel = 5U;
+  t2.src_dlc = 2U;
+  fix_crc(&t2);
+  load_flex(&t2, 1);
+  s_aux_active[5] = 1U;
+  Trigger_OnFrame(&f);
+  CHECK(s_sent_count == 0, "aux not-active cond must block when on");
+  s_aux_active[5] = 0U;
+  Trigger_OnFrame(&f);
+  CHECK(s_sent_count == 1, "aux not-active cond must pass when off");
+}
+
+/* Действие «доп. канал» исполняет AuxOut_Set — кадр на шину НЕ
+ * отправляется, параметры ШИМ разворачиваются из tx_data. */
+static void test_aux_action_executes_without_can(void)
+{
+  uint8_t params[8] = {0};
+  params[0] = 100U;                /* freq u16 */
+  params[1] = 0;
+  params[2] = 25U;                 /* duty % — PWM 0% легален, но тут 25 */
+  params[3] = 0xE8; params[4] = 0x03; /* time 1000 мс u32 */
+  trigger_t t;
+  make_aux_action_record(&t, 0x100U, 4U, 3U /*AUX_MODE_PWM*/, params);
+  load_flex(&t, 1);
+
+  const uint8_t d[1] = {0x01};
+  can_frame_t f = mk_frame(0U, 0x100U, 1U, d);
+  Trigger_OnFrame(&f);
+  run_ms(1);
+  CHECK(s_sent_count == 0, "aux action must NOT send CAN frames");
+  CHECK(s_aux_set_calls == 1, "aux action must call AuxOut_Set");
+  CHECK(s_aux_last.channel == 4U && s_aux_last.mode == 3U,
+        "aux action wrong channel/mode");
+  CHECK(s_aux_last.pwm_freq == 100U && s_aux_last.duty == 25U,
+        "aux action wrong PWM params");
+  CHECK(s_aux_last.time_ms == 1000U, "aux action wrong duration");
+  CHECK(s_aux_active[4] == 1U, "aux action must set active state");
+}
+
+/* Каскад aux-событий ограничен бюджетом опроса — кольцевая программа
+ * не запирает главный цикл: за Poll обрабатывается не более
+ * AUX_EVENT_DEPTH событий. */
+static void test_aux_event_budget_per_poll(void)
+{
+  trigger_t t;
+  make_aux_event_record(&t, 1U, 1U, 0x321U);
+  load_flex(&t, 1);
+
+  for (int i = 0; i < 12; i++) {
+    aux_push_event(1U, 1U);
+  }
+  Trigger_Poll();
+  CHECK(s_sent_count == 8, "aux poll budget must cap fires per poll");
+  Trigger_Poll();
+  CHECK(s_sent_count == 12, "remaining aux events fire next poll");
+}
+
+/* Контейнер FLXB v2 принимается; неизвестная версия — отказ целиком. */
+static void test_flxb_v2_container(void)
+{
+  trigger_t t;
+  make_aux_event_record(&t, 3U, 1U, 0x321U);
+  s_flex_len = build_flex_blob_ver(&t, 1, 2U);
+  s_flex_blob = s_blob;
+  s_sent_count = 0;
+  memset(s_triggers, 0, sizeof(s_triggers));
+  memset(s_flex_queue, 0, sizeof(s_flex_queue));
+  s_count = s_user_count = 0U;
+  aux_reset();
+  Trigger_ReloadFlex();
+
+  aux_push_event(3U, 1U);
+  Trigger_Poll();
+  CHECK(s_sent_count == 1, "FLXB v2 must load aux records");
+
+  /* v3 — неизвестная версия: контейнер отвергается целиком. */
+  s_flex_len = build_flex_blob_ver(&t, 1, 3U);
+  s_flex_blob = s_blob;
+  s_sent_count = 0;
+  s_count = s_user_count = 0U;
+  Trigger_ReloadFlex();
+  aux_push_event(3U, 1U);
+  Trigger_Poll();
+  CHECK(s_sent_count == 0, "FLXB v3 must be rejected whole");
+}
+
 int main(void)
 {
   test_flex_record_fires();
@@ -874,6 +1146,12 @@ int main(void)
   test_short_frame_no_match();
   test_flxb_validation();
   test_legacy_json_blob();
+  test_aux_event_fires_on_transition();
+  test_aux_event_edges_distinct();
+  test_aux_condition_gates_frame();
+  test_aux_action_executes_without_can();
+  test_aux_event_budget_per_poll();
+  test_flxb_v2_container();
 
   if (s_failures == 0) {
     printf("PASS: all flex-runtime checks\n");

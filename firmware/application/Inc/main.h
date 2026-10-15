@@ -56,7 +56,11 @@ extern "C" {
 #define CAN2_TXRX_S_PORT  GPIOB
 #define CAN2_TXRX_S_PIN   GPIO_PIN_4
 
-/* 120R bus-termination enable per channel. 1 = enabled */
+/* 120R bus-termination enable per channel. 1 = enabled.
+ * CM-HW-02: пины TERM совместно используемы с доп. каналами выхода
+ * №6 (PD2) и №7 (PB3) — реальный владелец задаётся aux_pins_mask в
+ * CFGH (DeviceConfig_GetAuxPinsMask). CanBridge_SetTransceiverMode()
+ * игнорирует запись в пин, отданный каналу выхода. */
 #define CAN1_TERM_PORT GPIOB
 #define CAN1_TERM_PIN  GPIO_PIN_3
 #define CAN2_TERM_PORT GPIOD
@@ -67,17 +71,31 @@ extern "C" {
  * is typical per the datasheet). PLACEHOLDER, conservative. */
 #define CAN_TRANSCEIVER_SWITCH_DELAY_US 5U
 
-/* General-purpose outputs OUT1..OUT4 per ТЗ 2.4: PC10/PC11/PC12/PA15.
- * OUT4 = PA15, which is normally JTDI; JTAG is disabled (SWD-only debug,
- * ТЗ 13) to free this pin. */
-#define OUT1_PORT GPIOC
-#define OUT1_PIN  GPIO_PIN_10
-#define OUT2_PORT GPIOC
-#define OUT2_PIN  GPIO_PIN_11
-#define OUT3_PORT GPIOC
-#define OUT3_PIN  GPIO_PIN_12
-#define OUT4_PORT GPIOA
-#define OUT4_PIN  GPIO_PIN_15
+/* Доп. каналы выхода — семь линий, новая нумерация (CM-HW-02):
+ *   №1=PA14 (SWCLK — только при бите владения, иначе SWD!),
+ *   №2=PA15 (ex-JTDI, JTAG off → SWD-only), №3=PC10, №4=PC11,
+ *   №5=PC12, №6=PD2 (ex-CAN2_TERM), №7=PB3 (ex-CAN1_TERM/JTDO).
+ * Инициализация и владение пинами — aux_out.c по aux_pins_mask из
+ * CFGH; спорные пины (1/6/7) без бита владения остаются входами
+ * (PA14 — SWCLK, PD2/PB3 — TERM, если их задействует can_bridge). */
+#define AUX_CH1_PORT GPIOA
+#define AUX_CH1_PIN  GPIO_PIN_14
+#define AUX_CH2_PORT GPIOA
+#define AUX_CH2_PIN  GPIO_PIN_15
+#define AUX_CH3_PORT GPIOC
+#define AUX_CH3_PIN  GPIO_PIN_10
+#define AUX_CH4_PORT GPIOC
+#define AUX_CH4_PIN  GPIO_PIN_11
+#define AUX_CH5_PORT GPIOC
+#define AUX_CH5_PIN  GPIO_PIN_12
+#define AUX_CH6_PORT GPIOD
+#define AUX_CH6_PIN  GPIO_PIN_2
+#define AUX_CH7_PORT GPIOB
+#define AUX_CH7_PIN  GPIO_PIN_3
+/* Легаси-номера CMD_AUX_SET (старое ПО и старые приложения):
+ * 1..4 = PC10/PC11/PC12/PA15 → новые каналы 3/4/5/2. */
+#define AUX_LEGACY_TO_NEW(ch) \
+  ((ch) == 1U ? 3U : (ch) == 2U ? 4U : (ch) == 3U ? 5U : 2U)
 
 /* VBUS sense: HIGH = USB powered, LOW = standalone mode (ТЗ 12.4). Same pin
  * already used as the USB PCD VBUS-sense input in usbd_conf.c; read directly

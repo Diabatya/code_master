@@ -6,6 +6,7 @@
 """
 
 import contextlib
+import hashlib
 import time
 from typing import Any
 from collections.abc import Callable
@@ -27,17 +28,26 @@ from core.firmware_utils import (
 )
 from core.stm32_info import (
     APPLICATION_BASE_ADDR,
+    APP_METADATA_MAGIC,
     APP_METADATA_PAGE_ADDR,
     APP_METADATA_PAGE_SIZE,
     BOOTLOADER_BASE_ADDR,
     DEVICE_CONFIG_PAGE_ADDR_LEGACY,
     DEVICE_CONFIG_PAGE_SIZE,
     DEVICE_INFO_PAGE_ADDR,
+    FLASH_END_ADDR,
     LEGACY_CONFIG_PAGE_ADDR,
     build_app_metadata,
     merge_device_config_page,
     parse_device_config,
     seed_device_config_page,
+)
+from core import storage_backup
+from core.storage_scan import (
+    StoragePlanError,
+    find_storage_regions,
+    plan_storage_relocation,
+    region_kind,
 )
 from models.logger import get_logger
 
@@ -75,6 +85,7 @@ class Bootloader:
         self.port = port
         self._progress_callback = progress_callback
         self._stop_requested = False
+        self._last_storage_scan_base = 0
 
     # Windows держит «Cannot configure port / PermissionError(13,
     # ERROR_GEN_FAILURE)» заметно дольше пары секунд после
@@ -797,6 +808,79 @@ class Bootloader:
                 self._progress_callback(min(100, int(written / total * 100)))
         return written
 
+    def _scan_marker_storage(self) -> tuple[bytes, list[tuple[int, bytes]]]:
+        """Дамп хвоста Flash и маркерные области в нём.
+
+        Области VARH/FLXH/CFGH/TRGH находятся сканированием страниц за
+        концом кода (как Storage_Init) — фиксированных адресов нет.
+        Сканируем [старый конец кода, FLASH_END): верхние страницы
+        (0x0803C000+) AN3155 не стирает и не пишет, но их видимость
+        нужна плану размещения (якоря VARH/TRGH/EVLH считаются от
+        полной карты). Конец старого кода берём из метаданных
+        APP1 (image_size); без валидных метаданных — весь диапазон.
+        Короткий ответ без исключения считается неполным дампом —
+        отказ до стирания (CM-N1)."""
+        scan_base = APPLICATION_BASE_ADDR
+        app1_valid = False
+        try:
+            meta = self.read_memory(APP_METADATA_PAGE_ADDR, 16)
+            magic = int.from_bytes(meta[0:4], "little")
+            app1_valid = magic == APP_METADATA_MAGIC
+            if len(meta) >= 16 and magic in (APP_METADATA_MAGIC, 0):
+                image_size = int.from_bytes(meta[8:12], "little")
+                if 0 < image_size < FLASH_END_ADDR - APPLICATION_BASE_ADDR:
+                    scan_base = max(
+                        APPLICATION_BASE_ADDR,
+                        APPLICATION_BASE_ADDR
+                        + image_size // 2048 * 2048 - 2048,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Метаданные приложения не прочитаны: %s", exc)
+        self._last_app1_valid = app1_valid
+        try:
+            tail = self.read_memory(scan_base, FLASH_END_ADDR - scan_base)
+        except Exception as exc:  # noqa: BLE001
+            raise BootloaderError(
+                f"Не удалось прочитать область хранилища перед "
+                f"стиранием ({exc}) — запись отменена, устройство "
+                f"не повреждено"
+            ) from exc
+        # Короткий ответ без исключения — не полный дамп: регион мог
+        # оказаться «невидимым» и быть стёрт пересадкой (CM-N1).
+        if len(tail) != FLASH_END_ADDR - scan_base:
+            raise BootloaderError(
+                f"Чтение области хранилища вернуло {len(tail)} из "
+                f"{FLASH_END_ADDR - scan_base} байт — дамп неполный, "
+                "запись отменена, устройство не повреждено"
+            )
+        self._last_storage_scan_base = scan_base
+        return tail, find_storage_regions(tail, scan_base)
+
+    def _update_fingerprints(self, info_seg: bytes | None) -> set[str]:
+        """Отпечатки устройства для резерва/восстановления хранилища.
+
+        Текущая страница идентификации плюс страница, которую запишет
+        это обновление (уже объединённая с сохранённой идентичностью):
+        обрыв мог стереть живую страницу до её записи — тогда резерв
+        находится по «будущему» отпечатку (CM-N9)."""
+        fps: set[str] = set()
+        try:
+            live = self.read_memory(
+                DEVICE_INFO_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE
+            )
+            fp = storage_backup.device_fingerprint(live)
+            if fp:
+                fps.add(fp)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Страница идентификации для отпечатка не прочитана: %s", exc
+            )
+        if info_seg is not None:
+            fp = storage_backup.device_fingerprint(info_seg)
+            if fp:
+                fps.add(fp)
+        return fps
+
     def flash_firmware(
         self,
         firmware_path: str,
@@ -804,6 +888,8 @@ class Bootloader:
         page_size: int = 2048,
         skip_blank: bool = True,
         status_callback: Callable[[str], None] | None = None,
+        preserve_storage: bool = True,
+        explicit_backup: list[tuple[int, bytes]] | None = None,
     ) -> list[tuple[int, bytes]]:
         """Записывает файл прошивки в память STM32.
 
@@ -830,10 +916,26 @@ class Bootloader:
                 полностью 0xFF (см. erase_pages()).
             status_callback: Функция для текстового статуса этапа
                 (подключение/стирание/запись/метаданные).
+            explicit_backup: Явно выбранные оператором области резерва
+                [(addr, blob)] — из storage_backup.load_backup_file
+                (CM-N17). Принадлежность подтверждает выбор оператора
+                (UI показывает предупреждение); целостность уже
+                проверена при чтении файла. Заданный резерв включает
+                сохранение хранилища даже при preserve_storage=False и
+                поднимает недостающие/повреждённые виды через общий
+                план (force_write + readback). None — обычный путь
+                автопоиска find_matching_backup.
 
         Raises:
             BootloaderError: при ошибке прошивки или запрещённой области.
         """
+        # CM-N18: граница типов — Qt-совместимая сигнатура может подсунуть
+        # bool от clicked; неподходящее значение отвергается до первого
+        # обращения к устройству, а не внутри merge.
+        try:
+            storage_backup.check_backup_regions_arg(explicit_backup)
+        except ValueError as exc:
+            raise BootloaderError(str(exc)) from exc
         firmware, file_base = load_firmware_bytes(firmware_path)
         if not firmware:
             raise BootloaderError("Файл прошивки пуст")
@@ -906,6 +1008,22 @@ class Bootloader:
             if not ok:
                 raise BootloaderError(f"Запрещённая область записи: {reason}")
 
+        # CM-N19: явное восстановление из резервной копии требует
+        # application-образ. Config-only запись (страница идентификации
+        # без кода) и сегмент «приложения» целиком из 0xFF резерв
+        # применить не могут — молча записать только info-страницу
+        # значило бы отчитаться успехом невыполненной операции.
+        # Отказ ДО подключения/стирания/записи, устройство не тронуто.
+        if explicit_backup is not None and not (
+            code and any(b != 0xFF for b in code)
+        ):
+            raise BootloaderError(
+                "Восстановление из резервной копии требует образ "
+                "application — config-only запись резерв не применяет. "
+                "Выберите файл прошивки (запись отменена, устройство "
+                "не повреждено)"
+            )
+
         def status(text: str) -> None:
             logger.info("Этап: %s", text)
             if status_callback:
@@ -962,6 +1080,156 @@ class Bootloader:
         # трогать метаданные: инвалидация без последующей записи валидных
         # метаданных убила бы загрузку приложения.
         is_app_update = bool(code) and any(b != 0xFF for b in code)
+
+        # CM-CDC-01/CM-N1: маркерное хранилище якорится за концом кода
+        # и живёт в записываемой зоне — рост образа стирает эти страницы,
+        # а цель пересадки может накрыть живую область, которую образ не
+        # трогал (сценарий ревью: CFGH, севший на страницу живого FLXH).
+        # Поэтому план размещения строится для ПОЛНОЙ карты живых
+        # областей (новейшее поколение каждого вида, каноничные якоря
+        # storage.c, пересечения и вместимость) — до первого
+        # деструктивного шага. Не влезло/противоречие — отказ до
+        # стирания, устройство не повреждено.
+        saved_storage: list[tuple[int, int, bytes]] = []
+        storage_backup_path: str | None = None
+        restored: dict[str, bytes] = {}
+        if (preserve_storage or explicit_backup is not None) and code:
+            status("Чтение областей хранилища")
+            tail, found = self._scan_marker_storage()
+
+            # CM-N9/CM-N12/CM-N13: повторная попытка после обрыва —
+            # живой Flash областей уже может не содержать (код
+            # перезаписал страницы, restore оборвался), либо содержит
+            # блок с валидным заголовком и битым payload. Резерв ПК
+            # применяется только при доказанной принадлежности
+            # (отпечаток страницы идентификации + sha256 образа этой
+            # операции) и только когда живое состояние этого
+            # требует: битый payload, отсутствующий вид или старое
+            # поколение при незавершённой операции (APP1 инвалиден).
+            # Исправная Flash с сознательно отсутствующим видом его
+            # из истории не воскрешает.
+            # CM-N17: резерв, ЯВНО выбранный оператором, принадлежность
+            # подтверждает выбор (предупреждение показано в UI);
+            # недостающие виды восстанавливаются по команде оператора
+            # и без признака незавершённой операции.
+            fingerprints = self._update_fingerprints(info_seg)
+            interrupted = not getattr(self, "_last_app1_valid", True)
+            image_sha256 = hashlib.sha256(code).hexdigest()
+            if explicit_backup is not None:
+                try:
+                    found, restored = storage_backup.merge_backup_regions(
+                        found, explicit_backup, interrupted=interrupted,
+                        operator_directed=True,
+                    )
+                except ValueError as exc:
+                    # Непригодный резерв — отказ до первого стирания:
+                    # «восстановить частично» = «заявить восстановление
+                    # повреждённого». Устройство не тронуто.
+                    raise BootloaderError(
+                        f"Выбранная резервная копия непригодна: {exc} — "
+                        "запись отменена, устройство не повреждено"
+                    ) from exc
+                status(
+                    "Резерв выбран оператором вручную: областей "
+                    f"{len(explicit_backup)}"
+                    + (
+                        ", к восстановлению: " + ", ".join(sorted(restored))
+                        if restored else ", все виды уже есть на Flash"
+                    )
+                )
+                logger.info(
+                    "Явно выбранный резерв оператора: областей=%d, "
+                    "к восстановлению=%s",
+                    len(explicit_backup), sorted(restored),
+                )
+            else:
+                backup_regions = storage_backup.find_matching_backup(
+                    fingerprints, image_sha256=image_sha256,
+                )
+                if backup_regions:
+                    found, restored = storage_backup.merge_backup_regions(
+                        found, backup_regions, interrupted=interrupted,
+                    )
+                    if restored:
+                        status(
+                            "Области подняты из подтверждённого резерва ПК: "
+                            + ", ".join(sorted(restored))
+                        )
+                        logger.info(
+                            "Восстановление хранилища из PC-резерва: %s",
+                            sorted(restored),
+                        )
+                elif interrupted:
+                    # APP1 инвалиден (незавершённое обновление), а резерв
+                    # не подтверждён для этого устройства/образа — честно
+                    # сообщаем в статус: это прошивка БЕЗ восстановления,
+                    # а не «восстановление из несуществующего резерва».
+                    status(
+                        "Внимание: предыдущее обновление не завершено, а "
+                        "подтверждённого резерва хранилища для этого "
+                        "устройства нет — настройки не восстановятся "
+                        "автоматически (возможен явный выбор файла "
+                        "резерва оператором — кнопка «Восстановить из "
+                        "резервной копии…» в диалоге прошивки)"
+                    )
+                    logger.warning(
+                        "Метаданные APP1 невалидны, а подходящего резерва "
+                        "нет — обновление без восстановления данных"
+                    )
+
+            try:
+                plan = plan_storage_relocation(
+                    found, code_addr, len(code), page_size=page_size,
+                    force_write=set(restored),
+                )
+            except StoragePlanError as exc:
+                raise BootloaderError(
+                    f"Не удалось разместить области хранилища под новым "
+                    f"образом: {exc} — запись отменена, устройство "
+                    f"не повреждено"
+                ) from exc
+            saved_storage = plan["moves"]
+            for warn in plan["warnings"]:
+                status(f"Внимание: {warn}")
+                logger.warning("%s", warn)
+            for d_addr, _d_blob, why in plan["dropped"]:
+                logger.info("Область 0x%08X не переносится: %s", d_addr, why)
+            if found:
+                # Резервная копия на ПК ДО стирания (CM-N1/CM-N9):
+                # обрыв связи в середине оставляет устройство в
+                # bootloader, байты хранилища в памяти процесса пропадут
+                # вместе с ним — файл переживает закрытие приложения.
+                # Честная политика: резерв не записался — деструктивных
+                # действий не делаем (отказ до первого стирания).
+                try:
+                    storage_backup_path = storage_backup.dump_backup(
+                        tail,
+                        self._last_storage_scan_base,
+                        found,
+                        fingerprints,
+                        restored_blobs=restored,
+                        image_sha256=image_sha256,
+                    )
+                except OSError as exc:
+                    raise BootloaderError(
+                        "Не удалось записать резервную копию хранилища "
+                        f"на ПК ({exc}) — запись отменена до стирания, "
+                        "устройство не повреждено"
+                    ) from exc
+                status(f"Резерв хранилища: {storage_backup_path}")
+                status(
+                    f"Областей хранилища: {len(found)} "
+                    f"(пересадка: {len(saved_storage)})"
+                )
+                logger.info(
+                    "План хранилища: %s",
+                    ", ".join(
+                        f"{region_kind(b)} 0x{o:08X}→0x{n:08X}"
+                        for o, n, b in saved_storage
+                    )
+                    or "без пересадки",
+                )
+
         meta = meta_seg
         if is_app_update:
             status("Подготовка обновления")
@@ -1006,6 +1274,40 @@ class Bootloader:
                 DEVICE_INFO_PAGE_ADDR, info_seg, written, total, skip_blank
             )
             regions.append((DEVICE_INFO_PAGE_ADDR, info_seg))
+        # Восстановление маркерного хранилища — после кода, до
+        # метаданных: обрыв на этом шаге оставляет приложение
+        # невалидным (bootloader повторит обновление), а не «живым»
+        # со стёртой конфигурацией. Целевые страницы стираем явно —
+        # там могли лежать старые поколения областей. Readback обязателен:
+        # без подтверждения обновление не считается безопасным.
+        for _orig, dst, blob in saved_storage:
+            status(f"Восстановление хранилища 0x{dst:08X}")
+            self.erase_pages(dst, blob, page_size=page_size, skip_blank=False)
+            self.write_memory(dst, blob)
+            if self.read_memory(dst, len(blob)) != blob:
+                raise BootloaderError(
+                    f"Хранилище 0x{dst:08X} не записалось обратно "
+                    "(verify mismatch) — конфигурация утеряна, "
+                    "обновление не считается безопасным"
+                )
+            regions.append((dst, blob))
+        # CM-N17: сообщение о восстановлении — только ПОСЛЕ реально
+        # записанных и вычитанных обратно областей. «Резерв проверен»
+        # и «настройки восстановлены» — разные факты.
+        if saved_storage:
+            kinds = sorted(
+                {region_kind(b) for _o, _d, b in saved_storage}
+            )
+            msg = (
+                "Настройки устройства восстановлены в Flash "
+                f"(записано и вычитано обратно): {', '.join(kinds)}"
+            )
+            if restored:
+                msg += (
+                    "; из резервной копии ПК: "
+                    + ", ".join(sorted(restored))
+                )
+            status(msg)
         if meta is not None:
             # Метаданные — последним шагом: валидный APP1 служит «флагом
             # завершённого обновления» (bl_metadata_is_valid).

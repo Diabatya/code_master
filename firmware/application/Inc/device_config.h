@@ -144,7 +144,7 @@ uint8_t DeviceConfig_FactoryReset(void);
 /* Настройки приложения — блоб CFGH на странице сразу за кодом
  * (storage.c, маркерное хранилище — отчёт мастера). Содержимое:
  * скорости CAN + терминаторы + режимы (silent). Пишется целиком. */
-#define DEVICE_APP_CFG_VERSION 1U
+#define DEVICE_APP_CFG_VERSION 2U
 
 typedef struct __attribute__((packed)) {
   uint16_t can1_baud_kbps;
@@ -154,8 +154,13 @@ typedef struct __attribute__((packed)) {
   uint8_t  can2_silent;
   uint8_t  can2_term;
   uint8_t  version;      /* DEVICE_APP_CFG_VERSION */
-  uint8_t  reserved[9];
-} device_app_cfg_t; /* 16 байт — половинками пишется в страницу CFGH */
+  /* v2: маска владения спорными пинами доп. каналов (aux_out.h
+   * AUX_OWN_*): бит канала = пин отдан выходу, 0 = пин под
+   * SWD/TERM-функцией. Старые блобы (reserved=0) читаются как
+   * «ничего не отдано» — поведение v1. */
+  uint8_t  aux_pins_mask;
+  uint8_t  reserved[8];
+} device_app_cfg_t; /* половинками пишется в страницу CFGH */
 
 /* CAN bit rate (kbit/s) configured for channel 0/1 — from the extended
  * record; DEVICE_CONFIG_DEFAULT_BAUD_KBPS when absent/corrupt. */
@@ -174,6 +179,12 @@ uint8_t DeviceConfig_GetCanTerm(uint8_t channel);
  * страницы). Возвращает 1 при успехе. */
 uint8_t DeviceConfig_SetCanMode(uint8_t channel, uint8_t silent,
                                 uint8_t term);
+
+/* Маска владения спорными пинами доп. каналов (AUX_OWN_* из aux_out.h):
+ * читается при старте в AuxOut_Init; Set пишет новое значение в CFGH —
+ * переприменение пинов делает AuxOut_ApplyOwnedMask (CMD_AUX_MAP). */
+uint8_t DeviceConfig_GetAuxPinsMask(void);
+uint8_t DeviceConfig_SetAuxPinsMask(uint8_t mask);
 
 /* Имя триггера по слоту базовой записи (0..TRIGGER_NAME_MAX-1):
  * возвращает указатель на len байт в RAM-зеркале (не терминировано

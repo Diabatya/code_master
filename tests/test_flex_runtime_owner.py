@@ -147,7 +147,12 @@ def test_probe_failure_keeps_confirmed_owner(tab) -> None:
     hw = _frame_rule(event_id="200", title="HW")
     pc = _frame_rule(event_id="321", title="PC")
     pc["conditions"] = [{"type": "aux", "channel": 1, "state": 1}]
-    analysis = analyze_device_flex(build_flex_blob([hw, pc]))
+    # Блоб собран под протокол 12: aux-условие на камне не
+    # выражается → программа остаётся на ПК (на proto 13 она
+    # компилировалась бы в запись COND_AUX).
+    analysis = analyze_device_flex(
+        build_flex_blob([hw, pc], protocol=12)
+    )
     assert analysis["state"] == "verified"
     tab.apply_device_flex_analysis(analysis)
     tab.mark_device_flex_probe_failed()

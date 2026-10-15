@@ -191,8 +191,9 @@ class _FakeTab:
         self.flexb = None
         self.probe_failed = False
 
-    def commit_runtime(self) -> None:
+    def commit_runtime(self, resolved_rules=None) -> None:
         self.calls.append("commit_runtime")
+        self.committed_rules = resolved_rules
 
     # --- контракт _sync_from_device/фоновых коллбеков -------------
 

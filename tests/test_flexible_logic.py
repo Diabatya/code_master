@@ -138,7 +138,7 @@ def test_aux_action_sends_cmd_and_mirrors_state(tab) -> None:
     """Действие «Вкл доп канал» шлёт CMD_AUX_SET и обновляет
     ПК-зеркало состояния для условий «активен/не активен»."""
     sent: list[bytes] = []
-    tab._serial_manager.send_data = sent.append
+    tab._serial_manager.send_data = lambda p: sent.append(p) or True
     tab.set_config([{
         "title": "AUX", "active": True,
         "events": [_frame_event()],
@@ -150,9 +150,11 @@ def test_aux_action_sends_cmd_and_mirrors_state(tab) -> None:
                        "extended": False, "rtr": False})
     assert sent, "CMD_AUX_SET не отправлен"
     packet = sent[0]
+    # Свежий SerialManager без SYSTEM_INFO отвечает proto<13 →
+    # легаси 0xD3 с переводом номера: новый 2 = PA15 = легаси 4.
     assert packet[0] == 0xD3 and packet[1] == 15
-    assert packet[2] == 2 and packet[3] == 1  # channel=2, mode=on
-    assert tab._aux_states[2] == 1
+    assert packet[2] == 4 and packet[3] == 1  # легаси-канал 4, on
+    assert tab._aux_states[2] == 1  # зеркало — по новому номеру
 
 
 def test_legacy_rule_migration_unchanged(tab) -> None:

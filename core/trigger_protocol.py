@@ -36,6 +36,10 @@ TRIGGER_F_COND_MASK = 0x1C
 # rx_flags бит 5 — «X-байты ответа из кадра события» (скомпилированная
 # ГЛ, см. core/flex_compiler.py). Позиции X размечены src_from[i]=0xFF.
 TRIGGER_F_TX_EVENT_DATA = 0x20
+TRIGGER_F_RX_AUX_EVENT = 0x40
+TRIGGER_F_TX_AUX = 0x04
+TRIGGER_F_COND_AUX = 0x08
+AUX_CH_COUNT = 7
 # src_flags бит 1 = CACHE_ONLY: запись только наполняет кэш, ответ не
 # вооружается — так «автозапись DATA в кэш» и обычные «Фреймы ответа»
 # работают в одном триггере вместе (филлеры + ответные записи группы).
@@ -264,12 +268,18 @@ def pack_trigger(values: dict[str, Any], fmt_version: int = TRIGGER_FORMAT_VERSI
             rx_flags |= TRIGGER_F_FIRE_ON_BOOT
         if values.get("rx_tx_event_data"):
             rx_flags |= TRIGGER_F_TX_EVENT_DATA
+        if values.get("rx_aux_event"):
+            rx_flags |= TRIGGER_F_RX_AUX_EVENT
         rx_flags |= (
             int(values.get("rx_cond_idx", 0)) << TRIGGER_F_COND_SHIFT
         ) & TRIGGER_F_COND_MASK
         src_flags = 0 if values.get("src_listen_echo", True) else TRIGGER_F_MUTE_ECHO
         if values.get("src_cache_only"):
             src_flags |= TRIGGER_F_CACHE_ONLY
+        if values.get("tx_aux"):
+            src_flags |= TRIGGER_F_TX_AUX
+        if values.get("cond_aux"):
+            src_flags |= TRIGGER_F_COND_AUX
         raw = bytearray(
             struct.pack(
                 _TRIGGER_FORMAT,
@@ -298,10 +308,13 @@ def unpack_trigger(payload: bytes) -> dict[str, Any]:
             "rx_fire_limit": values[28],
             "rx_listen_echo": not (values[29] & TRIGGER_F_MUTE_ECHO),
             "rx_fire_on_boot": bool(values[29] & TRIGGER_F_FIRE_ON_BOOT),
+            "rx_aux_event": bool(values[29] & TRIGGER_F_RX_AUX_EVENT),
             "rx_cond_idx": (values[29] & TRIGGER_F_COND_MASK) >> TRIGGER_F_COND_SHIFT,
             "src_fire_limit": values[30],
             "src_listen_echo": not (values[31] & TRIGGER_F_MUTE_ECHO),
             "src_cache_only": bool(values[31] & TRIGGER_F_CACHE_ONLY),
+            "tx_aux": bool(values[31] & TRIGGER_F_TX_AUX),
+            "cond_aux": bool(values[31] & TRIGGER_F_COND_AUX),
             "rx_boot_delay": values[32],
         }
     elif len(payload) == TRIGGER_SIZE_V2:
@@ -314,10 +327,13 @@ def unpack_trigger(payload: bytes) -> dict[str, Any]:
             "rx_fire_limit": 0,
             "rx_listen_echo": True,
             "rx_fire_on_boot": False,
+            "rx_aux_event": False,
             "rx_cond_idx": 0,
             "src_fire_limit": 0,
             "src_listen_echo": True,
             "src_cache_only": False,
+            "tx_aux": False,
+            "cond_aux": False,
             "rx_boot_delay": 0,
         }
     else:
@@ -382,19 +398,69 @@ def record_fields_valid(payload: bytes) -> bool:
     if rx_flags & ~(
         TRIGGER_F_MUTE_ECHO | TRIGGER_F_FIRE_ON_BOOT
         | TRIGGER_F_COND_MASK | TRIGGER_F_TX_EVENT_DATA
+        | TRIGGER_F_RX_AUX_EVENT
     ):
         return False
-    if src_flags & ~(TRIGGER_F_MUTE_ECHO | TRIGGER_F_CACHE_ONLY):
+    if src_flags & ~(
+        TRIGGER_F_MUTE_ECHO | TRIGGER_F_CACHE_ONLY
+        | TRIGGER_F_TX_AUX | TRIGGER_F_COND_AUX
+    ):
         return False
+    rx_aux = bool(rx_flags & TRIGGER_F_RX_AUX_EVENT)
+    tx_aux = bool(src_flags & TRIGGER_F_TX_AUX)
+    cond_aux = bool(src_flags & TRIGGER_F_COND_AUX)
     if not (
-        t["rx_channel"] <= 2 and t["tx_channel"] <= 2
-        and t["rx_extended"] <= 1 and t["tx_extended"] <= 1
+        t["rx_extended"] <= 1 and t["tx_extended"] <= 1
         and t["rx_dlc"] <= 8 and t["tx_dlc"] <= 8
         and t["tx_rtr"] <= 1 and t["rx_rtr"] <= 2
         and t["cache_enabled"] <= 1
-        and t["src_channel"] <= 2 and t["src_extended"] <= 1
-        and t["src_dlc"] <= 8
+        and t["src_channel"] <= AUX_CH_COUNT
+        and t["src_extended"] <= 1 and t["src_dlc"] <= 8
     ):
+        return False
+    if rx_aux:
+        # Событие «доп. канал N включился/выключился»: rx_channel —
+        # номер канала, rx_dlc — фронт (1=ON, 2=OFF), остальные поля
+        # матчинга кадра обязаны быть нулевыми (зеркало trigger.c).
+        if not (
+            1 <= t["rx_channel"] <= AUX_CH_COUNT
+            and t["rx_dlc"] in (1, 2)
+            and t["rx_extended"] == 0 and t["rx_id"] == 0
+            and t["rx_id_mask"] == 0 and t["rx_rtr"] == 0
+            and t["rx_fire_limit"] == 0
+            and not (rx_flags & TRIGGER_F_FIRE_ON_BOOT)
+            and t["rx_data"] == b"\x00" * 8
+            and t["rx_data_mask"] == b"\x00" * 8
+        ):
+            return False
+    elif t["rx_channel"] > 2:
+        return False
+    if tx_aux:
+        # Действие над доп. каналом: tx_channel — канал, tx_dlc —
+        # режим AuxOut (0=OFF, 1=ON, 2=PULSE, 3=PWM), tx_data —
+        # параметры режима, delay_ms — задержка запуска.
+        if not (
+            1 <= t["tx_channel"] <= AUX_CH_COUNT
+            and t["tx_dlc"] <= 3
+            and t["tx_extended"] == 0 and t["tx_id"] == 0
+            and t["tx_rtr"] == 0 and t["cache_enabled"] == 0
+            and t["tx_count"] <= 1 and t["tx_interval_ms"] == 0
+        ):
+            return False
+    elif t["tx_channel"] > 2:
+        return False
+    if cond_aux:
+        # Условие «доп. канал работает/не работает»: src_channel —
+        # канал, src_dlc — требуемое логическое состояние.
+        if not (
+            1 <= t["src_channel"] <= AUX_CH_COUNT
+            and t["src_dlc"] in (1, 2)
+            and t["cache_enabled"] == 0
+            and not (src_flags & TRIGGER_F_CACHE_ONLY)
+            and t["src_id"] == 0
+        ):
+            return False
+    elif t["src_channel"] > 2:
         return False
     rx_max = 0x1FFFFFFF if t["rx_extended"] else 0x7FF
     tx_max = 0x1FFFFFFF if t["tx_extended"] else 0x7FF

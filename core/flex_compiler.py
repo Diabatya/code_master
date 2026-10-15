@@ -33,6 +33,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from core.aux_channels import (
+    AUX_MAP_VERSION,
+    AUX_MAX_DURATION_MS,
+    migrate_rules,
+)
 from core.trigger_protocol import (
     TRIGGER_SIZE,
     pack_trigger,
@@ -42,7 +47,15 @@ from models.utils import hex_to_int
 
 FLEX_BLOB_MAGIC = b"FLXB"
 FLEX_BLOB_VERSION = 1
+# Версия 2: записи с флагами доп. каналов (RX_AUX_EVENT/TX_AUX/
+# COND_AUX). Контейнер поднимается до 2 только когда запись реально
+# использует aux-флаги — чисто кадровые программы остаются v1 и
+# принимаются прошивками протокола 12.
+FLEX_BLOB_VERSION_AUX = 2
+# Минимальный протокол, где прошивка исполняет aux-записи ГЛ.
+FLEX_AUX_PROTOCOL = 13
 FLEX_MAX_RECORDS = 16  # должен совпадать с trigger.h
+AUX_CH_COUNT = 7  # должен совпадать с aux_out.h
 
 _FLXB_HEADER_SIZE = 12
 
@@ -51,8 +64,14 @@ _EVENT_NONE = "none"
 _EVENT_FRAME = "frame"
 _EVENT_POWER = "power"
 _EVENT_PROGRAM = "program"
+_EVENT_AUX = "aux"
 _ACT_FRAME = "frame"
+_ACT_AUX = "aux"
 _COND_NONE = "none"
+_COND_AUX = "aux"
+
+# Режимы aux-действия → tx_dlc записи (aux_out.h AUX_MODE_*).
+_AUX_MODES = {"off": 0, "on": 1, "pulse": 2, "pwm": 3}
 
 
 def _tokens(value: Any) -> list[str]:
@@ -79,6 +98,25 @@ def _event_to_rx(event: dict[str, Any]) -> dict[str, Any] | None:
         # «Включение устройства»: вооружается один раз при запуске МК
         # (rx-поля не используются — как FIRE_ON_BOOT в триггерах).
         return {"rx_fire_on_boot": True, "rx_boot_delay": 0}
+    if etype == _EVENT_AUX:
+        # «Доп. канал включился/выключился»: переход ЛОГИЧЕСКОГО
+        # состояния (OFF↔ON/PWM/PULSE), не электрический фронт ШИМ —
+        # на камне событие ставит aux_out (CM-HW-03). rx_channel =
+        # канал 1..7, rx_dlc = фронт: 1 — «включился», 2 —
+        # «выключился» (коды edge в trigger.c::Trigger_OnAuxEvent).
+        try:
+            ch = int(event.get("channel", 0) or 0)
+            state = int(event.get("state", 1) or 0)
+        except (TypeError, ValueError):
+            return None
+        if not 1 <= ch <= AUX_CH_COUNT or state not in (0, 1):
+            return None
+        return {
+            "rx_aux_event": True,
+            "rx_channel": ch & 0xFF,
+            "rx_dlc": 1 if state == 1 else 2,
+            "rx_listen_echo": False,
+        }
     if etype != _EVENT_FRAME:
         return None
     can_id = hex_to_int(str(event.get("id", "")))
@@ -122,6 +160,69 @@ def _event_to_rx(event: dict[str, Any]) -> dict[str, Any] | None:
         "rx_data_mask": bytes(mask),
         "rx_rtr": 1 if event.get("rtr") else 0,
         **rx_flags_extra,
+    }
+
+
+def _aux_action_to_tx(action: dict[str, Any]) -> dict[str, Any] | None:
+    """Действие «Доп. канал» → tx-часть записи trigger_t (FLXB v2).
+
+    Раскладка tx_data по режимам — как trigger.c::aux_exec:
+      Вкл:  [0..3] срок работы мс (u32 LE; 0 = до «Выкл»)
+      Импульсы: [0..1] импульс, [2..3] пауза, [4..5] кол-во (u16),
+                [6..7] общий срок (u16, 0 = считать по кол-ву)
+      ШИМ:  [0..1] частота Гц, [2] заполнение %, [3..6] срок (u32)
+    tx_dlc = AUX_MODE_* (0..3), delay_ms — «пауза до действия»."""
+    try:
+        ch = int(action.get("aux_channel", 0) or 0)
+        mode = _AUX_MODES[str(action.get("aux_mode", "on"))]
+        delay = int(action.get("aux_delay", 0) or 0)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not 1 <= ch <= AUX_CH_COUNT:
+        return None
+    data = bytearray(8)
+    if mode == 1:  # Вкл — с опциональным сроком «включить на T мс»
+        on_time = int(action.get("aux_on_time", 0) or 0)
+        if on_time > AUX_MAX_DURATION_MS:
+            return None  # та же граница, что у МК (CM-N5)
+        data[0:4] = on_time.to_bytes(4, "little")
+    elif mode == 2:  # импульсы
+        try:
+            pulse_on = int(action.get("aux_pulse_on", 0) or 0)
+            pulse_off = int(action.get("aux_pulse_off", 0) or 0)
+            pulse_count = int(action.get("aux_pulse_count", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if not (pulse_on and pulse_off and pulse_count):
+            return None
+        data[0:2] = pulse_on.to_bytes(2, "little")
+        data[2:4] = pulse_off.to_bytes(2, "little")
+        data[4:6] = pulse_count.to_bytes(2, "little")
+    elif mode == 3:  # ШИМ
+        try:
+            freq = int(action.get("aux_pwm_freq", 0) or 0)
+            duty = int(action.get("aux_pwm_duty", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        # Зеркало AuxOut_Set: частота 1..500 Гц (программный ШИМ,
+        # период ≥ 2 мс), заполнение 0..100 (0% — легально).
+        if not 1 <= freq <= 500 or not 0 <= duty <= 100:
+            return None
+        data[0:2] = freq.to_bytes(2, "little")
+        data[2] = duty
+        pwm_time = int(action.get("aux_pwm_time", 0) or 0)
+        if pwm_time > AUX_MAX_DURATION_MS:
+            return None
+        data[3:7] = pwm_time.to_bytes(4, "little")
+    # mode == 0 («Выкл») — параметры не нужны.
+    return {
+        "tx_aux": True,
+        "tx_channel": ch & 0xFF,
+        "tx_dlc": mode & 0xFF,
+        "tx_data": bytes(data),
+        "delay_ms": delay & 0xFFFF,
+        "tx_count": 1,
+        "tx_interval_ms": 0,
     }
 
 
@@ -192,6 +293,17 @@ def _rx_overlap(a: dict[str, Any], b: dict[str, Any]) -> bool:
     каждое событие — отдельная запись trigger_t: пересекающиеся
     фильтры дали бы двойную отправку, поэтому такие программы не
     компилируются и остаются на исполнении приложения."""
+    a_aux = bool(a.get("rx_aux_event"))
+    b_aux = bool(b.get("rx_aux_event"))
+    if a_aux or b_aux:
+        # Aux-события пересекаются только одинаковым фронтом того же
+        # канала («канал N включился» дважды в списке). Фронт ON и OFF
+        # — разные переходы, кадры шины aux-записи не возбуждают.
+        return (
+            a_aux and b_aux
+            and a["rx_channel"] == b["rx_channel"]
+            and a["rx_dlc"] == b["rx_dlc"]
+        )
     a_boot = bool(a.get("rx_fire_on_boot"))
     b_boot = bool(b.get("rx_fire_on_boot"))
     if a_boot or b_boot:
@@ -236,20 +348,38 @@ def _rule_events(rule: dict[str, Any]) -> list:
 
 def _compile_rule(
     rule: dict[str, Any],
+    allow_aux: bool = False,
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
     """Программа ГЛ → (записи trigger_t | None, причина отказа | None).
 
-    Причины — для UI-бейджа «кто исполняет» (ревью CM-R4/R5)."""
+    allow_aux — прошивка протокола >=13 (FLXB v2) умеет события/
+    условия/действия доп. каналов. Причины — для UI-бейджа
+    «кто исполняет» (ревью CM-R4/R5)."""
     if not rule.get("active", False):
         return [], None
     events, conditions, actions = _rule_parts(rule)
 
-    # Условия ПРИ на камне не поддерживаются — переменные/флаги/доп.
-    # каналы живут только в приложении.
+    # Условие «доп. канал работает/не работает» — единственное,
+    # переносимое на камень (proto>=13): одно на программу, проверка
+    # логической активности в момент события (как ПК —
+    # _condition_passed по зеркалу состояния). Переменные/флаги/
+    # кэш-условия и комбинации — только на ПК.
+    aux_cond: tuple[int, int] | None = None  # (канал, src_dlc)
     for cond in conditions:
         ctype = cond.get("type", _COND_NONE)
-        if ctype not in (None, "", _COND_NONE):
-            return None, "условие ПРИ — только на ПК"
+        if ctype in (None, "", _COND_NONE):
+            continue
+        if ctype == _COND_AUX and allow_aux and aux_cond is None:
+            try:
+                ch = int(cond.get("channel", 0) or 0)
+                st = int(cond.get("state", 1) or 0)
+            except (TypeError, ValueError):
+                return None, "повреждённое условие по доп. каналу — только на ПК"
+            if not 1 <= ch <= AUX_CH_COUNT or st not in (0, 1):
+                return None, "повреждённое условие по доп. каналу — только на ПК"
+            aux_cond = (ch, 1 if st == 1 else 2)
+            continue
+        return None, "условие ПРИ — только на ПК"
 
     rx_parts: list[tuple[int, dict[str, Any]]] = []
     for idx, event in enumerate(events):
@@ -284,14 +414,23 @@ def _compile_rule(
         abort = action.get("abort") or {}
         if abort.get("type") not in (None, "", _EVENT_NONE):
             return None, "прерыватель действия — только на ПК"
-        # Действия не-фреймового типа (переменные, флаги, доп. каналы,
-        # кэш) делают программу некомпилируемой целиком.
+        # Действие «Доп. канал» переносится на камень с протокола 13 —
+        # до валидации «не-фрейма», чтобы atype=aux доходил сюда.
         atype = action.get("type", _ACT_FRAME)
+        if atype == _ACT_AUX or action.get("aux_enabled"):
+            if not allow_aux:
+                return None, "действие «доп. канал» — только на ПК"
+            tx = _aux_action_to_tx(action)
+            if tx is None:
+                return None, "действие «доп. канал» повреждено — только на ПК"
+            tx_parts.append((idx, tx))
+            continue
+        # Действия не-фреймового типа (переменные, флаги, кэш)
+        # делают программу некомпилируемой целиком.
         non_frame = (
             str(action.get("var", "")).strip()
             or str(action.get("flag_var", "")).strip()
             or str(action.get("cachevar", "")).strip()
-            or action.get("aux_enabled")
             or action.get("cache_enabled")
             or action.get("cv_op")
         )
@@ -350,6 +489,14 @@ def _compile_rule(
             }
             record.update(rx)
             record.update(tx)
+            if aux_cond is not None:
+                # «При доп. канал N работает/не работает»: src_channel
+                # = канал, src_dlc = требуемое логическое состояние
+                # (1 работает / 2 не работает) — aux_cond_ok в
+                # trigger.c проверяет её в момент события.
+                record["cond_aux"] = True
+                record["src_channel"] = aux_cond[0]
+                record["src_dlc"] = aux_cond[1]
             # «X из кадра события» — флаг rx_flags бит 5 + маска
             # подстановки в src_from (у скомпилированных записей
             # кэш-фильтр src_* не используется).
@@ -358,13 +505,16 @@ def _compile_rule(
     return records, None
 
 
-def compile_rule(rule: dict[str, Any]) -> list[dict[str, Any]] | None:
+def compile_rule(
+    rule: dict[str, Any],
+    allow_aux: bool = False,
+) -> list[dict[str, Any]] | None:
     """Программа ГЛ → список записей trigger_t (словари для pack_trigger).
 
     None — программа на камне не выражается (исполняет приложение).
     [] — программа компилируется, но записей не порождает (неактивна,
     нет рабочих событий или действий)."""
-    records, _reason = _compile_rule(rule)
+    records, _reason = _compile_rule(rule, allow_aux)
     return records
 
 
@@ -392,7 +542,9 @@ def executor_info(
     per_rule: list[tuple[list | None, str | None]] = []
     for rule in rules:
         try:
-            per_rule.append(_compile_rule(rule))
+            per_rule.append(
+                _compile_rule(rule, allow_aux=protocol >= FLEX_AUX_PROTOCOL)
+            )
         except Exception:  # noqa: BLE001
             per_rule.append((None, "ошибка конфигурации — только на ПК"))
 
@@ -432,15 +584,18 @@ def executor_info(
 
 def compile_rules(
     rules: list[dict[str, Any]],
+    protocol: int = 12,
 ) -> tuple[list[dict[str, Any]], list[bool]]:
     """Все программы → (плоский список записей, флаги «исполняет МК»).
 
-    Записи укладываются до FLEX_MAX_RECORDS; программа, не влезшая
-    целиком, остаётся на исполнении приложением."""
+    protocol >= 13 разрешает записи доп. каналов (FLXB v2). Записи
+    укладываются до FLEX_MAX_RECORDS; программа, не влезшая целиком,
+    остаётся на исполнении приложением."""
+    allow_aux = protocol >= FLEX_AUX_PROTOCOL
     per_rule: list[list[dict[str, Any]] | None] = []
     for rule in rules:
         try:
-            per_rule.append(compile_rule(rule))
+            per_rule.append(compile_rule(rule, allow_aux))
         except Exception:  # noqa: BLE001
             # Битый элемент конфига не должен срывать запись всего
             # блоба — программа остаётся на исполнении приложения.
@@ -479,21 +634,34 @@ def compile_rules(
     return records, managed
 
 
-def build_flex_blob(rules: list[dict[str, Any]]) -> bytes:
+def build_flex_blob(rules: list[dict[str, Any]], protocol: int = 13) -> bytes:
     """FLXB-контейнер для блоба FLXH: JSON-конфигурация + хвост из
-    скомпилированных записей trigger_t, исполняемых прошивкой."""
-    records, _managed = compile_rules(rules)
+    скомпилированных записей trigger_t, исполняемых прошивкой.
+
+    protocol — версия протокола целевой прошивки: >=13 компилирует и
+    aux-записи; <13 пишет чисто кадровые программы (FLXB v1), чтобы
+    блоб читался старой прошивкой после отката."""
+    records, _managed = compile_rules(rules, protocol=protocol)
+    version = FLEX_BLOB_VERSION
+    if protocol >= FLEX_AUX_PROTOCOL and any(
+        r.get("rx_aux_event") or r.get("tx_aux") or r.get("cond_aux")
+        for r in records
+    ):
+        version = FLEX_BLOB_VERSION_AUX
     json_part = json.dumps(
         {
             "kind": "code_master_flex_logic",
-            "format": 1,
+            # format — разметка номеров доп. каналов в JSON-правилах
+            # (aux_channels.AUX_MAP_VERSION): 2 = новая нумерация
+            # 1..7. Не путать с версией контейнера FLXB (байт 4).
+            "format": AUX_MAP_VERSION,
             "rules": rules,
         },
         ensure_ascii=False,
     ).encode("utf-8")
     packed = bytearray()
     packed += FLEX_BLOB_MAGIC
-    packed += bytes((FLEX_BLOB_VERSION, len(records) & 0xFF, 0, 0))
+    packed += bytes((version, len(records) & 0xFF, 0, 0))
     packed += len(json_part).to_bytes(4, "little")
     packed += json_part
     for record in records:
@@ -520,7 +688,7 @@ def parse_flex_blob(blob: bytes) -> tuple[bytes, int] | None:
         not blob
         or len(blob) < _FLXB_HEADER_SIZE
         or blob[:4] != FLEX_BLOB_MAGIC
-        or blob[4] != FLEX_BLOB_VERSION
+        or blob[4] not in (FLEX_BLOB_VERSION, FLEX_BLOB_VERSION_AUX)
     ):
         return None
     count = blob[5]
@@ -539,6 +707,15 @@ def parse_flex_blob(blob: bytes) -> tuple[bytes, int] | None:
     return blob[_FLXB_HEADER_SIZE:rec_off], count
 
 
+def _parse_flex_doc(json_part: bytes) -> dict[str, Any] | None:
+    """JSON-часть контейнера → документ или None."""
+    try:
+        doc = json.loads(json_part.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
 def parse_flex_rules(json_part: bytes) -> list[dict[str, Any]] | None:
     """JSON-часть контейнера → список правил, если схема валидна.
 
@@ -547,11 +724,8 @@ def parse_flex_rules(json_part: bytes) -> list[dict[str, Any]] | None:
     списки словарей (или легаси-поля event/condition/action —
     словари), «active» — bool, «title» — строка. Повреждённый
     элемент отвергается здесь, а не поздним исключением в UI."""
-    try:
-        doc = json.loads(json_part.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(doc, dict):
+    doc = _parse_flex_doc(json_part)
+    if doc is None:
         return None
     rules = doc.get("rules")
     if not isinstance(rules, list):
@@ -605,12 +779,42 @@ def analyze_device_flex(blob: bytes) -> dict[str, Any]:
         # Хвост исполняется, а конфигурация не читается — нельзя ни
         # подтвердить владение, ни включить ПК вслепую.
         return {"state": "conflict", "rules": None, "managed": []}
-    expected, managed = compile_rules(rules)
-    expected_tail = b"".join(pack_trigger(r) for r in expected)
     actual_tail = blob[_FLXB_HEADER_SIZE + len(json_part):]
-    if actual_tail != expected_tail:
-        return {"state": "conflict", "rules": rules, "managed": []}
-    return {"state": "verified", "rules": rules, "managed": managed}
+    # Хвост мог быть записан любой ревизией писателя: сначала сверка
+    # с компиляцией под текущий контракт (протокол 13, aux-записи
+    # FLXB v2), затем — под легаси (12, aux-программы записей не
+    # давали). Любое совпадение — verified, разница — conflict.
+    expected, managed = compile_rules(rules, protocol=13)
+    if actual_tail != b"".join(pack_trigger(r) for r in expected):
+        expected, managed = compile_rules(rules, protocol=12)
+        if actual_tail != b"".join(pack_trigger(r) for r in expected):
+            conflict_rules = rules
+            doc = _parse_flex_doc(json_part) or {}
+            try:
+                aux_map_version = int(doc.get("format", 1) or 1)
+            except (TypeError, ValueError):
+                aux_map_version = 1
+            return {
+                "state": "conflict",
+                # Черновик для диагностики показываем в новой нумерации
+                # — как у verified ниже.
+                "rules": migrate_rules(conflict_rules, aux_map_version),
+                "managed": [],
+            }
+    # JSON format<2 — легаси-разметка номеров доп. каналов (1..4 =
+    # PC10/PC11/PC12/PA15): для UI правила переводятся в новую
+    # нумерацию, физический пин сохраняется (CM-HW-02). Сверка хвоста
+    # выше шла по исходным правилам — как записаны.
+    doc = _parse_flex_doc(json_part) or {}
+    try:
+        aux_map_version = int(doc.get("format", 1) or 1)
+    except (TypeError, ValueError):
+        aux_map_version = 1
+    return {
+        "state": "verified",
+        "rules": migrate_rules(rules, aux_map_version),
+        "managed": managed,
+    }
 
 
 def flexb_header_valid(header: bytes, blob_len: int) -> bool:
@@ -627,7 +831,7 @@ def flexb_header_valid(header: bytes, blob_len: int) -> bool:
     json_len = int.from_bytes(header[8:12], "little")
     return (
         header[:4] == FLEX_BLOB_MAGIC
-        and header[4] == FLEX_BLOB_VERSION
+        and header[4] in (FLEX_BLOB_VERSION, FLEX_BLOB_VERSION_AUX)
         and count <= FLEX_MAX_RECORDS
         and json_len > 0
         and _FLXB_HEADER_SIZE + json_len + count * TRIGGER_SIZE
@@ -651,5 +855,5 @@ def managed_flags(rules: list[dict[str, Any]], protocol: int) -> list[bool]:
     видит — приложение исполняет все программы, как раньше."""
     if protocol < 12:
         return [False] * len(rules)
-    _records, managed = compile_rules(rules)
+    _records, managed = compile_rules(rules, protocol=protocol)
     return managed

@@ -134,7 +134,11 @@ def _flash_app(image: bytes, base_address: int = APPLICATION_BASE_ADDR) -> list[
         tmp.write(image)
         tmp_path = tmp.name
     try:
-        bl.flash_firmware(tmp_path, base_address=base_address)
+        # Сохранение хранилища не в фокусе этих тестов; короткий мок
+        # read_memory иначе фейлит обязательный полный дамп (CM-N1).
+        bl.flash_firmware(
+            tmp_path, base_address=base_address, preserve_storage=False
+        )
     finally:
         Path(tmp_path).unlink(missing_ok=True)
     return write_addrs

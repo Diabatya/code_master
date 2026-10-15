@@ -54,6 +54,15 @@ CMD_STORAGE_DATA = 0xD8    # [off u16][данные] → статус
 CMD_STORAGE_COMMIT = 0xD9  # [crc32 u32] → статус
 CMD_STORAGE_CLEAR = 0xDA   # [region][0xA5] → стереть область
 
+# Протокол 13 (CM-HW-02): семь доп. каналов в НОВОЙ нумерации
+# (1=PA14, 2=PA15, 3=PC10, 4=PC11, 5=PC12, 6=PD2, 7=PB3), спорные
+# пины — по маске владения aux_pins_mask в CFGH. Легаси CMD_AUX_SET
+# сохраняет старую нумерацию 1..4 = PC10/PC11/PC12/PA15 — старые
+# приложения ездят по тем же физическим пинам.
+CMD_AUX_SET_EXT = 0xDB  # [ch 1..7][mode 0..3][on u16][off u16][count u16][freq u16][duty][time u32]
+CMD_AUX_GET = 0xDC      # → [owned][active][level][mode×7] состояние каналов
+CMD_AUX_MAP = 0xDD      # [mask] → владение спорными пинами (CFGH)
+
 STORAGE_REGION_FLEX = 0  # программы гибкой логики
 STORAGE_REGION_VAR = 1   # конфигурация переменных
 

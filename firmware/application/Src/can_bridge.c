@@ -5,6 +5,7 @@
 #include "main.h"
 #include "can_bridge.h"
 #include "event_log.h"
+#include "aux_out.h"
 
 CAN_HandleTypeDef hcan1;
 CAN_HandleTypeDef hcan2;
@@ -370,13 +371,54 @@ static void gpio_init_can_pins(void)
   HAL_GPIO_Init(CAN2_TXRX_S_PORT, &out);
   HAL_GPIO_WritePin(CAN2_TXRX_S_PORT, CAN2_TXRX_S_PIN, GPIO_PIN_RESET);
 
-  out.Pin = CAN1_TERM_PIN;
-  HAL_GPIO_Init(CAN1_TERM_PORT, &out);
-  HAL_GPIO_WritePin(CAN1_TERM_PORT, CAN1_TERM_PIN, GPIO_PIN_RESET);
+  /* Пины TERM могут быть отданы доп. каналам выхода №7/№6
+   * (aux_pins_mask в CFGH) — тогда их инициализацией владеет
+   * aux_out.c, а TERM-запись игнорируется (см. SetTransceiverMode). */
+  if (!AuxOut_IsAvailable(7U)) {
+    out.Pin = CAN1_TERM_PIN;
+    HAL_GPIO_Init(CAN1_TERM_PORT, &out);
+    HAL_GPIO_WritePin(CAN1_TERM_PORT, CAN1_TERM_PIN, GPIO_PIN_RESET);
+  }
 
-  out.Pin = CAN2_TERM_PIN;
-  HAL_GPIO_Init(CAN2_TERM_PORT, &out);
-  HAL_GPIO_WritePin(CAN2_TERM_PORT, CAN2_TERM_PIN, GPIO_PIN_RESET);
+  if (!AuxOut_IsAvailable(6U)) {
+    out.Pin = CAN2_TERM_PIN;
+    HAL_GPIO_Init(CAN2_TERM_PORT, &out);
+    HAL_GPIO_WritePin(CAN2_TERM_PORT, CAN2_TERM_PIN, GPIO_PIN_RESET);
+  }
+}
+
+/* Последний запрошенный уровень терминатора по каналам — нужен для
+ * немедленного возврата TERM-пина при отзыве его у доп. канала
+ * выхода (CMD_AUX_MAP → CanBridge_RestoreTermPins, CM-N4). */
+static uint8_t s_term_level[2] = {0U, 0U};
+
+/* TERM-пин канала обратно в OUTPUT_PP (после возврата из-под AUX или
+ * просто для надёжности SetTransceiverMode). */
+static void term_gpio_init(uint8_t channel)
+{
+  GPIO_InitTypeDef out = {0};
+  out.Pin = (channel == 0U) ? CAN1_TERM_PIN : CAN2_TERM_PIN;
+  out.Mode = GPIO_MODE_OUTPUT_PP;
+  out.Pull = GPIO_NOPULL;
+  out.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init((channel == 0U) ? CAN1_TERM_PORT : CAN2_TERM_PORT, &out);
+}
+
+void CanBridge_RestoreTermPins(void)
+{
+  /* Возврат TERM-пинов, отозванных у доп. каналов: направление и
+   * последний запрошенный уровень восстанавливаются немедленно и
+   * независимо по каналам — отданный канал не трогаем (CM-N4). */
+  for (uint8_t ch = 0U; ch < 2U; ch++) {
+    uint8_t aux_owned = AuxOut_IsAvailable((ch == 0U) ? 7U : 6U);
+    if (!aux_owned) {
+      term_gpio_init(ch);
+      HAL_GPIO_WritePin(
+          (ch == 0U) ? CAN1_TERM_PORT : CAN2_TERM_PORT,
+          (ch == 0U) ? CAN1_TERM_PIN : CAN2_TERM_PIN,
+          s_term_level[ch] ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    }
+  }
 }
 
 void CanBridge_SetTransceiverMode(uint8_t channel, uint8_t silent, uint8_t term_enable)
@@ -385,11 +427,21 @@ void CanBridge_SetTransceiverMode(uint8_t channel, uint8_t silent, uint8_t term_
   uint16_t      s_pin  = (channel == 0U) ? CAN1_TXRX_S_PIN  : CAN2_TXRX_S_PIN;
   GPIO_TypeDef *t_port = (channel == 0U) ? CAN1_TERM_PORT   : CAN2_TERM_PORT;
   uint16_t      t_pin  = (channel == 0U) ? CAN1_TERM_PIN    : CAN2_TERM_PIN;
+  /* Пин TERM отдан доп. каналу выхода: запись терминатора молча не
+   * перенаправляется на чужой пин — она игнорируется, а доступность
+   * TERM хосту документируется CMD_AUX_GET/маской владения. */
+  uint8_t term_aux_owned = AuxOut_IsAvailable((channel == 0U) ? 7U : 6U);
 
   uint8_t was_silent = (HAL_GPIO_ReadPin(s_port, s_pin) == GPIO_PIN_SET) ? 1U : 0U;
 
+  s_term_level[channel] = term_enable ? 1U : 0U;
   HAL_GPIO_WritePin(s_port, s_pin, silent ? GPIO_PIN_SET : GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(t_port, t_pin, term_enable ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  if (!term_aux_owned) {
+    /* Направление восстанавливаем здесь же: пин мог вернуться из-под
+     * AUX входом — WritePin без Init оставил бы его повисшим (CM-N4). */
+    term_gpio_init(channel);
+    HAL_GPIO_WritePin(t_port, t_pin, term_enable ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  }
 
   if (was_silent && !silent) {
     /* Silent->Normal transition: honor the settle delay before the caller

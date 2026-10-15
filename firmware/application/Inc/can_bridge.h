@@ -77,6 +77,10 @@ uint32_t CanBridge_GetBaud(uint8_t channel);
  * documented in main.h after a Silent->Normal transition, before the first
  * TX is allowed. */
 void CanBridge_SetTransceiverMode(uint8_t channel, uint8_t silent, uint8_t term_enable);
+/* Немедленный возврат TERM-пинов (PD2=CAN2, PB3=CAN1), отозванных у
+ * доп. каналов выхода: OUTPUT_PP + последний запрошенный уровень.
+ * Отданный канал не трогает (CM-N4). Вызывается из CMD_AUX_MAP. */
+void CanBridge_RestoreTermPins(void);
 
 /* Pops the oldest buffered RX frame for the given channel into *out.
  * Returns 1 if a frame was available, 0 if the ring was empty. */

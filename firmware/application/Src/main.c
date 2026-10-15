@@ -270,7 +270,11 @@ int main(void)
    * (usbd_desc.c reads DeviceConfig_Get()). */
   DeviceConfig_Init();
   App_NoteStage(2U);
-  AuxOut_Init();
+  /* Доп. каналы: владение спорными пинами (PA14/SWCLK, PD2/PB3 TERM)
+   * — из сохранённой маски aux_pins_mask. Без бита владения пин
+   * остаётся под SWD/TERM и канал недоступен (CMD_AUX_* отвечает
+   * 0x02), независимо от того, что просит хост. */
+  AuxOut_Init(DeviceConfig_GetAuxPinsMask());
   App_NoteStage(3U); /* триггеры+доп.каналы готовы — этап 3 */
 
   /* CAN + triggers must run standalone even with USB deactivated (ТЗ
@@ -463,28 +467,9 @@ static void MX_GPIO_Init(void)
   gpio.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(VBUS_SENSE_PORT, &gpio);
 
-  /* General-purpose outputs OUT1-3 (PC10/PC11/PC12 per ТЗ 2.4), default LOW. */
-  gpio.Mode = GPIO_MODE_OUTPUT_PP;
-  gpio.Pull = GPIO_NOPULL;
-  gpio.Speed = GPIO_SPEED_FREQ_LOW;
-
-  gpio.Pin = OUT1_PIN;
-  HAL_GPIO_Init(OUT1_PORT, &gpio);
-  HAL_GPIO_WritePin(OUT1_PORT, OUT1_PIN, GPIO_PIN_RESET);
-
-  gpio.Pin = OUT2_PIN;
-  HAL_GPIO_Init(OUT2_PORT, &gpio);
-  HAL_GPIO_WritePin(OUT2_PORT, OUT2_PIN, GPIO_PIN_RESET);
-
-  gpio.Pin = OUT3_PIN;
-  HAL_GPIO_Init(OUT3_PORT, &gpio);
-  HAL_GPIO_WritePin(OUT3_PORT, OUT3_PIN, GPIO_PIN_RESET);
-
-  /* OUT4 = PA15 (ex-JTDI), only usable as GPIO after JTAG_Disable_SWD_Only()
-   * has run (must be called before this function — see main()). */
-  gpio.Pin = OUT4_PIN;
-  HAL_GPIO_Init(OUT4_PORT, &gpio);
-  HAL_GPIO_WritePin(OUT4_PORT, OUT4_PIN, GPIO_PIN_RESET);
+  /* Доп. каналы выхода инициализируются в AuxOut_Init() по маске
+   * владения из CFGH — безусловная настройка здесь оккупировала бы
+   * спорные пины (PA14/SWCLK, PD2/PB3 TERM) до проверки владельца. */
 
   /* CAN pins, transceiver control, USB D+/D- are initialized by
    * CanBridge_Init() / HAL_PCD_MspInit() respectively. */

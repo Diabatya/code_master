@@ -6,6 +6,7 @@
 #include "main.h"
 #include "trigger.h"
 #include "storage.h"
+#include "aux_out.h"
 
 /* sizeof(trigger_t) must be a multiple of 2 (half-word) so that
  * flash_write_store()'s halfword-by-halfword HAL_FLASH_Program()
@@ -269,8 +270,13 @@ static void append_flex(void)
   if (p == NULL || len < 12U) {
     return;
   }
+  /* Версии контейнера: 1 — записи кадр→кадр; 2 — то же + записи
+   * доп. каналов (флаги RX_AUX_EVENT/TX_AUX/COND_AUX, протокол 13).
+   * ПК отдаёт v2 только устройствам с protocol_version >= 13 —
+   * старая прошивка блоб v2 отвергнет целиком (и будет права: в нём
+   * могут быть записи, которых она не понимает). */
   if (p[0] != 'F' || p[1] != 'L' || p[2] != 'X' || p[3] != 'B'
-      || p[4] != 1U) {
+      || (p[4] != 1U && p[4] != 2U)) {
     return; /* блог старого приложения — чистый JSON без записей */
   }
   uint8_t count = p[5];
@@ -652,22 +658,84 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
   /* Каналы 0-based как в UI: 0=CAN1, 1=CAN2, 2=оба канала — на приём
    * матчит любой канал, на ответ шлёт в оба. src_* — матчер «Откуда
    * читаем» кэш-режима. */
-  if (trig == NULL || trig->rx_channel > 2U || trig->tx_channel > 2U
+  if (trig == NULL
       || trig->rx_extended > 1U || trig->tx_extended > 1U
       || trig->rx_dlc > 8U || trig->tx_dlc > 8U
       || trig->tx_rtr > 1U || trig->rx_rtr > 2U || trig->cache_enabled > 1U
-      || trig->src_channel > 2U || trig->src_extended > 1U
-      || trig->src_dlc > 8U
+      || trig->src_extended > 1U
       || (trig->rx_flags & ~(TRIGGER_F_MUTE_ECHO | TRIGGER_F_FIRE_ON_BOOT
                              | TRIGGER_F_COND_MASK
-                             | TRIGGER_F_TX_EVENT_DATA)) != 0U
+                             | TRIGGER_F_TX_EVENT_DATA
+                             | TRIGGER_F_RX_AUX_EVENT)) != 0U
       || (trig->src_flags & ~(TRIGGER_F_MUTE_ECHO
-                              | TRIGGER_F_CACHE_ONLY)) != 0U) {
+                              | TRIGGER_F_CACHE_ONLY
+                              | TRIGGER_F_TX_AUX
+                              | TRIGGER_F_COND_AUX)) != 0U) {
+    return 0U;
+  }
+  if (trig->rx_flags & TRIGGER_F_RX_AUX_EVENT) {
+    /* Событие доп. канала (FLXB v2): rx_channel = канал 1..7,
+     * rx_dlc = 1 (включился) / 2 (выключился); поля кадрового
+     * приёма и лимит сработок не используются — обязаны быть 0,
+     * иначе запись отбраковывается, а не трактуется вольно. */
+    if (trig->rx_channel < 1U || trig->rx_channel > AUX_CH_COUNT
+        || (trig->rx_dlc != 1U && trig->rx_dlc != 2U)
+        || trig->rx_extended != 0U || trig->rx_id != 0U
+        || trig->rx_id_mask != 0U || trig->rx_rtr != 0U
+        || trig->rx_fire_limit != 0U
+        || (trig->rx_flags & TRIGGER_F_FIRE_ON_BOOT) != 0U) {
+      return 0U;
+    }
+    for (uint8_t i = 0U; i < 8U; i++) {
+      if (trig->rx_data[i] != 0U || trig->rx_data_mask[i] != 0U) {
+        return 0U;
+      }
+    }
+  } else if (trig->rx_channel > 2U) {
+    return 0U;
+  }
+  if (trig->src_flags & TRIGGER_F_TX_AUX) {
+    /* Действие = команда доп. каналу: tx_channel = 1..7,
+     * tx_dlc = режим 0..3; кадровые tx-поля и повторы/интервал
+     * не используются (aux-команда сама программирует срок и
+     * параметры в AuxOut_Set). */
+    if (trig->tx_channel < 1U || trig->tx_channel > AUX_CH_COUNT
+        || trig->tx_dlc > AUX_MODE_PWM
+        || trig->tx_extended != 0U || trig->tx_id != 0U
+        || trig->tx_rtr != 0U || trig->cache_enabled != 0U
+        || trig->tx_count > 1U || trig->tx_interval_ms != 0U) {
+      return 0U;
+    }
+  } else if (trig->tx_channel > 2U) {
+    return 0U;
+  }
+  if (trig->src_flags & TRIGGER_F_COND_AUX) {
+    /* Условие по доп. каналу: src_channel = 1..7, src_dlc = 1
+     * («работает») / 2 («не работает»). Несовместимо с кэшом —
+     * поля src_* тогда уже заняты кэш-фильтром. */
+    if (trig->cache_enabled != 0U
+        || trig->src_channel < 1U || trig->src_channel > AUX_CH_COUNT
+        || (trig->src_dlc != 1U && trig->src_dlc != 2U)
+        || (trig->src_flags & TRIGGER_F_CACHE_ONLY) != 0U) {
+      return 0U;
+    }
+  } else if (trig->src_channel > 2U || trig->src_dlc > 8U) {
     return 0U;
   }
   uint32_t rx_max = trig->rx_extended ? 0x1FFFFFFFU : 0x7FFU;
   uint32_t tx_max = trig->tx_extended ? 0x1FFFFFFFU : 0x7FFU;
   uint32_t src_max = trig->src_extended ? 0x1FFFFFFFU : 0x7FFU;
+  if (trig->rx_flags & TRIGGER_F_RX_AUX_EVENT) {
+    rx_max = 0U; /* rx_id/mask обязаны быть 0 — проверено выше */
+  }
+  if (trig->src_flags & TRIGGER_F_TX_AUX) {
+    tx_max = 0U;
+  }
+  if (trig->src_flags & TRIGGER_F_COND_AUX) {
+    src_max = 0U; /* src_id не используется — обязан быть 0 */
+    return (trig->rx_id <= rx_max && trig->rx_id_mask <= rx_max
+            && trig->tx_id <= tx_max && trig->src_id == 0U) ? 1U : 0U;
+  }
   return (trig->rx_id <= rx_max && trig->rx_id_mask <= rx_max
           && trig->tx_id <= tx_max && trig->src_id <= src_max) ? 1U : 0U;
 }
@@ -1127,10 +1195,64 @@ static void arm_response(uint8_t index, const trigger_t *t, uint8_t echo)
  * event_data — pad-8 снимок DATA кадра-события для X-подстановки
  * (записи ГЛ берут его из элемента очереди — у каждого запуска свой
  * кадр); NULL — читать s_cache[index] (пользовательские триггеры). */
+/* Условие «доп. канал работает/не работает» (FLXB v2): проверяется в
+ * момент события по логическому состоянию — AuxOut_IsActive, а не
+ * уровню пина: низкая фаза ШИМ и ШИМ 0% — «работает» (единая
+ * трактовка с ПК, CM-HW-03). */
+static uint8_t aux_cond_ok(const trigger_t *t)
+{
+  if ((t->src_flags & TRIGGER_F_COND_AUX) == 0U) {
+    return 1U;
+  }
+  uint8_t need_active = (t->src_dlc == 1U) ? 1U : 0U;
+  return (AuxOut_IsActive(t->src_channel) == need_active) ? 1U : 0U;
+}
+
+/* Действие «доп. канал» (FLXB v2): команда AuxOut_Set с параметрами
+ * из tx_data по раскладке режима — как CMD_AUX_SET_EXT, только без
+ * провода. */
+static uint8_t aux_exec(const trigger_t *t)
+{
+  uint16_t pulse_on = 0U, pulse_off = 0U, pulse_count = 0U;
+  uint16_t pwm_freq = 0U;
+  uint8_t  pwm_duty = 0U;
+  uint32_t duration = 0U;
+  switch (t->tx_dlc) {
+  case AUX_MODE_PWM:
+    pwm_freq = (uint16_t)(t->tx_data[0] | ((uint16_t)t->tx_data[1] << 8));
+    pwm_duty = t->tx_data[2];
+    duration = (uint32_t)t->tx_data[3] | ((uint32_t)t->tx_data[4] << 8)
+               | ((uint32_t)t->tx_data[5] << 16)
+               | ((uint32_t)t->tx_data[6] << 24);
+    break;
+  case AUX_MODE_PULSE:
+    pulse_on = (uint16_t)(t->tx_data[0] | ((uint16_t)t->tx_data[1] << 8));
+    pulse_off = (uint16_t)(t->tx_data[2] | ((uint16_t)t->tx_data[3] << 8));
+    pulse_count = (uint16_t)(t->tx_data[4] | ((uint16_t)t->tx_data[5] << 8));
+    duration = (uint32_t)t->tx_data[6] | ((uint32_t)t->tx_data[7] << 8);
+    break;
+  case AUX_MODE_ON:
+    duration = (uint32_t)t->tx_data[0] | ((uint32_t)t->tx_data[1] << 8)
+               | ((uint32_t)t->tx_data[2] << 16)
+               | ((uint32_t)t->tx_data[3] << 24);
+    break;
+  default: /* OFF */
+    break;
+  }
+  return AuxOut_Set(t->tx_channel, t->tx_dlc, pulse_on, pulse_off,
+                    pulse_count, pwm_freq, pwm_duty, duration);
+}
+
 static uint8_t send_response(const trigger_t *t, uint8_t index,
                              uint8_t echo, const uint8_t *event_data)
 {
   can_frame_t resp;
+  if (t->src_flags & TRIGGER_F_TX_AUX) {
+    /* Действие «доп. канал»: CAN не трогаем, отказ (недоступный пин
+     * или битые параметры) идёт через тот же ретрай-движок. */
+    (void)index; (void)echo; (void)event_data;
+    return aux_exec(t);
+  }
   if (t->cache_enabled) {
     if (!s_cache_valid[index]) {
       return 0U; /* кэш ещё пуст — отправлять нечего */
@@ -1205,11 +1327,34 @@ static uint8_t flex_enqueue(uint8_t index, const trigger_t *t,
 
 /* Взвод запуска записи ГЛ: мгновенную отправку (delay=0, count=1)
  * пробуем сразу — отказ ящиков ставит серию в очередь с нулевым
- * сроком (ретраи в Trigger_Poll), остальные серии ждут свой тик. */
+ * сроком (ретраи в Trigger_Poll), остальные серии ждут свой тик.
+ * event_data — pad-8 снимок кадра-события (NULL для aux-событий),
+ * echo — глубина TX-эха источника. Условие COND_AUX проверяется в
+ * момент события, до взвода — как на ПК (_condition_passed). */
+static void flex_fire_ex(uint8_t index, const trigger_t *t,
+                         const uint8_t *event_data, uint8_t echo)
+{
+  if (!aux_cond_ok(t)) {
+    return;
+  }
+  uint8_t sends = t->tx_count ? t->tx_count : 1U;
+  if (t->delay_ms == 0U && sends == 1U) {
+    if (send_response(t, index, echo, event_data)) {
+      s_fired_count++;
+      return;
+    }
+  }
+  if (!flex_enqueue(index, t, event_data, echo,
+                    HAL_GetTick() + t->delay_ms)) {
+    /* Очередь переполнена — серия потеряна, но не молча: считаем в
+     * dropped (Trigger_GetStats → CMD_TRIGGER_STATS на ПК). */
+    s_dropped_count += sends;
+  }
+}
+
 static void flex_fire(uint8_t index, const trigger_t *t,
                       const can_frame_t *frame)
 {
-  uint8_t sends = t->tx_count ? t->tx_count : 1U;
   uint8_t ev_data[8];
   const uint8_t *evp = NULL;
   if (t->rx_flags & TRIGGER_F_TX_EVENT_DATA) {
@@ -1218,17 +1363,26 @@ static void flex_fire(uint8_t index, const trigger_t *t,
            frame->dlc < 8U ? frame->dlc : 8U);
     evp = ev_data;
   }
-  if (t->delay_ms == 0U && sends == 1U) {
-    if (send_response(t, index, frame->echo, evp)) {
-      s_fired_count++;
-      return;
+  flex_fire_ex(index, t, evp, frame->echo);
+}
+
+/* Событие перехода доп. канала (CM-HW-03): разбираются только записи
+ * хвоста ГЛ с RX_AUX_EVENT — rx_channel = канал, rx_dlc = 1/2
+ * («включился»/«выключился»). Условие COND_AUX проверяется до взвода,
+ * как на ПК. Кадра события нет — X-подстановки у таких записей не
+ * бывает (валидатор отбраковывает rx_id≠0, а TX_EVENT_DATA без
+ * кадрового фильтра бессмысленна). */
+void Trigger_OnAuxEvent(uint8_t channel, uint8_t is_on)
+{
+  uint8_t edge = is_on ? 1U : 2U;
+  for (uint8_t i = s_user_count; i < s_count; i++) {
+    const trigger_t *t = &s_triggers[i];
+    if (!t->enabled
+        || (t->rx_flags & TRIGGER_F_RX_AUX_EVENT) == 0U
+        || t->rx_channel != channel || t->rx_dlc != edge) {
+      continue;
     }
-  }
-  if (!flex_enqueue(index, t, evp, frame->echo,
-                    HAL_GetTick() + t->delay_ms)) {
-    /* Очередь переполнена — серия потеряна, но не молча: считаем в
-     * dropped (Trigger_GetStats → CMD_TRIGGER_STATS на ПК). */
-    s_dropped_count += sends;
+    flex_fire_ex(i, t, NULL, 0U);
   }
 }
 
@@ -1277,8 +1431,11 @@ void Trigger_OnFrame(const can_frame_t *frame)
     /* rx_flags&MUTE_ECHO — триггер не реагирует на кадры, отправленные
      * самим МК (TX-эхо); 0 — слушает и внешние, и свои (как в v2).
      * FIRE_ON_BOOT — вооружается один раз в Trigger_FireOnBoot(), кадры
-     * шины его не возбуждают (поля приёма в UI при галке заблокированы). */
-    if ((t->rx_flags & TRIGGER_F_FIRE_ON_BOOT) != 0U
+     * шины его не возбуждают (поля приёма в UI при галке заблокированы).
+     * RX_AUX_EVENT — событие перехода доп. канала: кадры шины эту
+     * запись не возбуждают, её разбирает Trigger_OnAuxEvent. */
+    if ((t->rx_flags & (TRIGGER_F_FIRE_ON_BOOT
+                       | TRIGGER_F_RX_AUX_EVENT)) != 0U
         || (frame->echo != 0U && (t->rx_flags & TRIGGER_F_MUTE_ECHO) != 0U)
         || !rx_header_matches(t, frame)) {
       continue;
@@ -1369,6 +1526,9 @@ void Trigger_FireOnBoot(void)
      * кадра события нет, снимок DATA нулевой (как у ПК — пустой
      * фрейм события «Включение устройства»). */
     if (i >= s_user_count) {
+      if (!aux_cond_ok(t)) {
+        continue; /* условие по доп. каналу — в момент события (как ПК) */
+      }
       (void)flex_enqueue(i, t, NULL, 0U,
                          HAL_GetTick() + t->delay_ms
                          + t->boot_delay_ms);
@@ -1390,6 +1550,16 @@ void Trigger_FireOnBoot(void)
 void Trigger_Poll(void)
 {
   uint32_t now = HAL_GetTick();
+  /* События переходов доп. каналов (CM-HW-03): aux_out складывает их
+   * в ограниченную очередь, здесь разбираем с бюджетом на вызов —
+   * каскад «событие → действие → событие» не может зациклить Poll:
+   * сверх бюджета события ждут следующего прохода, а при переполнении
+   * очереди aux_out считает потери (AuxOut_EventsDropped → диагностика). */
+  uint8_t aux_budget = FLEX_AUX_EVENTS_PER_POLL;
+  uint8_t a_ch, a_on;
+  while (aux_budget-- > 0U && AuxOut_TakeEvent(&a_ch, &a_on)) {
+    Trigger_OnAuxEvent(a_ch, a_on);
+  }
   /* STAGE без COMMIT протухает: оборванная сессия записи (USB-обрыв
    * между STAGE и COMMIT) держала staged-записи вооружёнными
    * бесконечно — см. TRIGGER_STAGE_TIMEOUT_MS. */

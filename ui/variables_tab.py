@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+import time
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any
@@ -49,6 +50,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QRegularExpressionValidator
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -57,6 +59,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGraphicsOpacityEffect,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -76,7 +79,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.aux_channels import (
+    AUX_PINS,
+    aux_pin_conflict,
+    migrate_aux_variables,
+    quantize_pwm,
+)
 from core.can_protocol import pack_can_frame
+from core import steering_decoder
+from core import variable_decode
 from models.config import (
     Config,
     pack_config_file,
@@ -123,7 +134,7 @@ def _tokens_match(tokens: list[str], data: bytes) -> bool:
 # «Config Variable» (отчёт мастера); вид конфига и устройство хранятся
 # ВНУТРИ файла, имя свободное.
 _CONFIG_INFO_KIND = "codemaster_config_info"
-_CONFIG_INFO_VERSION = 2
+_CONFIG_INFO_VERSION = 3  # 3 = новая разметка номеров доп. каналов (CM-HW-02)
 _CONFIG_INFO_NAME = "Config Variable.kmc"
 
 
@@ -856,6 +867,209 @@ def _parse_axis_value(text: str) -> float | None:
     return None
 
 
+class _SteeringDecoderDialog(QDialog):
+    """Декодер угла поворота руля по кратности сырого значения
+    (CM-HW-04): таблица делителей 2..20 с независимым выбором класса
+    «+»/«−» в каждой строке, код нейтрали, направление и калибровка
+    «|сырое| → |градусы|».
+
+    Выбор байтов и порядок старшинства задаёт переменная (DATA от/до +
+    SBLP) — диалог работает с уже собранным целым значением."""
+
+    def __init__(self, cfg: dict[str, Any], font: QFont,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        from core import steering_decoder as sd
+
+        conf = sd.normalize_config(cfg)
+        self.setWindowTitle(tr("Декодер угла руля"))
+        self.setModal(True)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+
+        hint = QLabel(tr(
+            "Знак угла — две независимые таблицы условий: в строке "
+            "«Кратно»/«Не кратно» (обе можно снять — строка не "
+            "участвует). Выбранные условия внутри таблицы объединяются "
+            "по И. Совпадение обеих таблиц — «конфликт» (невалидно), "
+            "ни одной — «вне классов». Угол — только из калибровки."
+        ))
+        hint.setFont(font)
+        hint.setWordWrap(True)
+        _selectable(hint)
+        layout.addWidget(hint)
+
+        # Две таблицы знаков (CM-N2): по десять чётных делителей,
+        # взаимоисключение только между «Кратно»/«Не кратно» одной
+        # строки одного знака — снять обе галочки можно (строка вне
+        # таблицы).
+        signs = conf["signs"]
+        self._sign_checks: dict[str, dict[int, tuple[QCheckBox, QCheckBox]]] = {}
+        tables_row = QHBoxLayout()
+        for sign, title in (
+            ("pos", tr("Класс «+» (таблица)")),
+            ("neg", tr("Класс «−» (таблица)")),
+        ):
+            box = QGroupBox(title)
+            box.setFont(font)
+            vb = QVBoxLayout(box)
+            table = QTableWidget(len(sd.DIVISORS), 4)
+            table.setFont(font)
+            table.setHorizontalHeaderLabels(
+                [tr("Делитель"), "DEC", tr("Кратно"), tr("Не кратно")]
+            )
+            table.verticalHeader().setVisible(False)
+            table.setEditTriggers(
+                QAbstractItemView.EditTrigger.NoEditTriggers
+            )
+            checks: dict[int, tuple[QCheckBox, QCheckBox]] = {}
+            for i, div in enumerate(sd.DIVISORS):
+                item = QTableWidgetItem(f"0x{div:X}")
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(i, 0, item)
+                dec = QTableWidgetItem(str(div))
+                dec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(i, 1, dec)
+                cb_div = QCheckBox()
+                cb_not = QCheckBox()
+                # «Кратно» и «Не кратно» одной строки исключают друг
+                # друга; повторный клик снимает выбор (третье
+                # состояние — строка вне таблицы).
+                cb_div.toggled.connect(
+                    lambda on, other=cb_not: on and other.setChecked(False)
+                )
+                cb_not.toggled.connect(
+                    lambda on, other=cb_div: on and other.setChecked(False)
+                )
+                cb_div.setChecked(signs[sign].get(div) == "div")
+                cb_not.setChecked(signs[sign].get(div) == "not")
+                for col, cb in ((2, cb_div), (3, cb_not)):
+                    cell = QWidget()
+                    lay = QHBoxLayout(cell)
+                    lay.setContentsMargins(0, 0, 0, 0)
+                    lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    lay.addWidget(cb)
+                    table.setCellWidget(i, col, cell)
+                checks[div] = (cb_div, cb_not)
+            table.resizeColumnsToContents()
+            table.setFixedHeight(230)
+            vb.addWidget(table)
+            tables_row.addWidget(box)
+            self._sign_checks[sign] = checks
+        layout.addLayout(tables_row)
+
+        misc = QHBoxLayout()
+        misc.addWidget(QLabel(tr("Код нейтрали:")))
+        self._neutral = QLineEdit(str(conf["neutral"]))
+        self._neutral.setFont(font)
+        self._neutral.setFixedWidth(90)
+        self._neutral.setToolTip(
+            tr("DEC или HEX (0x…): сырое значение, равное коду, "
+               "декодируется как 0°")
+        )
+        misc.addWidget(self._neutral)
+        self._dir_left = QCheckBox(tr("«−» — поворот влево"))
+        self._dir_left.setFont(font)
+        self._dir_left.setChecked(conf["left_is_negative"])
+        self._dir_left.setToolTip(
+            tr("Снята — отрицательный класс показывается положительными "
+               "градусами (правый руль/иная ориентация датчика)")
+        )
+        misc.addWidget(self._dir_left)
+        misc.addWidget(QLabel(tr("Таймаут, мс:")))
+        self._stale = QSpinBox()
+        self._stale.setFont(font)
+        self._stale.setRange(0, 600000)
+        self._stale.setValue(int(conf.get("stale_ms", 0) or 0))
+        self._stale.setToolTip(
+            tr("Свежесть значения для условий Гибкой логики: "
+               "просроченный угол не удовлетворяет численным "
+               "условиям. 0 — не устаревает")
+        )
+        misc.addWidget(self._stale)
+        misc.addStretch()
+        layout.addLayout(misc)
+
+        # Калибровка: |сырое| → |градусы|; DEC или HEX (0x…).
+        cal_row = QHBoxLayout()
+        cal_row.addWidget(QLabel(tr("Калибровка |сырое| → |°|:")))
+        self._interp = QCheckBox(tr("интерполяция между точками"))
+        self._interp.setFont(font)
+        self._interp.setChecked(conf["interpolate"])
+        cal_row.addWidget(self._interp)
+        cal_row.addStretch()
+        layout.addLayout(cal_row)
+        self._calib_table = QTableWidget(0, 2)
+        self._calib_table.setFont(font)
+        self._calib_table.setHorizontalHeaderLabels(
+            [tr("|сырое| (DEC/HEX)"), tr("|угол| °")]
+        )
+        self._calib_table.horizontalHeader().setStretchLastSection(True)
+        self._calib_table.setFixedHeight(120)
+        for x, y in conf["calib"]:
+            r = self._calib_table.rowCount()
+            self._calib_table.insertRow(r)
+            self._calib_table.setItem(r, 0, QTableWidgetItem(f"{x:g}"))
+            self._calib_table.setItem(r, 1, QTableWidgetItem(f"{y:g}"))
+        layout.addWidget(self._calib_table)
+        add_row = QHBoxLayout()
+        add_btn = QPushButton(tr("＋ точка"))
+        add_btn.setFont(font)
+        add_btn.clicked.connect(lambda: self._calib_table.insertRow(
+            self._calib_table.rowCount()
+        ))
+        add_row.addWidget(add_btn)
+        add_row.addStretch()
+        layout.addLayout(add_row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._conf = conf
+
+    def config(self) -> dict[str, Any]:
+        """Нормализованная конфигурация декодера из полей диалога."""
+        cfg = dict(self._conf)
+        cfg["version"] = steering_decoder.CONFIG_VERSION
+        signs: dict[str, dict[int, str]] = {"pos": {}, "neg": {}}
+        for sign, checks in self._sign_checks.items():
+            for div, (cb_div, cb_not) in checks.items():
+                if cb_div.isChecked():
+                    signs[sign][div] = "div"
+                elif cb_not.isChecked():
+                    signs[sign][div] = "not"
+        cfg["signs"] = signs
+        cfg.pop("divisors_pos", None)
+        cfg.pop("divisors_neg", None)
+        try:
+            text = self._neutral.text().strip()
+            cfg["neutral"] = (
+                int(text, 16)
+                if text.lower().startswith("0x") else int(text)
+            )
+        except ValueError:
+            pass
+        cfg["left_is_negative"] = self._dir_left.isChecked()
+        cfg["interpolate"] = self._interp.isChecked()
+        cfg["stale_ms"] = int(self._stale.value())
+        calib: list[tuple[float, float]] = []
+        for r in range(self._calib_table.rowCount()):
+            xi = self._calib_table.item(r, 0)
+            yi = self._calib_table.item(r, 1)
+            if xi is None or yi is None:
+                continue
+            x = _parse_axis_value(xi.text())
+            y = _parse_axis_value(yi.text())
+            if x is not None and y is not None:
+                calib.append((x, y))
+        cfg["calib"] = calib
+        return cfg
+
+
 class _HoverTip(QLabel):
     """Плавно появляющаяся закруглённая табличка-подсказка над
     графиком (отчёт мастера: не «выскакивает резко»)."""
@@ -1435,13 +1649,23 @@ class _ValuePage(QWidget):
             self.out_range.setFont(font)
             self.out_range.addItem(tr("От 0 до бесконечности (∞)"), "inf")
             self.out_range.addItem(tr("Градусы"), "degrees")
+            self.out_range.addItem(tr("Угол руля (кратность)"), "steering")
             self.out_range.setToolTip(
                 tr("Допустимый диапазон выводимого числа")
             )
             self.out_range.currentIndexChanged.connect(
-                lambda _i: self._on_edits_changed()
+                lambda _i: self._on_out_range_changed()
             )
             line1.addWidget(self.out_range)
+            self.steering_cfg: dict[str, Any] = {}
+            self.steering_btn = QPushButton(tr("Декодер…"))
+            self.steering_btn.setFont(font)
+            self.steering_btn.setFixedHeight(28)
+            self.steering_btn.setToolTip(tr(
+                "Делители, нейтраль и калибровка угла поворота руля"
+            ))
+            self.steering_btn.clicked.connect(self._edit_steering)
+            line1.addWidget(self.steering_btn)
         line1.addStretch()
         layout.addLayout(line1)
 
@@ -1646,12 +1870,37 @@ class _ValuePage(QWidget):
         # Начальное состояние SBLP: без двух байтов в вычислении
         # кнопка неактивна (отчёт мастера).
         self._update_sblp_enabled()
+        self._update_steering_btn()
 
     # ---- внутреннее -----------------------------------------------------
 
     def _emit_changed(self) -> None:
         if self._on_changed is not None:
             self._on_changed()
+
+    def _on_out_range_changed(self) -> None:
+        self._update_steering_btn()
+        self._on_edits_changed()
+
+    def _edit_steering(self) -> None:
+        """Диалог настройки декодера угла руля (CM-HW-04)."""
+        dialog = _SteeringDecoderDialog(
+            self.steering_cfg, self.font(), self
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.steering_cfg = dialog.config()
+            self._emit_changed()
+
+    def _update_steering_btn(self) -> None:
+        """Кнопка «Декодер…» открывает настройку кратности из режимов
+        «Угол руля (кратность)» и «Градусы» — маршрут задания: декодер
+        доступен при выборе «Градусы» (CM-N2, ревью round 2).
+        Включённый декодер в режиме «Градусы» замещает таблицу точек
+        как источник угла; без него «Градусы» работают по-старому."""
+        if getattr(self, "steering_btn", None) is not None:
+            self.steering_btn.setVisible(
+                self.out_range.currentData() in ("degrees", "steering")
+            )
 
     def _set_sblp(self, mode: str) -> None:
         """Переключает режим SBLP: повторный клик по выбранному
@@ -1820,7 +2069,7 @@ class _ValuePage(QWidget):
             ok = bool(self._HEX_CELL_RE.match(text))
             unbounded = (
                 getattr(self, "out_range", None) is not None
-                and self.out_range.currentData() in ("inf", "degrees")
+                and self.out_range.currentData() in ("inf", "degrees", "steering")
             )
             if ok and self._kind == "numeric" and text and not unbounded:
                 value = self._point_raw(text)
@@ -1892,7 +2141,7 @@ class _ValuePage(QWidget):
         # (отчёт мастера).
         unbounded = (
             getattr(self, "out_range", None) is not None
-            and self.out_range.currentData() in ("inf", "degrees")
+            and self.out_range.currentData() in ("inf", "degrees", "steering")
         )
         out_of_range = False
         for row in range(self.points_table.rowCount()):
@@ -1947,22 +2196,60 @@ class _ValuePage(QWidget):
             [self.data_from, self.data_to],
         )
         raw = getattr(row, "live_raw", None) if row is not None else None
-        self.live_hex_label.setText(
-            "0x—" if raw is None else f"0x{raw:X}"
-        )
+        stale = bool(getattr(row, "_stale_shown", False))
+        # RAW просроченного кадра не выдаём за свежий — та же
+        # пометка «устарело», что у числа (CM-N15).
+        hex_text = "0x—" if raw is None else f"0x{raw:X}"
+        if stale and raw is not None:
+            hex_text += tr(" (устарело)")
+        self.live_hex_label.setText(hex_text)
         if self._kind != "numeric":
             # «Динамическая»: рядом с сырым значением — имя из таблицы
             # привязки, если значение совпало (отчёт мастера).
-            name = self._binding_name(raw) if raw is not None else ""
+            # CM-N15: невалидный кадр — статус, а не залипшее имя.
+            if row is not None and not getattr(row, "live_valid", True):
+                name = getattr(row, "_live_text", "—")
+            else:
+                name = (
+                    self._binding_name(raw) if raw is not None else ""
+                )
+                if stale and name:
+                    name += tr(" (устарело)")
             self.live_label.setText(name or "—")
             return
-        if row is None or len(self.read_points()) < 2:
-            self.live_label.setText("0.00")
+        # CM-N15: редактор повторяет контракт валидности строки —
+        # невалидный/неполный кадр показывает статус, а не залипшее
+        # «0.00»; декодер угла не требует обычных точек калибровки.
+        if row is None:
+            self.live_label.setText("—")
+            return
+        if not getattr(row, "live_valid", False):
+            self.live_label.setText(getattr(row, "_live_text", "—"))
             return
         live = getattr(row, "live_value", None)
-        self.live_label.setText(
-            "0.00" if live is None else f"{live:.2f}"
+        if live is None:
+            self.live_label.setText("—")
+            return
+        steering = variable_decode.is_steering(
+            {
+                "out_range": str(self.out_range.currentData() or ""),
+                "steering": getattr(self, "steering_cfg", {}) or {},
+            }
         )
+        if steering:
+            # Подпись декодера уже содержит градусы и RAW-HEX —
+            # показываем как в строке.
+            text = getattr(row, "_live_text", f"{live:.2f}")
+        elif len(self.read_points()) < 2:
+            # Без таблицы привязки число не определено — прочерк,
+            # а не выглядящий валидным «0.00».
+            self.live_label.setText("—")
+            return
+        else:
+            text = f"{live:.2f}"
+        if stale:
+            text += tr(" (устарело)")
+        self.live_label.setText(text)
 
     # ---- конфиг ---------------------------------------------------------
 
@@ -1988,6 +2275,8 @@ class _ValuePage(QWidget):
                 out_mode = "degrees"
             idx = self.out_range.findData(out_mode)
             self.out_range.setCurrentIndex(idx if idx >= 0 else 0)
+            self.steering_cfg = dict(config.get("steering") or {})
+            self._update_steering_btn()
         self.points_table.setRowCount(0)
         for point in config.get("points") or []:
             try:
@@ -2021,6 +2310,8 @@ class _ValuePage(QWidget):
         if self._kind == "numeric":
             cfg["sblp"] = self._sblp
             cfg["out_range"] = str(self.out_range.currentData() or "inf")
+            if cfg["out_range"] == "steering" or self.steering_cfg:
+                cfg["steering"] = dict(self.steering_cfg)
             cfg["points"] = self.read_points()
         else:
             # «Динамическая переменная»: пары (сырое значение, имя).
@@ -2170,7 +2461,17 @@ class _ImpulsePage(QWidget):
         _set_live_data_html(self.live_data_label, data, self.data)
         row = self._get_row() if self._get_row is not None else None
         live = getattr(row, "live_value", None) if row is not None else None
-        self.flag_label.setText("1" if live else "0")
+        # CM-N15: тот же контракт, что у строки — до первого кадра и
+        # при невалидном кадре прочерк/статус, а не уверенный «0».
+        if row is not None and not getattr(row, "live_valid", True):
+            self.flag_label.setText(getattr(row, "_live_text", "—"))
+        elif live is None:
+            self.flag_label.setText("—")
+        else:
+            text = "1" if live else "0"
+            if getattr(row, "_stale_shown", False):
+                text += tr(" (устарело)")
+            self.flag_label.setText(text)
 
     def read(self) -> dict[str, Any]:
         return {
@@ -3333,6 +3634,150 @@ _AUX_FUNCTIONS = (
 _TYPE_FLAG = "flag"
 
 
+class _AuxChannelsDialog(QDialog):
+    """Состояние семи каналов выхода с устройства (CMD_AUX_GET) и
+    владение спорными пинами (CMD_AUX_MAP) — протокол 13.
+
+    Строки: канал (новая нумерация), физический пин, режим AUX_MODE_*,
+    «работает» (логическое состояние — ШИМ в нуле и 0% duty считаются
+    активными), уровень на пине. Спорные пины PA14/PD2/PB3 отдаются
+    каналам галочками владения; снятая галочка возвращает пин
+    SWD/TERM-функции. Маска хранится в CFGH — переживает перезагрузку
+    и обновление."""
+
+    _SHARED = (  # (канал, бит владения, чем делится пин)
+        (1, 0x01, "SWD (SWCLK)"),
+        (6, 0x20, "CAN2 TERM"),
+        (7, 0x40, "CAN1 TERM"),
+    )
+    _MODES = ("off", "on", "pulse", "pwm")
+
+    def __init__(self, serial_manager, font: QFont,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._sm = serial_manager
+        self.setWindowTitle(tr("Каналы выхода устройства"))
+        self.setMinimumWidth(430)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        state = serial_manager.read_aux_state() if serial_manager else None
+        if state is None:
+            hint = QLabel(tr(
+                "Устройство не поддерживает расширенные каналы "
+                "(протокол 13) или не отвечает — обновите прошивку."
+            ))
+            hint.setFont(font)
+            hint.setWordWrap(True)
+            _selectable(hint)
+            layout.addWidget(hint)
+            close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            close.rejected.connect(self.reject)
+            close.clicked.connect(self.reject)
+            layout.addWidget(close)
+            return
+
+        owned = state["owned"]
+        active = state["active"]
+        level = state["level"]
+        modes = state["modes"]
+
+        # Расширенный ответ протокола 13 (CM-N6): фактические фазы
+        # сигнала в мс — показываем ПРИМЕНЁННЫЙ ШИМ, не запрошенный.
+        on_ms = state.get("on_ms") or []
+        off_ms = state.get("off_ms") or []
+
+        table = QTableWidget(7, 6)
+        table.setFont(font)
+        table.setHorizontalHeaderLabels(
+            [tr("Канал"), tr("Пин"), tr("Режим"), tr("Работает"),
+             tr("Уровень"), tr("Фазы (мс)")]
+        )
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        for ch in range(1, 8):
+            r = ch - 1
+            mode = modes[r] if r < len(modes) else 0
+            phases = "—"
+            if mode in (2, 3) and r < len(on_ms) and r < len(off_ms):
+                phases = f"{on_ms[r]}+{off_ms[r]}"
+            cells = (
+                str(ch),
+                AUX_PINS[ch],
+                self._MODES[mode] if mode < len(self._MODES) else "?",
+                "✓" if active & (1 << r) else "—",
+                "1" if level & (1 << r) else "0",
+                phases,
+            )
+            for c, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(r, c, item)
+        table.resizeColumnsToContents()
+        table.setFixedHeight(
+            table.verticalHeader().defaultSectionSize() * 7
+            + table.horizontalHeader().height() + 4
+        )
+        layout.addWidget(table)
+
+        layout.addWidget(QLabel(tr("Владение спорными пинами:")))
+        self._own_checks: dict[int, QCheckBox] = {}
+        for ch, bit, conflict in self._SHARED:
+            cb = QCheckBox(
+                tr("{0} ({1}) — отдать каналу {2}: {1} отключён")
+                .format(AUX_PINS[ch], conflict, ch)
+            )
+            cb.setFont(font)
+            cb.setChecked(bool(owned & bit))
+            cb.setToolTip(tr(
+                "Снятая галочка возвращает пин функции {0}"
+            ).format(conflict))
+            layout.addWidget(cb)
+            self._own_checks[bit] = cb
+        warn = QLabel(tr(
+            "PA14 — отладочный SWCLK: после отдачи каналу прошивка по "
+            "SWD недоступна до перезагрузки с неотданным пином "
+            "(маска хранится в CFGH и применяется при старте)."
+        ))
+        warn.setFont(font)
+        warn.setWordWrap(True)
+        warn.setStyleSheet("color: #B03030;")
+        _selectable(warn)
+        layout.addWidget(warn)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Apply
+            | QDialogButtonBox.StandardButton.Close
+        )
+        apply_btn = buttons.button(QDialogButtonBox.StandardButton.Apply)
+        apply_btn.setText(tr("Применить владение"))
+        apply_btn.clicked.connect(self._apply_ownership)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _apply_ownership(self) -> None:
+        mask = 0
+        for bit, cb in self._own_checks.items():
+            if cb.isChecked():
+                mask |= bit
+        actual = self._sm.set_aux_pins_mask(mask)
+        if actual is None:
+            QMessageBox.warning(
+                self, tr("Владение пинами"),
+                tr("Команда CMD_AUX_MAP не подтверждена устройством")
+            )
+            return
+        for bit, cb in self._own_checks.items():
+            cb.setChecked(bool(actual & bit))
+        QMessageBox.information(
+            self, tr("Владение пинами"),
+            tr("Применено: маска 0x{0:02X}").format(actual)
+        )
+
+
 class _AuxDialog(QDialog):
     """Настройка строки третьей колонки («Дополнительные каналы
     входа, выхода и переменные» — отчёт мастера): имя + вид.
@@ -3380,15 +3825,25 @@ class _AuxDialog(QDialog):
         self._stack = QStackedWidget()
 
         channel_page = QWidget()
-        row = QHBoxLayout(channel_page)
-        row.setContentsMargins(0, 0, 0, 0)
+        ch_layout = QVBoxLayout(channel_page)
+        ch_layout.setContentsMargins(0, 0, 0, 0)
+        ch_layout.setSpacing(6)
+        row = QHBoxLayout()
         row.addWidget(QLabel(tr("Пин (канал):")))
         self._channel = QSpinBox()
         self._channel.setFont(font)
-        self._channel.setRange(1, 8)
+        # Семь выходов в новой нумерации (CM-HW-02, aux_channels.py):
+        # 1=PA14, 2=PA15, 3=PC10, 4=PC11, 5=PC12, 6=PD2, 7=PB3.
+        self._channel.setRange(1, 7)
         self._channel.setValue(int(config.get("channel", 1) or 1))
         self._channel.setFixedWidth(64)
         row.addWidget(self._channel)
+        # Реальное имя пина и ограничение (SWCLK/TERM) — CM-N7:
+        # доступность показывается явно, а не «канал есть = пин
+        # свободен».
+        self._pin_label = QLabel()
+        self._pin_label.setFont(font)
+        row.addWidget(self._pin_label)
         row.addWidget(QLabel(tr("Функция канала:")))
         self._function = QComboBox()
         self._function.setFont(font)
@@ -3397,7 +3852,64 @@ class _AuxDialog(QDialog):
         fidx = self._function.findData(config.get("function", "analog_out"))
         self._function.setCurrentIndex(fidx if fidx >= 0 else 0)
         row.addWidget(self._function, 1)
+        ch_layout.addLayout(row)
+
+        # Настройки выхода (CM-N7): константа Выкл/Вкл или ШИМ с
+        # частотой и заполнением — действие ГЛ «из настроек выхода»
+        # берёт режим отсюда.
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel(tr("Режим выхода:")))
+        self._out_mode = QComboBox()
+        self._out_mode.setFont(font)
+        self._out_mode.addItem(tr("Выкл"), "off")
+        self._out_mode.addItem(tr("Вкл"), "on")
+        self._out_mode.addItem(tr("ШИМ"), "pwm")
+        midx = self._out_mode.findData(str(config.get("out_mode", "on")))
+        self._out_mode.setCurrentIndex(midx if midx >= 0 else 1)
+        mode_row.addWidget(self._out_mode)
+        mode_row.addStretch()
+        ch_layout.addLayout(mode_row)
+
+        self._pwm_row = QWidget()
+        pwm_row = QHBoxLayout(self._pwm_row)
+        pwm_row.setContentsMargins(0, 0, 0, 0)
+        pwm_row.addWidget(QLabel(tr("Частота:")))
+        self._pwm_freq = QSpinBox()
+        self._pwm_freq.setFont(font)
+        # Та же сетка, что у МК (quantize_pwm, aux_out.c): шаг 1 мс,
+        # потолок 500 Гц (CM-N6).
+        self._pwm_freq.setRange(1, 500)
+        self._pwm_freq.setValue(int(config.get("pwm_freq", 250) or 250))
+        self._pwm_freq.setSuffix(tr(" Гц"))
+        pwm_row.addWidget(self._pwm_freq)
+        pwm_row.addWidget(QLabel(tr("Заполнение:")))
+        self._pwm_duty = QSpinBox()
+        self._pwm_duty.setFont(font)
+        self._pwm_duty.setRange(0, 100)
+        self._pwm_duty.setValue(int(config.get("pwm_duty", 50) or 0))
+        self._pwm_duty.setSuffix(" %")
+        pwm_row.addWidget(self._pwm_duty)
+        self._applied = QLabel()
+        self._applied.setFont(font)
+        self._applied.setStyleSheet("color: #9A9AA5;")
+        pwm_row.addWidget(self._applied)
+        pwm_row.addStretch()
+        ch_layout.addWidget(self._pwm_row)
+
+        self._conflict = QLabel()
+        self._conflict.setFont(font)
+        self._conflict.setWordWrap(True)
+        self._conflict.setStyleSheet("color: #B03030;")
+        _selectable(self._conflict)
+        ch_layout.addWidget(self._conflict)
+        ch_layout.addStretch()
         self._stack.addWidget(channel_page)
+
+        self._channel.valueChanged.connect(self._refresh_aux_out)
+        self._out_mode.currentIndexChanged.connect(self._refresh_aux_out)
+        self._pwm_freq.valueChanged.connect(self._refresh_aux_out)
+        self._pwm_duty.valueChanged.connect(self._refresh_aux_out)
+        self._refresh_aux_out()
 
         flag_page = QWidget()
         flag_layout = QVBoxLayout(flag_page)
@@ -3459,6 +3971,37 @@ class _AuxDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _refresh_aux_out(self) -> None:
+        """Подписи пина/конфликта и фактические фазы ШИМ (CM-N7):
+        показываем ПРИМЕНЁННЫЙ сигнал после квантования в сетку
+        целых мс — не запрошенный."""
+        ch = self._channel.value()
+        pin = AUX_PINS.get(ch, "?")
+        conflict = aux_pin_conflict(ch)
+        self._pin_label.setText(pin)
+        mode = self._out_mode.currentData()
+        self._pwm_row.setVisible(mode == "pwm")
+        if conflict:
+            self._conflict.setText(
+                tr("⚠ {0}: {1}").format(pin, tr(conflict))
+            )
+        else:
+            self._conflict.setText("")
+        self._conflict.setVisible(bool(conflict))
+        if mode == "pwm":
+            q = quantize_pwm(self._pwm_freq.value(), self._pwm_duty.value())
+            if q is None:
+                self._applied.setText(tr("недостижимо"))
+            else:
+                period, on, off = q
+                self._applied.setText(
+                    tr("≈ {0}+{1} мс ({2:.1f}%)").format(
+                        on, off, on * 100.0 / period
+                    )
+                )
+        else:
+            self._applied.setText("")
+
     @property
     def config(self) -> dict[str, Any]:
         if self._kind.currentData() == _TYPE_FLAG:
@@ -3472,6 +4015,9 @@ class _AuxDialog(QDialog):
             "name": self._name_edit.text().strip(),
             "channel": self._channel.value(),
             "function": self._function.currentData(),
+            "out_mode": self._out_mode.currentData(),
+            "pwm_freq": self._pwm_freq.value(),
+            "pwm_duty": self._pwm_duty.value(),
         }
 
 
@@ -3501,6 +4047,13 @@ class _VariableRow(QFrame):
         # Сырое HEX-значение DATA того же кадра — показываем рядом
         # с десятичным над графиком привязки (отчёт мастера).
         self.live_raw: int | None = None
+        # Достоверность показанного числа (CM-N11): невалидный кадр
+        # обнуляет live_value и ставит статус-текст; отметка времени
+        # последнего валидного значения нужна таймауту stale_ms.
+        self.live_valid = False
+        self._last_valid_ts = 0.0
+        self._stale_shown = False
+        self._live_text = "—"
         # «Импульсная переменная»: таймер вспышки «1» на 0.5 с
         # при совпадении DATA на шине (отчёт мастера).
         self._pulse_timer = QTimer(self)
@@ -3563,17 +4116,41 @@ class _VariableRow(QFrame):
 
     def set_live_value(
         self,
-        value: float,
+        value: float | None,
         raw: int | None = None,
         text: str | None = None,
+        *,
+        valid: bool = True,
     ) -> None:
         """Онлайн-значение переменной из CAN — дублируется в строке
         рядом с названием (отчёт мастера). ``text`` — готовая подпись
-        (имя привязки «Динамической переменной»); без неё — число."""
-        self.live_value = value
+        (имя привязки «Динамической переменной»); без неё — число.
+
+        ``valid=False`` — явный невалидный контракт (CM-N11): числовое
+        значение обнуляется (``live_value=None``), подпись — статус
+        ошибки; залипшего прошлого числа не остаётся."""
+        self.live_value = value if valid else None
+        self.live_valid = valid
         self.live_raw = raw
+        self._stale_shown = False
+        if valid:
+            self._last_valid_ts = time.monotonic()
+        self._live_text = (
+            text
+            if text is not None
+            else (f"{value:.2f}" if value is not None else "—")
+        )
+        self._state_label.setText(self._live_text)
+
+    def mark_stale(self) -> None:
+        """Пометить показанное значение устаревшим (CM-N11): число
+        остаётся видимым, но с явной отметкой — условия ГЛ его уже
+        не используют, и отображение это отражает."""
+        if self._stale_shown:
+            return
+        self._stale_shown = True
         self._state_label.setText(
-            text if text is not None else f"{value:.2f}"
+            tr("{0} (устарело)").format(self._live_text)
         )
 
     def pulse(self) -> None:
@@ -3664,15 +4241,25 @@ class _VariableRow(QFrame):
             )
             return
         if cfg_type == "aux":
-            # Доп. канал: вместо «0» показываем пин и функцию канала.
-            func = dict(_AUX_FUNCTIONS).get(
-                self.config.get("function", ""), ""
-            )
-            self._state_label.setText(
-                tr("Пин {0} · {1}").format(
-                    int(self.config.get("channel", 1) or 1), tr(func)
-                ).rstrip(" ·")
-            )
+            # Доп. канал: пин (реальное имя) + применённый режим
+            # выхода из настроек (CM-N7).
+            ch = int(self.config.get("channel", 1) or 1)
+            pin = AUX_PINS.get(ch, f"#{ch}")
+            out_mode = str(self.config.get("out_mode", "on") or "on")
+            if out_mode == "pwm":
+                q = quantize_pwm(
+                    int(self.config.get("pwm_freq", 0) or 0),
+                    int(self.config.get("pwm_duty", 0) or 0),
+                )
+                mode_text = (
+                    tr("ШИМ ≈{0:.0f}%").format(q[1] * 100.0 / q[0])
+                    if q else tr("ШИМ?")
+                )
+            elif out_mode == "off":
+                mode_text = tr("Выкл")
+            else:
+                mode_text = tr("Вкл")
+            self._state_label.setText(f"{pin} · {mode_text}")
             return
         if cfg_type == _TYPE_CACHE:
             # «Кэш переменная»: до записи — прочерки; после записи в
@@ -4056,13 +4643,20 @@ class VariablesTab(QWidget):
         # размещает settings_window через save_variables_button.
         self._save_btn = QPushButton(tr("Сохранить переменные"))
         self._clear_btn = QPushButton(tr("Очистить"))
-        for btn in (self._save_btn, self._clear_btn):
+        self._aux_state_btn = QPushButton(tr("Каналы выхода…"))
+        self._aux_state_btn.setToolTip(tr(
+            "Состояние семи выходов с устройства и владение "
+            "спорными пинами PA14/PD2/PB3 (протокол 13)"
+        ))
+        for btn in (self._save_btn, self._clear_btn, self._aux_state_btn):
             btn.setFont(self._font)
             btn.setFixedHeight(30)
+        btn_row.addWidget(self._aux_state_btn)
         btn_row.addWidget(self._clear_btn)
         btn_row.addStretch()
         self._save_btn.clicked.connect(self._save_file)
         self._clear_btn.clicked.connect(self._clear_all)
+        self._aux_state_btn.clicked.connect(self._show_aux_channels)
         layout.addLayout(btn_row)
 
         self._hint = QLabel(tr(
@@ -4099,9 +4693,50 @@ class VariablesTab(QWidget):
         if self._serial_manager is not None:
             self._serial_manager.new_can_frames.connect(self._on_can_frames)
 
+        # Таймаут свежести показанных значений (CM-N11): переменные с
+        # настроенным stale_ms помечаются «(устарело)» — число не
+        # выдаётся за актуальное, когда кадры давно не приходили.
+        self._stale_timer = QTimer(self)
+        self._stale_timer.setInterval(200)
+        self._stale_timer.timeout.connect(self._mark_stale_rows)
+        self._stale_timer.start()
+
         self._restore()
 
     # ---- онлайн-значения из CAN ----------------------------------------
+
+    @staticmethod
+    def _var_status_text(status: str) -> str:
+        """Человекочитаемая подпись машинного статуса декодера
+        (CM-N11) — вместо сырого кода вроде «no-class»."""
+        return {
+            "no-data": tr("нет данных"),
+            "no-field": tr("поле не задано"),
+            "incomplete": tr("неполный кадр"),
+            "conflict": tr("конфликт классов"),
+            "no-class": tr("вне классов"),
+            "no-calibration": tr("нет калибровки"),
+            "disabled": tr("выкл"),
+        }.get(status, status)
+
+    def _mark_stale_rows(self) -> None:
+        """Пометка «устарело» для значений с настроенным stale_ms —
+        прошло больше времени без валидного кадра (CM-N11)."""
+        now = time.monotonic()
+        for col in (self._read_col, self._ctrl_col, self._aux_col):
+            for row in list(getattr(col, "_rows", [])):
+                if not row.live_valid or row._stale_shown:
+                    continue
+                stale = variable_decode.stale_ms(row.config)
+                if stale and now - row._last_valid_ts > stale / 1000.0:
+                    row.mark_stale()
+
+    def _show_aux_channels(self) -> None:
+        """Диалог состояния выходов: CMD_AUX_GET (режимы/уровни) +
+        CMD_AUX_MAP (владение спорными пинами) — CM-HW-02."""
+        _AuxChannelsDialog(
+            self._serial_manager, self._font, self
+        ).exec()
 
     def _on_can_frames(self, frames: list[dict[str, Any]]) -> None:
         """Пересчитывает значения байтовых переменных по приходящим
@@ -4198,7 +4833,10 @@ class VariablesTab(QWidget):
                 fid = hex_to_int(str(cfg.get("id", "")))
                 points = cfg.get("points") or []
                 used = cfg.get("bytes") or []
-                if fid is None or not points or not used:
+                steering = variable_decode.is_steering(cfg)
+                # Таблица привязки декодеру угла не нужна — значение
+                # берётся из калибровки декодера (CM-N3).
+                if fid is None or not used or (not points and not steering):
                     continue
                 hit = latest.get(
                     (fid, bool(cfg.get("extended", False)))
@@ -4236,38 +4874,54 @@ class VariablesTab(QWidget):
                             text=name or f"0x{raw:X}",
                         )
                 else:
-                    # «Численная переменная»: сырое значение —
-                    # СУММА выбранных байтов кадра (отчёт мастера);
-                    # в режиме SBLP — сборка по порядку старшинства
-                    # («Старший байт справа»: 09 03 → 9 + 3·256).
-                    sblp = str(cfg.get("sblp", "") or "")
-                    if sblp:
-                        window = bytes(
-                            data[i] for i in used if i < len(data)
+                    # «Численная переменная»: RAW и полнота поля —
+                    # единый контракт с рантаймом ГЛ (CM-N3):
+                    # SBLP-склейка или сумма выбранных байтов;
+                    # неполное поле значения не даёт.
+                    res = variable_decode.decode_var_value(cfg, data)
+                    if not res["complete"]:
+                        # CM-N11: неполный кадр — явный статус, а не
+                        # залипшее прошлое число.
+                        row.set_live_value(
+                            None, valid=False,
+                            text=self._var_status_text(res["status"]),
                         )
-                        decoded = _sblp_decode(window, sblp)
-                        if decoded is not None:
-                            raw = decoded
-                            seen = True
-                    else:
-                        for i in used:
-                            if i < len(data):
-                                raw += data[i]
-                                seen = True
-                    if seen:
-                        if cfg.get("out_range") == "degrees":
-                            # «Градусы»: значение декодируется по
-                            # выведенной из ≥3 точек циклической
-                            # зависимости; неизвестное семейство —
-                            # значение не показываем (отчёт мастера).
-                            model = _degrees_model(points)
-                            degrees = _degrees_decode(model, raw)
-                            if degrees is not None:
-                                row.set_live_value(degrees, raw)
+                        continue
+                    raw = res["raw"]
+                    if steering:
+                        # «Угол руля»: класс по делителям (кратность),
+                        # нейтраль → 0°, градусы только из калибровки;
+                        # статус показываем текстом при невалидном
+                        # значении — живое число при этом НЕВАЛИДНО
+                        # (live_value=None, CM-N11).
+                        if res["valid"]:
+                            row.set_live_value(
+                                res["value"], raw,
+                                text=(
+                                    f'{res["value"]:.1f}° '
+                                    f'({res["raw_hex"]})'
+                                ),
+                            )
                         else:
                             row.set_live_value(
-                                _map_points(points, raw), raw
+                                None, raw, valid=False,
+                                text=self._var_status_text(
+                                    res["status"]
+                                ),
                             )
+                    elif cfg.get("out_range") == "degrees":
+                        # «Градусы»: значение декодируется по
+                        # выведенной из ≥3 точек циклической
+                        # зависимости; неизвестное семейство —
+                        # значение не показываем (отчёт мастера).
+                        model = _degrees_model(points)
+                        degrees = _degrees_decode(model, raw)
+                        if degrees is not None:
+                            row.set_live_value(degrees, raw)
+                    else:
+                        row.set_live_value(
+                            _map_points(points, raw), raw
+                        )
 
     def set_flag_live(self, name: str, value: int) -> None:
         """Онлайн-состояние бита «Переменная» из Гибкой логики —
@@ -4788,7 +5442,7 @@ class VariablesTab(QWidget):
         if (
             not isinstance(payload, dict)
             or payload.get("kind") != _CONFIG_INFO_KIND
-            or payload.get("format") not in (1, _CONFIG_INFO_VERSION)
+            or payload.get("format") not in (1, 2, _CONFIG_INFO_VERSION)
         ):
             if warn_format:
                 QMessageBox.warning(
@@ -4808,6 +5462,18 @@ class VariablesTab(QWidget):
             )
             return False
         variables = payload.get("variables") or {}
+        # Миграция разметки доп. каналов (CM-HW-02): файлы format<3
+        # хранят легаси-номера 1..4 — переводим, физический пин
+        # сохраняется.
+        try:
+            fmt = int(payload.get("format", 1) or 1)
+        except (TypeError, ValueError):
+            fmt = 1
+        if isinstance(variables, dict) and fmt < 3:
+            variables = dict(variables)
+            variables["aux"] = migrate_aux_variables(
+                variables.get("aux"), 1
+            )
         if isinstance(variables, dict):
             self.import_config(variables)
         notes = payload.get("id_notes")

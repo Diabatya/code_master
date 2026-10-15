@@ -42,6 +42,7 @@ OUT1-4 («Вкл»/«Выкл»/«Подать импульсы»/«Вкл ШИ�
 from __future__ import annotations
 
 import contextlib
+import copy
 import time
 from typing import Any
 
@@ -71,6 +72,14 @@ from PySide6.QtWidgets import (
 )
 
 from core.can_protocol import pack_can_frame
+from core import variable_decode
+from core.aux_channels import (
+    AUX_CH_COUNT,
+    AUX_MAP_VERSION,
+    migrate_rules,
+    resolve_aux_from_vars,
+    resolve_rule_actions,
+)
 from core.serial_manager import SerialManager
 from models.config import Config
 from core.flex_compiler import executor_info, managed_flags
@@ -2116,9 +2125,12 @@ class _CondItem(QWidget):
         aux_row.addWidget(_small_label(tr("Доп канал №"), font))
         self.aux_channel = QSpinBox()
         self.aux_channel.setFont(font)
-        self.aux_channel.setRange(1, 8)
+        self.aux_channel.setRange(1, AUX_CH_COUNT)
         self.aux_channel.setValue(1)
         self.aux_channel.setFixedWidth(64)
+        self.aux_channel.setToolTip(tr(
+            "1=PA14, 2=PA15, 3=PC10, 4=PC11, 5=PC12, 6=PD2, 7=PB3"
+        ))
         aux_row.addWidget(self.aux_channel)
         self.aux_state = QComboBox()
         self.aux_state.setFont(font)
@@ -2588,10 +2600,12 @@ class _ActionItem(QWidget):
         top.addWidget(_small_label(tr("Канал №"), font))
         self.aux_channel = QSpinBox()
         self.aux_channel.setFont(font)
-        self.aux_channel.setRange(1, 4)
+        self.aux_channel.setRange(1, AUX_CH_COUNT)
         self.aux_channel.setValue(1)
         self.aux_channel.setFixedWidth(64)
-        self.aux_channel.setToolTip(tr("OUT1…OUT4"))
+        self.aux_channel.setToolTip(tr(
+            "1=PA14, 2=PA15, 3=PC10, 4=PC11, 5=PC12, 6=PD2, 7=PB3"
+        ))
         top.addWidget(self.aux_channel)
         self.aux_mode = QComboBox()
         self.aux_mode.setFont(font)
@@ -2600,6 +2614,17 @@ class _ActionItem(QWidget):
         self.aux_mode.addItem(tr("Подать импульсы"), "pulse")
         self.aux_mode.addItem(tr("Вкл ШИМ"), "pwm")
         top.addWidget(self.aux_mode)
+        # CM-N7: режим может браться из настроек выхода переменной
+        # канала (вкладка «Переменные»); поля ниже — явный override,
+        # остаются запасным вариантом, если переменной нет.
+        self.aux_use_var = QCheckBox(tr("из настроек выхода"))
+        self.aux_use_var.setFont(font)
+        self.aux_use_var.setToolTip(tr(
+            "Режим и параметры ШИМ — из настроек выхода переменной "
+            "этого канала (вкладка «Переменные»); поля режима ниже "
+            "останутся запасным вариантом"
+        ))
+        top.addWidget(self.aux_use_var)
         top.addWidget(_small_label(tr("Пауза до действия"), font))
         self.aux_delay = QSpinBox()
         self.aux_delay.setFont(font)
@@ -2614,14 +2639,41 @@ class _ActionItem(QWidget):
         plain = QWidget()
         plain_layout = QVBoxLayout(plain)
         plain_layout.setContentsMargins(0, 0, 0, 0)
+        plain_layout.setSpacing(2)
+        # «Время включения» для «Вкл»: снятая галочка — до команды
+        # «Выкл»/снятия питания; установленная — авто-выключение МК
+        # через указанный срок (CM-HW-02: нулевой срок бессрочность
+        # молча не означает — для неё галочка снята).
+        on_row = QHBoxLayout()
+        self.aux_on_time_en = QCheckBox(tr("время включения"))
+        self.aux_on_time_en.setFont(font)
+        self.aux_on_time_en.setToolTip(
+            tr("Снята — работает до команды «Выкл»; "
+               "установлена — выключается через указанное время")
+        )
+        on_row.addWidget(self.aux_on_time_en)
+        self.aux_on_time = QSpinBox()
+        self.aux_on_time.setFont(font)
+        self.aux_on_time.setRange(1, 999999)
+        self.aux_on_time.setValue(100)
+        self.aux_on_time.setSuffix(tr(" мс"))
+        self.aux_on_time.setFixedWidth(96)
+        self.aux_on_time.setEnabled(False)
+        on_row.addWidget(self.aux_on_time)
+        on_row.addStretch()
+        plain_layout.addLayout(on_row)
         plain_hint = QLabel(
-            tr("«Вкл» — до команды «Выкл» или до снятия питания МК")
+            tr("«Вкл» без срока — до команды «Выкл» или до снятия "
+               "питания МК")
         )
         plain_hint.setFont(font)
         plain_hint.setStyleSheet("color: #9A9AA5;")
         plain_hint.setWordWrap(True)
         plain_layout.addWidget(plain_hint)
         plain_layout.addStretch()
+        self.aux_on_time_en.toggled.connect(self.aux_on_time.setEnabled)
+        self.aux_on_time_en.toggled.connect(mark_dirty)
+        self.aux_on_time.valueChanged.connect(mark_dirty)
 
         pulse = QWidget()
         pulse_layout = QVBoxLayout(pulse)
@@ -2663,15 +2715,17 @@ class _ActionItem(QWidget):
         pwm_row = QHBoxLayout()
         self.aux_pwm_freq = QSpinBox()
         self.aux_pwm_freq.setFont(font)
-        self.aux_pwm_freq.setRange(1, 20000)
-        self.aux_pwm_freq.setValue(1000)
+        # Программный ШИМ (aux_out.c, шаг 1 мс): потолок 500 Гц —
+        # честный предел, большего МК не выдаёт.
+        self.aux_pwm_freq.setRange(1, 500)
+        self.aux_pwm_freq.setValue(500)
         self.aux_pwm_freq.setSuffix(tr(" Гц"))
         self.aux_pwm_freq.setFixedWidth(96)
         pwm_row.addWidget(_small_label(tr("Частота"), font))
         pwm_row.addWidget(self.aux_pwm_freq)
         self.aux_pwm_duty = QSpinBox()
         self.aux_pwm_duty.setFont(font)
-        self.aux_pwm_duty.setRange(1, 100)
+        self.aux_pwm_duty.setRange(0, 100)
         self.aux_pwm_duty.setValue(50)
         self.aux_pwm_duty.setSuffix(" %")
         self.aux_pwm_duty.setFixedWidth(80)
@@ -2705,6 +2759,8 @@ class _ActionItem(QWidget):
         self._stack.addWidget(page)
 
         self.aux_channel.valueChanged.connect(mark_dirty)
+        self.aux_use_var.toggled.connect(mark_dirty)
+        self.aux_use_var.toggled.connect(self._refresh_aux_override)
         self.aux_mode.currentIndexChanged.connect(self._on_aux_mode)
         self.aux_mode.currentIndexChanged.connect(mark_dirty)
         self.aux_delay.valueChanged.connect(mark_dirty)
@@ -3000,6 +3056,15 @@ class _ActionItem(QWidget):
         self._update_abort_visibility()
         self._update_summary()
 
+    def _refresh_aux_override(self, *_args) -> None:
+        """«Из настроек выхода»: явные поля режима — видимый
+        запасной вариант (override), при включённой галочке они
+        подсвечены как неактивные (CM-N7)."""
+        use_var = self.aux_use_var.isChecked()
+        self.aux_mode.setEnabled(not use_var)
+        self._aux_stack.setEnabled(not use_var)
+        self._update_summary()
+
     def _update_abort_visibility(self) -> None:
         """У «Выкл» доп канала настройки «Прервать если» не нужны —
         скрываются (отчёт мастера)."""
@@ -3135,6 +3200,9 @@ class _ActionItem(QWidget):
                 "type": _ACT_AUX,
                 "aux_enabled": True,
                 "aux_channel": self.aux_channel.value(),
+                # CM-N7: режим из настроек выхода переменной канала;
+                # явные поля ниже — видимый запасной вариант.
+                "aux_use_var": self.aux_use_var.isChecked(),
                 "aux_mode": self.aux_mode.currentData(),
                 "aux_delay": self.aux_delay.value(),
                 "aux_pulse_on": self.aux_pulse_on.value(),
@@ -3142,11 +3210,16 @@ class _ActionItem(QWidget):
                 "aux_pulse_count": self.aux_pulse_count.value(),
                 "aux_pwm_freq": self.aux_pwm_freq.value(),
                 "aux_pwm_duty": self.aux_pwm_duty.value(),
-                # Без галочки «время включения» — 0: ШИМ до «Выкл»
-                # (отчёт мастера).
+                # Без галочки «время включения» — 0: до «Выкл»
+                # (нулевой срок бессрочность молча не означает —
+                # CM-HW-02).
                 "aux_pwm_time": (
                     self.aux_pwm_time.value()
                     if self.aux_pwm_time_en.isChecked() else 0
+                ),
+                "aux_on_time": (
+                    self.aux_on_time.value()
+                    if self.aux_on_time_en.isChecked() else 0
                 ),
             }
         elif atype == _ACT_CACHE:
@@ -3233,6 +3306,7 @@ class _ActionItem(QWidget):
             self.fr_between.setValue(int(action.get("between", 0) or 0))
         elif atype == _ACT_AUX:
             self.aux_channel.setValue(int(action.get("aux_channel", 1) or 1))
+            self.aux_use_var.setChecked(bool(action.get("aux_use_var")))
             midx = self.aux_mode.findData(action.get("aux_mode", "on"))
             self.aux_mode.setCurrentIndex(midx if midx >= 0 else 0)
             self.aux_delay.setValue(int(action.get("aux_delay", 0) or 0))
@@ -3254,6 +3328,9 @@ class _ActionItem(QWidget):
             pwm_time = int(action.get("aux_pwm_time", 0) or 0)
             self.aux_pwm_time_en.setChecked(pwm_time > 0)
             self.aux_pwm_time.setValue(max(1, pwm_time))
+            on_time = int(action.get("aux_on_time", 0) or 0)
+            self.aux_on_time_en.setChecked(on_time > 0)
+            self.aux_on_time.setValue(max(1, on_time))
             self._refresh_pulse_graph()
         elif atype == _ACT_CACHE:
             # Легаси: у старого действия были свои настройки кадра —
@@ -3293,8 +3370,14 @@ class _ActionItem(QWidget):
                 text = tr("Вкл импульсы доп канал №{0}").format(ch)
             elif mode == "pwm":
                 text = tr("ВКЛ ШИМ №{0}").format(ch)
+            elif self.aux_on_time_en.isChecked():
+                text = tr("Вкл доп канал №{0} на {1} мс").format(
+                    ch, self.aux_on_time.value()
+                )
             else:
                 text = tr("Вкл доп канал №{0}").format(ch)
+            if self.aux_use_var.isChecked():
+                text += tr(" (настройки выхода)")
         elif atype == _ACT_VAR:
             text = self.var.get_name() or tr("Переменная")
         elif atype == _ACT_FLAG:
@@ -3847,6 +3930,7 @@ class RuleRowWidget(QWidget):
             "aux_pwm_freq": 1000,
             "aux_pwm_duty": 50,
             "aux_pwm_time": 0,
+            "aux_on_time": 0,
             "cache_enabled": False,
             "cache_channel": 2,
             "cache_extended": False,
@@ -3911,6 +3995,12 @@ class FlexibleLogicTab(QWidget):
         # полей сюда не попадают, программа отрабатывает по
         # записанной в камень версии (отчёт мастера).
         self._runtime_rules: list[dict[str, Any]] = []
+        # Снимок настроек выхода доп. каналов, действовавший при
+        # фиксации runtime-правил: «из настроек выхода» резолвится по
+        # нему — черновые правки вкладки «Переменные» не должны менять
+        # параметры уже сохранённой программы без явной перезаписи
+        # (CM-N10). Обновляется вместе с _runtime_rules.
+        self._runtime_aux_configs: list[dict[str, Any]] = []
         # Индексы программ, исполняемых камнем (скомпилированы в
         # записи FLXB, прошивка protocol>=12): приложение их не
         # исполняет — иначе действие отрабатывало бы дважды
@@ -3956,6 +4046,10 @@ class FlexibleLogicTab(QWidget):
         self._variables_tab = None
         self._static_states: dict[str, int] = {}
         self._dyn_values: dict[str, float] = {}
+        # Метка свежести численного значения (monotonic) — политика
+        # устаревания декодера угла (stale_ms, CM-N3): просроченное
+        # значение численным условиям не отвечает.
+        self._dyn_ts: dict[str, float] = {}
         # Кэши байтов «Динамических переменных» (имя → {позиция: байт}):
         # каждый подошедший кадр перезаписывает только указанные
         # оператором позиции DATA (отчёт мастера).
@@ -4098,6 +4192,14 @@ class FlexibleLogicTab(QWidget):
         rules = self._config.get("flexible_rules", [])
         if not isinstance(rules, list):
             rules = []
+        # Миграция нумерации доп. каналов (CM-HW-02): конфигурация без
+        # пометки aux_map_version хранит легаси-номера 1..4 (PC10/PC11/
+        # PC12/PA15) — переводим в новую карту 1..7, физический пин
+        # сохраняется. Миграция версионируется и идемпотентна.
+        aux_map_ver = int(self._config.get("aux_map_version", 0) or 0)
+        if aux_map_ver < AUX_MAP_VERSION:
+            rules = migrate_rules(rules, aux_map_ver) or rules
+            self._config.set("aux_map_version", AUX_MAP_VERSION)
         self._rules = rules
         # Исполняемый снимок: «flexible_rules_active» — то, что
         # реально записано/вычитано из МК; на старых конфигах ключа
@@ -4105,15 +4207,30 @@ class FlexibleLogicTab(QWidget):
         # (отчёт мастера: программа отрабатывает только после
         # записи в камень).
         active = self._config.get("flexible_rules_active")
+        if aux_map_ver < AUX_MAP_VERSION and isinstance(active, list):
+            active = migrate_rules(active, aux_map_ver)
+            self._config.set("flexible_rules_active", active)
         new_runtime = (
             list(active) if isinstance(active, list) else list(rules)
         )
+        # CM-N14: исполняемый снимок несёт ПРИМЕНЁННЫЕ aux-параметры.
+        # Легаси-конфиги без маркера резолвим один раз по текущему
+        # снимку настроек выхода и помечаем aux_resolved; помеченные
+        # действия повторно не резолвятся — иначе правки черновика
+        # переменных молча меняли бы записанную программу.
+        aux_snapshot = self._aux_configs()
+        new_runtime = [
+            resolve_rule_actions(copy.deepcopy(r), aux_snapshot)
+            if isinstance(r, dict) else r
+            for r in new_runtime
+        ]
         if new_runtime != self._runtime_rules:
             # Сменился исполняемый снимок — новое поколение:
             # запланированные действия прошлых правил не стреляют
             # (ревью CM-R12).
             self._new_exec_generation()
         self._runtime_rules = new_runtime
+        self._runtime_aux_configs = aux_snapshot
         self._refresh_device_managed()
         self._rule_counters = [0] * len(rules)
         self._rebuild_rows()
@@ -4132,17 +4249,27 @@ class FlexibleLogicTab(QWidget):
         """Сохраняет программы в общую конфигурацию."""
         self._rules = self._collect_rules()
         self._config.set("flexible_rules", self._rules)
+        # Разметка номеров доп. каналов новая (CM-HW-02) — помечаем,
+        # чтобы загрузка не мигрировала уже новую нумерацию.
+        self._config.set("aux_map_version", AUX_MAP_VERSION)
         self._update_dirty_badges()
 
     def _update_dirty_badges(self) -> None:
         """Оранжевый треугольник на программе, отличающейся от
         записанной в МК (снимок _runtime_rules — отчёт мастера:
-        замена кнопки «Что изменится»)."""
+        замена кнопки «Что изменится»). Снимок резолвнутый
+        (aux_resolved): черновик сравниваем в том же виде —
+        «из настроек выхода» резолвится по ТЕКУЩИМ настройкам,
+        чтобы правка параметров выхода тоже давала индикатор
+        расхождения с записанной версией (CM-N14)."""
+        aux_cfgs = self._aux_configs()
         for i, row in enumerate(self._row_widgets):
             try:
+                rule = row.get_rule()
                 dirty = (
                     i >= len(self._runtime_rules)
-                    or row.get_rule() != self._runtime_rules[i]
+                    or resolve_rule_actions(rule, aux_cfgs)
+                    != self._runtime_rules[i]
                 )
             except Exception:  # noqa: BLE001
                 dirty = False
@@ -4171,7 +4298,9 @@ class FlexibleLogicTab(QWidget):
             self._config.set("flexible_rules_active", list(rules))
         self._load_config()
 
-    def commit_runtime(self) -> None:
+    def commit_runtime(
+        self, resolved_rules: list[dict[str, Any]] | None = None
+    ) -> None:
         """Фиксирует снимок исполняемой программы — вызывается
         окном настроек только после успешной записи FLXH-блоба в МК.
 
@@ -4179,15 +4308,41 @@ class FlexibleLogicTab(QWidget):
         «flexible_rules» (черновик), а исполняется последняя
         записанная в камень версия (отчёт мастера: ввод цифр в
         событии численной переменной не должен запускать программу
-        до сохранения)."""
+        до сохранения).
+
+        resolved_rules — точный снимок, ушедший в устройство
+        (actions[]/action уже резолвнуты «из настроек выхода» и
+        помечены aux_resolved): исполняется ОН, а не повторный
+        резолв черновика по текущим настройкам переменных
+        (CM-N14). Без аргумента резолвим черновик по снимку
+        настроек выхода на момент записи — та же семантика."""
         self._save_config()
-        new_runtime = self._collect_rules()
+        aux_snapshot = self._aux_configs()
+        if resolved_rules is None:
+            new_runtime = [
+                resolve_rule_actions(r, aux_snapshot)
+                if isinstance(r, dict) else r
+                for r in self._collect_rules()
+            ]
+        else:
+            new_runtime = resolved_rules
+        # Глубокая копия: снимок не должен разделять dict'ы действий
+        # с редактором/кодом записи — правки черновика после commit
+        # исполняемую программу не меняют.
+        new_runtime = copy.deepcopy(new_runtime)
         if new_runtime != self._runtime_rules:
             # Новый исполняемый снимок — новое поколение: действия,
             # запланированные прежними правилами (в т.ч. уже ушедшими
             # на МК), не исполняются на ПК повторно (ревью CM-R12).
+            # Поколение учитывает ПРИМЕНЁННЫЕ aux-параметры: смена
+            # только настроек выхода тоже инвалидирует старые таймеры
+            # (CM-N14).
             self._new_exec_generation()
         self._runtime_rules = new_runtime
+        # Момент применения «из настроек выхода» — запись в камень:
+        # снимок настроек фиксируется здесь, черновые правки
+        # переменных позже не меняют исполняемые параметры (CM-N10).
+        self._runtime_aux_configs = copy.deepcopy(aux_snapshot)
         self._config.set("flexible_rules_active", self._runtime_rules)
         self._refresh_device_managed()
         self._rules_dirty = True
@@ -4360,6 +4515,7 @@ class FlexibleLogicTab(QWidget):
             self._aux_states.clear()
             self._static_states.clear()
             self._dyn_values.clear()
+            self._dyn_ts.clear()
             self._dyn_cache_bytes.clear()
             self._tick = 0
 
@@ -4403,6 +4559,25 @@ class FlexibleLogicTab(QWidget):
                 # страховка против кривого вызова.
                 state = "conflict"
             else:
+                # CM-N14: вычитанный из камня JSON уже содержит
+                # применённые параметры «из настроек выхода» —
+                # помечаем aux_resolved, чтобы runtime не перерезолвил
+                # их по текущему черновику переменных; deepcopy —
+                # снимок не разделяет dict'ы с источником. Нормализация
+                # ДО сравнения: без неё маркер давал бы ложную смену
+                # снимка при повторной вычитке того же блоба (CM-R14).
+                runtime_snapshot = copy.deepcopy(rules)
+                for _rule in runtime_snapshot:
+                    if not isinstance(_rule, dict):
+                        continue
+                    for _act in list(
+                        _rule.get("actions") or []
+                    ) + [_rule.get("action")]:
+                        if (
+                            isinstance(_act, dict)
+                            and _act.get("aux_use_var")
+                        ):
+                            _act["aux_resolved"] = True
                 # managed — список bool по индексам правил (как у
                 # compile_rules): set(managed) дал бы {True, False},
                 # где `0 in`/`1 in` истинны по равенству — все
@@ -4414,7 +4589,7 @@ class FlexibleLogicTab(QWidget):
                 }
                 if (
                     self._device_flex_state == "verified"
-                    and self._runtime_rules == rules
+                    and self._runtime_rules == runtime_snapshot
                     and self._device_managed == managed_idx
                 ):
                     # Повторная вычитка ТОГО ЖЕ блоба на том же
@@ -4429,7 +4604,8 @@ class FlexibleLogicTab(QWidget):
                 # действия, запланированные старыми правилами, не
                 # имеют права стрелять под новым владением (CM-R12 п.5).
                 self._new_exec_generation()
-                self._runtime_rules = [dict(r) for r in rules]
+                self._runtime_rules = runtime_snapshot
+                self._runtime_aux_configs = self._aux_configs()
                 self._config.set(
                     "flexible_rules_active", self._runtime_rules
                 )
@@ -4543,6 +4719,13 @@ class FlexibleLogicTab(QWidget):
         data = self._variables_tab.export_config()
         return (data.get("read") or []) + (data.get("control") or [])
 
+    def _aux_configs(self) -> list[dict[str, Any]]:
+        """Настройки доп. каналов третьей колонки «Переменных» —
+        для «из настроек выхода» (CM-N7)."""
+        tab = self._variables_tab
+        aux = getattr(tab, "aux_channel_configs", None)
+        return aux() if callable(aux) else []
+
     def _update_variable_states(self, frame_id: int, data: bytes) -> dict[str, int]:
         """Обновляет состояния переменных по пришедшему кадру.
         Возвращает статические переменные, сменившие состояние
@@ -4612,15 +4795,23 @@ class FlexibleLogicTab(QWidget):
                 hi = str(var.get("to", "")).split()
                 if not _tokens_range_match(lo, hi, data):
                     continue
-                # «Численная переменная»: сырое значение — СУММА
-                # выбранных байтов кадра (отчёт мастера).
-                raw = 0
-                for pos in var.get("bytes") or []:
-                    if 0 <= pos < len(data):
-                        raw += data[pos]
-                self._dyn_values[name] = _interpolate(
-                    var.get("points"), raw
-                )
+                # «Численная переменная»: RAW — по единому контракту
+                # (SBLP-склейка или сумма, CM-N3). Неполное поле или
+                # невалидный декод («конфликт»/«нет калибровки» у
+                # угла руля) — численного значения НЕТ: условия по
+                # такой переменной не выполняются.
+                res = variable_decode.decode_var_value(var, data)
+                if not res["valid"]:
+                    self._dyn_values.pop(name, None)
+                    self._dyn_ts.pop(name, None)
+                    continue
+                if res["value"] is not None:
+                    self._dyn_values[name] = res["value"]
+                else:
+                    self._dyn_values[name] = _interpolate(
+                        var.get("points"), res["raw"]
+                    )
+                self._dyn_ts[name] = time.monotonic()
         return changed
 
     def _capture_cache_vars(
@@ -4867,6 +5058,23 @@ class FlexibleLogicTab(QWidget):
         tokens = str(event.get("data", "")).split()
         return _tokens_match(tokens, bytes(frame["data"]))
 
+    def _dyn_current(self, name: str) -> Any:
+        """Текущее значение динамической переменной для условий ГЛ —
+        только валидное и не просроченное (политика устаревания
+        ``stale_ms`` декодера угла руля, CM-N3)."""
+        if name not in self._dyn_values:
+            return None
+        for var in self._variable_defs():
+            if str(var.get("name", "")).strip() != name:
+                continue
+            ms = variable_decode.stale_ms(var)
+            if ms > 0:
+                ts = self._dyn_ts.get(name)
+                if ts is None or time.monotonic() - ts > ms / 1000.0:
+                    return None
+            break
+        return self._dyn_values[name]
+
     def _condition_passed(self, cond: dict[str, Any]) -> bool:
         """ПРИ: проверка текущего состояния перед действием."""
         ctype = cond.get("type", _COND_NONE)
@@ -4879,13 +5087,13 @@ class FlexibleLogicTab(QWidget):
             # условия списком из таблицы привязки). Пустое состояние —
             # легаси «Активно»: переменная в любом именованном
             # состоянии.
-            current = self._dyn_values.get(str(cond.get("var", "")))
+            current = self._dyn_current(str(cond.get("var", "")))
             state = str(cond.get("state", "")).strip()
             if state:
                 return str(current) == state
             return bool(current)
         if ctype == _COND_NUM:
-            value = self._dyn_values.get(str(cond.get("var", "")))
+            value = self._dyn_current(str(cond.get("var", "")))
             if value is None:
                 return False
             try:
@@ -5196,7 +5404,7 @@ class FlexibleLogicTab(QWidget):
             )
         if etype in (_EVENT_DYN, _EVENT_NUM):
             name = str(abort.get("var", "")).strip()
-            current = self._dyn_values.get(name)
+            current = self._dyn_current(name)
             if current is None:
                 return False
             try:
@@ -5318,11 +5526,30 @@ class FlexibleLogicTab(QWidget):
         #    импульсы и ШИМ крутит сам МК (aux_out.c). «Пауза до
         #    действия» — PC-таймер, как у фреймов.
         if action.get("aux_enabled"):
+            # CM-N7: «из настроек выхода» — режим и ШИМ-параметры
+            # берутся из настроек выхода переменной этого канала
+            # (вкладка «Переменные»); без переменной — явный
+            # override действия. CM-N10/CM-N14: резолв по снимку
+            # момента записи и только для ещё не резолвнутых
+            # действий — aux_resolved несёт применённые параметры,
+            # черновые правки «Переменных» сохранённую программу
+            # не меняют.
+            action = resolve_aux_from_vars(
+                action, self._runtime_aux_configs
+            )
             aux_delay = int(action.get("aux_delay", 0) or 0)
             channel = int(action.get("aux_channel", 1) or 1)
             mode_name = str(action.get("aux_mode", "on"))
             mode = {"off": 0, "on": 1, "pulse": 2, "pwm": 3}.get(
                 mode_name, 1
+            )
+            # Срок работы: у «Вкл» своё поле aux_on_time («включить на
+            # T мс», CM-HW-02), у ШИМ — aux_pwm_time; импульсы
+            # завершаются по количеству.
+            run_time = (
+                int(action.get("aux_on_time", 0) or 0)
+                if mode == 1
+                else int(action.get("aux_pwm_time", 0) or 0)
             )
             kwargs = {
                 "pulse_on_ms": int(action.get("aux_pulse_on", 0) or 0),
@@ -5330,7 +5557,7 @@ class FlexibleLogicTab(QWidget):
                 "pulse_count": int(action.get("aux_pulse_count", 0) or 0),
                 "pwm_freq_hz": int(action.get("aux_pwm_freq", 0) or 0),
                 "pwm_duty_pct": int(action.get("aux_pwm_duty", 0) or 0),
-                "pwm_time_ms": int(action.get("aux_pwm_time", 0) or 0),
+                "pwm_time_ms": run_time,
             }
 
             aux_gen = self._exec_generation
@@ -5353,9 +5580,13 @@ class FlexibleLogicTab(QWidget):
                     )
                     return
                 # ПК-зеркало состояния — для условий «Доп канал N
-                # активен» (уровень на ноге следует за mode).
-                self._aux_states[ch] = 0 if m == 0 else 1
-                self._serial_manager.send_aux(ch, m, **kw)
+                # активен»: логическая активность, не уровень ноги
+                # (низкая фаза ШИМ и ШИМ 0% — «работает», единая
+                # трактовка с МК). Команды, отвергнутые на выходе
+                # (канала нет в прошивке/маске — send_aux False),
+                # зеркало не трогают.
+                if self._serial_manager.send_aux(ch, m, **kw):
+                    self._aux_states[ch] = 0 if m == 0 else 1
                 logger.info(
                     "ГЛ: доп канал №%d → %s", ch, mn,
                 )
@@ -5658,9 +5889,9 @@ class FlexibleLogicTab(QWidget):
             )
         if etype in (_EVENT_DYN, _EVENT_NUM):
             name = str(event.get("var", "")).strip()
-            if name not in self._dyn_values:
+            current = self._dyn_current(name)
+            if current is None:
                 return False
-            current = self._dyn_values[name]
             try:
                 threshold = float(
                     str(event.get("value", "")).replace(",", ".")
