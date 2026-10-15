@@ -258,7 +258,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: latest
           name: Latest build
-          bodyPath: release_notes.md
+          bodyFile: release_notes.md
           prerelease: true
           allowUpdates: true
           replacesArtifacts: true
