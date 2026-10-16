@@ -2221,6 +2221,35 @@ class _ValuePage(QWidget):
         del_btn.clicked.connect(self.remove_point_row)
         buttons.addWidget(add_btn)
         buttons.addWidget(del_btn)
+        if kind != "numeric":
+            # CM-F08: «Динамическая переменная» — тот же захват DATA,
+            # что у декодера «Градусы»: «Записать» ловит кадры своего
+            # ID и добавляет уникальные значения поля в таблицу
+            # привязки (имя состояния оператор вводит рядом).
+            self._dyn_record_btn = QPushButton(tr("Записать"))
+            self._dyn_record_btn.setFont(font)
+            self._dyn_record_btn.setFixedHeight(26)
+            self._dyn_record_btn.setStyleSheet(
+                "background: #2E7D32; color: white;"
+                " border-radius: 4px;"
+            )
+            self._dyn_record_btn.setToolTip(tr(
+                "Записать значения DATA приходящих кадров в таблицу "
+                "привязки — имя состояния вводится рядом"
+            ))
+            self._dyn_record_btn.clicked.connect(
+                self._toggle_dyn_record
+            )
+            buttons.addWidget(self._dyn_record_btn)
+            self._dyn_recording = False
+            self._dyn_recorded = 0
+            self._dyn_last_raw: bytes | None = None
+            self._dyn_record_status = QLabel("")
+            self._dyn_record_status.setFont(font)
+            buttons.addWidget(self._dyn_record_status)
+            self.destroyed.connect(
+                lambda *_: self._stop_dyn_record()
+            )
         buttons.addStretch()
         left.addLayout(buttons)
         # Предупреждение о точках вне диапазона «ОТ»/«ДО»
@@ -2304,6 +2333,111 @@ class _ValuePage(QWidget):
         manager = getattr(tab, "_serial_manager", None)
         if manager is not None:
             manager.new_can_frames.connect(callback)
+
+    # ---- запись DATA динамической переменной (CM-F08) ------------------
+
+    def _toggle_dyn_record(self) -> None:
+        """«Записать»/«Стоп»: захват DATA выбранного поля в таблицу
+        привязки — тот же механизм, что у таблиц декодера «Градусы»
+        (F06): только свой ID/разрядность, только покрытое поле,
+        повторы подряд и уже записанные значения не плодят строки."""
+        if self._dyn_recording:
+            self._stop_dyn_record()
+            return
+        if hex_to_int(self.can_id.text()) is None:
+            self._dyn_record_status.setText(tr("— укажите ID"))
+            return
+        if not self.bytes_used():
+            self._dyn_record_status.setText(
+                tr("— выберите байты DATA")
+            )
+            return
+        self._dyn_recording = True
+        self._dyn_recorded = 0
+        self._dyn_last_raw = None
+        self._dyn_record_btn.setText(tr("Стоп"))
+        self._dyn_record_btn.setStyleSheet(
+            "background: #C62828; color: white; border-radius: 4px;"
+        )
+        tab = self._get_tab() if self._get_tab is not None else None
+        self._subscribe_frames(tab, self._on_dyn_frames)
+        self._dyn_record_status.setText(tr("• запись"))
+
+    def _stop_dyn_record(self) -> None:
+        """Останавливает захват и отписывается от потока кадров
+        (RAM-only — закрытие страницы/вкладки не оставляет
+        подписки)."""
+        if not getattr(self, "_dyn_recording", False):
+            return
+        self._dyn_recording = False
+        tab = self._get_tab() if self._get_tab is not None else None
+        manager = getattr(tab, "_serial_manager", None)
+        if manager is not None:
+            with contextlib.suppress(RuntimeError, TypeError):
+                manager.new_can_frames.disconnect(self._on_dyn_frames)
+        self._dyn_record_btn.setText(tr("Записать"))
+        self._dyn_record_btn.setStyleSheet(
+            "background: #2E7D32; color: white; border-radius: 4px;"
+        )
+        self._dyn_record_status.setText(
+            tr("• записано {0}").format(self._dyn_recorded)
+            if self._dyn_recorded else ""
+        )
+
+    def _on_dyn_frames(self, frames: list[dict[str, Any]]) -> None:
+        """Кадры шины → окно выбранного поля → строки таблицы
+        привязки. Новое значение добавляется строкой с пустым именем
+        состояния; повтор подряд и значения, уже присутствующие в
+        таблице, пропускаются."""
+        if not self._dyn_recording:
+            return
+        fid = hex_to_int(self.can_id.text())
+        if fid is None:
+            return
+        ext = bool(self.bit.currentData())
+        used = self.bytes_used()
+        # Снимок занятых значений — дедупликация с уже введёнными
+        # строками (повторная запись не множит дубли).
+        existing = {
+            _parse_data_hex(
+                self.points_table.item(r, 0).text()
+            )
+            for r in range(self.points_table.rowCount())
+            if self.points_table.item(r, 0) is not None
+        }
+        for frame in frames:
+            if int(frame.get("id", -1)) != fid:
+                continue
+            if bool(frame.get("extended", False)) != ext:
+                continue
+            data = bytes(frame.get("data", b""))
+            if not used or any(p < 0 or p >= len(data) for p in used):
+                continue  # кадр не покрыл поле — не пишем
+            window = bytes(data[p] for p in used)
+            if window == self._dyn_last_raw:
+                continue  # повтор подряд
+            self._dyn_last_raw = window
+            raw = int.from_bytes(window, "big")
+            if float(raw) in existing:
+                continue  # значение уже есть в таблице
+            existing.add(float(raw))
+            row = self.points_table.rowCount()
+            self.points_table.insertRow(row)
+            self.points_table.setItem(
+                row, 0,
+                QTableWidgetItem(
+                    " ".join(f"{b:02X}" for b in window)
+                ),
+            )
+            self.points_table.setItem(
+                row, 1, QTableWidgetItem("")
+            )
+            self._dyn_recorded += 1
+            self._dyn_record_status.setText(
+                tr("• записано {0}").format(self._dyn_recorded)
+            )
+        if self._dyn_recorded:
+            self._emit_changed()
 
     def _update_steering_btn(self) -> None:
         """Кнопка «Декодер…» открывает настройку кратности режима
