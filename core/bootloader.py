@@ -1262,7 +1262,12 @@ class Bootloader:
             )
 
         regions: list[tuple[int, bytes]] = []
-        total = len(code) + (len(info_seg) if info_seg else 0) + (len(meta) if meta else 0)
+        total = (
+            len(code)
+            + (len(info_seg) if info_seg else 0)
+            + (len(meta) if meta else 0)
+            + sum(len(b) for _o, _d, b in saved_storage)
+        )
         written = 0
         if code:
             status(f"Запись {len(code)} байт с 0x{code_addr:08X}")
@@ -1283,7 +1288,13 @@ class Bootloader:
         for _orig, dst, blob in saved_storage:
             status(f"Восстановление хранилища 0x{dst:08X}")
             self.erase_pages(dst, blob, page_size=page_size, skip_blank=False)
-            self.write_memory(dst, blob)
+            # CM-F01: общий чанкованный путь — write_memory принимает
+            # ≤BLOCK_SIZE, область может быть больше двух страниц
+            # (полевой обрыв: «Блок данных слишком большой: 4096 байт»
+            # после уже выполненного стирания).
+            written = self._write_region(
+                dst, blob, written, total, skip_blank
+            )
             if self.read_memory(dst, len(blob)) != blob:
                 raise BootloaderError(
                     f"Хранилище 0x{dst:08X} не записалось обратно "

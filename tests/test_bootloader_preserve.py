@@ -682,7 +682,11 @@ class TestStorageBackupCMN9:
         bl.write_memory = _dying_write  # type: ignore[method-assign]
         path = _tmp_bin(_app_code(4 * PAGE, 0x22))
         try:
-            with pytest.raises(OSError):
+            # CM-F01: restore идёт общим чанкованным путём — обрыв
+            # порта отрабатывается ограниченными повторами и
+            # заканчивается честным BootloaderError, а не «голым»
+            # OSError на целом блобе.
+            with pytest.raises(BootloaderError):
                 bl.flash_firmware(
                     path, APPLICATION_BASE_ADDR, page_size=PAGE,
                     skip_blank=False, preserve_storage=True,
@@ -856,18 +860,24 @@ class TestPartialWriteRecoveryCMN12:
         failed = {"done": False}
 
         def _dying_write(addr: int, data: bytes) -> None:
-            if addr == new_end and not failed["done"]:
-                # Первые 32 байта — заголовок (CRC8 валиден) + кусок
-                # payload; CRC32 полного payload не сойдётся.
-                real_write(addr, data[:32])
-                failed["done"] = True
+            if addr == new_end:
+                if not failed["done"]:
+                    # Первые 32 байта — заголовок (CRC8 валиден) +
+                    # кусок payload; CRC32 полного payload не
+                    # сойдётся. Падение повторяется на каждой
+                    # попытке чанкованного _write_region — иначе
+                    # retry молча дозапишет блок.
+                    real_write(addr, data[:32])
+                    failed["done"] = True
                 raise OSError("port lost")
             real_write(addr, data)
 
         bl.write_memory = _dying_write  # type: ignore[method-assign]
         path = _tmp_bin(code)
         try:
-            with pytest.raises(OSError):
+            # CM-F01: обрыв порта отрабатывается повторами и
+            # заканчивается честным BootloaderError.
+            with pytest.raises(BootloaderError):
                 bl.flash_firmware(
                     path, APPLICATION_BASE_ADDR, page_size=PAGE,
                     skip_blank=False, preserve_storage=True,
@@ -1538,3 +1548,224 @@ class TestExplicitBackupWorkerPath:
         assert not ok
         assert "application" in msg or "резерв" in msg
         assert not [op for op in sim.ops if op[0] == "e"]
+
+
+def _bl_on_sim_strict(sim: FlashSim) -> Bootloader:
+    """Строгий транспорт AN3155: write_memory отклоняет блоки
+    >BLOCK_SIZE — как настоящий Bootloader.write_memory. Ослабленная
+    подмена записи произвольного размера маскировала полевой обрыв
+    CM-F01 («Блок данных слишком большой: 4096 байт»)."""
+    bl = _bl_on_sim(sim)
+
+    def _write_limited(addr: int, data: bytes) -> None:
+        if len(data) > Bootloader.BLOCK_SIZE:
+            raise BootloaderError(
+                f"Блок данных слишком большой: {len(data)} байт"
+            )
+        sim.write(addr, data)
+
+    bl.write_memory = _write_limited  # type: ignore[method-assign]
+    return bl
+
+
+class TestChunkedRestoreCMF01:
+    """CM-F01: восстановление областей хранилища пишется блоками
+    ≤256 Б общим путём _write_region — как код прошивки. Полевой
+    дамп: FLXH gen=7 на 0x0801B000 (blob 4096) при обновлении на
+    45616-Б образ пересаживался на 0x08015000 и одиночный
+    write_memory(dst, blob) падал ПОСЛЕ стирания."""
+
+    @staticmethod
+    def _plant_dump_map(sim: FlashSim) -> dict[str, bytes]:
+        """Карта полевого дампа v1.1.73: CFGH@0x14800 gen1,
+        FLXH gen2..7 @0x16000..0x1B000, VARH gen1..7
+        @0x39000..0x3F000. APP1 стёрт (обрыв) — scan идёт по всему
+        хвосту."""
+        blobs: dict[str, bytes] = {}
+        cfg = _store_region(CFG_MAGIC, 18, fill=0x43, gen=1)
+        sim.erase(0x08014800, PAGE)
+        sim.write(0x08014800, cfg)
+        blobs["cfg"] = cfg
+        for gen in range(2, 8):
+            flx = _store_region(
+                FLX_MAGIC, 2186 if gen == 7 else 120, fill=0x50 + gen,
+                gen=gen,
+            )
+            addr = 0x08016000 + (gen - 2) * 0x1000
+            sim.erase(addr, len(flx))
+            sim.write(addr, flx)
+            blobs["flex"] = flx  # последний (gen=7) перекрывает
+        # В дампе поколения VARH убывают по адресу: gen=7 на 0x39000,
+        # gen=1 на 0x3F000.
+        for gen in range(1, 8):
+            var = _store_region(
+                VAR_MAGIC, 3707 if gen == 7 else 300, fill=0x70 + gen,
+                gen=gen,
+            )
+            addr = 0x08039000 + (7 - gen) * 0x1000
+            sim.erase(addr, len(var))
+            sim.write(addr, var)
+            blobs["var"] = var
+        return blobs
+
+    def test_field_dump_map_restore_4096(self) -> None:
+        """Фактическая карта: FLXH 0x0801B000 → 0x08015000,
+        каждый write ≤256 Б, полный readback, APP1 последним."""
+        sim = FlashSim()
+        blobs = self._plant_dump_map(sim)
+        bl = _bl_on_sim_strict(sim)
+        sim.ops.clear()
+        new_code = _app_code(45616, 0x22)
+        path = _tmp_bin(new_code)
+        try:
+            regions = bl.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=True,
+            )
+        finally:
+            os.unlink(path)
+        # Ни одной записи >256 Б на транспорте.
+        big = [op for op in sim.ops if op[0] == "w" and op[2] > 256]
+        assert not big, f"write_memory >256 Б: {big[:3]}"
+        # FLXH gen=7 переехал на 0x08015000 целиком.
+        assert sim.read(0x08015000, len(blobs["flex"])) == blobs["flex"]
+        # CFGH и VARH gen=7 на месте/перенесены целиком.
+        assert sim.read(0x08014800, len(blobs["cfg"])) == blobs["cfg"]
+        assert sim.read(0x08039000, len(blobs["var"])) == blobs["var"]
+        # APP1 записан последним и валиден.
+        writes = [op for op in sim.ops if op[0] == "w"]
+        assert APP_METADATA_PAGE_ADDR <= writes[-1][1] < (
+            APP_METADATA_PAGE_ADDR + APP_METADATA_PAGE_SIZE
+        )
+        assert sim.read(APP_METADATA_PAGE_ADDR, 4) == (
+            APP_METADATA_MAGIC.to_bytes(4, "little")
+        )
+        assert (0x08015000, blobs["flex"]) in regions
+
+    @pytest.mark.parametrize(
+        "magic,payload_len",
+        [
+            (CFG_MAGIC, 18),
+            (CFG_MAGIC, 255),
+            (CFG_MAGIC, 256),
+            (CFG_MAGIC, 257),
+            (CFG_MAGIC, 1500),
+            (FLX_MAGIC, 2048),   # blob 4096 — полевая ошибка
+            (FLX_MAGIC, 4096),   # blob 6144 — больше двух страниц
+            (FLX_MAGIC, 4300),
+        ],
+    )
+    def test_restore_sizes_chunked(
+        self, magic: int, payload_len: int
+    ) -> None:
+        """Любой размер области: все write ≤256, readback точный.
+        CFGH — строго одна страница, FLXH — цепочка страниц за ним."""
+        sim = FlashSim()
+        old_code = _app_code(3 * PAGE, 0x11)
+        _flash_app(sim, old_code)
+        old_code_end = APPLICATION_BASE_ADDR + 3 * PAGE
+        if magic == CFG_MAGIC:
+            region_addr = old_code_end
+        else:
+            cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x31, gen=1)
+            sim.erase(old_code_end, PAGE)
+            sim.write(old_code_end, cfg_blob)
+            region_addr = old_code_end + PAGE
+        blob = _store_region(magic, payload_len, fill=0x42, gen=3)
+        sim.erase(region_addr, len(blob))
+        sim.write(region_addr, blob)
+
+        bl = _bl_on_sim_strict(sim)
+        sim.ops.clear()
+        new_code = _app_code(4 * PAGE, 0x22)
+        path = _tmp_bin(new_code)
+        try:
+            bl.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=True,
+            )
+        finally:
+            os.unlink(path)
+        big = [op for op in sim.ops if op[0] == "w" and op[2] > 256]
+        assert not big
+        # Область целиком вычитана с новой каноничной позиции.
+        from core.storage_scan import find_storage_regions
+        tail = sim.read(
+            APPLICATION_BASE_ADDR,
+            FLASH_END_ADDR - APPLICATION_BASE_ADDR,
+        )
+        assert blob in [
+            b for _a, b in find_storage_regions(
+                tail, APPLICATION_BASE_ADDR
+            )
+        ]
+
+    def test_abort_mid_restore_retry_from_backup(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Обрыв на втором блоке restore: APP1 инвалиден, честная
+        ошибка; повтор новым процессом из резерва восстанавливает
+        область блоками ≤256."""
+        sim = FlashSim()
+        old_code = _app_code(3 * PAGE, 0x11)
+        _flash_app(sim, old_code)
+        old_code_end = APPLICATION_BASE_ADDR + 3 * PAGE
+        cfg_blob = _store_region(CFG_MAGIC, 2000, fill=0x42, gen=3)
+        sim.erase(old_code_end, len(cfg_blob))
+        sim.write(old_code_end, cfg_blob)
+        # Страница идентификации — отпечаток для резерва.
+        page = bytearray(b"\xFF" * PAGE)
+        page[0:12] = b"TESTDEVICE01"
+        sim.erase(DEVICE_INFO_PAGE_ADDR, PAGE)
+        sim.write(DEVICE_INFO_PAGE_ADDR, bytes(page))
+
+        bl = _bl_on_sim_strict(sim)
+        real_write = bl.write_memory
+        calls = {"n": 0}
+
+        def _die_on_restore(addr: int, data: bytes) -> None:
+            calls["n"] += 1
+            # Падаем при записи второго блока восстановленного CFGH
+            # (новая позиция за концом выросшего кода).
+            if addr == old_code_end + PAGE + 256:
+                raise BootloaderError("USB CDC обрыв")
+            real_write(addr, data)
+
+        bl.write_memory = _die_on_restore  # type: ignore[method-assign]
+        sim.ops.clear()
+        new_code = _app_code(4 * PAGE, 0x22)
+        path = _tmp_bin(new_code)
+        try:
+            with pytest.raises(BootloaderError, match="USB CDC обрыв"):
+                bl.flash_firmware(
+                    path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                    skip_blank=False, preserve_storage=True,
+                )
+        finally:
+            os.unlink(path)
+        # APP1 инвалиден — повторная операция знает о незавершённости.
+        assert sim.read(APP_METADATA_PAGE_ADDR, 4) != (
+            APP_METADATA_MAGIC.to_bytes(4, "little")
+        )
+        # Резерв создан до стирания.
+        backups = list(tmp_path.glob("storage-*.json"))
+        assert backups, "резерв хранилища не создан до стирания"
+
+        # Повтор новым процессом: строгий транспорт, резерв
+        # доказанно свой (отпечаток info-страницы + sha256 образа).
+        bl2 = _bl_on_sim_strict(sim)
+        path = _tmp_bin(new_code)
+        try:
+            bl2.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=True,
+            )
+        finally:
+            os.unlink(path)
+        big = [op for op in sim.ops if op[0] == "w" and op[2] > 256]
+        assert not big
+        new_code_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        assert sim.read(new_code_end, len(cfg_blob)) == cfg_blob
+        assert sim.read(APP_METADATA_PAGE_ADDR, 4) == (
+            APP_METADATA_MAGIC.to_bytes(4, "little")
+        )
