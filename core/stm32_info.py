@@ -76,6 +76,14 @@ DEVICE_CONFIG_VER_OFFSET = 1024
 DEVICE_CONFIG_VER_OFFSET_LEGACY = 32
 DEVICE_CONFIG_VER_MAGIC = 0x56455231
 DEVICE_CONFIG_VERSION_MAX = 16
+# CM-F03: версионная запись VER1 переехала со страницы идентичности
+# на страницу метаданных APP1 — смещение 32, сразу за 16-байтной
+# записью APP1. Страница идентичности (0x08008000) CDC/UART-путь
+# вообще не стирает: тип/серийник меняется только первичным
+# программированием (DFU/ST-Link/J-Link). Прошивка протокола ≥15
+# читает VER1 сначала отсюда, потом — со страницы идентичности
+# (совместимость + миграция при первой загрузке).
+APP_METADATA_VER_OFFSET = 32
 
 
 def device_config_crc8(data: bytes) -> int:
@@ -126,16 +134,35 @@ def build_device_config_page(
     record[31] = device_config_crc8(record[:31])
     page[:32] = record
     if fw_version is not None:
-        ver = fw_version.encode("ascii", errors="ignore")[:DEVICE_CONFIG_VERSION_MAX]
-        vrec = bytearray(32)
-        vrec[0:4] = DEVICE_CONFIG_VER_MAGIC.to_bytes(4, "little")
-        vrec[4] = len(ver)
-        vrec[5 : 5 + DEVICE_CONFIG_VERSION_MAX] = ver.ljust(
-            DEVICE_CONFIG_VERSION_MAX, b"\x00"
-        )
-        vrec[31] = device_config_crc8(vrec[:31])
-        page[DEVICE_CONFIG_VER_OFFSET : DEVICE_CONFIG_VER_OFFSET + 32] = vrec
+        page[DEVICE_CONFIG_VER_OFFSET : DEVICE_CONFIG_VER_OFFSET + 32] = build_ver_record(fw_version)
     return bytes(page)
+
+
+def build_ver_record(fw_version: str) -> bytes:
+    """32-байтная запись VER1 (device_fw_ver_t) — та же, что пишется
+    на страницу идентичности по смещению 1024 и на страницу
+    метаданных APP1 по смещению APP_METADATA_VER_OFFSET."""
+    ver = fw_version.encode("ascii", errors="ignore")[:DEVICE_CONFIG_VERSION_MAX]
+    vrec = bytearray(32)
+    vrec[0:4] = DEVICE_CONFIG_VER_MAGIC.to_bytes(4, "little")
+    vrec[4] = len(ver)
+    vrec[5 : 5 + DEVICE_CONFIG_VERSION_MAX] = ver.ljust(DEVICE_CONFIG_VERSION_MAX, b"\x00")
+    vrec[31] = device_config_crc8(bytes(vrec[:31]))
+    return bytes(vrec)
+
+
+def parse_ver_record(block: bytes) -> str | None:
+    """Разбирает один 32-байтный блок как запись VER1."""
+    if len(block) != 32:
+        return None
+    if int.from_bytes(block[:4], "little") != DEVICE_CONFIG_VER_MAGIC:
+        return None
+    ver_len = block[4]
+    if ver_len > DEVICE_CONFIG_VERSION_MAX:
+        return None
+    if device_config_crc8(block[:31]) != block[31]:
+        return None
+    return block[5 : 5 + ver_len].decode("ascii", errors="ignore")
 
 
 def parse_device_fw_version(page: bytes) -> str | None:
@@ -146,15 +173,43 @@ def parse_device_fw_version(page: bytes) -> str | None:
     for off in (DEVICE_CONFIG_VER_OFFSET, DEVICE_CONFIG_VER_OFFSET_LEGACY):
         if len(page) < off + 32:
             continue
-        if int.from_bytes(page[off : off + 4], "little") != DEVICE_CONFIG_VER_MAGIC:
-            continue
-        ver_len = page[off + 4]
-        if ver_len > DEVICE_CONFIG_VERSION_MAX:
-            continue
-        if device_config_crc8(page[off : off + 31]) != page[off + 31]:
-            continue
-        return page[off + 5 : off + 5 + ver_len].decode("ascii", errors="ignore")
+        ver = parse_ver_record(page[off : off + 32])
+        if ver is not None:
+            return ver
     return None
+
+
+def info_page_version_only(page: bytes) -> tuple[bytes | None, str | None]:
+    """CM-F03: содержимое страницы идентификации в образе для CDC-пути.
+
+    Через CDC/UART-путь (bootloader-протокол AN3155) страница
+    идентификации не пишется вообще — тип/серийник меняется только
+    первичным программированием (DFU/ST-Link/J-Link). Поэтому в
+    образе разрешены только стёртые блоки и записи VER1: VER1
+    переносится на страницу метаданных APP1 и обновляется без
+    стирания идентичности.
+
+    Возвращает (32-байтная VER1-запись либо None, причина отказа
+    либо None). Недостающий хвост страницы считается стёртым."""
+    ver: str | None = None
+    for off in range(0, DEVICE_CONFIG_PAGE_SIZE, DEVICE_CONFIG_RECORD_SIZE):
+        block = page[off : off + DEVICE_CONFIG_RECORD_SIZE]
+        if not block:
+            break
+        if len(block) < DEVICE_CONFIG_RECORD_SIZE:
+            block = block + b"\xFF" * (DEVICE_CONFIG_RECORD_SIZE - len(block))
+        if all(b == 0xFF for b in block):
+            continue
+        parsed = parse_ver_record(block)
+        if parsed is None:
+            return None, (
+                f"блок @+{off} страницы идентичности содержит "
+                "конфигурацию устройства (тип/серийник) — через "
+                "CDC/UART такой образ не прошивается, используйте "
+                "USB DFU или ST-Link"
+            )
+        ver = parsed
+    return (build_ver_record(ver) if ver is not None else None), None
 
 
 def parse_device_config(page: bytes) -> tuple[str, str, int, int] | None:
@@ -244,19 +299,17 @@ def merge_device_config_page(incoming_page: bytes, existing_page: bytes) -> byte
         # VER1 по легаси-смещению 32 переносится ниже в актуальное
         # смещение 1024 — оверлей по старому адресу попал бы в область
         # имён триггеров (TNM0) и испортил бы их записи.
-        if (
-            off == DEVICE_CONFIG_VER_OFFSET_LEGACY
-            and int.from_bytes(block[:4], "little") == DEVICE_CONFIG_VER_MAGIC
-        ):
+        if off == DEVICE_CONFIG_VER_OFFSET_LEGACY and int.from_bytes(block[:4], "little") == DEVICE_CONFIG_VER_MAGIC:
             continue
         for i, byte in enumerate(block):
             if byte != 0xFF:
                 merged[off + i] = byte
     existing = parse_device_config(existing_page) if existing_page else None
     merged_cfg = parse_device_config(bytes(merged))
-    if existing is not None and merged_cfg is not None and (
-        incoming_cfg is not None
-        and merged_cfg[2:4] != existing[2:4]
+    if (
+        existing is not None
+        and merged_cfg is not None
+        and (incoming_cfg is not None and merged_cfg[2:4] != existing[2:4])
     ):
         # VID/PID — аппаратная идентичность USB-интерфейса: образ
         # собран инструментом без данных устройства и мог принести
@@ -268,17 +321,7 @@ def merge_device_config_page(incoming_page: bytes, existing_page: bytes) -> byte
     # переноса хранили её по offset 32 — теперь там имена триггеров).
     ver = parse_device_fw_version(incoming_page)
     if ver is not None:
-        enc = ver.encode("ascii", errors="ignore")[:DEVICE_CONFIG_VERSION_MAX]
-        vrec = bytearray(32)
-        vrec[0:4] = DEVICE_CONFIG_VER_MAGIC.to_bytes(4, "little")
-        vrec[4] = len(enc)
-        vrec[5 : 5 + DEVICE_CONFIG_VERSION_MAX] = enc.ljust(
-            DEVICE_CONFIG_VERSION_MAX, b"\x00"
-        )
-        vrec[31] = device_config_crc8(bytes(vrec[:31]))
-        merged[
-            DEVICE_CONFIG_VER_OFFSET : DEVICE_CONFIG_VER_OFFSET + 32
-        ] = vrec
+        merged[DEVICE_CONFIG_VER_OFFSET : DEVICE_CONFIG_VER_OFFSET + 32] = build_ver_record(ver)
     return bytes(merged)
 
 

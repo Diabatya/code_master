@@ -31,16 +31,17 @@ from core.stm32_info import (
     APP_METADATA_MAGIC,
     APP_METADATA_PAGE_ADDR,
     APP_METADATA_PAGE_SIZE,
+    APP_METADATA_VER_OFFSET,
     BOOTLOADER_BASE_ADDR,
     DEVICE_CONFIG_PAGE_ADDR_LEGACY,
     DEVICE_CONFIG_PAGE_SIZE,
+    DEVICE_CONFIG_VER_OFFSET,
     DEVICE_INFO_PAGE_ADDR,
     FLASH_END_ADDR,
-    LEGACY_CONFIG_PAGE_ADDR,
     build_app_metadata,
-    merge_device_config_page,
-    parse_device_config,
-    seed_device_config_page,
+    build_ver_record,
+    info_page_version_only,
+    parse_device_fw_version,
 )
 from core import storage_backup
 from core.storage_scan import (
@@ -290,8 +291,7 @@ class Bootloader:
             self.port.flush()
         except (serial.SerialException, OSError) as exc:
             logger.warning(
-                "Команда перезагрузки не ушла (%s) — порт уже недоступен, "
-                "жду появления bootloader-устройства",
+                "Команда перезагрузки не ушла (%s) — порт уже недоступен, жду появления bootloader-устройства",
                 exc,
             )
             return
@@ -865,21 +865,52 @@ class Bootloader:
         находится по «будущему» отпечатку (CM-N9)."""
         fps: set[str] = set()
         try:
-            live = self.read_memory(
-                DEVICE_INFO_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE
-            )
+            live = self.read_memory(DEVICE_INFO_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE)
             fp = storage_backup.device_fingerprint(live)
             if fp:
                 fps.add(fp)
         except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "Страница идентификации для отпечатка не прочитана: %s", exc
-            )
+            logger.debug("Страница идентификации для отпечатка не прочитана: %s", exc)
         if info_seg is not None:
             fp = storage_backup.device_fingerprint(info_seg)
             if fp:
                 fps.add(fp)
         return fps
+
+    def _read_preserved_ver_record(self) -> bytes | None:
+        """VER1-запись устройства для переноса в новую страницу
+        метаданных (CM-F03): сначала слот на странице APP1 (новое
+        место), затем страница идентичности (старые прошивки/
+        DFU-заливка). None — версии на устройстве нет."""
+        try:
+            page = self.read_memory(APP_METADATA_PAGE_ADDR, APP_METADATA_PAGE_SIZE)
+            ver = parse_device_fw_version(page)
+            if ver is not None:
+                return build_ver_record(ver)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Страница метаданных для VER1 не прочитана: %s", exc)
+        try:
+            page = self.read_memory(DEVICE_INFO_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE)
+            ver = parse_device_fw_version(page)
+            if ver is not None:
+                return build_ver_record(ver)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Страница идентичности для VER1 не прочитана: %s", exc)
+        return None
+
+    def _meta_page_with_ver(self, ver_record: bytes) -> bytes | None:
+        """Страница метаданных с пропатченным слотом VER1 — запись
+        APP1 (флаг валидного приложения) сохраняется дословно."""
+        try:
+            page = bytearray(self.read_memory(APP_METADATA_PAGE_ADDR, APP_METADATA_PAGE_SIZE))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Страница метаданных для записи VER1 не прочитана: %s",
+                exc,
+            )
+            return None
+        page[APP_METADATA_VER_OFFSET : APP_METADATA_VER_OFFSET + len(ver_record)] = ver_record
+        return bytes(page)
 
     def flash_firmware(
         self,
@@ -962,13 +993,10 @@ class Bootloader:
             firmware, base_address = trim_to_application_region(firmware, base_address)
             if not firmware:
                 raise BootloaderError(
-                    "Образ не содержит записываемой области (0x08008000+) — "
-                    "через bootloader записать нечего"
+                    "Образ не содержит записываемой области (0x08008000+) — через bootloader записать нечего"
                 )
             if status_callback:
-                status_callback(
-                    "Область bootloader пропущена (AN3155 пишет только 0x08008000+)"
-                )
+                status_callback("Область bootloader пропущена (AN3155 пишет только 0x08008000+)")
             logger.info("Обрезана область bootloader: base=0x%08X, %d байт", base_address, len(firmware))
 
         # Разреженный образ по новой карте памяти разбивается на
@@ -980,8 +1008,7 @@ class Bootloader:
         code = firmware
         code_addr = base_address
         if base_address == DEVICE_CONFIG_PAGE_ADDR_LEGACY:
-            # Образ config-страницы старой раскладки (0x0803D800):
-            # переносим на новую страницу идентификации.
+            # Образ config-страницы старой раскладки (0x0803D800).
             info_seg = firmware[:DEVICE_CONFIG_PAGE_SIZE]
             code = b""
         else:
@@ -1008,15 +1035,28 @@ class Bootloader:
             if not ok:
                 raise BootloaderError(f"Запрещённая область записи: {reason}")
 
+        # CM-F03: страница идентификации (тип/серийник) через
+        # CDC/UART-путь не пишется вообще — контракт «неперезаписываемой
+        # идентичности»: её меняет только первичное программирование
+        # (DFU/ST-Link/J-Link). В образе допускаются только стёртые
+        # блоки и записи VER1 — VER1 переносим на страницу метаданных
+        # APP1 (обновляется и читается после обновления, стирание
+        # идентичности не требуется). Образ с CFG0/CEX0/TNM0 —
+        # отказ ДО подключения/стирания (низкая граница, не UI-флаг).
+        ver_record: bytes | None = None
+        if info_seg is not None:
+            ver_record, deny_reason = info_page_version_only(info_seg)
+            if deny_reason is not None:
+                raise BootloaderError(f"Запись отклонена: {deny_reason}. Запись отменена, устройство не повреждено")
+            info_seg = None
+
         # CM-N19: явное восстановление из резервной копии требует
         # application-образ. Config-only запись (страница идентификации
         # без кода) и сегмент «приложения» целиком из 0xFF резерв
         # применить не могут — молча записать только info-страницу
         # значило бы отчитаться успехом невыполненной операции.
         # Отказ ДО подключения/стирания/записи, устройство не тронуто.
-        if explicit_backup is not None and not (
-            code and any(b != 0xFF for b in code)
-        ):
+        if explicit_backup is not None and not (code and any(b != 0xFF for b in code)):
             raise BootloaderError(
                 "Восстановление из резервной копии требует образ "
                 "application — config-only запись резерв не применяет. "
@@ -1031,44 +1071,23 @@ class Bootloader:
 
         logger.info(
             "Начинаю прошивку: %s, base=0x%08X, размер %d байт, page_size=%d",
-            firmware_path, base_address, len(firmware), page_size,
+            firmware_path,
+            base_address,
+            len(firmware),
+            page_size,
         )
         status("Подключение к bootloader")
         self.reconfigure_for_bootloader()
         self.enter_bootloader()
         self.sync()
 
-        # Страница идентификации из образа объединяется с существующей:
-        # имя/serial/VID/PID устройства сохраняются, версионная запись
-        # VER1 берётся из нового образа (отчёт мастера). Если на новой
-        # странице CFG0 ещё никогда не было (старая раскладка/DFU-заливка
-        # без страницы), идентичность поднимается с легаси-адресов —
-        # иначе серийник терялся и USB отдавал UID-строку вроде
-        # «48E851863846» (отчёт мастера).
-        if info_seg is not None and any(b != 0xFF for b in info_seg):
-            existing = self.read_memory(DEVICE_INFO_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE)
-            candidates = [existing]
-            if parse_device_config(existing) is None:
-                for addr in (
-                    DEVICE_CONFIG_PAGE_ADDR_LEGACY,
-                    LEGACY_CONFIG_PAGE_ADDR,
-                ):
-                    try:
-                        candidates.append(
-                            self.read_memory(addr, DEVICE_CONFIG_PAGE_SIZE)
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug(
-                            "Легаси-страница идентичности 0x%08X не прочитана: %s",
-                            addr, exc,
-                        )
-            seed = seed_device_config_page(candidates)
-            if seed is not None:
-                existing = seed
-            info_seg = merge_device_config_page(info_seg, existing)
-            logger.info("Страница идентификации объединена с существующей (VID/PID сохранены)")
-        elif info_seg is not None:
-            info_seg = None  # пустая прослойка разреженного образа — не пишем
+        # CM-F03: когда в образе VER1 нет, версию сохраняем с
+        # устройства — слот VER1 на странице метаданных APP1
+        # (новое место), затем страница идентичности (старая
+        # раскладка/миграция). Чтение только если VER1 реально
+        # понадобится: при записи страницы метаданных.
+        if ver_record is None:
+            ver_record = self._read_preserved_ver_record()
 
         # Метаданные из одних 0xFF (padding разреженного образа)
         # считаем отсутствующими — их сгенерирует ПК.
@@ -1126,35 +1145,35 @@ class Bootloader:
                     # «восстановить частично» = «заявить восстановление
                     # повреждённого». Устройство не тронуто.
                     raise BootloaderError(
-                        f"Выбранная резервная копия непригодна: {exc} — "
-                        "запись отменена, устройство не повреждено"
+                        f"Выбранная резервная копия непригодна: {exc} — запись отменена, устройство не повреждено"
                     ) from exc
                 status(
                     "Резерв выбран оператором вручную: областей "
                     f"{len(explicit_backup)}"
                     + (
                         ", к восстановлению: " + ", ".join(sorted(restored))
-                        if restored else ", все виды уже есть на Flash"
+                        if restored
+                        else ", все виды уже есть на Flash"
                     )
                 )
                 logger.info(
-                    "Явно выбранный резерв оператора: областей=%d, "
-                    "к восстановлению=%s",
-                    len(explicit_backup), sorted(restored),
+                    "Явно выбранный резерв оператора: областей=%d, к восстановлению=%s",
+                    len(explicit_backup),
+                    sorted(restored),
                 )
             else:
                 backup_regions = storage_backup.find_matching_backup(
-                    fingerprints, image_sha256=image_sha256,
+                    fingerprints,
+                    image_sha256=image_sha256,
                 )
                 if backup_regions:
                     found, restored = storage_backup.merge_backup_regions(
-                        found, backup_regions, interrupted=interrupted,
+                        found,
+                        backup_regions,
+                        interrupted=interrupted,
                     )
                     if restored:
-                        status(
-                            "Области подняты из подтверждённого резерва ПК: "
-                            + ", ".join(sorted(restored))
-                        )
+                        status("Области подняты из подтверждённого резерва ПК: " + ", ".join(sorted(restored)))
                         logger.info(
                             "Восстановление хранилища из PC-резерва: %s",
                             sorted(restored),
@@ -1173,13 +1192,15 @@ class Bootloader:
                         "резервной копии…» в диалоге прошивки)"
                     )
                     logger.warning(
-                        "Метаданные APP1 невалидны, а подходящего резерва "
-                        "нет — обновление без восстановления данных"
+                        "Метаданные APP1 невалидны, а подходящего резерва нет — обновление без восстановления данных"
                     )
 
             try:
                 plan = plan_storage_relocation(
-                    found, code_addr, len(code), page_size=page_size,
+                    found,
+                    code_addr,
+                    len(code),
+                    page_size=page_size,
                     force_write=set(restored),
                 )
             except StoragePlanError as exc:
@@ -1217,17 +1238,10 @@ class Bootloader:
                         "устройство не повреждено"
                     ) from exc
                 status(f"Резерв хранилища: {storage_backup_path}")
-                status(
-                    f"Областей хранилища: {len(found)} "
-                    f"(пересадка: {len(saved_storage)})"
-                )
+                status(f"Областей хранилища: {len(found)} (пересадка: {len(saved_storage)})")
                 logger.info(
                     "План хранилища: %s",
-                    ", ".join(
-                        f"{region_kind(b)} 0x{o:08X}→0x{n:08X}"
-                        for o, n, b in saved_storage
-                    )
-                    or "без пересадки",
+                    ", ".join(f"{region_kind(b)} 0x{o:08X}→0x{n:08X}" for o, n, b in saved_storage) or "без пересадки",
                 )
 
         meta = meta_seg
@@ -1239,6 +1253,26 @@ class Bootloader:
             self.write_memory(APP_METADATA_PAGE_ADDR, b"\x00" * 4)
             if meta is None:
                 meta = build_app_metadata(code)
+        if meta is not None and ver_record is not None:
+            # CM-F03: VER1 вкладывается в страницу метаданных APP1
+            # (смещение 32 — за 16-байтной записью APP1) и пишется тем
+            # же стиранием/записью. build_app_metadata() возвращает
+            # только 16 байт — страницу дополняем до размера явно,
+            # иначе VER1 окажется не в своём слоте.
+            buf = bytearray(b"\xFF" * APP_METADATA_PAGE_SIZE)
+            buf[: len(meta)] = meta
+            buf[APP_METADATA_VER_OFFSET : APP_METADATA_VER_OFFSET + len(ver_record)] = ver_record
+            meta = bytes(buf)
+        elif meta is None and ver_record is not None:
+            # Образ без application и без страницы метаданных, но с
+            # VER1 («обновление только версии»): страница метаданных
+            # вычитана в _read_preserved_ver_record — патчим слот и
+            # пишем целиком обратно, запись APP1 не трогаем.
+            meta = self._meta_page_with_ver(ver_record)
+            if meta is None:
+                raise BootloaderError(
+                    "Не удалось прочитать страницу метаданных для записи версии — устройство не повреждено"
+                )
 
         status("Стирание Flash")
         # При обновлении application страницы кода стираем полностью:
@@ -1252,33 +1286,16 @@ class Bootloader:
                 page_size=page_size,
                 skip_blank=skip_blank and not is_app_update,
             )
-        if info_seg is not None:
-            self.erase_pages(
-                DEVICE_INFO_PAGE_ADDR, info_seg, page_size=page_size, skip_blank=skip_blank
-            )
         if meta is not None:
-            self.erase_pages(
-                APP_METADATA_PAGE_ADDR, meta, page_size=page_size, skip_blank=skip_blank
-            )
+            self.erase_pages(APP_METADATA_PAGE_ADDR, meta, page_size=page_size, skip_blank=skip_blank)
 
         regions: list[tuple[int, bytes]] = []
-        total = (
-            len(code)
-            + (len(info_seg) if info_seg else 0)
-            + (len(meta) if meta else 0)
-            + sum(len(b) for _o, _d, b in saved_storage)
-        )
+        total = len(code) + (len(meta) if meta else 0) + sum(len(b) for _o, _d, b in saved_storage)
         written = 0
         if code:
             status(f"Запись {len(code)} байт с 0x{code_addr:08X}")
             written = self._write_region(code_addr, code, 0, total, skip_blank)
             regions.append((code_addr, code))
-        if info_seg is not None:
-            status(f"Запись страницы идентификации ({len(info_seg)} байт)")
-            written = self._write_region(
-                DEVICE_INFO_PAGE_ADDR, info_seg, written, total, skip_blank
-            )
-            regions.append((DEVICE_INFO_PAGE_ADDR, info_seg))
         # Восстановление маркерного хранилища — после кода, до
         # метаданных: обрыв на этом шаге оставляет приложение
         # невалидным (bootloader повторит обновление), а не «живым»
@@ -1306,19 +1323,35 @@ class Bootloader:
         # записанных и вычитанных обратно областей. «Резерв проверен»
         # и «настройки восстановлены» — разные факты.
         if saved_storage:
-            kinds = sorted(
-                {region_kind(b) for _o, _d, b in saved_storage}
-            )
-            msg = (
-                "Настройки устройства восстановлены в Flash "
-                f"(записано и вычитано обратно): {', '.join(kinds)}"
-            )
+            kinds = sorted({region_kind(b) for _o, _d, b in saved_storage})
+            msg = f"Настройки устройства восстановлены в Flash (записано и вычитано обратно): {', '.join(kinds)}"
             if restored:
-                msg += (
-                    "; из резервной копии ПК: "
-                    + ", ".join(sorted(restored))
-                )
+                msg += "; из резервной копии ПК: " + ", ".join(sorted(restored))
             status(msg)
+        if ver_record is not None:
+            # CM-F03: легаси-копия VER1 на странице идентичности —
+            # только дозапись в ПОЛНОСТЬЮ стёртый слот (стирание этой
+            # страницы не выполняется никогда): прошивки <15 читают
+            # версию отсюда, а запись 0xFF→данные flash допускает без
+            # стирания — CFG0 и прочие записи не затрагиваются. Слот
+            # занят (старая версия или мусор после обрыва) — не
+            # трогаем: перезапись потребовала бы стирания страницы.
+            try:
+                id_page = self.read_memory(DEVICE_INFO_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE)
+                slot = id_page[DEVICE_CONFIG_VER_OFFSET : DEVICE_CONFIG_VER_OFFSET + 32]
+                if all(b == 0xFF for b in slot):
+                    self._write_region(
+                        DEVICE_INFO_PAGE_ADDR + DEVICE_CONFIG_VER_OFFSET,
+                        ver_record,
+                        written,
+                        total,
+                        skip_blank,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "Легаси-слот VER1 на странице идентичности не дописан: %s",
+                    exc,
+                )
         if meta is not None:
             # Метаданные — последним шагом: валидный APP1 служит «флагом
             # завершённого обновления» (bl_metadata_is_valid).

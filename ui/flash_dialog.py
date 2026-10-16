@@ -64,9 +64,7 @@ from core.firmware_utils import (
 )
 from core.can_protocol import (
 
-    CFG_WRITE_TRAILER,
     CMD_CFG_READ,
-    CMD_CFG_WRITE,
     DEVICE_TYPE_ANALOG,
     DEVICE_TYPE_BASIC,
     DEVICE_TYPE_CAN_FD,
@@ -156,6 +154,15 @@ def _firmware_image_version(file_path: str) -> str | None:
         return None
     if not base:
         base = guess_firmware_base(data)
+    # CM-F03: актуальное место VER1 — слот на странице метаданных
+    # APP1; копия на странице идентичности — миграция/совместимость.
+    page = extract_flash_page(
+        data, base, APP_METADATA_PAGE_ADDR, APP_METADATA_PAGE_SIZE
+    )
+    if page is not None:
+        ver = parse_device_fw_version(page)
+        if ver is not None:
+            return ver
     page = extract_flash_page(
         data, base, DEVICE_CONFIG_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE
     )
@@ -2674,49 +2681,29 @@ class FlashDialog(QDialog):
         return True
 
     def _try_direct_config_write(self, method: str) -> bool:
-        """Пишет конфигурацию через C1 без входа в bootloader/DFU.
+        """Запись конфигурации без файла прошивки.
 
-        Возвращает True, если операция завершена (успешно или с ошибкой), и
-        False, если нужно продолжить обычным DFU/UART-путём.
+        CM-F03: тип/серийник через CDC-протокол (CMD_CFG_WRITE) и
+        bootloader-путь больше не пишутся — идентичность меняет
+        только первичное программирование сервисным путём
+        (USB DFU / ST-Link / J-Link). Для таких методов возвращаем
+        False — обычный flash-путь прошьёт сгенерированный config-HEX;
+        для CDC/UART показываем явный отказ (True — обработано).
         """
         if not self._config_button.isChecked() or self._files_list.count() != 0:
             return False
-        if method not in ("auto", "usb_cdc") or self._serial_manager is None:
+        if method in ("usb", "stlink", "jlink", "auto"):
             return False
-        if not self._serial_manager.is_open():
-            return False
-        name = self._device_name_edit.text().strip().encode("ascii", errors="ignore")[:DEVICE_CONFIG_NAME_MAX]
-        serial = self._serial_edit.text().strip().encode("ascii", errors="ignore")[:10]
-        payload = bytes((len(name),)) + name + bytes((len(serial),)) + serial
-        payload += bytes((0x83, 0x04, 0x40, 0x57))
-        # Трейлер-ключ протокола v3: новая прошивка отвергает C1 без него
-        # (защита от фантомной записи при рассинхроне потока), старая
-        # прошивка лишние байты просто игнорирует.
-        payload += CFG_WRITE_TRAILER
-        try:
-            self._serial_manager.request_control(CMD_CFG_WRITE, payload)
-            name_str = name.decode("ascii", errors="ignore")
-            serial_str = serial.decode("ascii", errors="ignore")
-            # После пере-энумерации iSerial = записанный серийник —
-            # запоминаем имя для отображения в списке портов и в шапке.
-            if name:
-                port_names = dict(self._config.get("port_names", {}) or {})
-                port_names[serial_str] = name_str
-                self._config.set_bulk({
-                    "port_names": port_names,
-                    "device_name": name_str,
-                    "device_type_name": name_str,
-                    "device_serial": serial_str,
-                    "serial_number": serial_str,
-                })
-            self._mark_operation_disconnected()
-            message = tr("Конфигурация записана без перепрошивки Flash")
-            self._log(message)
-            QMessageBox.information(self, tr("Готово"), message)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Прямая запись конфигурации недоступна, использую bootloader: %s", exc)
-            return False
+        QMessageBox.warning(
+            self,
+            tr("Запись конфигурации устройства"),
+            tr("Тип и серийный номер устройства записываются только "
+               "первичным программированием — выберите способ "
+               "«USB DFU», «ST-Link» или «J-Link». Через USB CDC/UART "
+               "страница идентичности не изменяется (защита от "
+               "случайной смены типа и серийника)."),
+        )
+        return True
 
     def _pick_backup_manifest(self) -> tuple[list[tuple[int, bytes]], str] | None:
         """Явный выбор файла резервной копии оператором (CM-N17).
