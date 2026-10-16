@@ -291,6 +291,56 @@ def migrate_aux_out_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _migrate_action_delay(action: dict[str, Any]) -> dict[str, Any]:
+    """CM-F11: легаси ``aux_delay`` («Пауза до действия») складывается
+    в единый ``exec_delay`` («Задержка»). Старый UI исполнял их
+    последовательно (exec_delay-таймер → aux_delay-таймер), поэтому
+    реальная задержка до старта — сумма. Идемпотентно: ключ
+    удаляется, повторный проход ничего не меняет."""
+    aux_delay = _int(action.get("aux_delay"))
+    if aux_delay <= 0:
+        action.pop("aux_delay", None)
+        return action
+    out = dict(action)
+    out.pop("aux_delay", None)
+    out["exec_delay"] = _int(out.get("exec_delay")) + aux_delay
+    return out
+
+
+def migrate_aux_delay_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    """CM-F11: свёртка двух легаси-задержек действия «Доп канал» в
+    одну общую «Задержку» во всех снимках правил.
+
+    Обрабатывает оба представления (канонический ``actions[]`` и
+    легаси ``action``), чтобы черновик и исполняемый снимок
+    расходились не в задержке. Без потерь: суммарная задержка
+    старта сохраняется дословно, двойного отсчёта нет — PC-рантайм
+    и компилятор больше не видят ``aux_delay`` после миграции."""
+    for key in ("flexible_rules", "flexible_rules_active"):
+        rules = payload.get(key)
+        if not isinstance(rules, list):
+            continue
+        new_rules = []
+        for rule in rules:
+            if not isinstance(rule, dict):
+                new_rules.append(rule)
+                continue
+            out = dict(rule)
+            actions = rule.get("actions")
+            if isinstance(actions, list):
+                out["actions"] = [
+                    _migrate_action_delay(a)
+                    if isinstance(a, dict) else a
+                    for a in actions
+                ]
+            legacy = rule.get("action")
+            if isinstance(legacy, dict):
+                out["action"] = _migrate_action_delay(legacy)
+            new_rules.append(out)
+        payload[key] = new_rules
+    return payload
+
+
 def _int(value: Any) -> int:
     try:
         return int(value or 0)

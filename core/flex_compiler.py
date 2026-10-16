@@ -693,7 +693,7 @@ def _aux_action_to_tx(action: dict[str, Any]) -> dict[str, Any] | None:
         delay = int(action.get("aux_delay", 0) or 0)
     except (KeyError, TypeError, ValueError):
         return None
-    if not 1 <= ch <= AUX_CH_COUNT:
+    if not 1 <= ch <= AUX_CH_COUNT or not 0 <= delay <= 0xFFFF:
         return None
     data = bytearray(8)
     if mode == 1:  # Вкл — с опциональным сроком «включить на T мс»
@@ -730,12 +730,15 @@ def _aux_action_to_tx(action: dict[str, Any]) -> dict[str, Any] | None:
             return None
         data[3:7] = pwm_time.to_bytes(4, "little")
     # mode == 0 («Выкл») — параметры не нужны.
+    # delay_ms передаётся без маски — верхний предел поля 0xFFFF
+    # проверяет вызывающий вместе с exec_delay (CM-F11: единая
+    # «Задержка», усечение молча меняло бы время старта).
     return {
         "tx_aux": True,
         "tx_channel": ch & 0xFF,
         "tx_dlc": mode & 0xFF,
         "tx_data": bytes(data),
-        "delay_ms": delay & 0xFFFF,
+        "delay_ms": delay,
         "tx_count": 1,
         "tx_interval_ms": 0,
     }
@@ -1212,9 +1215,12 @@ def _compile_rule(
             tx = _aux_action_to_tx(action)
             if tx is None:
                 return None, "действие «доп. канал» повреждено — только на ПК"
-            if exec_delay:
-                if tx["delay_ms"] + exec_delay > 0xFFFF:
-                    return None, "задержка действия не влезает — только на ПК"
+            # CM-F11: легаси aux_delay и общий exec_delay — это
+            # последовательные этапы одного старта, их сумма и есть
+            # автономная delay_ms. Сумма сверх поля — честный отказ.
+            if tx["delay_ms"] + exec_delay > 0xFFFF:
+                return None, "задержка действия не влезает — только на ПК"
+            if tx["delay_ms"] + exec_delay:
                 tx = dict(tx)
                 tx["delay_ms"] += exec_delay
             tx_parts.append((idx, tx))

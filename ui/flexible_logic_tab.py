@@ -2697,8 +2697,10 @@ class _ActionItem(QWidget):
     # ---- страницы настроек -------------------------------------------
 
     def _build_aux_page(self, font: QFont, mark_dirty) -> None:
-        """«Доп канал»: №, режим Вкл/Выкл/Импульсы/ШИМ, пауза до
-        действия и под-страница параметров (отчёт мастера)."""
+        """«Доп канал»: канал по имени, режим Вкл/Выкл/Импульсы/ШИМ
+        и под-страница параметров. Отложенный старт — единая
+        «Задержка» действия вверху редактора (CM-F11: отдельная
+        «Пауза до действия» удалена)."""
         page = QWidget()
         pl = QVBoxLayout(page)
         pl.setSpacing(2)
@@ -2731,13 +2733,6 @@ class _ActionItem(QWidget):
             "останутся запасным вариантом"
         ))
         top.addWidget(self.aux_use_var)
-        top.addWidget(_small_label(tr("Пауза до действия"), font))
-        self.aux_delay = QSpinBox()
-        self.aux_delay.setFont(font)
-        self.aux_delay.setRange(0, 999999)
-        self.aux_delay.setSuffix(tr(" мс"))
-        self.aux_delay.setFixedWidth(96)
-        top.addWidget(self.aux_delay)
         top.addStretch()
         pl.addLayout(top)
 
@@ -2746,39 +2741,34 @@ class _ActionItem(QWidget):
         plain_layout = QVBoxLayout(plain)
         plain_layout.setContentsMargins(0, 0, 0, 0)
         plain_layout.setSpacing(2)
-        # «Время включения» для «Вкл»: снятая галочка — до команды
-        # «Выкл»/снятия питания; установленная — авто-выключение МК
-        # через указанный срок (CM-HW-02: нулевой срок бессрочность
-        # молча не означает — для неё галочка снята).
+        # «вкл постоянно» для «Вкл» (CM-F11): галочка по умолчанию —
+        # канал работает до команды «Выкл»/снятия питания; снятая —
+        # активно «Время включения, мс» (строго положительное) и МК
+        # выключает сам по дедлайну.
         on_row = QHBoxLayout()
-        self.aux_on_time_en = QCheckBox(tr("время включения"))
-        self.aux_on_time_en.setFont(font)
-        self.aux_on_time_en.setToolTip(
-            tr("Снята — работает до команды «Выкл»; "
-               "установлена — выключается через указанное время")
+        self.aux_on_perm = QCheckBox(tr("вкл постоянно"))
+        self.aux_on_perm.setFont(font)
+        self.aux_on_perm.setChecked(True)
+        self.aux_on_perm.setToolTip(
+            tr("Установлена — работает до команды «Выкл» или снятия "
+               "питания; снята — МК выключает через указанное время")
         )
-        on_row.addWidget(self.aux_on_time_en)
+        on_row.addWidget(self.aux_on_perm)
+        on_row.addWidget(_small_label(tr("Время включения, мс"), font))
         self.aux_on_time = QSpinBox()
         self.aux_on_time.setFont(font)
         self.aux_on_time.setRange(1, 999999)
         self.aux_on_time.setValue(100)
-        self.aux_on_time.setSuffix(tr(" мс"))
         self.aux_on_time.setFixedWidth(96)
         self.aux_on_time.setEnabled(False)
         on_row.addWidget(self.aux_on_time)
         on_row.addStretch()
         plain_layout.addLayout(on_row)
-        plain_hint = QLabel(
-            tr("«Вкл» без срока — до команды «Выкл» или до снятия "
-               "питания МК")
-        )
-        plain_hint.setFont(font)
-        plain_hint.setStyleSheet("color: #9A9AA5;")
-        plain_hint.setWordWrap(True)
-        plain_layout.addWidget(plain_hint)
         plain_layout.addStretch()
-        self.aux_on_time_en.toggled.connect(self.aux_on_time.setEnabled)
-        self.aux_on_time_en.toggled.connect(mark_dirty)
+        self.aux_on_perm.toggled.connect(
+            lambda on: self.aux_on_time.setEnabled(not on)
+        )
+        self.aux_on_perm.toggled.connect(mark_dirty)
         self.aux_on_time.valueChanged.connect(mark_dirty)
 
         pulse = QWidget()
@@ -2837,27 +2827,30 @@ class _ActionItem(QWidget):
         self.aux_pwm_duty.setFixedWidth(80)
         pwm_row.addWidget(_small_label(tr("Заполнение"), font))
         pwm_row.addWidget(self.aux_pwm_duty)
-        # «время включения» с галочкой (отчёт мастера): без галочки
-        # ШИМ работает до команды «Выкл»; с галочкой — указанное
-        # время 1–999999 мс и выключается сам.
-        self.aux_pwm_time_en = QCheckBox(tr("время включения"))
-        self.aux_pwm_time_en.setFont(font)
-        self.aux_pwm_time_en.setToolTip(
-            tr("Снята — ШИМ работает до команды «Выкл»; "
-               "установлена — выключается через указанное время")
+        # «вкл постоянно» для ШИМ (CM-F11): галочка по умолчанию —
+        # ШИМ до команды «Выкл»/снятия питания; снятая — «Время
+        # включения, мс» (строго положительное) и МК выключает сам.
+        self.aux_pwm_perm = QCheckBox(tr("вкл постоянно"))
+        self.aux_pwm_perm.setFont(font)
+        self.aux_pwm_perm.setChecked(True)
+        self.aux_pwm_perm.setToolTip(
+            tr("Установлена — ШИМ до команды «Выкл» или снятия "
+               "питания; снята — МК выключает через указанное время")
         )
-        pwm_row.addWidget(self.aux_pwm_time_en)
+        pwm_row.addWidget(self.aux_pwm_perm)
+        pwm_row.addWidget(_small_label(tr("Время включения, мс"), font))
         self.aux_pwm_time = QSpinBox()
         self.aux_pwm_time.setFont(font)
         self.aux_pwm_time.setRange(1, 999999)
         self.aux_pwm_time.setValue(100)
-        self.aux_pwm_time.setSuffix(tr(" мс"))
         self.aux_pwm_time.setFixedWidth(96)
         self.aux_pwm_time.setEnabled(False)
         pwm_row.addWidget(self.aux_pwm_time)
         pwm_row.addStretch()
         pwm_layout.addLayout(pwm_row)
-        self.aux_pwm_time_en.toggled.connect(self.aux_pwm_time.setEnabled)
+        self.aux_pwm_perm.toggled.connect(
+            lambda on: self.aux_pwm_time.setEnabled(not on)
+        )
 
         for sub in (plain, pulse, pwm):
             self._aux_stack.addWidget(sub)
@@ -2870,8 +2863,7 @@ class _ActionItem(QWidget):
         self.aux_use_var.toggled.connect(self._refresh_aux_override)
         self.aux_mode.currentIndexChanged.connect(self._on_aux_mode)
         self.aux_mode.currentIndexChanged.connect(mark_dirty)
-        self.aux_delay.valueChanged.connect(mark_dirty)
-        self.aux_pwm_time_en.toggled.connect(mark_dirty)
+        self.aux_pwm_perm.toggled.connect(mark_dirty)
         for spin in (
             self.aux_pulse_on, self.aux_pulse_off, self.aux_pulse_count,
             self.aux_pwm_freq, self.aux_pwm_duty, self.aux_pwm_time,
@@ -3316,22 +3308,22 @@ class _ActionItem(QWidget):
                 # явные поля ниже — видимый запасной вариант.
                 "aux_use_var": self.aux_use_var.isChecked(),
                 "aux_mode": self.aux_mode.currentData(),
-                "aux_delay": self.aux_delay.value(),
                 "aux_pulse_on": self.aux_pulse_on.value(),
                 "aux_pulse_off": self.aux_pulse_off.value(),
                 "aux_pulse_count": self.aux_pulse_count.value(),
                 "aux_pwm_freq": self.aux_pwm_freq.value(),
                 "aux_pwm_duty": self.aux_pwm_duty.value(),
-                # Без галочки «время включения» — 0: до «Выкл»
-                # (нулевой срок бессрочность молча не означает —
-                # CM-HW-02).
+                # CM-F11: галочка «вкл постоянно» — 0 срока = до
+                # «Выкл»/питания; снятая — положительное время
+                # включения, выключает сам МК. Старое скрытое
+                # значение не влияет на выполнение.
                 "aux_pwm_time": (
-                    self.aux_pwm_time.value()
-                    if self.aux_pwm_time_en.isChecked() else 0
+                    0 if self.aux_pwm_perm.isChecked()
+                    else self.aux_pwm_time.value()
                 ),
                 "aux_on_time": (
-                    self.aux_on_time.value()
-                    if self.aux_on_time_en.isChecked() else 0
+                    0 if self.aux_on_perm.isChecked()
+                    else self.aux_on_time.value()
                 ),
             }
         elif atype == _ACT_CACHE:
@@ -3421,7 +3413,6 @@ class _ActionItem(QWidget):
             self.aux_use_var.setChecked(bool(action.get("aux_use_var")))
             midx = self.aux_mode.findData(action.get("aux_mode", "on"))
             self.aux_mode.setCurrentIndex(midx if midx >= 0 else 0)
-            self.aux_delay.setValue(int(action.get("aux_delay", 0) or 0))
             self.aux_pulse_on.setValue(
                 int(action.get("aux_pulse_on", 100) or 100)
             )
@@ -3438,10 +3429,10 @@ class _ActionItem(QWidget):
                 int(action.get("aux_pwm_duty", 50) or 50)
             )
             pwm_time = int(action.get("aux_pwm_time", 0) or 0)
-            self.aux_pwm_time_en.setChecked(pwm_time > 0)
+            self.aux_pwm_perm.setChecked(pwm_time <= 0)
             self.aux_pwm_time.setValue(max(1, pwm_time))
             on_time = int(action.get("aux_on_time", 0) or 0)
-            self.aux_on_time_en.setChecked(on_time > 0)
+            self.aux_on_perm.setChecked(on_time <= 0)
             self.aux_on_time.setValue(max(1, on_time))
             self._refresh_pulse_graph()
         elif atype == _ACT_CACHE:
@@ -3465,7 +3456,16 @@ class _ActionItem(QWidget):
                 self.cv_op.currentData() == _CACHE_OP_SEND
             )
         # Общие параметры действия (отчёт мастера).
-        self.exec_delay.setValue(int(action.get("exec_delay", 0) or 0))
+        # CM-F11: единая «Задержка» — легаси aux_delay складывается
+        # в exec_delay один раз (старый файл: отдельная «Пауза до
+        # действия» срабатывала ПОСЛЕ exec_delay-таймера, поэтому
+        # реальная задержка до начала действия — их сумма). Ключ
+        # type у старых действий может отсутствовать — сверяем
+        # разрешённый тип.
+        delay = int(action.get("exec_delay", 0) or 0)
+        if atype == _ACT_AUX:
+            delay += int(action.get("aux_delay", 0) or 0)
+        self.exec_delay.setValue(min(delay, self.exec_delay.maximum()))
         self._abort.write(action.get("abort"))
         self._update_summary()
 
@@ -3483,7 +3483,7 @@ class _ActionItem(QWidget):
                 text = tr("Вкл импульсы {0}").format(ch)
             elif mode == "pwm":
                 text = tr("ВКЛ ШИМ {0}").format(ch)
-            elif self.aux_on_time_en.isChecked():
+            elif not self.aux_on_perm.isChecked():
                 text = tr("Вкл {0} на {1} мс").format(
                     ch, self.aux_on_time.value()
                 )
@@ -4138,6 +4138,10 @@ class FlexibleLogicTab(QWidget):
         # Состояние доп. каналов OUT1-4 (ПК-зеркало команд CMD_AUX_SET):
         # канал → 0/1. События/условия «Доп канал» опираются на него.
         self._aux_states: dict[int, int] = {}
+        # CM-F11: счётчик команд на канал — отложенный коллбек
+        # устаревшей команды не перекрывает более новую (OFF должен
+        # отменять ещё не сработавший ON, а не наоборот).
+        self._aux_cmd_seq: dict[int, int] = {}
         self._aux_flags: dict[tuple[int, int, int], bool] = {}
         # Признак «условие дин. события уже истинно» — событие «Стало
         # больше/меньше» — фронт булева состояния, а не каждый кадр.
@@ -5621,8 +5625,10 @@ class FlexibleLogicTab(QWidget):
                     )
 
         # 3. Доп канал OUT1-4: «Вкл» держится до «Выкл»/питания,
-        #    импульсы и ШИМ крутит сам МК (aux_out.c). «Пауза до
-        #    действия» — PC-таймер, как у фреймов.
+        #    импульсы и ШИМ крутит сам МК (aux_out.c). CM-F11:
+        #    единая «Задержка» уже оттикала в _run_actions; aux_delay
+        #    остаётся только для старых снимков из файла/камня без
+        #    прохода через редактор (legacy-совместимость).
         if action.get("aux_enabled"):
             # CM-N7: «из настроек выхода» — режим и ШИМ-параметры
             # берутся из настроек выхода переменной этого канала
@@ -5659,15 +5665,26 @@ class FlexibleLogicTab(QWidget):
             }
 
             aux_gen = self._exec_generation
+            # «Последняя команда побеждает» на канал: OFF/новый режим,
+            # выданный позже, отменяет ещё не сработавший отложенный
+            # коллбек — устаревший таймер не гасит новый запуск.
+            aux_seq = self._aux_cmd_seq.get(channel, 0) + 1
+            self._aux_cmd_seq[channel] = aux_seq
 
             def fire_aux(
                 ch=channel, m=mode, kw=kwargs, mn=mode_name,
-                g=aux_gen,
+                g=aux_gen, s=aux_seq,
             ) -> None:
                 if g != self._exec_generation:
                     logger.info(
                         "ГЛ: команда доп канала №%d отброшена — "
                         "сменилось поколение исполнения", ch,
+                    )
+                    return
+                if s != self._aux_cmd_seq.get(ch):
+                    logger.info(
+                        "ГЛ: команда доп канала №%d отброшена — "
+                        "выдана более новая", ch,
                     )
                     return
                 if not self._pc_flex_allowed():
