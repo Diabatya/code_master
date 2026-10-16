@@ -161,6 +161,12 @@ jobs:
             firmware/application/tests/test_storage_select.c \
             -o /tmp/test_storage_select
           /tmp/test_storage_select
+          # CM-F04: чтение идентичности загрузчиком из страницы CFG0.
+          cc -I firmware/bootloader/Inc \
+            firmware/application/tests/test_device_identity.c \
+            firmware/bootloader/Src/device_identity.c \
+            -o /tmp/test_device_identity
+          /tmp/test_device_identity
       - name: Verify application metadata
         run: |
           python3 -m pip install intelhex
