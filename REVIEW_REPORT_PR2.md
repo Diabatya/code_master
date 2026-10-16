@@ -112,12 +112,34 @@ Flash с сознательно отсутствующим видом его н�
 | CM-N18 | Исправлено | `ui/flash_dialog.py` (связь `clicked`→`_on_flash`, keyword-only аргумент); `core/storage_backup.py::check_backup_regions_arg`; `core/bootloader.py::flash_firmware`; `ui/flash_dialog.py::FlashWorker.__init__` | До: `clicked` сигнал `QPushButton` передаёт `checked: bool` — изменённая сигнатура `_on_flash(explicit_backup_regions)` получала `False` при обычном нажатии «Прошить»: `False is not None` обходил direct-config, включал preserve и приводил к `TypeError` в `merge_backup_regions` — **обычная прошивка была сломана**. После: сигнал отбрасывается в `lambda`, аргумент резерва — keyword-only, bool/строки/мусор отвергаются `ValueError`/`BootloaderError` на границе FlashWorker и flash_firmware до первого обращения к устройству | `test_flash_dialog_restore.py` — настоящий `FlashDialog` + настоящий `_flash_button.click()`: worker получает `None`; direct-config через ту же кнопку завершает без worker; чекбокс preserve вкл/выкл работает; `FlashWorker(explicit_backup_regions=False)` → `ValueError`; `flash_firmware(explicit_backup=False/True/str/dict)` → `BootloaderError`, `sim.ops == []` |
 | CM-N19 | Исправлено | `core/bootloader.py::flash_firmware`; `ui/flash_dialog.py` (`_on_restore_from_backup` гейт, DFU `has_app_image`); `FlashWorker` | До: явный резерв + config-only образ — `explicit_backup` обрабатывался только в ветке `and code`: запись info-страницы завершалась успехом, резерв не проверялся и не применялся, оператор не получал результат выбранной операции. После: `explicit_backup` без application-сегмента (отсутствует или целиком 0xFF) — понятный отказ ДО подключения/стирания/записи в `flash_firmware`; та же проверка в DFU (`has_app_image` до `find_dfu_device`); UI гейтит «Восстановить…» при пустом списке файлов до открытия выбора манифеста. UI-if — не единственная защита: CLI/worker/прямой API покрыты проверкой в Bootloader | `test_bootloader_preserve.py::TestExplicitBackupContractCMN19` — config-only образ + резерв → отказ, `erase_count=0`, APP1 цел; all-FF application-сегмент → отказ; обычная config-only без резерва — работает как раньше; `TestExplicitBackupWorkerPath` — сквозной `_flash_uart`/`_flash_usb_cdc` → настоящий `flash_firmware` на FlashSim: резерв доезжает и восстанавливает VARH; config-only через worker → отказ до erase |
 
+## Полевой отчёт — сводная таблица CM-F01…CM-F12
+
+| # | Статус | Суть | Проверки |
+|---|--------|------|----------|
+| CM-F01 | Исправлено | Запись хранилища чанками по лимиту транспорта (256 Б), план до стирания, APP1 последним | `test_bootloader_preserve.py`, FlashSim-пайплайн |
+| CM-F02 | Исправлено | FLXB v3/протокол 14: автономные переменные и ГЛ на МК (RX_VAR/TX_SETFLAG/COND_FLAG) | `test_flex_compiler_vars.py`, `test_trigger_flex` |
+| CM-F03 | Исправлено | Протокол 15: страница идентичности не стирается/не пишется CDC/UART, VER1 → слот APP1, CMD_CFG_WRITE отклонён | `test_bootloader_preserve.py`, `test_update_regions.py` |
+| CM-F04 | Исправлено + отчёт | Загрузчик читает CFG0 read-only: iProduct/iSerial = приложению; без-COM исследование — `USB_NO_COM_RESEARCH.md` | `test_device_identity` (host), ARM build |
+| CM-F05 | Исправлено | Единый режим «Градусы»: декодер v3, ветки «+»/«−», инверсия, live CAN | `test_steering_decoder.py`, `test_degrees_decoder_dialog.py` |
+| CM-F06 | Исправлено | Две таблицы записи DATA (5 колонок, Записать/Стоп, RAM-история) | `test_degrees_decoder_dialog.py` |
+| CM-F07 | Исправлено | Таблица привязки — источник нейтрали/масштаба, валидация по стороне, график-ветки | `test_steering_decoder.py`, `test_variable_decode.py` |
+| CM-F08 | Исправлено | Захват DATA для динамической переменной во временную историю + «→ В привязку» | `test_dyn_var_record.py` |
+| CM-F09 | Исправлено | Убраны «Каналы выхода…» и режимы выхода из диалога допканала; миграция out_mode | `test_aux_dialog.py`, `test_aux_channels.py` |
+| CM-F10 | Исправлено | Имена каналов в ГЛ, повторное редактирование, без «ПК»-бейджа и вкладки «Библиотека» | `test_flex_editor_cm_f10.py` (реальные QMouseEvent) |
+| CM-F11 | Исправлено | «вкл постоянно» для Вкл/ШИМ, единая «Задержка» (автономная delay_ms), миграция aux_delay | `test_flex_cm_f11.py` |
+| CM-F12 | Подготовлено | Маркер 111 в именах артефактов, сервисный bootloader-образ, архив исходников, SHA256SUMS под финальными именами | `test_package_sources.py`, YAML-валидность workflow |
+
+Не проверено на железе: реальная энумерация Windows (кэш
+friendly-name), автономное исполнение записанных программ, живой
+декод руля, обрывы обновления на плате — отдельный стендовый этап.
+
 ## Проверки
 
-- pytest: **456 passed** (системный Python, `QT_QPA_PLATFORM=offscreen`; venv с битым Qt-плагином не используется)
+- pytest: **560 passed** (системный Python, `QT_QPA_PLATFORM=offscreen`; venv с битым Qt-плагином не используется)
 - Ruff: clean; compileall: OK
 - C-харнессы: `test_trigger_flash`, `test_device_config`, `test_event_log_ring`, `test_trigger_flex` (+aux-сценарии), `test_aux_out` (настоящий `aux_out.c`), `test_storage_select` (настоящий `storage.c`, mmap-дамп, 9 сценариев) — все PASS. На macOS arm64 `test_storage_select` собирается `cc -arch x86_64 -Wl,-pagezero_size,0x4000` и работает через Rosetta (фиксированный mmap 0x08000000); в CI на x86_64 Linux хватает обычного `cc`
-- ARM-сборки: application text **46568 B** (+3188 к базе v1.1.72 = 43380 B, бюджет 224K), bootloader text 19440 B без изменений
+- ARM-сборки: application text **47472 B** (бюджет 224K), bootloader text+data **20368 B** (бюджет 32K)
+- C-харнессы: + `test_device_identity` (CM-F04, парсер CFG0 загрузчика) — 7 файлов, все PASS
 - GUI smoke: настоящий `MainWindow` + `FlashDialog` offscreen — проверены пользовательские действия: обычное «Прошить» (реальный click → worker с `explicit_backup_regions=None`), direct-config через ту же кнопку без worker, «Восстановить из резервной копии…» — отмена без worker, подтверждённый выбор маршрутизирует список в worker, отказ без файла прошивки до выбора манифеста
 - CI (round 4): run **38629560179** на `f91ae73` — все job ✓; release пропущен
 - CI (round 5): run **38634632206** на `755430c` — все job ✓; release пропущен
