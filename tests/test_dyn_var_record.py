@@ -2,8 +2,10 @@
 тот же механизм захвата DATA, что у декодера «Градусы».
 
 Проверяются: фильтрация по своему ID/разрядности, только полностью
-покрытое поле, дедуп повторов подряд и уже записанных значений,
-RAM-only отписка при «Стоп»/уничтожении, честные подсказки без
+покрытое поле, временная история HEX+DEC в порядке прихода,
+дедуп повторов/уже пойманных, отсутствие автопревращения истории
+в постоянную привязку (перенос — только осознанной кнопкой),
+просмотр после «Стоп», RAM-only отписка, честные подсказки без
 ID/байтов.
 """
 
@@ -16,6 +18,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QLabel
 
@@ -90,27 +93,40 @@ def _frame(can_id=0x100, data=b"\x01\x02", ext=False):
     }
 
 
+def _history_hex(page) -> list[str]:
+    return [
+        str(page._dyn_history.item(i).data(Qt.ItemDataRole.UserRole))
+        for i in range(page._dyn_history.count())
+    ]
+
+
 def test_record_button_only_on_dynamic(qapp) -> None:
-    """Кнопка «Записать» — только у «Динамической переменной»,
-    у численной её нет (там запись живёт в диалоге декодера)."""
+    """Кнопка «Записать» и временная история — только у
+    «Динамической переменной», у численной их нет."""
     dyn, _m = _page(qapp, "dyn")
     num, _m2 = _page(qapp, "numeric")
     try:
         assert hasattr(dyn, "_dyn_record_btn")
+        assert hasattr(dyn, "_dyn_history")
         assert not hasattr(num, "_dyn_record_btn")
         assert dyn._dyn_record_btn.text() == "Записать"
+        assert "2E7D32" in dyn._dyn_record_btn.styleSheet()
     finally:
         dyn.deleteLater()
         num.deleteLater()
 
 
-def test_capture_fills_binding_rows(qapp) -> None:
-    """Кадры своего ID → уникальные значения поля попадают в таблицу
-    привязки; чужой ID/разрядность и неполное поле игнорируются."""
+def test_capture_goes_to_temp_history(qapp) -> None:
+    """Кадры своего ID → временная история (HEX и DEC), а НЕ в
+    таблицу привязки: автопревращения захвата в постоянную
+    привязку нет (CM-F08)."""
     page, manager = _page(qapp)
     try:
+        before = page.points_table.rowCount()
         page._toggle_dyn_record()
-        assert page._dyn_recording and page._dyn_record_btn.text() == "Стоп"
+        assert page._dyn_recording
+        assert page._dyn_record_btn.text() == "Стоп"
+        assert "C62828" in page._dyn_record_btn.styleSheet()
         manager.new_can_frames.emit([
             _frame(data=b"\xAA\xBB"),
             _frame(can_id=0x200, data=b"\xCC\xDD"),  # чужой ID
@@ -118,46 +134,60 @@ def test_capture_fills_binding_rows(qapp) -> None:
             _frame(data=b"\x01"),                    # не покрывает поле
             _frame(data=b"\x11\x22"),
         ])
-        bindings = page.read_bindings()
-        # Имена ещё не введены → read_bindings их отбрасывает; строки
-        # проверяем по значениям (itemChanged нормализует «AA BB» →
-        # «AABB»).
-        raws = {
-            vt._parse_data_hex(page.points_table.item(r, 0).text())
-            for r in range(page.points_table.rowCount())
-        }
-        assert 0xAABB in raws and 0x1122 in raws
-        assert 0xCCDD not in raws and 0xEEFF not in raws
-        assert 0x01 not in raws
-        assert not bindings  # имён пока нет — строки «сырые»
+        hist = _history_hex(page)
+        assert hist == ["AA BB", "11 22"]
+        item = page._dyn_history.item(0)
+        assert "AA BB" in item.text() and "43707" in item.text()
+        # Постоянная таблица привязки не тронута захватом.
+        assert page.points_table.rowCount() == before
         assert page._dyn_recorded == 2
         page._stop_dyn_record()
         assert not page._dyn_recording
         assert page._dyn_record_btn.text() == "Записать"
+        # История остаётся на просмотр после «Стоп».
+        assert _history_hex(page) == ["AA BB", "11 22"]
+        assert page._dyn_history_box.isVisibleTo(page)
     finally:
         page.deleteLater()
 
 
-def test_dedupe_consecutive_and_existing(qapp) -> None:
-    """Повтор подряд и значение, уже есть в таблице, не плодят строки."""
+def test_apply_selected_to_binding(qapp) -> None:
+    """«→ В привязку» переносит только выбранное значение строкой
+    с пустым именем — осознанный перенос оператора."""
     page, manager = _page(qapp)
     try:
         page._toggle_dyn_record()
-        manager.new_can_frames.emit([_frame(data=b"\x01\x02")])
         manager.new_can_frames.emit([
-            _frame(data=b"\x01\x02"),  # повтор подряд
-            _frame(data=b"\x01\x02"),
+            _frame(data=b"\xAA\xBB"), _frame(data=b"\x11\x22"),
         ])
-        rows = page.points_table.rowCount()
-        manager.new_can_frames.emit([_frame(data=b"\x03\x04")])
-        manager.new_can_frames.emit([_frame(data=b"\x03\x04")])
-        texts = [
+        page._stop_dyn_record()
+        page._dyn_history.setCurrentRow(1)
+        page._dyn_history_to_binding()
+        raws = [
             vt._parse_data_hex(page.points_table.item(r, 0).text())
             for r in range(page.points_table.rowCount())
         ]
-        assert texts.count(0x0102) == 1
-        assert texts.count(0x0304) == 1
-        assert page.points_table.rowCount() == rows + 1
+        assert 0x1122 in raws and 0xAABB not in raws
+        # Строка без имени не считается готовой привязкой.
+        assert page.read_bindings() == []
+    finally:
+        page.deleteLater()
+
+
+def test_dedupe_consecutive_and_seen(qapp) -> None:
+    """Повтор подряд и уже пойманное значение не плодят строки
+    истории; порядок — по приходу (A,B,A → A,B)."""
+    page, manager = _page(qapp)
+    try:
+        page._toggle_dyn_record()
+        manager.new_can_frames.emit([
+            _frame(data=b"\x01\x02"),
+            _frame(data=b"\x01\x02"),  # повтор подряд
+            _frame(data=b"\x03\x04"),
+            _frame(data=b"\x01\x02"),  # уже поймано ранее
+        ])
+        assert _history_hex(page) == ["01 02", "03 04"]
+        assert page._dyn_recorded == 2
     finally:
         page.deleteLater()
 
@@ -190,7 +220,6 @@ def test_stop_unsubscribes(qapp) -> None:
         assert manager.new_can_frames._subs == [page._on_dyn_frames]
         page._stop_dyn_record()
         assert manager.new_can_frames._subs == []
-        # Повторный захват — новая подписка, старой нет.
         page._toggle_dyn_record()
         page._stop_dyn_record()
         assert manager.new_can_frames._subs == []

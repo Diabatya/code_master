@@ -62,6 +62,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -2224,8 +2226,9 @@ class _ValuePage(QWidget):
         if kind != "numeric":
             # CM-F08: «Динамическая переменная» — тот же захват DATA,
             # что у декодера «Градусы»: «Записать» ловит кадры своего
-            # ID и добавляет уникальные значения поля в таблицу
-            # привязки (имя состояния оператор вводит рядом).
+            # ID во ВРЕМЕННУЮ историю (HEX+DEC, порядок прихода);
+            # в постоянную таблицу привязки значение попадает только
+            # осознанным выбором оператора («→ В привязку»).
             self._dyn_record_btn = QPushButton(tr("Записать"))
             self._dyn_record_btn.setFont(font)
             self._dyn_record_btn.setFixedHeight(26)
@@ -2234,8 +2237,8 @@ class _ValuePage(QWidget):
                 " border-radius: 4px;"
             )
             self._dyn_record_btn.setToolTip(tr(
-                "Записать значения DATA приходящих кадров в таблицу "
-                "привязки — имя состояния вводится рядом"
+                "Записать приходящие значения DATA во временную "
+                "историю — затем выбранное переносится в привязку"
             ))
             self._dyn_record_btn.clicked.connect(
                 self._toggle_dyn_record
@@ -2244,6 +2247,7 @@ class _ValuePage(QWidget):
             self._dyn_recording = False
             self._dyn_recorded = 0
             self._dyn_last_raw: bytes | None = None
+            self._dyn_seen: set[bytes] = set()
             self._dyn_record_status = QLabel("")
             self._dyn_record_status.setFont(font)
             buttons.addWidget(self._dyn_record_status)
@@ -2252,6 +2256,39 @@ class _ValuePage(QWidget):
             )
         buttons.addStretch()
         left.addLayout(buttons)
+        if kind != "numeric":
+            # Временная история захвата (CM-F08): просматривается
+            # после «Стоп», не сохраняется в конфиг и умирает со
+            # страницей. Кнопка переносит выбранное значение в
+            # постоянную таблицу привязки — без автопревращения.
+            self._dyn_history_box = QWidget()
+            hist_layout = QVBoxLayout(self._dyn_history_box)
+            hist_layout.setContentsMargins(0, 0, 0, 0)
+            hist_layout.setSpacing(2)
+            self._dyn_history = QListWidget()
+            self._dyn_history.setFont(font)
+            self._dyn_history.setMaximumHeight(110)
+            self._dyn_history.setToolTip(tr(
+                "Временная история захваченных DATA (HEX — "
+                "десятичное); не сохраняется в конфигурацию"
+            ))
+            hist_layout.addWidget(self._dyn_history)
+            hist_row = QHBoxLayout()
+            self._dyn_apply_btn = QPushButton(tr("→ В привязку"))
+            self._dyn_apply_btn.setFont(font)
+            self._dyn_apply_btn.setFixedHeight(24)
+            self._dyn_apply_btn.setToolTip(tr(
+                "Добавить выбранное из истории значение строкой в "
+                "таблицу привязки — имя состояния вводится рядом"
+            ))
+            self._dyn_apply_btn.clicked.connect(
+                self._dyn_history_to_binding
+            )
+            hist_row.addWidget(self._dyn_apply_btn)
+            hist_row.addStretch()
+            hist_layout.addLayout(hist_row)
+            self._dyn_history_box.setVisible(False)
+            left.addWidget(self._dyn_history_box)
         # Предупреждение о точках вне диапазона «ОТ»/«ДО»
         # (только «Численная переменная» — отчёт мастера).
         self._range_warn = QLabel(tr(
@@ -2337,10 +2374,12 @@ class _ValuePage(QWidget):
     # ---- запись DATA динамической переменной (CM-F08) ------------------
 
     def _toggle_dyn_record(self) -> None:
-        """«Записать»/«Стоп»: захват DATA выбранного поля в таблицу
-        привязки — тот же механизм, что у таблиц декодера «Градусы»
-        (F06): только свой ID/разрядность, только покрытое поле,
-        повторы подряд и уже записанные значения не плодят строки."""
+        """«Записать»/«Стоп»: захват DATA выбранного поля во
+        временную историю — тот же механизм, что у таблиц декодера
+        «Градусы» (F06): только свой ID/разрядность, только
+        покрытое поле, повтор подряд и уже пойманное значение не
+        плодят строки. История не становится привязкой сама —
+        перенос только кнопкой «→ В привязку» (CM-F08)."""
         if self._dyn_recording:
             self._stop_dyn_record()
             return
@@ -2355,6 +2394,9 @@ class _ValuePage(QWidget):
         self._dyn_recording = True
         self._dyn_recorded = 0
         self._dyn_last_raw = None
+        self._dyn_seen.clear()
+        self._dyn_history.clear()
+        self._dyn_history_box.setVisible(True)
         self._dyn_record_btn.setText(tr("Стоп"))
         self._dyn_record_btn.setStyleSheet(
             "background: #C62828; color: white; border-radius: 4px;"
@@ -2364,9 +2406,9 @@ class _ValuePage(QWidget):
         self._dyn_record_status.setText(tr("• запись"))
 
     def _stop_dyn_record(self) -> None:
-        """Останавливает захват и отписывается от потока кадров
-        (RAM-only — закрытие страницы/вкладки не оставляет
-        подписки)."""
+        """Останавливает захват и отписывается от потока кадров.
+        История остаётся на просмотр (CM-F08) и умирает со
+        страницей — в конфиг не попадает."""
         if not getattr(self, "_dyn_recording", False):
             return
         self._dyn_recording = False
@@ -2385,10 +2427,9 @@ class _ValuePage(QWidget):
         )
 
     def _on_dyn_frames(self, frames: list[dict[str, Any]]) -> None:
-        """Кадры шины → окно выбранного поля → строки таблицы
-        привязки. Новое значение добавляется строкой с пустым именем
-        состояния; повтор подряд и значения, уже присутствующие в
-        таблице, пропускаются."""
+        """Кадры шины → окно выбранного поля → временная история
+        (HEX + десятичное, порядок прихода). Постоянная таблица
+        привязки захватом не изменяется."""
         if not self._dyn_recording:
             return
         fid = hex_to_int(self.can_id.text())
@@ -2396,48 +2437,56 @@ class _ValuePage(QWidget):
             return
         ext = bool(self.bit.currentData())
         used = self.bytes_used()
-        # Снимок занятых значений — дедупликация с уже введёнными
-        # строками (повторная запись не множит дубли).
-        existing = {
-            _parse_data_hex(
-                self.points_table.item(r, 0).text()
-            )
-            for r in range(self.points_table.rowCount())
-            if self.points_table.item(r, 0) is not None
-        }
+        if not used:
+            return
         for frame in frames:
             if int(frame.get("id", -1)) != fid:
                 continue
             if bool(frame.get("extended", False)) != ext:
                 continue
             data = bytes(frame.get("data", b""))
-            if not used or any(p < 0 or p >= len(data) for p in used):
+            if any(p < 0 or p >= len(data) for p in used):
                 continue  # кадр не покрыл поле — не пишем
             window = bytes(data[p] for p in used)
-            if window == self._dyn_last_raw:
-                continue  # повтор подряд
+            if window == self._dyn_last_raw or window in self._dyn_seen:
+                continue
             self._dyn_last_raw = window
+            self._dyn_seen.add(window)
             raw = int.from_bytes(window, "big")
-            if float(raw) in existing:
-                continue  # значение уже есть в таблице
-            existing.add(float(raw))
-            row = self.points_table.rowCount()
-            self.points_table.insertRow(row)
-            self.points_table.setItem(
-                row, 0,
-                QTableWidgetItem(
-                    " ".join(f"{b:02X}" for b in window)
-                ),
+            item = QListWidgetItem(
+                "{}   = {}".format(
+                    " ".join(f"{b:02X}" for b in window), raw
+                )
             )
-            self.points_table.setItem(
-                row, 1, QTableWidgetItem("")
+            item.setData(
+                Qt.ItemDataRole.UserRole,
+                " ".join(f"{b:02X}" for b in window),
             )
+            self._dyn_history.addItem(item)
+            self._dyn_history.scrollToBottom()
             self._dyn_recorded += 1
             self._dyn_record_status.setText(
                 tr("• записано {0}").format(self._dyn_recorded)
             )
-        if self._dyn_recorded:
-            self._emit_changed()
+
+    def _dyn_history_to_binding(self) -> None:
+        """Выбранное из временной истории значение → строка таблицы
+        привязки с пустым именем — единственный путь захвата в
+        постоянную привязку (CM-F08)."""
+        item = self._dyn_history.currentItem()
+        if item is None:
+            return
+        hex_text = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if not hex_text:
+            return
+        row = self.points_table.rowCount()
+        self.points_table.insertRow(row)
+        self.points_table.setItem(row, 0, QTableWidgetItem(hex_text))
+        self.points_table.setItem(row, 1, QTableWidgetItem(""))
+        self.points_table.scrollToItem(
+            self.points_table.item(row, 0)
+        )
+        self._emit_changed()
 
     def _update_steering_btn(self) -> None:
         """Кнопка «Декодер…» открывает настройку кратности режима
