@@ -4355,8 +4355,14 @@ class FlexibleLogicTab(QWidget):
         (protocol>=12)."""
         try:
             proto = self._serial_manager.device_protocol_version()
+            variables = (
+                self._variables_tab.export_config()
+                if self._variables_tab is not None else None
+            )
             flags = (
-                managed_flags(self._runtime_rules, proto)
+                managed_flags(
+                    self._runtime_rules, proto, variables=variables
+                )
                 if self._device_flex_state == "verified" else []
             )
         except Exception:  # noqa: BLE001
@@ -4375,7 +4381,13 @@ class FlexibleLogicTab(QWidget):
         except Exception:  # noqa: BLE001
             proto = 0
         try:
-            info = executor_info(self._runtime_rules, proto)
+            variables = (
+                self._variables_tab.export_config()
+                if self._variables_tab is not None else None
+            )
+            info = executor_info(
+                self._runtime_rules, proto, variables=variables
+            )
         except Exception:  # noqa: BLE001
             info = []
         for i, row in enumerate(self._row_widgets):

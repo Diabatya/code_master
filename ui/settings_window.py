@@ -2188,7 +2188,11 @@ class SettingsWindow(QMainWindow):
             rules_for_blob = [
                 resolve_rule_actions(rule, aux_cfgs) for rule in rules
             ]
-            flex_blob = build_flex_blob(rules_for_blob, protocol=proto)
+            flex_blob = build_flex_blob(
+                rules_for_blob,
+                protocol=proto,
+                variables=self._variables_tab.export_config(),
+            )
         else:
             # Протокол 11 хранит блобы, но FLXB-записей не исполняет —
             # пишем прежний JSON, исполнение ГЛ остаётся на ПК.

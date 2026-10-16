@@ -1115,15 +1115,193 @@ static void test_flxb_v2_container(void)
   Trigger_Poll();
   CHECK(s_sent_count == 1, "FLXB v2 must load aux records");
 
-  /* v3 — неизвестная версия: контейнер отвергается целиком. */
-  s_flex_len = build_flex_blob_ver(&t, 1, 3U);
+  /* v4 — неизвестная версия: контейнер отвергается целиком. */
+  s_flex_len = build_flex_blob_ver(&t, 1, 4U);
   s_flex_blob = s_blob;
   s_sent_count = 0;
   s_count = s_user_count = 0U;
   Trigger_ReloadFlex();
   aux_push_event(3U, 1U);
   Trigger_Poll();
-  CHECK(s_sent_count == 0, "FLXB v3 must be rejected whole");
+  CHECK(s_sent_count == 0, "FLXB v4 must be rejected whole");
+}
+
+/* ---- CM-F02: записи переменных (FLXB v3, протокол 14) -------------- */
+
+/* Updater статической переменной: кадр → псевдо-действие SETFLAG
+ * (src_flags&TX_SETFLAG, tx_data[0]=индекс, [1]=значение,
+ * [2..5]=авто-выкл мс). */
+static void make_setflag_record(trigger_t *t, uint32_t rx_id,
+                                uint8_t flag_idx, uint8_t val,
+                                uint32_t auto_off_ms)
+{
+  make_flex_record(t, 2U, rx_id, 0U, 0U);
+  t->src_flags |= TRIGGER_F_TX_SETFLAG;
+  t->tx_channel = 0U;
+  t->tx_dlc = 0U;
+  t->tx_id = 0U;
+  t->tx_data[0] = flag_idx;
+  t->tx_data[1] = val;
+  t->tx_data[2] = (uint8_t)(auto_off_ms & 0xFFU);
+  t->tx_data[3] = (uint8_t)((auto_off_ms >> 8) & 0xFFU);
+  t->tx_data[4] = (uint8_t)((auto_off_ms >> 16) & 0xFFU);
+  t->tx_data[5] = (uint8_t)((auto_off_ms >> 24) & 0xFFU);
+  fix_crc(t);
+}
+
+/* Слушатель фронта флага: rx_flags&RX_VAR, rx_channel=0xFF,
+ * rx_dlc = фронт (0 любой/1 «стал 1»/2 «стал 0»),
+ * rx_data_mask[0] = индекс флага. */
+static void make_flag_listener(trigger_t *t, uint8_t flag_idx,
+                               uint8_t edge, uint32_t tx_id)
+{
+  make_flex_record(t, 0U, 0U, 0U, tx_id);
+  t->rx_flags |= TRIGGER_F_RX_VAR;
+  t->rx_channel = TRIGGER_VAR_CHAN_FLAG;
+  t->rx_dlc = edge;
+  t->rx_id_mask = 0U;
+  t->rx_data_mask[0] = flag_idx;
+  fix_crc(t);
+}
+
+/* «Динамическая переменная»: rx_flags&RX_VAR, rx_channel=CAN-канал,
+ * mask = offset/len/endian/cmp/kind, rx_data = значение u64. */
+static void make_var_record(trigger_t *t, uint8_t ch, uint32_t rx_id,
+                            uint8_t off, uint8_t len, uint8_t endian,
+                            uint8_t cmp, uint8_t kind, uint64_t val,
+                            uint32_t tx_id)
+{
+  make_flex_record(t, ch, rx_id, 0U, tx_id);
+  t->rx_flags |= TRIGGER_F_RX_VAR;
+  t->rx_data_mask[0] = off;
+  t->rx_data_mask[1] = len;
+  t->rx_data_mask[2] = endian;
+  t->rx_data_mask[3] = cmp;
+  t->rx_data_mask[4] = kind;
+  for (uint8_t i = 0; i < 8U; i++) {
+    t->rx_data[i] = (uint8_t)((val >> (8U * i)) & 0xFFU);
+  }
+  fix_crc(t);
+}
+
+/* Статическая переменная «Зажигание»: updater ставит бит по кадру,
+ * слушатель фронта «стала 1» отправляет ответ — как программа
+ * «статическая → команда» из дампа CM-F02. */
+static void test_static_flag_listener_and_updater(void)
+{
+  trigger_t recs[3];
+  make_flag_listener(&recs[0], 0U, 1U, 0x321U);      /* фронт ON → кадр */
+  make_setflag_record(&recs[1], 0x300U, 0U, 1U, 0U); /* ON-кадр */
+  make_setflag_record(&recs[2], 0x301U, 0U, 0U, 0U); /* OFF-кадр */
+  load_flex(recs, 3);
+
+  can_frame_t on = mk_frame(0U, 0x300U, 1U, (const uint8_t *)"\x01");
+  can_frame_t off = mk_frame(0U, 0x301U, 1U, (const uint8_t *)"\x00");
+  Trigger_OnFrame(&on);          /* флаг 0→1, фронт в очереди */
+  Trigger_Poll();                /* раздача фронта слушателю */
+  CHECK(s_sent_count == 1, "flag ON edge must fire the listener");
+  Trigger_OnFrame(&on);          /* уже 1 — повторного фронта нет */
+  Trigger_Poll();
+  CHECK(s_sent_count == 1, "repeated ON frame must not refire");
+  Trigger_OnFrame(&off);         /* 1→0: фронт OFF слушателю ON — нет */
+  Trigger_Poll();
+  CHECK(s_sent_count == 1, "OFF edge must not fire ON listener");
+  Trigger_OnFrame(&on);          /* 0→1 снова — фронт */
+  Trigger_Poll();
+  CHECK(s_sent_count == 2, "second ON edge must fire again");
+}
+
+/* Численная переменная «поле > порог»: фронт истинности — одна
+ * сработка на переходе, пока условие держится — повторов нет
+ * (_dyn_flags на ПК). */
+static void test_dyn_var_threshold_edge(void)
+{
+  trigger_t recs[1];
+  /* bytes[0..1] little-endian > 100 → кадр 0x321. */
+  make_var_record(&recs[0], 2U, 0x100U, 0U, 2U, 1U, 1U, 1U, 100U,
+                  0x321U);
+  load_flex(recs, 1);
+
+  uint8_t lo[8] = {50, 0};
+  uint8_t hi[8] = {200, 0};
+  can_frame_t f_lo = mk_frame(0U, 0x100U, 8U, lo);
+  can_frame_t f_hi = mk_frame(0U, 0x100U, 8U, hi);
+  Trigger_OnFrame(&f_lo);
+  CHECK(s_sent_count == 0, "below threshold must not fire");
+  Trigger_OnFrame(&f_hi);
+  CHECK(s_sent_count == 1, "rising edge must fire once");
+  Trigger_OnFrame(&f_hi);
+  CHECK(s_sent_count == 1, "sustained value must not refire");
+  Trigger_OnFrame(&f_lo);
+  Trigger_OnFrame(&f_hi);
+  CHECK(s_sent_count == 2, "second crossing must fire again");
+}
+
+/* dyn_cache: позиции поля накапливаются покадрово — значение
+ * сравнивается когда все позиции записаны хотя бы раз. */
+static void test_dyn_cache_partial_then_complete(void)
+{
+  trigger_t recs[1];
+  /* bytes[2..3] BE == 0x0201 («Драйв») → кадр 0x321. */
+  make_var_record(&recs[0], 2U, 0x200U, 2U, 2U, 0U, 0U, 0U, 0x0201U,
+                  0x321U);
+  load_flex(recs, 1);
+
+  uint8_t half[8] = {0, 0, 2, 0};   /* DLC 3 — позиция 3 не записана */
+  uint8_t rest[8] = {0, 0, 2, 1};   /* DLC 4 — поле целиком: 0x0201 */
+  uint8_t other[8] = {0, 0, 2, 9};  /* raw 0x0209 — не совпадает */
+  can_frame_t f_half = mk_frame(0U, 0x200U, 3U, half);
+  can_frame_t f_rest = mk_frame(0U, 0x200U, 4U, rest);
+  can_frame_t f_other = mk_frame(0U, 0x200U, 4U, other);
+  Trigger_OnFrame(&f_half);
+  CHECK(s_sent_count == 0, "incomplete field must not fire");
+  Trigger_OnFrame(&f_rest);
+  CHECK(s_sent_count == 1, "completed binding value must fire");
+  Trigger_OnFrame(&f_other);
+  Trigger_OnFrame(&f_other);
+  CHECK(s_sent_count == 1, "non-matching value must stay silent");
+}
+
+/* Условие «флаг в состоянии» (COND_FLAG): кадровая запись срабатывает
+ * только когда бит поднят — как «ПРИ статическая == 1» на ПК. */
+static void test_cond_flag_gates_frame(void)
+{
+  trigger_t recs[2];
+  make_flex_record(&recs[0], 2U, 0x123U, 0U, 0x456U);
+  recs[0].src_flags |= TRIGGER_F_COND_FLAG;
+  recs[0].src_id = 0U;
+  recs[0].src_dlc = 1U;            /* «есть 1» */
+  fix_crc(&recs[0]);
+  make_setflag_record(&recs[1], 0x300U, 0U, 1U, 0U);
+  load_flex(recs, 2);
+
+  can_frame_t ev = mk_frame(0U, 0x123U, 8U, NULL);
+  can_frame_t on = mk_frame(0U, 0x300U, 1U, (const uint8_t *)"\x01");
+  Trigger_OnFrame(&ev);
+  CHECK(s_sent_count == 0, "frame with flag down must not fire");
+  Trigger_OnFrame(&on);
+  Trigger_Poll();
+  Trigger_OnFrame(&ev);
+  CHECK(s_sent_count == 1, "frame with flag up must fire");
+}
+
+/* «вкл на N мс»: SETFLAG с авто-выкл — спустя срок бит падает,
+ * слушатель фронта «стал 0» исполняется. */
+static void test_setflag_pulse_auto_off(void)
+{
+  trigger_t recs[2];
+  make_setflag_record(&recs[0], 0x300U, 0U, 1U, 50U); /* вкл на 50 мс */
+  make_flag_listener(&recs[1], 0U, 2U, 0x321U);       /* фронт OFF */
+  load_flex(recs, 2);
+
+  can_frame_t on = mk_frame(0U, 0x300U, 1U, (const uint8_t *)"\x01");
+  Trigger_OnFrame(&on);
+  run_ms(30);
+  Trigger_Poll();
+  CHECK(s_sent_count == 0, "auto-off must not fire early");
+  run_ms(30);                      /* 60 мс — авто-выкл + фронт OFF */
+  Trigger_Poll();
+  CHECK(s_sent_count == 1, "auto-off edge must fire OFF listener");
 }
 
 int main(void)
@@ -1152,6 +1330,11 @@ int main(void)
   test_aux_action_executes_without_can();
   test_aux_event_budget_per_poll();
   test_flxb_v2_container();
+  test_static_flag_listener_and_updater();
+  test_dyn_var_threshold_edge();
+  test_dyn_cache_partial_then_complete();
+  test_cond_flag_gates_frame();
+  test_setflag_pulse_auto_off();
 
   if (s_failures == 0) {
     printf("PASS: all flex-runtime checks\n");

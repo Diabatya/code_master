@@ -102,6 +102,25 @@ static uint32_t s_max_lateness_ms;
 static uint8_t s_flash_valid_count; /* включённых записей, прочитанных
   из Flash при старте — диагностика «триггеры пропали после питания» */
 
+/* Автономные переменные ГЛ (FLXB v3, протокол 14):
+ *  - s_flex_flags — биты статических/пользовательских флагов
+ *    (записи-подниматели и действия «Переменная»);
+ *  - s_flag_off_at — сроки авто-выкл «включить на N мс»;
+ *  - очередь переходов флагов — раздаётся слушателям RX_VAR/0xFF
+ *    с бюджетом на Poll (как aux-события);
+ *  - s_flex_var_win/valid — кэш байтов поля dyn_cache-записи
+ *    (ПК тоже накапливает позиции покадрово — _dyn_cache_bytes);
+ *  - s_flex_var_prev — прежняя истинность сравнения на запись
+ *    (фронт false→true — как _dyn_flags на ПК). */
+static uint32_t s_flex_flags;
+static uint32_t s_flag_off_at[FLEX_MAX_FLAGS];
+typedef struct { uint8_t idx; uint8_t val; } flag_event_t;
+static flag_event_t s_flag_ev[FLEX_FLAG_EVENTS_DEPTH];
+static uint8_t s_flag_ev_head, s_flag_ev_tail;
+static uint8_t s_flex_var_win[FLEX_MAX_RECORDS][8];
+static uint16_t s_flex_var_valid[FLEX_MAX_RECORDS];
+static uint32_t s_flex_var_prev;
+
 /* Состояние «кол-во сработок до смены DATA» (формат v3): на запись —
  * счётчик сработок на неизменном содержимом и защёлка «лимит исчерпан»
  * (тот самый «бит в ОЗУ» из ТЗ). Смена DATA на уровне ID-фильтра
@@ -119,6 +138,11 @@ static fire_state_t s_src_state[TRIGGER_MAX_RECORDS];  /* источник кэ�
                                  * только пользовательские записи */
 
 static uint8_t trigger_fields_valid(const trigger_t *trig);
+static uint8_t setflag_exec(const trigger_t *t);
+static void flag_ev_push(uint8_t idx, uint8_t val);
+static uint8_t flag_ev_pop(uint8_t *idx_out, uint8_t *val_out);
+static uint8_t flex_var_edge(uint8_t flex_idx, const trigger_t *t,
+                             const can_frame_t *frame);
 static uint8_t erase_pages(uint32_t from, uint32_t to);
 static uint8_t program_store(uint32_t base, uint32_t generation, uint8_t total,
                              const trigger_t **src);
@@ -265,18 +289,32 @@ static void append_flex(void)
    * пересборку: индексы хвоста могли сместиться. */
   s_count = s_user_count;
   memset(s_flex_queue, 0, sizeof(s_flex_queue));
+  /* Состояние автономных переменных (FLXB v3): флаги, сроки
+   * авто-выкл, очередь фронтов, кэши окон и защёлки истинности
+   * относятся к конкретным записям — при пересборке хвоста индексы
+   * могут сместиться, всё начинается с нуля (холодный старт, как
+   * запись программы заново на ПК). */
+  s_flex_flags = 0U;
+  memset(s_flag_off_at, 0, sizeof(s_flag_off_at));
+  s_flag_ev_head = 0U;
+  s_flag_ev_tail = 0U;
+  memset(s_flex_var_win, 0, sizeof(s_flex_var_win));
+  memset(s_flex_var_valid, 0, sizeof(s_flex_var_valid));
+  s_flex_var_prev = 0U;
   uint32_t len = 0U;
   const uint8_t *p = Storage_FlexPayload(&len);
   if (p == NULL || len < 12U) {
     return;
   }
   /* Версии контейнера: 1 — записи кадр→кадр; 2 — то же + записи
-   * доп. каналов (флаги RX_AUX_EVENT/TX_AUX/COND_AUX, протокол 13).
-   * ПК отдаёт v2 только устройствам с protocol_version >= 13 —
-   * старая прошивка блоб v2 отвергнет целиком (и будет права: в нём
-   * могут быть записи, которых она не понимает). */
+   * доп. каналов (флаги RX_AUX_EVENT/TX_AUX/COND_AUX, протокол 13);
+   * 3 — то же + автономные переменные (RX_VAR/TX_SETFLAG/COND_FLAG,
+   * протокол 14). ПК отдаёт новую версию только устройствам с
+   * достаточным protocol_version — старая прошивка чужой блоб
+   * отвергнет целиком (и будет права: в нём могут быть записи,
+   * которых она не понимает). */
   if (p[0] != 'F' || p[1] != 'L' || p[2] != 'X' || p[3] != 'B'
-      || (p[4] != 1U && p[4] != 2U)) {
+      || p[4] < 1U || p[4] > 3U) {
     return; /* блог старого приложения — чистый JSON без записей */
   }
   uint8_t count = p[5];
@@ -666,12 +704,59 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
       || (trig->rx_flags & ~(TRIGGER_F_MUTE_ECHO | TRIGGER_F_FIRE_ON_BOOT
                              | TRIGGER_F_COND_MASK
                              | TRIGGER_F_TX_EVENT_DATA
-                             | TRIGGER_F_RX_AUX_EVENT)) != 0U
+                             | TRIGGER_F_RX_AUX_EVENT
+                             | TRIGGER_F_RX_VAR)) != 0U
       || (trig->src_flags & ~(TRIGGER_F_MUTE_ECHO
                               | TRIGGER_F_CACHE_ONLY
                               | TRIGGER_F_TX_AUX
-                              | TRIGGER_F_COND_AUX)) != 0U) {
+                              | TRIGGER_F_COND_AUX
+                              | TRIGGER_F_TX_SETFLAG
+                              | TRIGGER_F_COND_FLAG)) != 0U) {
     return 0U;
+  }
+  if (trig->rx_flags & TRIGGER_F_RX_VAR) {
+    /* Событие по переменной (FLXB v3). Несовместимо с другими
+     * некадровыми типами и с лимитом сработок — у переменных его
+     * нет на ПК. */
+    if ((trig->rx_flags
+          & (TRIGGER_F_RX_AUX_EVENT | TRIGGER_F_FIRE_ON_BOOT)) != 0U
+        || trig->rx_rtr != 0U || trig->rx_fire_limit != 0U) {
+      return 0U;
+    }
+    if (trig->rx_channel == TRIGGER_VAR_CHAN_FLAG) {
+      /* Слушатель фронта статического флага: rx_dlc = фронт
+       * (0 любой / 1 «стал 1» / 2 «стал 0»), mask[0] = индекс
+       * флага; все кадровые поля и значение сравнения нулевые. */
+      if (trig->rx_dlc > 2U || trig->rx_extended != 0U
+          || trig->rx_id != 0U || trig->rx_id_mask != 0U
+          || trig->rx_data_mask[0] >= FLEX_MAX_FLAGS
+          || (trig->rx_flags & TRIGGER_F_TX_EVENT_DATA) != 0U) {
+        return 0U;
+      }
+      for (uint8_t i = 1U; i < 8U; i++) {
+        if (trig->rx_data_mask[i] != 0U || trig->rx_data[i] != 0U) {
+          return 0U;
+        }
+      }
+      if (trig->rx_data[0] != 0U) {
+        return 0U;
+      }
+    } else {
+      /* «Динамическая переменная»: mask — offset/len/endian/cmp/
+       * kind (извлечение и вид сравнения), rx_data — значение u64.
+       * Позиции [5..7] маски зарезервированы нулями. */
+      uint8_t off = trig->rx_data_mask[0];
+      uint8_t len = trig->rx_data_mask[1];
+      if (len < 1U || (uint16_t)off + len > 8U
+          || trig->rx_data_mask[2] > 1U
+          || trig->rx_data_mask[3] > 3U
+          || trig->rx_data_mask[4] > 1U
+          || trig->rx_data_mask[5] != 0U
+          || trig->rx_data_mask[6] != 0U
+          || trig->rx_data_mask[7] != 0U) {
+        return 0U;
+      }
+    }
   }
   if (trig->rx_flags & TRIGGER_F_RX_AUX_EVENT) {
     /* Событие доп. канала (FLXB v2): rx_channel = канал 1..7,
@@ -691,7 +776,8 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
         return 0U;
       }
     }
-  } else if (trig->rx_channel > 2U) {
+  } else if ((trig->rx_flags & TRIGGER_F_RX_VAR) == 0U
+             && trig->rx_channel > 2U) {
     return 0U;
   }
   if (trig->src_flags & TRIGGER_F_TX_AUX) {
@@ -708,6 +794,32 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
     }
   } else if (trig->tx_channel > 2U) {
     return 0U;
+  }
+  if (trig->src_flags & TRIGGER_F_TX_SETFLAG) {
+    /* Псевдо-действие «установить флаг» (FLXB v3): tx_data[0] =
+     * индекс, [1] = значение, [2..5] = авто-выкл мс; кадровые
+     * tx-поля не используются и несовместимо с aux-действием. */
+    if ((trig->src_flags & TRIGGER_F_TX_AUX) != 0U
+        || trig->tx_channel != 0U || trig->tx_dlc != 0U
+        || trig->tx_extended != 0U || trig->tx_id != 0U
+        || trig->tx_rtr != 0U || trig->cache_enabled != 0U
+        || trig->tx_data[0] >= FLEX_MAX_FLAGS
+        || trig->tx_data[1] > 1U) {
+      return 0U;
+    }
+  }
+  if (trig->src_flags & TRIGGER_F_COND_FLAG) {
+    /* Условие «флаг в состоянии» (FLXB v3): src_id = индекс флага,
+     * src_dlc = 1 («есть 1») / 2 («есть 0»); src_channel/src_ext
+     * не используются. Может соседствовать с COND_AUX (оба
+     * проверяются по И). */
+    if (trig->cache_enabled != 0U
+        || trig->src_id >= FLEX_MAX_FLAGS
+        || (trig->src_dlc != 1U && trig->src_dlc != 2U)
+        || trig->src_channel != 0U || trig->src_extended != 0U
+        || (trig->src_flags & TRIGGER_F_CACHE_ONLY) != 0U) {
+      return 0U;
+    }
   }
   if (trig->src_flags & TRIGGER_F_COND_AUX) {
     /* Условие по доп. каналу: src_channel = 1..7, src_dlc = 1
@@ -1201,6 +1313,15 @@ static void arm_response(uint8_t index, const trigger_t *t, uint8_t echo)
  * трактовка с ПК, CM-HW-03). */
 static uint8_t aux_cond_ok(const trigger_t *t)
 {
+  /* Условие «флаг в состоянии» (FLXB v3): проверяется в момент
+   * события по биту s_flex_flags — как COND_AUX по логическому
+   * состоянию. */
+  if ((t->src_flags & TRIGGER_F_COND_FLAG) != 0U) {
+    uint8_t need = (t->src_dlc == 1U) ? 1U : 0U;
+    if (((s_flex_flags >> t->src_id) & 1U) != need) {
+      return 0U;
+    }
+  }
   if ((t->src_flags & TRIGGER_F_COND_AUX) == 0U) {
     return 1U;
   }
@@ -1253,6 +1374,12 @@ static uint8_t send_response(const trigger_t *t, uint8_t index,
     (void)index; (void)echo; (void)event_data;
     return aux_exec(t);
   }
+  if (t->src_flags & TRIGGER_F_TX_SETFLAG) {
+    /* Псевдо-действие «установить флаг» (FLXB v3): CAN не трогаем,
+     * переход реального бита ставит событие фронта слушателям. */
+    (void)index; (void)echo; (void)event_data;
+    return setflag_exec(t);
+  }
   if (t->cache_enabled) {
     if (!s_cache_valid[index]) {
       return 0U; /* кэш ещё пуст — отправлять нечего */
@@ -1291,6 +1418,138 @@ static uint8_t send_response(const trigger_t *t, uint8_t index,
     sent |= CanBridge_Transmit(&resp);
   }
   return sent;
+}
+
+/* Переход статического флага ставится в ограниченную очередь —
+ * раздача слушателям RX_VAR/0xFF идёт в Trigger_Poll с бюджетом
+ * (защита от кольцевых программ, как у aux-событий). Переполнение
+ * считается в dropped — потеря диагностируется, не молчит. */
+static void flag_ev_push(uint8_t idx, uint8_t val)
+{
+  uint8_t next = (uint8_t)((s_flag_ev_tail + 1U) % FLEX_FLAG_EVENTS_DEPTH);
+  if (next == s_flag_ev_head) {
+    s_dropped_count++;
+    return;
+  }
+  s_flag_ev[s_flag_ev_tail].idx = idx;
+  s_flag_ev[s_flag_ev_tail].val = val;
+  s_flag_ev_tail = next;
+}
+
+static uint8_t flag_ev_pop(uint8_t *idx_out, uint8_t *val_out)
+{
+  if (s_flag_ev_head == s_flag_ev_tail) {
+    return 0U;
+  }
+  *idx_out = s_flag_ev[s_flag_ev_head].idx;
+  *val_out = s_flag_ev[s_flag_ev_head].val;
+  s_flag_ev_head =
+      (uint8_t)((s_flag_ev_head + 1U) % FLEX_FLAG_EVENTS_DEPTH);
+  return 1U;
+}
+
+/* Псевдо-действие «установить флаг» (FLXB v3): tx_data[0] = индекс,
+ * [1] = значение, [2..5] = авто-выкл мс. Переход реального бита
+ * ставит событие фронта; CAN не отправляется, отказов нет. */
+static uint8_t setflag_exec(const trigger_t *t)
+{
+  uint8_t idx = t->tx_data[0];
+  uint8_t val = t->tx_data[1];
+  uint32_t off_ms = (uint32_t)t->tx_data[2]
+                    | ((uint32_t)t->tx_data[3] << 8)
+                    | ((uint32_t)t->tx_data[4] << 16)
+                    | ((uint32_t)t->tx_data[5] << 24);
+  uint8_t old = (uint8_t)((s_flex_flags >> idx) & 1U);
+  if (val != 0U) {
+    s_flex_flags |= (1UL << idx);
+    s_flag_off_at[idx] = (off_ms != 0U)
+        ? HAL_GetTick() + off_ms : 0U;
+  } else {
+    s_flex_flags &= ~(1UL << idx);
+    s_flag_off_at[idx] = 0U;
+  }
+  if (old != val) {
+    flag_ev_push(idx, val);
+  }
+  return 1U;
+}
+
+/* «Динамическая переменная» (FLXB v3): извлечение поля из подошедшего
+ * кадра и фронт истинности сравнения — как _event_fired/_dyn_flags
+ * на ПК. kind=0 (dyn_cache): позиции поля накапливаются в кэше окна
+ * — значение оценивается после КАЖДОГО подошедшего кадра из смеси
+ * свежих и ранее записанных байтов; оценка начинается, когда все
+ * позиции поля записаны хотя бы раз (complete). kind=1 (численная):
+ * поле должно быть в этом кадре целиком — неполный кадр переменную
+ * не меняет (на ПК значение попадает в invalid и флаг сохраняется —
+ * _event_fired выходит до обновления _dyn_flags). */
+static uint8_t flex_var_edge(uint8_t flex_idx, const trigger_t *t,
+                             const can_frame_t *frame)
+{
+  uint8_t off = t->rx_data_mask[0];
+  uint8_t len = t->rx_data_mask[1];
+  uint8_t *win = s_flex_var_win[flex_idx];
+  uint8_t complete = 1U;
+  if (t->rx_data_mask[4] == 0U) {
+    /* dyn_cache: покадровое обновление кэша позиций. */
+    uint16_t need = (uint16_t)((1U << len) - 1U);
+    for (uint8_t i = 0U; i < len; i++) {
+      uint8_t pos = (uint8_t)(off + i);
+      if (pos < frame->dlc) {
+        win[i] = frame->data[pos];
+        s_flex_var_valid[flex_idx] |= (uint16_t)(1U << i);
+      }
+    }
+    if ((s_flex_var_valid[flex_idx] & need) != need) {
+      complete = 0U;
+    }
+  } else {
+    /* Численная: поле целиком из этого кадра. */
+    for (uint8_t i = 0U; i < len; i++) {
+      uint8_t pos = (uint8_t)(off + i);
+      if (pos >= frame->dlc) {
+        complete = 0U;
+        break;
+      }
+      win[i] = frame->data[pos];
+    }
+  }
+  if (complete == 0U) {
+    return 0U;
+  }
+  uint64_t raw = 0U;
+  if (t->rx_data_mask[2] == 0U) {
+    /* Big-endian окна: первая позиция — старший байт (порядок
+     * списка байтов dyn_cache и sblp="be" на ПК). */
+    for (uint8_t i = 0U; i < len; i++) {
+      raw = (raw << 8) | win[i];
+    }
+  } else {
+    /* Little-endian: последняя позиция — старший байт. */
+    for (int8_t i = (int8_t)len - 1; i >= 0; i--) {
+      raw = (raw << 8) | win[i];
+    }
+  }
+  uint8_t cmp = t->rx_data_mask[3];
+  if (cmp == 3U) {
+    return 1U; /* «импульсная» — каждый подошедший кадр */
+  }
+  uint64_t val = 0U;
+  for (uint8_t i = 0U; i < 8U; i++) {
+    val |= ((uint64_t)t->rx_data[i]) << (8U * i);
+  }
+  uint8_t cond =
+      (cmp == 0U) ? (raw == val)
+                  : ((cmp == 1U) ? (raw > val) : (raw < val));
+  uint32_t bit = 1UL << flex_idx;
+  uint8_t fired = (cond != 0U
+                   && (s_flex_var_prev & bit) == 0U) ? 1U : 0U;
+  if (cond != 0U) {
+    s_flex_var_prev |= bit;
+  } else {
+    s_flex_var_prev &= ~bit;
+  }
+  return fired;
 }
 
 /* Постановка серии записи ГЛ в очередь: серия сохраняет свой срок,
@@ -1454,12 +1713,23 @@ void Trigger_OnFrame(const can_frame_t *frame)
        *    exec_delay-отсрочки, а такие действия компилятор на МК
        *    не отдаёт — каждый совпавший кадр ставит свою серию
        *    отправок со своим расписанием (ревью CM-R1). */
-      if (!rx_data_matches(t, frame)) {
-        continue;
-      }
-      fire_track(&s_rx_state[i], frame, t, 0U, 1U);
-      if (s_rx_state[i].suppress != 0U) {
-        continue;
+      if ((t->rx_flags & TRIGGER_F_RX_VAR) != 0U) {
+        /* Событие по переменной (FLXB v3): rx_data/mask — параметры
+         * извлечения и сравнения, а не фильтр DATA. Слушатель фронта
+         * флага (rx_channel==0xFF) сюда не доходит — не проходит
+         * rx_header_matches по каналу. */
+        if (t->rx_channel == TRIGGER_VAR_CHAN_FLAG
+            || !flex_var_edge((uint8_t)(i - s_user_count), t, frame)) {
+          continue;
+        }
+      } else {
+        if (!rx_data_matches(t, frame)) {
+          continue;
+        }
+        fire_track(&s_rx_state[i], frame, t, 0U, 1U);
+        if (s_rx_state[i].suppress != 0U) {
+          continue;
+        }
       }
     } else {
       if (t->rx_fire_limit != 0U) {
@@ -1559,6 +1829,38 @@ void Trigger_Poll(void)
   uint8_t a_ch, a_on;
   while (aux_budget-- > 0U && AuxOut_TakeEvent(&a_ch, &a_on)) {
     Trigger_OnAuxEvent(a_ch, a_on);
+  }
+  /* Авто-выкл «включить на N мс» (FLXB v3): просроченный флаг
+   * сбрасывается и ставит событие фронта — как на ПК таймер
+   * _set_flag(pulse_ms). */
+  for (uint8_t f = 0U; f < FLEX_MAX_FLAGS; f++) {
+    if (s_flag_off_at[f] != 0U
+        && (int32_t)(now - s_flag_off_at[f]) >= 0) {
+      s_flag_off_at[f] = 0U;
+      if ((s_flex_flags & (1UL << f)) != 0U) {
+        s_flex_flags &= ~(1UL << f);
+        flag_ev_push(f, 0U);
+      }
+    }
+  }
+  /* Фронты статических флагов (FLXB v3): раздача слушателям
+   * RX_VAR/0xFF с бюджетом — каскад «флаг → программа → флаг»
+   * обрезается до бюджета за проход (как aux-события). */
+  uint8_t flag_budget = FLEX_FLAG_EVENTS_PER_POLL;
+  uint8_t f_idx, f_val;
+  while (flag_budget-- > 0U && flag_ev_pop(&f_idx, &f_val)) {
+    uint8_t edge = (f_val != 0U) ? 1U : 2U;
+    for (uint8_t i = s_user_count; i < s_count; i++) {
+      const trigger_t *t = &s_triggers[i];
+      if (!t->enabled
+          || (t->rx_flags & TRIGGER_F_RX_VAR) == 0U
+          || t->rx_channel != TRIGGER_VAR_CHAN_FLAG
+          || t->rx_data_mask[0] != f_idx
+          || (t->rx_dlc != 0U && t->rx_dlc != edge)) {
+        continue;
+      }
+      flex_fire_ex(i, t, NULL, 0U);
+    }
   }
   /* STAGE без COMMIT протухает: оборванная сессия записи (USB-обрыв
    * между STAGE и COMMIT) держала staged-записи вооружёнными
