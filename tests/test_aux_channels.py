@@ -389,3 +389,75 @@ class TestResolvedMarkerCMN14:
             self._vars(freq=777, duty=70),
         )
         assert out["aux_pwm_freq"] == 777
+
+
+# ------------------------------------------------------------------
+# CM-F09: миграция «настроек выхода» в снимок действия
+# ------------------------------------------------------------------
+
+
+class TestMigrateAuxOutSnapshot:
+    """migrate_aux_out_snapshot: действия «из настроек выхода»
+    резолвятся в aux_resolved-снимок по сохранённым полям, затем
+    черновые out_mode/pwm_* снимаются из конфигов каналов."""
+
+    def _payload(self):
+        return {
+            "variables": {
+                "aux": [
+                    {"type": "aux", "name": "Вент", "channel": 2,
+                     "out_mode": "pwm", "pwm_freq": 250,
+                     "pwm_duty": 40},
+                    {"type": "flag", "name": "Бит", "storage": "ram"},
+                ],
+            },
+            "flexible_rules": [{
+                "name": "Программа",
+                "actions": [{
+                    "type": "aux", "aux_enabled": True,
+                    "aux_use_var": True, "aux_channel": 2,
+                    "aux_mode": "on", "aux_duration_ms": 0,
+                }],
+            }],
+            "flexible_rules_active": [{
+                "name": "Активная",
+                "actions": [{
+                    "type": "aux", "aux_enabled": True,
+                    "aux_use_var": True, "aux_channel": 2,
+                    "aux_mode": "off",
+                }],
+            }],
+        }
+
+    def test_resolves_then_strips(self) -> None:
+        from core.aux_channels import migrate_aux_out_snapshot
+        payload = migrate_aux_out_snapshot(self._payload())
+        rule = payload["flexible_rules"][0]["actions"][0]
+        assert rule["aux_mode"] == "pwm"
+        assert rule["aux_pwm_freq"] == 250
+        assert rule["aux_pwm_duty"] == 40
+        assert rule["aux_resolved"] is True
+        active = payload["flexible_rules_active"][0]["actions"][0]
+        assert active["aux_mode"] == "pwm" and active["aux_resolved"]
+        aux_cfg = payload["variables"]["aux"][0]
+        assert "out_mode" not in aux_cfg
+        assert "pwm_freq" not in aux_cfg
+        assert aux_cfg["name"] == "Вент" and aux_cfg["channel"] == 2
+        # Не-aux строки не тронуты.
+        assert payload["variables"]["aux"][1]["storage"] == "ram"
+
+    def test_idempotent(self) -> None:
+        from core.aux_channels import migrate_aux_out_snapshot
+        once = migrate_aux_out_snapshot(self._payload())
+        twice = migrate_aux_out_snapshot(once)
+        assert twice == once
+
+    def test_no_variables_section(self) -> None:
+        """Файл без «variables» — правила не тронуты."""
+        from core.aux_channels import migrate_aux_out_snapshot
+        payload = {"flexible_rules": [{"actions": [
+            {"type": "aux", "aux_use_var": True, "aux_channel": 2,
+             "aux_mode": "on"},
+        ]}]}
+        out = migrate_aux_out_snapshot(payload)
+        assert out["flexible_rules"][0]["actions"][0]["aux_mode"] == "on"

@@ -260,6 +260,37 @@ def resolve_rule_actions(
     return out
 
 
+def migrate_aux_out_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    """CM-F09 п.9: одноразовая миграция «настроек выхода» переменных
+    в снимки действий ГЛ.
+
+    Диалог доп. канала больше не редактирует ``out_mode``/``pwm_*`` —
+    старые действия с ``aux_use_var`` резолвятся по СОХРАНЁННЫМ полям
+    в канонический снимок (``aux_resolved``) ДО их снятия: сигнал
+    ранее записанных программ не меняется. Затем черновые поля
+    убираются из конфигов каналов — резолв по исчезнувшему полю
+    невозможен. Идемпотентно: ``aux_resolved``-действия и конфиги без
+    полей проходят без изменений."""
+    variables = payload.get("variables")
+    aux_cfgs = (
+        variables.get("aux") if isinstance(variables, dict) else None
+    )
+    for key in ("flexible_rules", "flexible_rules_active"):
+        rules = payload.get(key)
+        if isinstance(rules, list):
+            payload[key] = [
+                resolve_rule_actions(r, aux_cfgs)
+                if isinstance(r, dict) else r
+                for r in rules
+            ]
+    if isinstance(aux_cfgs, list):
+        for cfg in aux_cfgs:
+            if isinstance(cfg, dict) and cfg.get("type") == "aux":
+                for k in ("out_mode", "pwm_freq", "pwm_duty"):
+                    cfg.pop(k, None)
+    return payload
+
+
 def _int(value: Any) -> int:
     try:
         return int(value or 0)

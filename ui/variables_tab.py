@@ -50,7 +50,6 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QRegularExpressionValidator
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -80,12 +79,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.aux_channels import (
-    AUX_PINS,
-    aux_pin_conflict,
-    migrate_aux_variables,
-    quantize_pwm,
-)
+from core.aux_channels import migrate_aux_variables
 from core.can_protocol import pack_can_frame
 from core import steering_decoder
 from core import variable_decode
@@ -4304,14 +4298,12 @@ class VariableDialog(QDialog):
         return base
 
 
-# Функции доп. канала входа/выхода (отчёт мастера: в таблице
-# «Входы и выходы» настраивается только конкретный канал — без
-# информации о фреймах).
+# Функции доп. канала (CM-F09 п.7): все семь каналов — выходы,
+# «Дискретный вход/выход» убраны — фиктивного физического входа из
+# выходной карты нет.
 _AUX_FUNCTIONS = (
     ("analog_out", "Аналоговый выход"),
     ("pwm", "ШИМ"),
-    ("discrete_in", "Дискретный вход"),
-    ("discrete_out", "Дискретный выход"),
 )
 
 # Вид «Переменная» — именованный флаг из одного бита ОЗУ/ПЗУ
@@ -4319,150 +4311,6 @@ _AUX_FUNCTIONS = (
 # имя фигурирует в Гибкой логике (событие «Стала 1/0», условие,
 # действия «включить/включить на/выключить»).
 _TYPE_FLAG = "flag"
-
-
-class _AuxChannelsDialog(QDialog):
-    """Состояние семи каналов выхода с устройства (CMD_AUX_GET) и
-    владение спорными пинами (CMD_AUX_MAP) — протокол 13.
-
-    Строки: канал (новая нумерация), физический пин, режим AUX_MODE_*,
-    «работает» (логическое состояние — ШИМ в нуле и 0% duty считаются
-    активными), уровень на пине. Спорные пины PA14/PD2/PB3 отдаются
-    каналам галочками владения; снятая галочка возвращает пин
-    SWD/TERM-функции. Маска хранится в CFGH — переживает перезагрузку
-    и обновление."""
-
-    _SHARED = (  # (канал, бит владения, чем делится пин)
-        (1, 0x01, "SWD (SWCLK)"),
-        (6, 0x20, "CAN2 TERM"),
-        (7, 0x40, "CAN1 TERM"),
-    )
-    _MODES = ("off", "on", "pulse", "pwm")
-
-    def __init__(self, serial_manager, font: QFont,
-                 parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._sm = serial_manager
-        self.setWindowTitle(tr("Каналы выхода устройства"))
-        self.setMinimumWidth(430)
-        layout = QVBoxLayout(self)
-        layout.setSpacing(8)
-
-        state = serial_manager.read_aux_state() if serial_manager else None
-        if state is None:
-            hint = QLabel(tr(
-                "Устройство не поддерживает расширенные каналы "
-                "(протокол 13) или не отвечает — обновите прошивку."
-            ))
-            hint.setFont(font)
-            hint.setWordWrap(True)
-            _selectable(hint)
-            layout.addWidget(hint)
-            close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-            close.rejected.connect(self.reject)
-            close.clicked.connect(self.reject)
-            layout.addWidget(close)
-            return
-
-        owned = state["owned"]
-        active = state["active"]
-        level = state["level"]
-        modes = state["modes"]
-
-        # Расширенный ответ протокола 13 (CM-N6): фактические фазы
-        # сигнала в мс — показываем ПРИМЕНЁННЫЙ ШИМ, не запрошенный.
-        on_ms = state.get("on_ms") or []
-        off_ms = state.get("off_ms") or []
-
-        table = QTableWidget(7, 6)
-        table.setFont(font)
-        table.setHorizontalHeaderLabels(
-            [tr("Канал"), tr("Пин"), tr("Режим"), tr("Работает"),
-             tr("Уровень"), tr("Фазы (мс)")]
-        )
-        table.verticalHeader().setVisible(False)
-        table.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers
-        )
-        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        for ch in range(1, 8):
-            r = ch - 1
-            mode = modes[r] if r < len(modes) else 0
-            phases = "—"
-            if mode in (2, 3) and r < len(on_ms) and r < len(off_ms):
-                phases = f"{on_ms[r]}+{off_ms[r]}"
-            cells = (
-                str(ch),
-                AUX_PINS[ch],
-                self._MODES[mode] if mode < len(self._MODES) else "?",
-                "✓" if active & (1 << r) else "—",
-                "1" if level & (1 << r) else "0",
-                phases,
-            )
-            for c, text in enumerate(cells):
-                item = QTableWidgetItem(text)
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(r, c, item)
-        table.resizeColumnsToContents()
-        table.setFixedHeight(
-            table.verticalHeader().defaultSectionSize() * 7
-            + table.horizontalHeader().height() + 4
-        )
-        layout.addWidget(table)
-
-        layout.addWidget(QLabel(tr("Владение спорными пинами:")))
-        self._own_checks: dict[int, QCheckBox] = {}
-        for ch, bit, conflict in self._SHARED:
-            cb = QCheckBox(
-                tr("{0} ({1}) — отдать каналу {2}: {1} отключён")
-                .format(AUX_PINS[ch], conflict, ch)
-            )
-            cb.setFont(font)
-            cb.setChecked(bool(owned & bit))
-            cb.setToolTip(tr(
-                "Снятая галочка возвращает пин функции {0}"
-            ).format(conflict))
-            layout.addWidget(cb)
-            self._own_checks[bit] = cb
-        warn = QLabel(tr(
-            "PA14 — отладочный SWCLK: после отдачи каналу прошивка по "
-            "SWD недоступна до перезагрузки с неотданным пином "
-            "(маска хранится в CFGH и применяется при старте)."
-        ))
-        warn.setFont(font)
-        warn.setWordWrap(True)
-        warn.setStyleSheet("color: #B03030;")
-        _selectable(warn)
-        layout.addWidget(warn)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Apply
-            | QDialogButtonBox.StandardButton.Close
-        )
-        apply_btn = buttons.button(QDialogButtonBox.StandardButton.Apply)
-        apply_btn.setText(tr("Применить владение"))
-        apply_btn.clicked.connect(self._apply_ownership)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def _apply_ownership(self) -> None:
-        mask = 0
-        for bit, cb in self._own_checks.items():
-            if cb.isChecked():
-                mask |= bit
-        actual = self._sm.set_aux_pins_mask(mask)
-        if actual is None:
-            QMessageBox.warning(
-                self, tr("Владение пинами"),
-                tr("Команда CMD_AUX_MAP не подтверждена устройством")
-            )
-            return
-        for bit, cb in self._own_checks.items():
-            cb.setChecked(bool(actual & bit))
-        QMessageBox.information(
-            self, tr("Владение пинами"),
-            tr("Применено: маска 0x{0:02X}").format(actual)
-        )
 
 
 class _AuxDialog(QDialog):
@@ -4481,9 +4329,27 @@ class _AuxDialog(QDialog):
         super().__init__(parent)
         font = QFont("Segoe UI", 9)
         self.setWindowTitle(tr("Настройка доп. канала / переменной"))
-        self.setMinimumWidth(420)
+        # CM-F09 п.2: ~×1.5 от прежней ширины (420 → 630 логических
+        # px), с потолком от доступного экрана под DPI-масштаб.
+        self.setMinimumWidth(630)
         self.setFont(font)
+        screen = self.screen() or (
+            QApplication.primaryScreen() if QApplication.instance()
+            else None
+        )
+        if screen is not None:
+            self.setMaximumWidth(
+                int(screen.availableGeometry().width() * 0.9)
+            )
         config = config or {}
+        # Легаси-поля настроек выхода (out_mode/pwm_freq/pwm_duty)
+        # проносятся сквозь диалог для уже сохранённых действий
+        # «из настроек выхода» — до их миграции в снимок действия
+        # поля не редактируются (настройка убрана, CM-F09 п.8–9).
+        self._legacy_out = {
+            k: config[k] for k in ("out_mode", "pwm_freq", "pwm_duty")
+            if k in config
+        }
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -4516,21 +4382,18 @@ class _AuxDialog(QDialog):
         ch_layout.setContentsMargins(0, 0, 0, 0)
         ch_layout.setSpacing(6)
         row = QHBoxLayout()
-        row.addWidget(QLabel(tr("Пин (канал):")))
+        # CM-F09 п.5–6: «Пин (канал)» → «Канал»; физические имена
+        # пинов (PA14…) из этого UI убраны — оператор работает с
+        # номером канала, проверки занятости SWD/TERM остаются
+        # внутренними и объясняются при операции.
+        row.addWidget(QLabel(tr("Канал:")))
         self._channel = QSpinBox()
         self._channel.setFont(font)
-        # Семь выходов в новой нумерации (CM-HW-02, aux_channels.py):
-        # 1=PA14, 2=PA15, 3=PC10, 4=PC11, 5=PC12, 6=PD2, 7=PB3.
+        # Семь выходов в новой нумерации (CM-HW-02, aux_channels.py).
         self._channel.setRange(1, 7)
         self._channel.setValue(int(config.get("channel", 1) or 1))
         self._channel.setFixedWidth(64)
         row.addWidget(self._channel)
-        # Реальное имя пина и ограничение (SWCLK/TERM) — CM-N7:
-        # доступность показывается явно, а не «канал есть = пин
-        # свободен».
-        self._pin_label = QLabel()
-        self._pin_label.setFont(font)
-        row.addWidget(self._pin_label)
         row.addWidget(QLabel(tr("Функция канала:")))
         self._function = QComboBox()
         self._function.setFont(font)
@@ -4540,63 +4403,8 @@ class _AuxDialog(QDialog):
         self._function.setCurrentIndex(fidx if fidx >= 0 else 0)
         row.addWidget(self._function, 1)
         ch_layout.addLayout(row)
-
-        # Настройки выхода (CM-N7): константа Выкл/Вкл или ШИМ с
-        # частотой и заполнением — действие ГЛ «из настроек выхода»
-        # берёт режим отсюда.
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel(tr("Режим выхода:")))
-        self._out_mode = QComboBox()
-        self._out_mode.setFont(font)
-        self._out_mode.addItem(tr("Выкл"), "off")
-        self._out_mode.addItem(tr("Вкл"), "on")
-        self._out_mode.addItem(tr("ШИМ"), "pwm")
-        midx = self._out_mode.findData(str(config.get("out_mode", "on")))
-        self._out_mode.setCurrentIndex(midx if midx >= 0 else 1)
-        mode_row.addWidget(self._out_mode)
-        mode_row.addStretch()
-        ch_layout.addLayout(mode_row)
-
-        self._pwm_row = QWidget()
-        pwm_row = QHBoxLayout(self._pwm_row)
-        pwm_row.setContentsMargins(0, 0, 0, 0)
-        pwm_row.addWidget(QLabel(tr("Частота:")))
-        self._pwm_freq = QSpinBox()
-        self._pwm_freq.setFont(font)
-        # Та же сетка, что у МК (quantize_pwm, aux_out.c): шаг 1 мс,
-        # потолок 500 Гц (CM-N6).
-        self._pwm_freq.setRange(1, 500)
-        self._pwm_freq.setValue(int(config.get("pwm_freq", 250) or 250))
-        self._pwm_freq.setSuffix(tr(" Гц"))
-        pwm_row.addWidget(self._pwm_freq)
-        pwm_row.addWidget(QLabel(tr("Заполнение:")))
-        self._pwm_duty = QSpinBox()
-        self._pwm_duty.setFont(font)
-        self._pwm_duty.setRange(0, 100)
-        self._pwm_duty.setValue(int(config.get("pwm_duty", 50) or 0))
-        self._pwm_duty.setSuffix(" %")
-        pwm_row.addWidget(self._pwm_duty)
-        self._applied = QLabel()
-        self._applied.setFont(font)
-        self._applied.setStyleSheet("color: #9A9AA5;")
-        pwm_row.addWidget(self._applied)
-        pwm_row.addStretch()
-        ch_layout.addWidget(self._pwm_row)
-
-        self._conflict = QLabel()
-        self._conflict.setFont(font)
-        self._conflict.setWordWrap(True)
-        self._conflict.setStyleSheet("color: #B03030;")
-        _selectable(self._conflict)
-        ch_layout.addWidget(self._conflict)
         ch_layout.addStretch()
         self._stack.addWidget(channel_page)
-
-        self._channel.valueChanged.connect(self._refresh_aux_out)
-        self._out_mode.currentIndexChanged.connect(self._refresh_aux_out)
-        self._pwm_freq.valueChanged.connect(self._refresh_aux_out)
-        self._pwm_duty.valueChanged.connect(self._refresh_aux_out)
-        self._refresh_aux_out()
 
         flag_page = QWidget()
         flag_layout = QVBoxLayout(flag_page)
@@ -4636,10 +4444,11 @@ class _AuxDialog(QDialog):
         self._kind.currentIndexChanged.connect(self._stack.setCurrentIndex)
         layout.addWidget(self._stack)
 
+        # CM-F09 п.3 — точный текст подсказки.
         self._hint = QLabel(tr(
-            "Количество пинов и их названия появятся после "
-            "программирования каналов в МК. Здесь настраивается "
-            "только роль конкретного канала."
+            "Количество выходов и входов и их названия появятся после "
+            "программирования каналов в устройство. Здесь "
+            "настраивается только роль конкретного канала."
         ))
         self._hint.setFont(font)
         self._hint.setWordWrap(True)
@@ -4658,37 +4467,6 @@ class _AuxDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def _refresh_aux_out(self) -> None:
-        """Подписи пина/конфликта и фактические фазы ШИМ (CM-N7):
-        показываем ПРИМЕНЁННЫЙ сигнал после квантования в сетку
-        целых мс — не запрошенный."""
-        ch = self._channel.value()
-        pin = AUX_PINS.get(ch, "?")
-        conflict = aux_pin_conflict(ch)
-        self._pin_label.setText(pin)
-        mode = self._out_mode.currentData()
-        self._pwm_row.setVisible(mode == "pwm")
-        if conflict:
-            self._conflict.setText(
-                tr("⚠ {0}: {1}").format(pin, tr(conflict))
-            )
-        else:
-            self._conflict.setText("")
-        self._conflict.setVisible(bool(conflict))
-        if mode == "pwm":
-            q = quantize_pwm(self._pwm_freq.value(), self._pwm_duty.value())
-            if q is None:
-                self._applied.setText(tr("недостижимо"))
-            else:
-                period, on, off = q
-                self._applied.setText(
-                    tr("≈ {0}+{1} мс ({2:.1f}%)").format(
-                        on, off, on * 100.0 / period
-                    )
-                )
-        else:
-            self._applied.setText("")
-
     @property
     def config(self) -> dict[str, Any]:
         if self._kind.currentData() == _TYPE_FLAG:
@@ -4697,15 +4475,18 @@ class _AuxDialog(QDialog):
                 "name": self._name_edit.text().strip(),
                 "storage": self._storage.currentData(),
             }
-        return {
+        cfg = {
             "type": "aux",
             "name": self._name_edit.text().strip(),
             "channel": self._channel.value(),
             "function": self._function.currentData(),
-            "out_mode": self._out_mode.currentData(),
-            "pwm_freq": self._pwm_freq.value(),
-            "pwm_duty": self._pwm_duty.value(),
         }
+        # CM-F09 п.9: легаси out_mode/pwm_* проносятся неизменными,
+        # пока действия «из настроек выхода» не мигрированы в снимок
+        # (import-time resolve). Новых конфигов с этими полями
+        # диалог больше не создаёт.
+        cfg.update(self._legacy_out)
+        return cfg
 
 
 class _VariableRow(QFrame):
@@ -4928,25 +4709,19 @@ class _VariableRow(QFrame):
             )
             return
         if cfg_type == "aux":
-            # Доп. канал: пин (реальное имя) + применённый режим
-            # выхода из настроек (CM-N7).
+            # CM-F09 п.5: физические имена пинов и черновой «режим
+            # выхода» из UI убраны — строка показывает номер канала
+            # и роль (функцию); режим/ШИМ задаётся действием ГЛ.
             ch = int(self.config.get("channel", 1) or 1)
-            pin = AUX_PINS.get(ch, f"#{ch}")
-            out_mode = str(self.config.get("out_mode", "on") or "on")
-            if out_mode == "pwm":
-                q = quantize_pwm(
-                    int(self.config.get("pwm_freq", 0) or 0),
-                    int(self.config.get("pwm_duty", 0) or 0),
-                )
-                mode_text = (
-                    tr("ШИМ ≈{0:.0f}%").format(q[1] * 100.0 / q[0])
-                    if q else tr("ШИМ?")
-                )
-            elif out_mode == "off":
-                mode_text = tr("Выкл")
-            else:
-                mode_text = tr("Вкл")
-            self._state_label.setText(f"{pin} · {mode_text}")
+            func = str(self.config.get("function", "") or "")
+            func_text = next(
+                (tr(t) for code, t in _AUX_FUNCTIONS if code == func),
+                "",
+            )
+            text = tr("Канал №{0}").format(ch)
+            if func_text:
+                text += f" · {func_text}"
+            self._state_label.setText(text)
             return
         if cfg_type == _TYPE_CACHE:
             # «Кэш переменная»: до записи — прочерки; после записи в
@@ -5330,20 +5105,15 @@ class VariablesTab(QWidget):
         # размещает settings_window через save_variables_button.
         self._save_btn = QPushButton(tr("Сохранить переменные"))
         self._clear_btn = QPushButton(tr("Очистить"))
-        self._aux_state_btn = QPushButton(tr("Каналы выхода…"))
-        self._aux_state_btn.setToolTip(tr(
-            "Состояние семи выходов с устройства и владение "
-            "спорными пинами PA14/PD2/PB3 (протокол 13)"
-        ))
-        for btn in (self._save_btn, self._clear_btn, self._aux_state_btn):
+        for btn in (self._save_btn, self._clear_btn):
             btn.setFont(self._font)
             btn.setFixedHeight(30)
-        btn_row.addWidget(self._aux_state_btn)
+        # CM-F09 п.1: пользовательская кнопка «Каналы выхода…»
+        # (состояние пинов/владение) из «Переменных» удалена.
         btn_row.addWidget(self._clear_btn)
         btn_row.addStretch()
         self._save_btn.clicked.connect(self._save_file)
         self._clear_btn.clicked.connect(self._clear_all)
-        self._aux_state_btn.clicked.connect(self._show_aux_channels)
         layout.addLayout(btn_row)
 
         self._hint = QLabel(tr(
@@ -5418,13 +5188,6 @@ class VariablesTab(QWidget):
                 stale = variable_decode.stale_ms(row.config)
                 if stale and now - row._last_valid_ts > stale / 1000.0:
                     row.mark_stale()
-
-    def _show_aux_channels(self) -> None:
-        """Диалог состояния выходов: CMD_AUX_GET (режимы/уровни) +
-        CMD_AUX_MAP (владение спорными пинами) — CM-HW-02."""
-        _AuxChannelsDialog(
-            self._serial_manager, self._font, self
-        ).exec()
 
     def _on_can_frames(self, frames: list[dict[str, Any]]) -> None:
         """Пересчитывает значения байтовых переменных по приходящим
