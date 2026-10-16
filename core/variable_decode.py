@@ -10,12 +10,16 @@
   сумма/склейка не используется;
 - ``sblp`` "be"/"le" — сборка по порядку старшинства; иначе —
   сумма байтов (легаси-контракт отчёта мастера);
-- ``out_range == "steering"`` — значение только из
-  ``steering_decoder``: конфликт, отсутствие класса/калибровки,
-  неполный кадр и просроченные данные дают valid=False и не
-  удовлетворяют численным условиям ГЛ;
+- ``out_range == "degrees"`` (единый режим «Градусы», CM-F05;
+  легаси-ключ ``"steering"`` мигрируется в ``"degrees"``) —
+  значение только из ``steering_decoder``: нейтраль/масштаб —
+  таблица привязки переменной, класс знака — делители декодера;
+  конфликт, отсутствие класса/точек стороны, неполный кадр и
+  просроченные данные дают valid=False и не удовлетворяют
+  численным условиям ГЛ;
 - устаревание: ``stale_ms`` конфига декодера — политика свежести
-  значения для условий ГЛ (0 = не устаревает).
+  значения для условий ГЛ (0 = не устаревает; поле удалено из
+  диалога CM-F05, значение сохранено при миграции).
 """
 
 from __future__ import annotations
@@ -73,7 +77,7 @@ def decode_var_value(
         status    str          — ok / incomplete / no-data /
                                  конфликты декодера / no-calibration…
 
-    Нестеering-режимы возвращают value=None — маппинг по точкам
+    Неградусные режимы возвращают value=None — маппинг по точкам
     графика у отображения и ГЛ исторически разный (экстраполяция vs
     насыщение) и остаётся на вызывающей стороне; единым является
     только контракт RAW и отказ при неполном поле."""
@@ -87,29 +91,39 @@ def decode_var_value(
                 "raw": None, "raw_hex": "",
                 "status": ("no-data" if not data else "incomplete")}
     if is_steering(cfg):
-        res = steering_decoder.decode_raw(raw, cfg.get("steering"))
+        # «Градусы»: нейтраль и масштаб — из таблицы привязки
+        # переменной (CM-F05 п.3–4); делители/инверсия/единица —
+        # из конфига декодера. Флаг enabled легаси-конфига
+        # «steering» почитаем; у чистых «degrees» без декодера он
+        # отсутствует — декод всё равно работает по точкам.
+        scfg = dict(cfg.get("steering") or {})
+        if "enabled" not in scfg:
+            scfg["enabled"] = True
+        res = steering_decoder.decode_raw(
+            raw, scfg, points=cfg.get("points")
+        )
         return {"complete": True, "valid": bool(res["valid"]),
                 "value": res["angle"], "raw": raw,
-                "raw_hex": res["raw_hex"], "status": res["status"]}
+                "raw_hex": res["raw_hex"], "status": res["status"],
+                "unit": steering_decoder.normalize_config(
+                    cfg.get("steering")
+                )["unit"]}
     return {"complete": True, "valid": True, "value": None,
             "raw": raw, "raw_hex": f"0x{raw:X}", "status": "ok"}
 
 
 def is_steering(cfg: dict[str, Any]) -> bool:
-    """Переменная декодируется декодером угла руля: режим «Угол
-    руля (кратность)» либо «Градусы» с включённой настройкой
-    кратности — маршрут из задания открывает тот же декодер из
-    выбора «Градусы» (совместимость прежнего режима сохранена:
-    без настроенного декодера «Градусы» работают по таблице
-    точек, как раньше)."""
-    out_range = str(cfg.get("out_range", "") or "")
-    if out_range == "steering":
-        return True
-    if out_range == "degrees":
-        return steering_decoder.normalize_config(
-            cfg.get("steering")
-        )["enabled"]
-    return False
+    """Переменная декодируется декодером «Градусы»: единый режим
+    ``out_range == "degrees"`` (CM-F05; легаси ``"steering"``
+    читаем тем же маршрутом — миграция в «Градусы» при записи
+    конфига). Нейтраль и масштаб — из таблицы привязки."""
+    return str(cfg.get("out_range", "") or "") in ("degrees", "steering")
+
+
+def steering_unit(cfg: dict[str, Any]) -> str:
+    """Единица величины («none»/«celsius»/«fahrenheit») для подписи
+    в контрольных строках и графике (CM-F07)."""
+    return steering_decoder.normalize_config(cfg.get("steering"))["unit"]
 
 
 def stale_ms(cfg: dict[str, Any]) -> int:

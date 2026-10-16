@@ -146,13 +146,14 @@ class TestValuePageValidity:
 
     def test_valid_then_no_calibration_shows_status(self, qapp) -> None:
         steer = dict(_STEER)
-        steer["calib"] = []  # класс есть, калибровки нет
+        steer["calib"] = []  # класс есть, опорных точек стороны нет
         row = _row(_num_cfg(steering=steer))
         tab = _tab([row])
         page = _page(row, tab, _num_cfg(steering=steer))
         tab._on_can_frames([_frame(data=b"\x00\x10")])
         page._update_live_label()
-        assert "калибров" in page.live_label.text().lower()
+        # CM-F05: статус «нет точек стороны» заменяет «нет калибровки».
+        assert "точек" in page.live_label.text().lower()
 
     def test_stale_value_marked_in_editor(self, qapp) -> None:
         """После stale_ms редактор показывает «устарело» и для

@@ -59,7 +59,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGraphicsOpacityEffect,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -700,96 +699,6 @@ def _set_live_data_html(
     label.setText(" ".join(parts))
 
 
-def _degrees_model(
-    points: list[tuple[float, float]],
-) -> tuple[int, int, dict[int, tuple[float, float]]] | None:
-    """Выводит закон «сырое значение → градусы» по точкам таблицы
-    привязки (режим «Градусы», отчёт мастера).
-
-    Кодирование градуса циклично: знак и шаг определяет семейство
-    значений по модулю периода — «чётные → +, нечётные → −» или
-    «0,4,8,… → −; 2,6,10,… → +». Алгоритм перебирает период P=1..16:
-    остаток x%P разбивает точки на семейства; валидный P — когда в
-    каждом семействе знак градуса один и линейность по x
-    согласована. Точка y=0 — якорь нуля, в проверке знака не
-    участвует.
-
-    Возвращает ``(anchor, P, {residue: (slope, intercept)})`` —
-    продолжение графика за заданные точки автоматическое — или
-    ``None``, если зависимость не нашлась (линия графика — красная).
-    """
-    pts: list[tuple[int, float]] = []
-    for x, y in points:
-        try:
-            pts.append((int(round(x)), float(y)))
-        except (TypeError, ValueError):
-            continue
-    pts = sorted(set(pts))
-    if len(pts) < 3:
-        return None
-    zero_xs = [x for x, y in pts if y == 0]
-    anchor = zero_xs[0] if zero_xs else pts[0][0]
-    nonzero = [(x, y) for x, y in pts if y != 0]
-    if len(nonzero) < 2:
-        return None
-    for period in range(1, 17):
-        groups: dict[int, list[tuple[int, float]]] = {}
-        for x, y in nonzero:
-            groups.setdefault(x % period, []).append((x, y))
-        ok = True
-        model: dict[int, tuple[float, float]] = {}
-        for residue, group in groups.items():
-            group.sort()
-            signs = {1 if y > 0 else -1 for _, y in group}
-            if len(signs) > 1:
-                ok = False
-                break
-            if len(group) >= 2:
-                slopes = [
-                    (group[i + 1][1] - group[i][1])
-                    / (group[i + 1][0] - group[i][0])
-                    for i in range(len(group) - 1)
-                    if group[i + 1][0] != group[i][0]
-                ]
-                if not slopes or any(
-                    abs(s - slopes[0]) > 1e-9 for s in slopes
-                ):
-                    ok = False
-                    break
-                slope = slopes[0]
-                intercept = group[0][1] - slope * group[0][0]
-            else:
-                x, y = group[0]
-                den = x - anchor
-                if den == 0:
-                    ok = False
-                    break
-                slope = y / den
-                intercept = y - slope * x
-            model[residue] = (slope, intercept)
-        if ok:
-            return (anchor, period, model)
-    return None
-
-
-def _degrees_decode(
-    model: tuple[int, int, dict[int, tuple[float, float]]] | None,
-    raw: int,
-) -> float | None:
-    """Градусы по выведенной модели; ``None`` — значение не известного
-    семейства (таблица покрыла не все остатки периода)."""
-    if model is None:
-        return None
-    anchor, period, groups = model
-    if int(raw) == anchor:
-        return 0.0
-    entry = groups.get(int(raw) % period)
-    if entry is None:
-        return None
-    slope, intercept = entry
-    return slope * raw + intercept
-
-
 def _map_points(points: list[tuple[float, float]], raw: float) -> float:
     """Значение по «таблице привязки»: ломаная линейная интерполяция.
     За крайними точками прямая ПРОДОЛЖАЕТСЯ по наклону краевого
@@ -867,209 +776,671 @@ def _parse_axis_value(text: str) -> float | None:
     return None
 
 
-class _SteeringDecoderDialog(QDialog):
-    """Декодер угла поворота руля по кратности сырого значения
-    (CM-HW-04): таблица делителей 2..20 с независимым выбором класса
-    «+»/«−» в каждой строке, код нейтрали, направление и калибровка
-    «|сырое| → |градусы|».
+class _SignRecordTable(QWidget):
+    """Одна таблица записи DATA декодера «Градусы» (CM-F06).
 
-    Выбор байтов и порядок старшинства задаёт переменная (DATA от/до +
-    SBLP) — диалог работает с уже собранным целым значением."""
+    Десять фиксированных строк-делителей 2..20 (колонка «Числу») с
+    тремя состояниями «Кратно»/«Не кратно»/не участвует; ниже —
+    растущая история записанных значений (ОЗУ, не сохраняется;
+    F06 п.3 — история длиннее десяти не обрезается, п.5 — делители
+    фиксированы и от истории не зависят). Колонки: DATA 16 |
+    DATA 10 | Кратно | Числу | Не кратно."""
 
-    def __init__(self, cfg: dict[str, Any], font: QFont,
-                 parent: QWidget | None = None) -> None:
+    COL_HEX, COL_DEC, COL_DIV, COL_NUM, COL_NOT = range(5)
+    HISTORY_LIMIT = 512  # потолок записей на таблицу (F06 п.16)
+
+    def __init__(
+        self,
+        sign: str,
+        font: QFont,
+        on_changed: Callable[[], None],
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
-        from core import steering_decoder as sd
-
-        conf = sd.normalize_config(cfg)
-        self.setWindowTitle(tr("Декодер угла руля"))
-        self.setModal(True)
+        self.sign = sign
+        self._on_changed = on_changed
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        top = QHBoxLayout()
+        self.record_btn = QPushButton(tr("Записать"))
+        self.record_btn.setFont(font)
+        self.record_btn.setFixedHeight(26)
+        self._set_record_idle()
+        self.record_btn.clicked.connect(self.toggle_record)
+        top.addWidget(self.record_btn)
+        self.status = QLabel("")
+        self.status.setFont(font)
+        top.addWidget(self.status, 1)
+        layout.addLayout(top)
+        title = (
+            tr("− Отрицательные") if sign == "neg"
+            else tr("+ Положительные")
+        )
+        lbl = QLabel(title)
+        lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        _selectable(lbl)
+        layout.addWidget(lbl)
+        self.table = QTableWidget(0, 5)
+        self.table.setFont(font)
+        self.table.setHorizontalHeaderLabels([
+            tr("DATA 16"), tr("DATA 10"), tr("Кратно"),
+            tr("Числу"), tr("Не кратно"),
+        ])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.itemChanged.connect(self._on_item)
+        layout.addWidget(self.table, 1)
+        for d in steering_decoder.DIVISORS:
+            self._add_divisor_row(d)
+        self.recording = False
+        self._last_raw: int | None = None
+        self._history = 0
+
+    # ---- строки ----------------------------------------------------
+
+    def _add_divisor_row(self, div: int) -> None:
+        """Фиксированная строка делителя — «Числу» не редактируется."""
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        self._fill_row(r, "", div, fixed=True)
+
+    def _add_history_row(self, hex_text: str) -> None:
+        """Строка записанного значения: «Числу» свободно — оператор
+        может назначить делитель вручную (F06 п.3)."""
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        self._fill_row(r, hex_text, None, fixed=False)
+
+    def _fill_row(
+        self, r: int, hex_text: str, div: int | None, fixed: bool
+    ) -> None:
+        hex_item = QTableWidgetItem(hex_text)
+        hex_item.setToolTip(tr("Сырое значение поля DATA в HEX"))
+        self.table.blockSignals(True)
+        self.table.setItem(r, self.COL_HEX, hex_item)
+        dec = QTableWidgetItem("")
+        dec.setFlags(dec.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        dec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.table.setItem(r, self.COL_DEC, dec)
+        # «Кратно»/«Не кратно» — взаимоисключающие галочки требования
+        # (третье состояние — обе сняты, строка вне таблицы).
+        for col in (self.COL_DIV, self.COL_NOT):
+            cell = QWidget()
+            lay = QHBoxLayout(cell)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cb = QCheckBox()
+            cb.toggled.connect(
+                lambda _on, rr=r, cc=col: self._on_req(rr, cc)
+            )
+            lay.addWidget(cb)
+            self.table.setCellWidget(r, col, cell)
+            placeholder = QTableWidgetItem("")
+            placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.table.setItem(r, col, placeholder)
+        num = QTableWidgetItem("" if div is None else str(div))
+        num.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        if fixed:
+            num.setFlags(num.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        else:
+            num.setToolTip(tr("Делитель 2…20 — назначьте для правила"))
+        self.table.setItem(r, self.COL_NUM, num)
+        self.table.blockSignals(False)
+
+    def _req_boxes(self, r: int) -> tuple[QCheckBox, QCheckBox] | None:
+        w_div = self.table.cellWidget(r, self.COL_DIV)
+        w_not = self.table.cellWidget(r, self.COL_NOT)
+        if w_div is None or w_not is None:
+            return None
+        return (
+            w_div.findChild(QCheckBox), w_not.findChild(QCheckBox)
+        )
+
+    def _on_req(self, r: int, col: int) -> None:
+        """Взаимоисключение «Кратно»/«Не кратно» одной строки."""
+        boxes = self._req_boxes(r)
+        if boxes is None:
+            return
+        cb_div, cb_not = boxes
+        if col == self.COL_DIV and cb_div.isChecked():
+            cb_not.setChecked(False)
+        elif col == self.COL_NOT and cb_not.isChecked():
+            cb_div.setChecked(False)
+        self._revalidate_row(r)
+        self._on_changed()
+
+    # ---- значения строк ---------------------------------------------
+
+    def _row_hex(self, r: int) -> str:
+        item = self.table.item(r, self.COL_HEX)
+        return item.text().strip() if item is not None else ""
+
+    def _row_raw(self, r: int) -> int | None:
+        data = _data_text_bytes(self._row_hex(r))
+        if data is None:
+            return None
+        return int.from_bytes(data, "big")
+
+    def _row_div(self, r: int) -> int | None:
+        item = self.table.item(r, self.COL_NUM)
+        if item is None:
+            return None
+        try:
+            d = int(item.text().strip())
+        except ValueError:
+            return None
+        return d if d in steering_decoder.DIVISORS else None
+
+    def _row_req(self, r: int) -> str:
+        boxes = self._req_boxes(r)
+        if boxes is None:
+            return ""
+        cb_div, cb_not = boxes
+        if cb_div.isChecked():
+            return "div"
+        if cb_not.isChecked():
+            return "not"
+        return ""
+
+    # ---- валидация (F06 п.8–9) ---------------------------------------
+
+    def _mark(self, r: int, color: str | None, tip: str = "") -> None:
+        item = self.table.item(r, self.COL_HEX)
+        if item is None:
+            return
+        item.setForeground(
+            QColor(color) if color else QColor("#E8E8EF")
+        )
+        item.setToolTip(tip)
+
+    def _revalidate_row(self, r: int) -> None:
+        """Пересчёт DATA 10 и пометок строки после ввода/галочки.
+
+        Состояния различаются явно: невалидный/неполный HEX —
+        красный (запись НЕ исчезает, F06 п.8); валидный код,
+        нарушающий выбранное требование кратности, — жёлтый;
+        согласованный — зелёный; без кода — нейтральный.
+
+        setText/setForeground порождают itemChanged → рекурсия —
+        вся переработка под блокировкой сигналов."""
+        self.table.blockSignals(True)
+        raw_hex = self._row_hex(r)
+        dec_item = self.table.item(r, self.COL_DEC)
+        data = _data_text_bytes(raw_hex)
+        if not raw_hex:
+            if dec_item is not None:
+                dec_item.setText("")
+            self._mark(r, None)
+        elif data is None:
+            if dec_item is not None:
+                dec_item.setText("—")
+            self._mark(r, "#F44336", tr("Неполный/невалидный HEX"))
+        else:
+            raw = int.from_bytes(data, "big")
+            if dec_item is not None:
+                dec_item.setText(str(raw))
+            d = self._row_div(r)
+            req = self._row_req(r)
+            if req and d is not None and (
+                (req == "div" and raw % d != 0)
+                or (req == "not" and raw % d == 0)
+            ):
+                req_text = (
+                    tr("кратно") if req == "div" else tr("не кратно")
+                )
+                self._mark(
+                    r, "#FFB74D",
+                    tr("Код не подходит «") + req_text + f" {d}" + tr("»"),
+                )
+            else:
+                self._mark(r, "#4CAF50")
+        self.table.blockSignals(False)
+
+    def _on_item(self, item: QTableWidgetItem) -> None:
+        """Валидация после завершения ввода (itemChanged срабатывает
+        на commit редактора — аналог editingFinished, F06 п.8).
+        Невалидный текст НЕ стирается — подменяется только
+        кириллица на той же клавише."""
+        if item.column() in (self.COL_HEX, self.COL_NUM):
+            text = (
+                translate_cyrillic_hex(item.text())
+                if item.column() == self.COL_HEX
+                else translate_cyrillic_layout(item.text())
+            )
+            if text != item.text():
+                self.table.blockSignals(True)
+                item.setText(text)
+                self.table.blockSignals(False)
+        self._revalidate_row(item.row())
+        self._on_changed()
+
+    # ---- запись (F06) -------------------------------------------------
+
+    def _set_record_idle(self) -> None:
+        self.record_btn.setText(tr("Записать"))
+        self.record_btn.setStyleSheet(
+            "QPushButton { background: #2E7D32; color: white;"
+            " font-weight: bold; }"
+        )
+
+    def _set_record_active(self) -> None:
+        self.record_btn.setText(tr("Стоп"))
+        self.record_btn.setStyleSheet(
+            "QPushButton { background: #C62828; color: white;"
+            " font-weight: bold; }"
+        )
+
+    def toggle_record(self) -> None:
+        if self.recording:
+            self.stop_record()
+        else:
+            # Старт ТОЛЬКО по явной команде (F06 п.14): история и
+            # прошлые значения не трогаем — «Записать» продолжает их.
+            self.recording = True
+            self._last_raw = None
+            self._set_record_active()
+
+    def stop_record(self) -> None:
+        """Стоп — подтверждённые делители и правила не меняет
+        (F06 п.12): история остаётся, запись просто отключается."""
+        self.recording = False
+        self._set_record_idle()
+
+    def capture(self, data: bytes) -> None:
+        """Принять кадр: выделенное поле → новая строка истории.
+
+        Повторяющееся подряд значение не плодит строки (F06 п.18);
+        потолок HISTORY_LIMIT — явный стоп с подписью (F06 п.16)."""
+        if not self.recording or data is None:
+            return
+        raw = int.from_bytes(data, "big")
+        if raw == self._last_raw:
+            return
+        self._last_raw = raw
+        if self._history >= self.HISTORY_LIMIT:
+            self.stop_record()
+            self.status.setText(
+                tr("Стоп: лимит записей (%1)").replace(
+                    "%1", str(self.HISTORY_LIMIT)
+                )
+            )
+            return
+        hex_text = " ".join(f"{b:02X}" for b in data)
+        self._add_history_row(hex_text)
+        self._history += 1
+        self._revalidate_row(self.table.rowCount() - 1)
+        self.status.setText(
+            tr("Записано: %1").replace("%1", str(self._history))
+        )
+        self._on_changed()
+
+    # ---- конфиг --------------------------------------------------------
+
+    def errors(self) -> list[str]:
+        """Невалидные записи таблицы (F06 п.9): неполный HEX,
+        требования, которым введённый код не соответствует, и
+        делитель вне фиксированных 2…20."""
+        out: list[str] = []
+        for r in range(self.table.rowCount()):
+            text = self._row_hex(r)
+            data = _data_text_bytes(text) if text else None
+            if text and data is None:
+                out.append(
+                    tr("строка %1: невалидный HEX «%2»")
+                    .replace("%1", str(r + 1)).replace("%2", text)
+                )
+                continue
+            num_item = self.table.item(r, self.COL_NUM)
+            num_text = (
+                num_item.text().strip() if num_item is not None else ""
+            )
+            if num_text and self._row_div(r) is None:
+                out.append(
+                    tr("строка %1: делитель вне 2…20").replace(
+                        "%1", str(r + 1)
+                    )
+                )
+            if data is None:
+                continue
+            raw = int.from_bytes(data, "big")
+            d = self._row_div(r)
+            req = self._row_req(r)
+            if req and d is not None and (
+                (req == "div" and raw % d != 0)
+                or (req == "not" and raw % d == 0)
+            ):
+                req_text = (
+                    tr("кратно") if req == "div" else tr("не кратно")
+                )
+                out.append(
+                    tr("строка %1: 0x%2 не подходит «")
+                    .replace("%1", str(r + 1))
+                    .replace("%2", f"{raw:X}")
+                    + req_text + f" {d}" + tr("»")
+                )
+        return out
+
+    def sign_rules(self) -> dict[int, str]:
+        """Требования стороны для конфига: делитель → div/not —
+        из строк с выбранной галочкой (фиксированных и записанных
+        с назначенным «Числу»)."""
+        out: dict[int, str] = {}
+        for r in range(self.table.rowCount()):
+            d = self._row_div(r)
+            req = self._row_req(r)
+            if d is not None and req:
+                out[d] = req
+        return out
+
+
+class _DegreesDecoderDialog(QDialog):
+    """Декодер режима «Градусы» (CM-F05/06): две таблицы кратности
+    с записью DATA, «Инвертирование», «Температура», live-поле
+    CAN ID/DATA. Код нейтрали, таймаут, калибровка и интерполяция
+    удалены — нейтраль задаётся нулевой точкой таблицы привязки
+    переменной, масштаб — её ветками (CM-F05 п.3–4)."""
+
+    def __init__(
+        self,
+        cfg: dict[str, Any],
+        font: QFont,
+        parent: QWidget | None = None,
+        live: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        conf = steering_decoder.normalize_config(cfg)
+        self._conf = conf
+        self._live = live or {}
+        self.setWindowTitle(tr("Настройка «Градусы» — декодер"))
+        self.setModal(True)
+        root = QVBoxLayout(self)
+        root.setSpacing(6)
+
+        # CM-F05 п.7: ширина ~×2 от редактора, содержимое в скролле,
+        # OK/Отмена всегда видимы при любом масштабе Windows.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        body = QWidget()
+        layout = QVBoxLayout(body)
         layout.setSpacing(6)
 
         hint = QLabel(tr(
-            "Знак угла — две независимые таблицы условий: в строке "
-            "«Кратно»/«Не кратно» (обе можно снять — строка не "
-            "участвует). Выбранные условия внутри таблицы объединяются "
-            "по И. Совпадение обеих таблиц — «конфликт» (невалидно), "
-            "ни одной — «вне классов». Угол — только из калибровки."
+            "Знак значения — две независимые таблицы условий: "
+            "«Кратно»/«Не кратно» к делителю «Числу» (обе галочки "
+            "сняты — строка не участвует). Условия внутри таблицы "
+            "объединяются по И. Совпадение обеих таблиц — «конфликт», "
+            "ни одной — «вне классов». Нейтраль и масштаб — из таблицы "
+            "привязки переменной (нулевая точка = нейтраль). Кнопки "
+            "«Записать» ловят DATA выбранного поля в строки истории."
         ))
         hint.setFont(font)
         hint.setWordWrap(True)
         _selectable(hint)
         layout.addWidget(hint)
 
-        # Две таблицы знаков (CM-N2): по десять чётных делителей,
-        # взаимоисключение только между «Кратно»/«Не кратно» одной
-        # строки одного знака — снять обе галочки можно (строка вне
-        # таблицы).
-        signs = conf["signs"]
-        self._sign_checks: dict[str, dict[int, tuple[QCheckBox, QCheckBox]]] = {}
-        tables_row = QHBoxLayout()
-        for sign, title in (
-            ("pos", tr("Класс «+» (таблица)")),
-            ("neg", tr("Класс «−» (таблица)")),
-        ):
-            box = QGroupBox(title)
-            box.setFont(font)
-            vb = QVBoxLayout(box)
-            table = QTableWidget(len(sd.DIVISORS), 4)
-            table.setFont(font)
-            table.setHorizontalHeaderLabels(
-                [tr("Делитель"), "DEC", tr("Кратно"), tr("Не кратно")]
-            )
-            table.verticalHeader().setVisible(False)
-            table.setEditTriggers(
-                QAbstractItemView.EditTrigger.NoEditTriggers
-            )
-            checks: dict[int, tuple[QCheckBox, QCheckBox]] = {}
-            for i, div in enumerate(sd.DIVISORS):
-                item = QTableWidgetItem(f"0x{div:X}")
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(i, 0, item)
-                dec = QTableWidgetItem(str(div))
-                dec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(i, 1, dec)
-                cb_div = QCheckBox()
-                cb_not = QCheckBox()
-                # «Кратно» и «Не кратно» одной строки исключают друг
-                # друга; повторный клик снимает выбор (третье
-                # состояние — строка вне таблицы).
-                cb_div.toggled.connect(
-                    lambda on, other=cb_not: on and other.setChecked(False)
-                )
-                cb_not.toggled.connect(
-                    lambda on, other=cb_div: on and other.setChecked(False)
-                )
-                cb_div.setChecked(signs[sign].get(div) == "div")
-                cb_not.setChecked(signs[sign].get(div) == "not")
-                for col, cb in ((2, cb_div), (3, cb_not)):
-                    cell = QWidget()
-                    lay = QHBoxLayout(cell)
-                    lay.setContentsMargins(0, 0, 0, 0)
-                    lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    lay.addWidget(cb)
-                    table.setCellWidget(i, col, cell)
-                checks[div] = (cb_div, cb_not)
-            table.resizeColumnsToContents()
-            table.setFixedHeight(230)
-            vb.addWidget(table)
-            tables_row.addWidget(box)
-            self._sign_checks[sign] = checks
-        layout.addLayout(tables_row)
+        # CM-F05 п.8: live-поле — выбранный CAN ID и онлайн DATA по
+        # настройке переменной (ID/канал/extended/байты/порядок байт).
+        live_row = QHBoxLayout()
+        self._live_label = QLabel("—")
+        self._live_label.setFont(
+            QFont("Consolas", 10, QFont.Weight.Bold)
+        )
+        self._live_label.setStyleSheet(
+            "color: #4CAF50; border: 1px solid #45455A;"
+            " border-radius: 6px; padding: 2px 10px;"
+        )
+        _selectable(self._live_label)
+        live_row.addWidget(self._live_label, 1)
+        layout.addLayout(live_row)
 
+        # Две раздельные таблицы записи (CM-F06): левая — коды
+        # отрицательных значений, правая — положительных; по
+        # независимой кнопке «Записать»/«Стоп» над каждой.
+        tables_row = QHBoxLayout()
+        signs = conf["signs"]
+        self._tables: dict[str, _SignRecordTable] = {}
+        for sign in ("neg", "pos"):
+            tbl = _SignRecordTable(sign, font, self._on_rules_changed)
+            self._restore_rules(tbl, signs.get(sign) or {})
+            tables_row.addWidget(tbl, 1)
+            self._tables[sign] = tbl
+        layout.addLayout(tables_row, 1)
+
+        # «Инвертирование» (CM-F05 п.5) — единственный флаг
+        # направления; «Температура» (CM-F07) — семантическая метка
+        # единицы, не конвертация.
         misc = QHBoxLayout()
-        misc.addWidget(QLabel(tr("Код нейтрали:")))
-        self._neutral = QLineEdit(str(conf["neutral"]))
-        self._neutral.setFont(font)
-        self._neutral.setFixedWidth(90)
-        self._neutral.setToolTip(
-            tr("DEC или HEX (0x…): сырое значение, равное коду, "
-               "декодируется как 0°")
-        )
-        misc.addWidget(self._neutral)
-        self._dir_left = QCheckBox(tr("«−» — поворот влево"))
-        self._dir_left.setFont(font)
-        self._dir_left.setChecked(conf["left_is_negative"])
-        self._dir_left.setToolTip(
-            tr("Снята — отрицательный класс показывается положительными "
-               "градусами (правый руль/иная ориентация датчика)")
-        )
-        misc.addWidget(self._dir_left)
-        misc.addWidget(QLabel(tr("Таймаут, мс:")))
-        self._stale = QSpinBox()
-        self._stale.setFont(font)
-        self._stale.setRange(0, 600000)
-        self._stale.setValue(int(conf.get("stale_ms", 0) or 0))
-        self._stale.setToolTip(
-            tr("Свежесть значения для условий Гибкой логики: "
-               "просроченный угол не удовлетворяет численным "
-               "условиям. 0 — не устаревает")
-        )
-        misc.addWidget(self._stale)
+        self._enabled = QCheckBox(tr("Включить декодер «Градусы»"))
+        self._enabled.setFont(font)
+        self._enabled.setChecked(conf["enabled"])
+        misc.addWidget(self._enabled)
+        self._inverted = QCheckBox(tr("Инвертирование"))
+        self._inverted.setFont(font)
+        self._inverted.setChecked(conf["inverted"])
+        self._inverted.setToolTip(tr(
+            "Меняет положительное/отрицательное направление: "
+            "применяется один раз к уже декодированной величине"
+        ))
+        misc.addWidget(self._inverted)
+        misc.addWidget(QLabel(tr("Температура:")))
+        self._unit = QComboBox()
+        self._unit.setFont(font)
+        for label, key in (
+            (tr("Не выбрано"), "none"),
+            (tr("Цельсий"), "celsius"),
+            (tr("Фаренгейт"), "fahrenheit"),
+        ):
+            self._unit.addItem(label, key)
+        idx = self._unit.findData(conf["unit"])
+        self._unit.setCurrentIndex(idx if idx >= 0 else 0)
+        self._unit.setToolTip(tr(
+            "Подпись величины (°/°C/°F) в контрольных строках, "
+            "графике и условиях — без пересчёта числа"
+        ))
+        misc.addWidget(self._unit)
         misc.addStretch()
         layout.addLayout(misc)
 
-        # Калибровка: |сырое| → |градусы|; DEC или HEX (0x…).
-        cal_row = QHBoxLayout()
-        cal_row.addWidget(QLabel(tr("Калибровка |сырое| → |°|:")))
-        self._interp = QCheckBox(tr("интерполяция между точками"))
-        self._interp.setFont(font)
-        self._interp.setChecked(conf["interpolate"])
-        cal_row.addWidget(self._interp)
-        cal_row.addStretch()
-        layout.addLayout(cal_row)
-        self._calib_table = QTableWidget(0, 2)
-        self._calib_table.setFont(font)
-        self._calib_table.setHorizontalHeaderLabels(
-            [tr("|сырое| (DEC/HEX)"), tr("|угол| °")]
-        )
-        self._calib_table.horizontalHeader().setStretchLastSection(True)
-        self._calib_table.setFixedHeight(120)
-        for x, y in conf["calib"]:
-            r = self._calib_table.rowCount()
-            self._calib_table.insertRow(r)
-            self._calib_table.setItem(r, 0, QTableWidgetItem(f"{x:g}"))
-            self._calib_table.setItem(r, 1, QTableWidgetItem(f"{y:g}"))
-        layout.addWidget(self._calib_table)
-        add_row = QHBoxLayout()
-        add_btn = QPushButton(tr("＋ точка"))
-        add_btn.setFont(font)
-        add_btn.clicked.connect(lambda: self._calib_table.insertRow(
-            self._calib_table.rowCount()
-        ))
-        add_row.addWidget(add_btn)
-        add_row.addStretch()
-        layout.addLayout(add_row)
-
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        self._conf = conf
+        root.addWidget(buttons)
+
+        # Размер: ~×2 к ширине редактора переменной, но не более 90%
+        # доступного экрана — кнопки видны при 100–200% масштабе
+        # Windows (CM-F05 п.7).
+        screen = self.screen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            self.resize(
+                min(1180, int(avail.width() * 0.9)),
+                min(760, int(avail.height() * 0.9)),
+            )
+        else:
+            self.resize(1180, 760)
+
+        # Live + запись: тик — лёгкое обновление поля и слив
+        # накопленных кадров в историю (пакетно, без подвисания UI,
+        # F06 п.4).
+        self._pending: list[bytes] = []
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(100)
+        self._live_timer.timeout.connect(self._tick)
+        self._live_timer.start()
+        self._subscribe()
+
+    # ---- live CAN (CM-F05 п.8) ----------------------------------------
+
+    def _subscribe(self) -> None:
+        """Подписка на поток кадров для записи — только через
+        провайдера; отписка — при закрытии (F06 п.17)."""
+        source = self._live.get("subscribe")
+        if callable(source):
+            source(self._on_frames)
+
+    def _on_frames(self, frames: list[dict[str, Any]]) -> None:
+        """Кадры шины → выбранное поле DATA → очередь записи."""
+        get_id = self._live.get("fid")
+        fid = get_id() if callable(get_id) else self._live.get("fid")
+        if fid is None:
+            return
+        get_ext = self._live.get("extended")
+        ext = get_ext() if callable(get_ext) else bool(
+            self._live.get("extended")
+        )
+        for frame in frames:
+            if int(frame.get("id", -1)) != fid:
+                continue
+            if bool(frame.get("extended", False)) != ext:
+                continue
+            data = bytes(frame.get("data", b""))
+            window = self._field_window(data)
+            if window is not None:
+                self._pending.append(window)
+
+    def _field_window(self, data: bytes) -> bytes | None:
+        """Байты поля переменной из кадра; ``None`` — кадр не покрыл
+        поле (в историю не пишем — F06 п.1 «выбранного поля»)."""
+        get_used = self._live.get("bytes")
+        used = get_used() if callable(get_used) else (
+            self._live.get("bytes") or []
+        )
+        used = [int(p) for p in used]
+        if not used or any(p < 0 or p >= len(data) for p in used):
+            return None
+        return bytes(data[p] for p in used)
+
+    def _tick(self) -> None:
+        """Live-строка + слив очереди записи (батч за тик)."""
+        get_id = self._live.get("fid")
+        fid = get_id() if callable(get_id) else self._live.get("fid")
+        get_ext = self._live.get("extended")
+        ext = get_ext() if callable(get_ext) else bool(
+            self._live.get("extended")
+        )
+        get_frame = self._live.get("get_frame")
+        data = (
+            get_frame(fid, ext)
+            if callable(get_frame) and fid is not None else None
+        )
+        id_text = "—" if fid is None else f"0x{fid:X}"
+        data_text = (
+            "—" if data is None
+            else " ".join(f"{b:02X}" for b in data)
+        )
+        window = self._field_window(data) if data is not None else None
+        field_text = "—"
+        if window is not None:
+            get_sblp = self._live.get("sblp")
+            sblp = get_sblp() if callable(get_sblp) else (
+                self._live.get("sblp") or ""
+            )
+            raw = (
+                variable_decode.sblp_decode(window, sblp)
+                if sblp
+                else int.from_bytes(window, "big")
+            )
+            if raw is not None:
+                field_text = f"0x{raw:X} ({raw})"
+        self._live_label.setText(
+            f"CAN ID {id_text}   |   DATA {data_text}   |   "
+            + tr("поле") + f": {field_text}"
+        )
+        if self._pending:
+            pending, self._pending = self._pending, []
+            for window in pending:
+                for tbl in self._tables.values():
+                    tbl.capture(window)
+
+    def _on_rules_changed(self) -> None:
+        """Перевалидация всех строк — назначение делителя на одной
+        строке меняет проверки остальных (F06 п.10)."""
+        for tbl in self._tables.values():
+            for r in range(tbl.table.rowCount()):
+                tbl._revalidate_row(r)
+
+    def _restore_rules(
+        self, tbl: _SignRecordTable, rules: dict[int, str]
+    ) -> None:
+        """Конфиг → галочки «Кратно»/«Не кратно» фиксированных строк."""
+        for r in range(tbl.table.rowCount()):
+            d_item = tbl.table.item(r, tbl.COL_NUM)
+            try:
+                d = int(d_item.text()) if d_item is not None else None
+            except (ValueError, TypeError):
+                continue
+            req = rules.get(d)
+            boxes = tbl._req_boxes(r)
+            if req and boxes is not None:
+                cb_div, cb_not = boxes
+                cb_div.setChecked(req == "div")
+                cb_not.setChecked(req == "not")
+
+    # ---- конфиг --------------------------------------------------------
+
+    def _on_accept(self) -> None:
+        """Некорректная настройка не подтверждается (F06 п.9):
+        невалидный HEX / нарушение кратности / делитель вне 2…20 —
+        диагностика и отказ."""
+        errors: list[str] = []
+        names = {"neg": tr("«−»"), "pos": tr("«+»")}
+        for sign, tbl in self._tables.items():
+            for err in tbl.errors():
+                errors.append(f"{names[sign]} {err}")
+        if errors:
+            QMessageBox.warning(
+                self, tr("Декодер «Градусы»"),
+                tr("Некорректные записи (исправьте или очистите):\n")
+                + "\n".join(errors[:10]),
+            )
+            return
+        self.accept()
 
     def config(self) -> dict[str, Any]:
         """Нормализованная конфигурация декодера из полей диалога."""
         cfg = dict(self._conf)
         cfg["version"] = steering_decoder.CONFIG_VERSION
-        signs: dict[str, dict[int, str]] = {"pos": {}, "neg": {}}
-        for sign, checks in self._sign_checks.items():
-            for div, (cb_div, cb_not) in checks.items():
-                if cb_div.isChecked():
-                    signs[sign][div] = "div"
-                elif cb_not.isChecked():
-                    signs[sign][div] = "not"
-        cfg["signs"] = signs
-        cfg.pop("divisors_pos", None)
-        cfg.pop("divisors_neg", None)
-        try:
-            text = self._neutral.text().strip()
-            cfg["neutral"] = (
-                int(text, 16)
-                if text.lower().startswith("0x") else int(text)
-            )
-        except ValueError:
-            pass
-        cfg["left_is_negative"] = self._dir_left.isChecked()
-        cfg["interpolate"] = self._interp.isChecked()
-        cfg["stale_ms"] = int(self._stale.value())
-        calib: list[tuple[float, float]] = []
-        for r in range(self._calib_table.rowCount()):
-            xi = self._calib_table.item(r, 0)
-            yi = self._calib_table.item(r, 1)
-            if xi is None or yi is None:
-                continue
-            x = _parse_axis_value(xi.text())
-            y = _parse_axis_value(yi.text())
-            if x is not None and y is not None:
-                calib.append((x, y))
-        cfg["calib"] = calib
+        cfg["enabled"] = self._enabled.isChecked()
+        cfg["inverted"] = self._inverted.isChecked()
+        cfg["unit"] = str(self._unit.currentData() or "none")
+        cfg["signs"] = {
+            sign: tbl.sign_rules() for sign, tbl in self._tables.items()
+        }
+        # Легаси-ключи не переписываем — нейтраль/калибровка живут в
+        # таблице привязки переменной (CM-F05 п.3–4), интерполяция —
+        # единственный контракт; направление v2 → inverted.
+        for key in (
+            "neutral", "calib", "interpolate", "left_is_negative",
+            "divisors_pos", "divisors_neg", "points",
+        ):
+            cfg.pop(key, None)
         return cfg
 
+    def stop_all(self) -> None:
+        """Закрытие/отмена — запись остановлена и отписана
+        (F06 п.17)."""
+        for tbl in self._tables.values():
+            tbl.stop_record()
+        self._pending.clear()
 
+    def accept(self) -> None:  # noqa: A003
+        self.stop_all()
+        super().accept()
+
+    def reject(self) -> None:
+        self.stop_all()
+        super().reject()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self.stop_all()
+        super().closeEvent(event)
 class _HoverTip(QLabel):
     """Плавно появляющаяся закруглённая табличка-подсказка над
     графиком (отчёт мастера: не «выскакивает резко»)."""
@@ -1217,9 +1588,10 @@ class _GraphPreview(QWidget):
 
     def _paint_degrees(self, painter: QPainter, rect) -> None:
         """«Градусы»: 4-зонный график — оси X и Y пересекаются
-        в центре (0,0), линии семейств уходят во все стороны
-        (отчёт мастера). Зелёная — зависимость найдена и
-        продолжается; красная — точки «переломили» график."""
+        в центре (0,0), ветки сторон таблицы привязки уходят от
+        нулевой точки в своём направлении (CM-F05/F07). Зелёная
+        линия — ветка с нулевой точкой и опорными; красная —
+        контур неполной таблицы (нет нуля или стороны)."""
         font = painter.font()
         font.setPointSize(7)
         painter.setFont(font)
@@ -1228,22 +1600,29 @@ class _GraphPreview(QWidget):
             painter.drawText(
                 rect, Qt.AlignmentFlag.AlignCenter,
                 tr("«Градусы»: минимум 3 точки "
-                   "(0°, отрицательный, положительный)"),
+                   "(нулевая, отрицательная, положительная)"),
             )
             return
-        model = self._degree_model
-        valid = model is not None
+        model = self._degree_model or {}
+        sides = model.get("sides") or {}
+        inverted = bool(model.get("inverted"))
+        suffix = steering_decoder.unit_suffix(model.get("unit", "none"))
+        zero = sides.get("zero")
+        branches = {
+            "neg": list(sides.get("neg") or []),
+            "pos": list(sides.get("pos") or []),
+        }
+        if zero:
+            branches["neg"].append((float(zero[0]), 0.0))
+            branches["pos"].append((float(zero[0]), 0.0))
+        # Ветка строится по всей ширине: точки + экстраполяция
+        # крайних отрезков до границ графика — «график обязан
+        # доходить до DATA от/до» (отчёт мастера).
+        sign = -1.0 if inverted else 1.0
         xs = [p[0] for p in self._points]
         ys = [p[1] for p in self._points]
-        x_lim = max(1.0, max(xs))
-        y_cand = list(ys)
-        groups: dict[int, tuple[float, float]] = {}
-        if valid:
-            _anchor, _period, groups = model
-            for slope, intercept in groups.values():
-                for x in (-x_lim, x_lim):
-                    y_cand.append(slope * x + intercept)
-        y_lim = max(1.0, max(abs(v) for v in y_cand))
+        x_lim = max(1.0, max(abs(v) for v in xs))
+        y_lim = max(1.0, max(abs(v) for v in ys))
         x_lim *= 1.15
         y_lim *= 1.15
 
@@ -1264,31 +1643,32 @@ class _GraphPreview(QWidget):
                 int(px) - 26, cy + 5, 52, 14,
                 Qt.AlignmentFlag.AlignHCenter, self._fmt_x(x),
             )
-        for y in sorted({p[1] for p in self._points if p[1] != 0}):
+        for y in sorted({p[1] * sign for p in self._points if p[1] != 0}):
             _, py = to_screen(0, y)
             painter.drawText(
                 0, int(py) - 7, self._MARGIN_LEFT - 6, 14,
                 Qt.AlignmentFlag.AlignRight
                 | Qt.AlignmentFlag.AlignVCenter,
-                f"{y:g}°",
+                f"{y:g}{suffix}",
             )
 
         painter.setClipRect(rect)
-        line_color = (
-            QColor(76, 175, 80) if valid else QColor(244, 67, 54)
-        )
-        painter.setPen(QPen(line_color, 2))
-        if valid:
-            # Каждое семейство — своя прямая, продолжение за
-            # заданные точки показывает найденную цикличность.
-            edge = x_lim * 1.05
-            for slope, intercept in groups.values():
-                ax_, ay_ = to_screen(-edge, slope * -edge + intercept)
-                bx_, by_ = to_screen(edge, slope * edge + intercept)
-                painter.drawLine(int(ax_), int(ay_), int(bx_), int(by_))
-        else:
+        edge = x_lim * 1.05
+        for side in ("neg", "pos"):
+            branch = sorted(branches[side])
+            complete = len(branch) >= 2 and zero is not None
+            painter.setPen(QPen(
+                QColor(76, 175, 80) if complete else QColor(244, 67, 54),
+                2,
+            ))
+            if not branch:
+                continue
+            # Крайние точки ветки — продолжение её крайних отрезков
+            # до границ графика (экстраполяция как у декодера).
+            xs_line = sorted({-edge, *(x for x, _ in branch), edge})
             prev = None
-            for x, y in self._points:
+            for x in xs_line:
+                y = steering_decoder._piecewise(branch, x) * sign
                 px, py = to_screen(x, y)
                 if prev is not None:
                     painter.drawLine(
@@ -1299,7 +1679,7 @@ class _GraphPreview(QWidget):
         painter.setPen(QPen(QColor(255, 170, 80), 1))
         painter.setBrush(QColor(255, 170, 80))
         for x, y in self._points:
-            px, py = to_screen(x, y)
+            px, py = to_screen(x, y * sign)
             painter.drawEllipse(int(px) - 3, int(py) - 3, 6, 6)
 
     def paintEvent(self, _event) -> None:  # noqa: N802
@@ -1648,8 +2028,9 @@ class _ValuePage(QWidget):
             self.out_range = QComboBox()
             self.out_range.setFont(font)
             self.out_range.addItem(tr("От 0 до бесконечности (∞)"), "inf")
+            # CM-F05 п.1: единый режим «Градусы» — дубль «Угол руля
+            # (кратность)» удалён, старые конфиги мигрируются.
             self.out_range.addItem(tr("Градусы"), "degrees")
-            self.out_range.addItem(tr("Угол руля (кратность)"), "steering")
             self.out_range.setToolTip(
                 tr("Допустимый диапазон выводимого числа")
             )
@@ -1662,7 +2043,8 @@ class _ValuePage(QWidget):
             self.steering_btn.setFont(font)
             self.steering_btn.setFixedHeight(28)
             self.steering_btn.setToolTip(tr(
-                "Делители, нейтраль и калибровка угла поворота руля"
+                "Делители кратности, инвертирование и единица "
+                "величины; запись DATA в таблицы декодера"
             ))
             self.steering_btn.clicked.connect(self._edit_steering)
             line1.addWidget(self.steering_btn)
@@ -1880,26 +2262,56 @@ class _ValuePage(QWidget):
 
     def _on_out_range_changed(self) -> None:
         self._update_steering_btn()
+        # CM-F07 п.1: «Градусы» — минимум три строки привязки
+        # (отрицательная опорная, нулевая, положительная опорная).
+        if (
+            self.out_range.currentData() == "degrees"
+            and self.points_table.rowCount() < 3
+        ):
+            for _ in range(3 - self.points_table.rowCount()):
+                self.add_point_row()
         self._on_edits_changed()
 
     def _edit_steering(self) -> None:
-        """Диалог настройки декодера угла руля (CM-HW-04)."""
-        dialog = _SteeringDecoderDialog(
-            self.steering_cfg, self.font(), self
+        """Диалог декодера «Градусы» (CM-F05/06): делители с записью
+        DATA, инвертирование, единица; live-поле — ID/DATA/байты/
+        порядок байт самой переменной."""
+        tab = self._get_tab() if self._get_tab is not None else None
+        live = {
+            "fid": lambda: hex_to_int(self.can_id.text()),
+            "extended": lambda: bool(self.bit.currentData()),
+            "bytes": self.bytes_used,
+            "sblp": lambda: self._sblp,
+            "get_frame": (
+                tab.live_frame if tab is not None else None
+            ),
+            "subscribe": (
+                lambda cb: self._subscribe_frames(tab, cb)
+                if tab is not None else None
+            ),
+        }
+        dialog = _DegreesDecoderDialog(
+            self.steering_cfg, self.font(), self, live=live
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.steering_cfg = dialog.config()
+            self._refresh_graph()
             self._emit_changed()
 
+    def _subscribe_frames(self, tab, callback) -> None:
+        """Подписка диалога на поток кадров вкладки — запись DATA
+        декодера (CM-F06); отписка при уничтожении виджета."""
+        manager = getattr(tab, "_serial_manager", None)
+        if manager is not None:
+            manager.new_can_frames.connect(callback)
+
     def _update_steering_btn(self) -> None:
-        """Кнопка «Декодер…» открывает настройку кратности из режимов
-        «Угол руля (кратность)» и «Градусы» — маршрут задания: декодер
-        доступен при выборе «Градусы» (CM-N2, ревью round 2).
-        Включённый декодер в режиме «Градусы» замещает таблицу точек
-        как источник угла; без него «Градусы» работают по-старому."""
+        """Кнопка «Декодер…» открывает настройку кратности режима
+        «Градусы» — единственного режима (CM-F05 п.2). Нейтраль и
+        масштаб — по таблице привязки, не по полям диалога."""
         if getattr(self, "steering_btn", None) is not None:
             self.steering_btn.setVisible(
-                self.out_range.currentData() in ("degrees", "steering")
+                self.out_range.currentData() == "degrees"
             )
 
     def _set_sblp(self, mode: str) -> None:
@@ -2069,7 +2481,7 @@ class _ValuePage(QWidget):
             ok = bool(self._HEX_CELL_RE.match(text))
             unbounded = (
                 getattr(self, "out_range", None) is not None
-                and self.out_range.currentData() in ("inf", "degrees", "steering")
+                and self.out_range.currentData() in ("inf", "degrees")
             )
             if ok and self._kind == "numeric" and text and not unbounded:
                 value = self._point_raw(text)
@@ -2103,8 +2515,72 @@ class _ValuePage(QWidget):
             item.setForeground(
                 QColor("#E8E8EF") if ok or not text else QColor("#F44336")
             )
+        # CM-F07 п.3: в «Градусах» код X-ячейки проверяется по
+        # кратности СВОЕЙ стороны и противоположной — валидный
+        # зелёный, конфликт/чужой класс красный, код без кратности
+        # жёлтый. Изменение величины меняет сторону → перевалидация
+        # всех строк.
+        if (
+            self._kind == "numeric"
+            and getattr(self, "out_range", None) is not None
+            and self.out_range.currentData() == "degrees"
+        ):
+            self._recolor_degree_cells()
         self._refresh_graph()
         self._emit_changed()
+
+    def _recolor_degree_cells(self) -> None:
+        """Проверка кодов точек привязки по кратности сторон (F07.3).
+
+        Сторона точки — знак её величины; нулевая точка — нейтраль,
+        код освобождён от проверки (F06 п.7). Класс берётся из
+        текущих делителей декодера; без делителей любой валидный код
+        — зелёный."""
+        conf = steering_decoder.normalize_config(self.steering_cfg)
+        signs = conf["signs"]
+        no_rules = not signs["pos"] and not signs["neg"]
+        # setForeground тоже порождает itemChanged — перекраска под
+        # блокировкой сигналов, иначе рекурсия.
+        self.points_table.blockSignals(True)
+        for row in range(self.points_table.rowCount()):
+            x_item = self.points_table.item(row, 0)
+            y_item = self.points_table.item(row, 1)
+            if x_item is None:
+                continue
+            text = x_item.text().strip()
+            if not text or not self._HEX_CELL_RE.match(text):
+                continue  # невалидный HEX уже красный выше
+            raw = self._point_raw(text)
+            y = _parse_axis_value(
+                y_item.text() if y_item is not None else ""
+            )
+            if raw is None or y is None:
+                continue
+            if y == 0 or no_rules:
+                # Нулевая точка — нейтраль: код совпадает с любой
+                # стороной и всегда валиден (F06 п.7).
+                x_item.setForeground(QColor("#4CAF50"))
+                continue
+            side = "pos" if y > 0 else "neg"
+            cls = steering_decoder.classify(int(raw), conf)
+            if cls == side or cls == "free":
+                x_item.setForeground(QColor("#4CAF50"))
+            elif cls == steering_decoder.STATUS_NO_CLASS:
+                x_item.setForeground(QColor("#FFB74D"))
+            else:  # conflict / чужой класс — явная ошибка
+                x_item.setForeground(QColor("#F44336"))
+        self.points_table.blockSignals(False)
+
+    def _degree_graph_model(self) -> dict[str, Any]:
+        """Модель графика «Градусы»: ветки сторон от нулевой точки
+        таблицы привязки + инверсия и единица для отрисовки
+        (CM-F05/F07)."""
+        conf = steering_decoder.normalize_config(self.steering_cfg)
+        return {
+            "sides": steering_decoder.split_points(self.read_points()),
+            "inverted": conf["inverted"],
+            "unit": conf["unit"],
+        }
 
     def bytes_used(self) -> list[int]:
         return _data_bytes_used(self.data_from)
@@ -2123,17 +2599,17 @@ class _ValuePage(QWidget):
         self.graph.set_axis_x(lo, hi)
         points = self.read_points()
         self.graph.set_points(points)
-        # «Градусы»: 4-зонный график с осями через (0,0); модель
-        # строится по ≥3 точкам — зелёная линия при найденной
-        # циклической зависимости, красная при «переломе» (отчёт
-        # мастера).
+        # «Градусы»: 4-зонный график с осями через (0,0); линии —
+        # ветки сторон таблицы привязки от нулевой точки (нулевая =
+        # нейтраль, CM-F05 п.4), инверсия применяется к выводу один
+        # раз (CM-F05 п.5); единица — в подписях оси Y (CM-F07).
         degrees = (
             getattr(self, "out_range", None) is not None
             and self.out_range.currentData() == "degrees"
         )
         self.graph.set_degree_mode(degrees)
         self.graph.set_degree_model(
-            _degrees_model(points) if degrees else None
+            self._degree_graph_model() if degrees else None
         )
         # Точки привязки вне диапазона «ОТ»/«ДО» — красные символы и
         # строка предупреждения под таблицей. В режимах «От 0 до
@@ -2141,7 +2617,7 @@ class _ValuePage(QWidget):
         # (отчёт мастера).
         unbounded = (
             getattr(self, "out_range", None) is not None
-            and self.out_range.currentData() in ("inf", "degrees", "steering")
+            and self.out_range.currentData() in ("inf", "degrees")
         )
         out_of_range = False
         for row in range(self.points_table.rowCount()):
@@ -2267,18 +2743,41 @@ class _ValuePage(QWidget):
             # (round-trip «09 03» ↔ 777 — отчёт мастера).
             self._set_sblp(str(config.get("sblp", "") or ""))
             self._update_sblp_enabled()
-            # «В пределах «ОТ»–«ДО»» заменён режимом «Градусы»
-            # (отчёт мастера) — старые конфиги «range» читаем как
-            # градусный.
+            # «В пределах «ОТ»–«ДО»» и «Угол руля (кратность)» —
+            # заменены единым режимом «Градусы» (отчёт мастера,
+            # CM-F05 п.1) — старые конфиги «range»/«steering»
+            # читаем как градусный.
             out_mode = str(config.get("out_range", "inf") or "inf")
-            if out_mode == "range":
+            if out_mode in ("range", "steering"):
                 out_mode = "degrees"
             idx = self.out_range.findData(out_mode)
             self.out_range.setCurrentIndex(idx if idx >= 0 else 0)
-            self.steering_cfg = dict(config.get("steering") or {})
+            steering = dict(config.get("steering") or {})
+            # CM-F05 п.4/миграция: легаси-«нейтраль»/«калибровка»
+            # декодера → точки таблицы привязки (нулевая точка и
+            # ±-опорные) — правила/привязки не теряются.
+            legacy_points = steering_decoder.migration_points(steering)
+            for key in ("neutral", "calib"):
+                steering.pop(key, None)
+            self.steering_cfg = steering_decoder.normalize_config(
+                steering
+            )
+            self._legacy_points = legacy_points
             self._update_steering_btn()
         self.points_table.setRowCount(0)
-        for point in config.get("points") or []:
+        merged_points = list(config.get("points") or [])
+        if self._kind == "numeric" and getattr(
+            self, "_legacy_points", None
+        ):
+            have = {
+                (float(p[0]), float(p[1]))
+                for p in merged_points
+                if isinstance(p, (list, tuple)) and len(p) >= 2
+            }
+            for x, y in self._legacy_points:
+                if (x, y) not in have:
+                    merged_points.append([x, y])
+        for point in merged_points:
             try:
                 x, y = point
             except (TypeError, ValueError):
@@ -2310,8 +2809,13 @@ class _ValuePage(QWidget):
         if self._kind == "numeric":
             cfg["sblp"] = self._sblp
             cfg["out_range"] = str(self.out_range.currentData() or "inf")
-            if cfg["out_range"] == "steering" or self.steering_cfg:
-                cfg["steering"] = dict(self.steering_cfg)
+            if cfg["out_range"] == "degrees" or self.steering_cfg:
+                # v3-нормализация: легаси-ключи (neutral/calib/
+                # left_is_negative/interpolate) не сохраняются —
+                # они уже развернуты в points/inverted при загрузке.
+                cfg["steering"] = steering_decoder.normalize_config(
+                    self.steering_cfg
+                )
             cfg["points"] = self.read_points()
         else:
             # «Динамическая переменная»: пары (сырое значение, имя).
@@ -4716,6 +5220,7 @@ class VariablesTab(QWidget):
             "conflict": tr("конфликт классов"),
             "no-class": tr("вне классов"),
             "no-calibration": tr("нет калибровки"),
+            "no-points": tr("нет точек стороны"),
             "disabled": tr("выкл"),
         }.get(status, status)
 
@@ -4834,8 +5339,9 @@ class VariablesTab(QWidget):
                 points = cfg.get("points") or []
                 used = cfg.get("bytes") or []
                 steering = variable_decode.is_steering(cfg)
-                # Таблица привязки декодеру угла не нужна — значение
-                # берётся из калибровки декодера (CM-N3).
+                # «Градусы»: таблица привязки — источник нейтрали и
+                # масштаба (CM-F05); без точек и без декодера строку
+                # пропускаем — считать нечего.
                 if fid is None or not used or (not points and not steering):
                     continue
                 hit = latest.get(
@@ -4889,16 +5395,19 @@ class VariablesTab(QWidget):
                         continue
                     raw = res["raw"]
                     if steering:
-                        # «Угол руля»: класс по делителям (кратность),
-                        # нейтраль → 0°, градусы только из калибровки;
-                        # статус показываем текстом при невалидном
-                        # значении — живое число при этом НЕВАЛИДНО
-                        # (live_value=None, CM-N11).
+                        # «Градусы» (единый режим, CM-F05): класс по
+                        # делителям, нейтраль/масштаб — из таблицы
+                        # привязки; статус показываем текстом при
+                        # невалидном значении — живое число при этом
+                        # НЕВАЛИДНО (live_value=None, CM-N11).
                         if res["valid"]:
+                            suffix = steering_decoder.unit_suffix(
+                                res.get("unit", "none")
+                            )
                             row.set_live_value(
                                 res["value"], raw,
                                 text=(
-                                    f'{res["value"]:.1f}° '
+                                    f'{res["value"]:.1f}{suffix} '
                                     f'({res["raw_hex"]})'
                                 ),
                             )
@@ -4909,15 +5418,6 @@ class VariablesTab(QWidget):
                                     res["status"]
                                 ),
                             )
-                    elif cfg.get("out_range") == "degrees":
-                        # «Градусы»: значение декодируется по
-                        # выведенной из ≥3 точек циклической
-                        # зависимости; неизвестное семейство —
-                        # значение не показываем (отчёт мастера).
-                        model = _degrees_model(points)
-                        degrees = _degrees_decode(model, raw)
-                        if degrees is not None:
-                            row.set_live_value(degrees, raw)
                     else:
                         row.set_live_value(
                             _map_points(points, raw), raw

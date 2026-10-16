@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from core import variable_decode
 from core.aux_channels import (
     AUX_MAP_VERSION,
     AUX_MAX_DURATION_MS,
@@ -348,7 +349,16 @@ def _num_raw_threshold(
     raw): при монотонно неубывающей карте «value > thr» эквивалентно
     «raw > floor(raw_c)», «value < thr» — «raw < ceil(raw_c)»,
     где raw_c — точка пересечения. Немонотонная карта, порог вне
-    диапазона карты и плоские сегменты — на камне не выражаются."""
+    диапазона карты и плоские сегменты — на камне не выражаются.
+
+    «Градусы»/руль не компилируются в сырой порог: на ПК значение —
+    знаковый декод по веткам сторон с классификацией делителями и
+    инверсией (decode_var_value), а не _interpolate по всей таблице;
+    тривиальный raw-порог срабатывал бы на чужом классе/конфликте
+    там, где ПК даёт invalid. Такие переменные остаются на ПК
+    (CM-F05)."""
+    if variable_decode.is_steering(var):
+        return None
     pts: list[tuple[float, float]] = []
     for p in var.get("points") or []:
         try:

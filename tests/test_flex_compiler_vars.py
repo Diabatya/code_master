@@ -219,6 +219,27 @@ def test_num_var_sum_mode_uncompilable() -> None:
     assert managed == [False]
 
 
+def test_degrees_var_stays_pc() -> None:
+    """«Градусы» (руль): на ПК значение — знаковый декод по веткам
+    с делителями/инверсией, сырой порог на камне искажал бы
+    семантику (срабатывание на чужом классе/конфликте, где ПК даёт
+    invalid). Даже монотонная на вид таблица не компилируется —
+    программа остаётся на ПК (CM-F05)."""
+    deg = _num_var(
+        out_range="degrees",
+        steering={"enabled": True, "version": 3,
+                  "signs": {"pos": {4: "div", 8: "not"},
+                            "neg": {8: "div"}},
+                  "inverted": False},
+        points=[[0, 0.0], [16, 45.0], [20, 60.0]])
+    rules = [_rule(events=[{
+        "type": "num", "var": "V", "value": "30", "dir": "gt",
+    }])]
+    _r, managed = compile_rules(
+        rules, protocol=14, variables=_vars(read=[deg]))
+    assert managed == [False]
+
+
 # ------------------------------------------------------------------
 # Статические переменные: слушатель + updater-записи
 # ------------------------------------------------------------------
