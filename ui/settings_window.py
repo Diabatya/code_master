@@ -78,7 +78,7 @@ from ui.event_log_tab import EventLogTab
 from ui.flexible_logic_tab import FlexibleLogicTab
 from ui.hex_edit import HexDataEdit
 from ui.variables_tab import VariablesTab
-from ui.library_browser import LibraryBrowser
+
 from ui.memory_indicator import MemoryIndicator
 from ui.toast import show_toast
 import contextlib
@@ -453,7 +453,7 @@ class SettingsWindow(QMainWindow):
         # Загрузка файла переменных — тоже правка, «Сохранить» должна
         # включиться (отчёт мастера).
         self._variables_tab.loaded.connect(self._mark_dirty)
-        self._library_tab = LibraryBrowser(self._trigger_tab, self._flexible_tab, self)
+        # CM-F10 п.6: вкладка «Библиотека» удалена из окна настроек.
         self._analyzer_tab = CanAnalyzer(self._serial_manager, self)
         self._topology_tab = CanTopologyWidget(self)
         self._event_log_tab = EventLogTab(self._serial_manager, self)
@@ -465,7 +465,6 @@ class SettingsWindow(QMainWindow):
         self._tabs.addTab(self._gateway_tab, "🚦 " + tr("Шлюз"))
         self._tabs.addTab(self._monitor_tab, "🔍 " + tr("Мониторинг"))
         self._tabs.addTab(self._analyzer_tab, "\U0001F52C " + tr("Трейс"))
-        self._tabs.addTab(self._library_tab, "\U0001F4DA " + tr("Библиотека"))
         self._tabs.addTab(self._topology_tab, "🌐 " + tr("Топология"))
         self._tabs.addTab(self._event_log_tab, "🧾 " + tr("Лог МК"))
         self._update_analog_tab()
@@ -1444,7 +1443,6 @@ class SettingsWindow(QMainWindow):
             self._gateway_tab: "🚦 " + tr("Шлюз"),
             self._flexible_tab: "🧩 " + tr("Гибкая логика"),
             self._variables_tab: "🎛 " + tr("Переменные"),
-            self._library_tab: "📚 " + tr("Библиотека"),
             self._analyzer_tab: "🔬 " + tr("Трейс"),
             self._topology_tab: "🌐 " + tr("Топология"),
             self._event_log_tab: "🧾 " + tr("Лог МК"),
@@ -1467,7 +1465,6 @@ class SettingsWindow(QMainWindow):
             self._gateway_tab,
             self._flexible_tab,
             self._variables_tab,
-            self._library_tab,
             self._analyzer_tab,
             self._topology_tab,
             self._event_log_tab,

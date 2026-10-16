@@ -317,13 +317,19 @@ def _close_button(font: QFont, tooltip: str) -> QPushButton:
 
 
 class _ClickableSummary(QLabel):
-    """Строка-сводка события/условия: клик разворачивает редактор.
-    Пока тип «Не выбрано» — строка обведена голубой рамкой
-    (отчёт мастера)."""
+    """Строка-сводка события/условия/программы: клик разворачивает
+    редактор. Пока тип «Не выбрано» — строка обведена голубой рамкой
+    (отчёт мастера).
 
-    def __init__(self, parent=None) -> None:
+    ``on_click`` — явный обработчик клика (для сводки свёрнутой
+    программы — _toggle_collapsed строки, CM-F10); без него клик
+    идёт в ``_toggle_editor`` родителя, как раньше."""
+
+    def __init__(self, parent=None, on_click=None, colored: bool = True) -> None:
         super().__init__(parent)
         self.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self._on_click = on_click
+        self._colored = colored
         self._unselected = False
         self._apply_style()
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -341,14 +347,18 @@ class _ClickableSummary(QLabel):
             " border: 1px solid #3A7BD5; border-radius: 4px;"
             " padding: 1px 8px;" if self._unselected else ""
         )
-        self.setStyleSheet(f"color: #7C9EFF;{border}")
+        color = "color: #7C9EFF;" if self._colored else ""
+        self.setStyleSheet(f"{color}{border}")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            p = self.parent()
-            toggle = getattr(p, "_toggle_editor", None)
-            if callable(toggle):
-                toggle()
+            if callable(self._on_click):
+                self._on_click()
+            else:
+                p = self.parent()
+                toggle = getattr(p, "_toggle_editor", None)
+                if callable(toggle):
+                    toggle()
         super().mousePressEvent(event)
 
 
@@ -494,6 +504,57 @@ class _VarCombo(QComboBox):
         if self.currentIndex() >= 1:
             return self.currentText()
         return self._desired
+
+
+class _AuxChannelCombo(QComboBox):
+    """Выбор доп. канала по ИМЕНИ из вкладки «Переменные» (CM-F10).
+
+    Модель хранит неизменный номер канала в itemData — переименование
+    канала меняет только отображаемый текст, физическое назначение
+    остаётся. Безымянный канал показывается как «Канал №N».
+    ``get_rows`` — callable → [(имя, канал, функция)] из
+    ``_aux_channel_names``."""
+
+    def __init__(
+        self, font: QFont, get_rows=None, parent=None
+    ) -> None:
+        super().__init__(parent)
+        self.setFont(font)
+        self._get_rows = get_rows
+        for ch in range(1, AUX_CH_COUNT + 1):
+            self.addItem("", ch)
+        self.setCurrentIndex(0)
+        self.refresh_names()
+
+    def refresh_names(self) -> None:
+        """Обновляет подписи пунктов по текущим настройкам каналов —
+        вызывается при refresh_variables вкладки."""
+        names: dict[int, str] = {}
+        if callable(self._get_rows):
+            try:
+                for name, ch, _func in self._get_rows():
+                    names[ch] = name
+            except Exception:  # noqa: BLE001
+                pass
+        self.blockSignals(True)
+        for i in range(self.count()):
+            ch = int(self.itemData(i) or (i + 1))
+            label = names.get(ch) or tr("Канал №{0}").format(ch)
+            self.setItemText(i, label)
+            self.setItemData(
+                i,
+                tr("Канал №{0}").format(ch),
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        self.blockSignals(False)
+
+    def value(self) -> int:  # noqa: N802 — совместимость с QSpinBox
+        data = self.currentData()
+        return int(data) if data is not None else self.currentIndex() + 1
+
+    def setValue(self, ch: int) -> None:  # noqa: N802
+        idx = self.findData(int(ch))
+        self.setCurrentIndex(idx if idx >= 0 else 0)
 
 
 class _DynEventPage(QWidget):
@@ -770,12 +831,14 @@ class _ImpulseVarPage(QWidget):
 
 
 class _AuxEventPage(QWidget):
-    """Событие «Доп канал»: направление «Вход»/«Выход», номер канала
-    и состояние «Активен»/«Не активен» (отчёт мастера: помимо входов
-    в событиях доступны и выходы — программа срабатывает по включению
-    выбранного выхода)."""
+    """Событие «Доп канал»: направление «Вход»/«Выход», канал по
+    имени из «Переменных» и состояние «Активен»/«Не активен»
+    (отчёт мастера: помимо входов в событиях доступны и выходы —
+    программа срабатывает по включению выбранного выхода)."""
 
-    def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
+    def __init__(
+        self, font: QFont, mark_dirty, get_rows=None, parent=None
+    ) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setSpacing(2)
@@ -787,12 +850,8 @@ class _AuxEventPage(QWidget):
         self.direction.addItem(tr("Вход"), "in")
         self.direction.addItem(tr("Выход"), "out")
         row.addWidget(self.direction)
-        row.addWidget(_small_label(tr("Доп канал №"), font))
-        self.channel = QSpinBox()
-        self.channel.setFont(font)
-        self.channel.setRange(1, 8)
-        self.channel.setValue(1)
-        self.channel.setFixedWidth(64)
+        row.addWidget(_small_label(tr("Доп канал"), font))
+        self.channel = _AuxChannelCombo(font, get_rows)
         row.addWidget(self.channel)
         self.state = QComboBox()
         self.state.setFont(font)
@@ -804,8 +863,11 @@ class _AuxEventPage(QWidget):
         layout.addStretch()
 
         self.direction.currentIndexChanged.connect(mark_dirty)
-        self.channel.valueChanged.connect(mark_dirty)
+        self.channel.currentIndexChanged.connect(mark_dirty)
         self.state.currentIndexChanged.connect(mark_dirty)
+
+    def refresh_names(self) -> None:
+        self.channel.refresh_names()
 
     def read(self) -> dict[str, Any]:
         return {
@@ -1219,7 +1281,12 @@ class _AbortEventEditor(QWidget):
         self._dyn = _DynEventPage(font, mark_dirty, _EVENT_DYN, get_tab=get_tab)
         self._num = _DynEventPage(font, mark_dirty, _EVENT_NUM)
         self._impulse = _ImpulseVarPage(font, mark_dirty)
-        self._aux = _AuxEventPage(font, mark_dirty)
+        self._aux = _AuxEventPage(
+            font, mark_dirty,
+            get_rows=lambda: _aux_channel_names_from_tab(
+                self._get_tab() if callable(self._get_tab) else None
+            ),
+        )
         self._flag = _FlagEventPage(font, mark_dirty)
         self._frame = _FrameEventPage(font, mark_dirty)
         for page in (
@@ -1298,6 +1365,9 @@ class _AbortEventEditor(QWidget):
         self._impulse.var.set_names(imp, tr("— не выбрано —"))
         self._flag.var.set_names(flags, tr("— не выбрано —"))
         self._dyn.refresh_binding_names()
+        # Имена доп. каналов в комбобоксе события-прерывателя
+        # (CM-F10).
+        self._aux.refresh_names()
 
 
 def _detach_item(item, sep) -> None:
@@ -1488,27 +1558,52 @@ def _popup_type_selector(item) -> None:
     QTimer.singleShot(0, _popup)
 
 
-def _aux_channel_names(item) -> list[tuple[str, int, str]]:
-    """Именованные доп. каналы из третьей колонки «Переменных»:
-    (имя, пин/канал, функция) — для каскадного меню пунктов ГЛ."""
-    tab = item._row._tab._variables_tab
-    if tab is None:
+def _aux_channel_names_from_tab(tab) -> list[tuple[str, int, str]]:
+    """Доп. каналы вкладки «Переменных»: (отображаемое имя, номер
+    канала, функция).
+
+    CM-F10: показывается ИМЯ назначенного канала вместо номера;
+    безымянный настроенный канал отображается как «Канал №N».
+    Ссылка в модели — по неизменному номеру канала, переименование
+    обновляет только текст."""
+    export = getattr(tab, "export_config", None)
+    if not callable(export):
         return []
-    aux = getattr(tab, "aux_channel_configs", None)
-    if not callable(aux):
+    try:
+        data = export()
+    except Exception:  # noqa: BLE001
         return []
     out = []
-    for cfg in aux():
+    for cfg in data.get("aux") or []:
+        if cfg.get("type") != "aux":
+            continue
+        ch = int(cfg.get("channel", 1) or 1)
         name = str(cfg.get("name", "")).strip()
-        if name:
-            out.append(
-                (
-                    name,
-                    int(cfg.get("channel", 1) or 1),
-                    str(cfg.get("function", "")),
-                )
+        out.append(
+            (
+                name or tr("Канал №{0}").format(ch),
+                ch,
+                str(cfg.get("function", "")),
             )
+        )
     return out
+
+
+def _aux_channel_names(item) -> list[tuple[str, int, str]]:
+    """Доп. каналы из третьей колонки «Переменных» — для каскадного
+    меню и подписей пунктов ГЛ (CM-F10)."""
+    row = getattr(item, "_row", item)
+    tab = getattr(getattr(row, "_tab", None), "_variables_tab", None)
+    return _aux_channel_names_from_tab(tab) if tab is not None else []
+
+
+def _aux_channel_label(item, ch: int) -> str:
+    """Отображаемое имя доп. канала: настроенное имя либо
+    «Канал №N» (CM-F10)."""
+    for name, channel, _func in _aux_channel_names(item):
+        if channel == ch:
+            return name
+    return tr("Канал №{0}").format(ch)
 
 
 def _apply_menu_choice(item, code: str, patch: dict[str, Any]) -> None:
@@ -1666,7 +1761,10 @@ class _EventItem(QWidget):
         self._impulse = _ImpulseVarPage(
             font, row._mark_dirty, caption=tr("получено")
         )
-        self._aux = _AuxEventPage(font, row._mark_dirty)
+        self._aux = _AuxEventPage(
+            font, row._mark_dirty,
+            get_rows=lambda row=row: _aux_channel_names(row),
+        )
         self._flag = _FlagEventPage(font, row._mark_dirty)
         self._frame = _FrameEventPage(font, row._mark_dirty)
         self._power = _PowerEventPage(font, row._mark_dirty)
@@ -1839,6 +1937,10 @@ class _EventItem(QWidget):
         # Список состояний «Динамической переменной» подтягивается
         # из её таблицы привязки (отчёт мастера).
         self._dyn.refresh_binding_names()
+        # Имена доп. каналов — из третьей колонки «Переменных»
+        # (CM-F10); сводка обновляется текстом имени.
+        self._aux.refresh_names()
+        self._update_summary()
 
     def _menu_spec(self) -> list[tuple[str, list | None]]:
         """Виды событий → заполненные переменные → команды/события —
@@ -2020,8 +2122,11 @@ class _EventItem(QWidget):
                 tr("активен") if self._aux.state.currentData() == 1
                 else tr("не активен")
             )
-            text = tr("Доп канал №{0} {1} {2}").format(
-                self._aux.channel.value(), direction, state
+            # CM-F10: имя назначенного канала, не номер.
+            text = tr("{0} {1} {2}").format(
+                _aux_channel_label(self, self._aux.channel.value()),
+                direction,
+                state,
             )
         self._summary.set_unselected(etype == _EVENT_NONE)
         self._summary.setText(text)
@@ -2122,15 +2227,12 @@ class _CondItem(QWidget):
         aux_layout.setSpacing(2)
         aux_layout.setContentsMargins(0, 0, 0, 0)
         aux_row = QHBoxLayout()
-        aux_row.addWidget(_small_label(tr("Доп канал №"), font))
-        self.aux_channel = QSpinBox()
-        self.aux_channel.setFont(font)
-        self.aux_channel.setRange(1, AUX_CH_COUNT)
-        self.aux_channel.setValue(1)
-        self.aux_channel.setFixedWidth(64)
-        self.aux_channel.setToolTip(tr(
-            "1=PA14, 2=PA15, 3=PC10, 4=PC11, 5=PC12, 6=PD2, 7=PB3"
-        ))
+        aux_row.addWidget(_small_label(tr("Доп канал"), font))
+        # CM-F10: выбор канала по имени из «Переменных» — модель
+        # хранит номер канала (itemData).
+        self.aux_channel = _AuxChannelCombo(
+            font, get_rows=lambda: _aux_channel_names(self)
+        )
         aux_row.addWidget(self.aux_channel)
         self.aux_state = QComboBox()
         self.aux_state.setFont(font)
@@ -2185,7 +2287,7 @@ class _CondItem(QWidget):
         self.num_op.currentIndexChanged.connect(self._update_summary)
         self.num_value.textChanged.connect(self._update_summary)
         self.imp_var.currentIndexChanged.connect(self._update_summary)
-        self.aux_channel.valueChanged.connect(self._update_summary)
+        self.aux_channel.currentIndexChanged.connect(self._update_summary)
         self.aux_state.currentIndexChanged.connect(self._update_summary)
         self.flag_var.currentIndexChanged.connect(self._update_summary)
         self.flag_state.currentIndexChanged.connect(self._update_summary)
@@ -2197,7 +2299,7 @@ class _CondItem(QWidget):
         self.st_state.currentIndexChanged.connect(row._mark_dirty)
         self.dyn_var.currentIndexChanged.connect(row._mark_dirty)
         self.imp_var.currentIndexChanged.connect(row._mark_dirty)
-        self.aux_channel.valueChanged.connect(row._mark_dirty)
+        self.aux_channel.currentIndexChanged.connect(row._mark_dirty)
         self.aux_state.currentIndexChanged.connect(row._mark_dirty)
 
         if cond is not None:
@@ -2348,6 +2450,9 @@ class _CondItem(QWidget):
         # Состояния «Динамической переменной» — из её таблицы привязки
         # (отчёт мастера: список состояний в условии был пуст).
         self._dyn_page.refresh_binding_names()
+        # Имена доп. каналов (CM-F10).
+        self.aux_channel.refresh_names()
+        self._update_summary()
 
     def _menu_spec(self) -> list[tuple[str, list | None]]:
         """Виды условий → заполненные переменные → проверки — для
@@ -2448,13 +2553,15 @@ class _CondItem(QWidget):
                 f"{tr('— импульс активен')}"
             )
         elif ctype == _COND_AUX:
-            # «Доп канал 1 активен».
+            # «Вентилятор активен» — имя канала из «Переменных»
+            # (CM-F10), безымянный — «Канал №N».
             state = (
                 tr("активен") if self.aux_state.currentData() == 1
                 else tr("не активен")
             )
-            text = tr("Доп канал {0} {1}").format(
-                self.aux_channel.value(), state
+            text = tr("{0} {1}").format(
+                _aux_channel_label(self, self.aux_channel.value()),
+                state,
             )
         elif ctype == _COND_FLAG:
             # «Свет салона 1» — имя переменной + состояние.
@@ -2597,15 +2704,14 @@ class _ActionItem(QWidget):
         pl.setSpacing(2)
         pl.setContentsMargins(0, 0, 0, 0)
         top = QHBoxLayout()
-        top.addWidget(_small_label(tr("Канал №"), font))
-        self.aux_channel = QSpinBox()
-        self.aux_channel.setFont(font)
-        self.aux_channel.setRange(1, AUX_CH_COUNT)
-        self.aux_channel.setValue(1)
-        self.aux_channel.setFixedWidth(64)
-        self.aux_channel.setToolTip(tr(
-            "1=PA14, 2=PA15, 3=PC10, 4=PC11, 5=PC12, 6=PD2, 7=PB3"
-        ))
+        top.addWidget(_small_label(tr("Канал"), font))
+        # CM-F10: выбор канала по имени из «Переменных» — модель
+        # хранит номер канала (itemData), переименование меняет
+        # только подпись.
+        self.aux_channel = _AuxChannelCombo(
+            font, get_rows=lambda: _aux_channel_names(self)
+        )
+        self.aux_channel.setMinimumWidth(120)
         top.addWidget(self.aux_channel)
         self.aux_mode = QComboBox()
         self.aux_mode.setFont(font)
@@ -2758,7 +2864,8 @@ class _ActionItem(QWidget):
         pl.addWidget(self._aux_stack)
         self._stack.addWidget(page)
 
-        self.aux_channel.valueChanged.connect(mark_dirty)
+        self.aux_channel.currentIndexChanged.connect(mark_dirty)
+        self.aux_channel.currentIndexChanged.connect(self._update_summary)
         self.aux_use_var.toggled.connect(mark_dirty)
         self.aux_use_var.toggled.connect(self._refresh_aux_override)
         self.aux_mode.currentIndexChanged.connect(self._on_aux_mode)
@@ -3100,6 +3207,9 @@ class _ActionItem(QWidget):
         # «Запись DATA в кэш» — та же кэш-переменная (отчёт мастера).
         self.cache_var.set_names(cache, tr("— не выбрано —"))
         self._abort.refresh_variables()
+        # Имена доп. каналов (CM-F10).
+        self.aux_channel.refresh_names()
+        self._update_summary()
 
     def _menu_spec(self) -> list[tuple[str, list | None]]:
         """Виды действий → заполненные переменные → команды — для
@@ -3128,8 +3238,10 @@ class _ActionItem(QWidget):
                     for label, p in aux_modes
                 ],
             )
+            # Все семь назначенных пинов — выходы (CM-F09): фильтра
+            # «OUT1-4» больше нет, действия доступны всем каналам.
             for name, ch, _func in _aux_channel_names(self)
-            if 1 <= ch <= 4  # выходные каналы OUT1-4 (отчёт мастера)
+            if 1 <= ch <= AUX_CH_COUNT
         ]
         return [
             (_ACT_AUX, aux_vars),
@@ -3362,20 +3474,21 @@ class _ActionItem(QWidget):
         импульсы доп канал №1», «ВКЛ ШИМ №2», «Фрейм» (отчёт мастера)."""
         atype = self._type.currentData()
         if atype == _ACT_AUX:
-            ch = self.aux_channel.value()
+            # Имя назначенного канала вместо номера (CM-F10).
+            ch = _aux_channel_label(self, self.aux_channel.value())
             mode = self.aux_mode.currentData()
             if mode == "off":
-                text = tr("Выкл доп канал №{0}").format(ch)
+                text = tr("Выкл {0}").format(ch)
             elif mode == "pulse":
-                text = tr("Вкл импульсы доп канал №{0}").format(ch)
+                text = tr("Вкл импульсы {0}").format(ch)
             elif mode == "pwm":
-                text = tr("ВКЛ ШИМ №{0}").format(ch)
+                text = tr("ВКЛ ШИМ {0}").format(ch)
             elif self.aux_on_time_en.isChecked():
-                text = tr("Вкл доп канал №{0} на {1} мс").format(
+                text = tr("Вкл {0} на {1} мс").format(
                     ch, self.aux_on_time.value()
                 )
             else:
-                text = tr("Вкл доп канал №{0}").format(ch)
+                text = tr("Вкл {0}").format(ch)
             if self.aux_use_var.isChecked():
                 text += tr(" (настройки выхода)")
         elif atype == _ACT_VAR:
@@ -3437,50 +3550,12 @@ class RuleRowWidget(QWidget):
         """Оранжевый треугольник «программа ≠ записи в МК»."""
         self._dirty_badge.setVisible(bool(dirty))
 
-    def set_executor(self, owner: str, reason: str | None) -> None:
-        """Бейдж владельца исполнения программы (ревью CM-R4):
-        «устройство» — камень исполняет автономно, «ПК» — программа
-        живёт в приложении (причина — в подсказке), «не записано» —
-        программа ещё не уходила в камень, «выключена» — неактивна."""
-        text, color, tip = {
-            "device": (
-                tr("устройство"), "#7FBF7F",
-                tr("Исполняется устройством автономно — работает "
-                   "без приложения") + (
-                    f"; {reason}" if reason else ""
-                ),
-            ),
-            "conflict": (
-                tr("конфликт"), "#C96A6A",
-                tr("Содержимое устройства не совпадает с "
-                   "конфигурацией приложения — исполнение ПК "
-                   "приостановлено, пересохраните настройки"),
-            ),
-            "suspended": (
-                tr("пауза"), "#C9A86A",
-                tr("Владелец исполнения не подтверждён — область "
-                   "устройства ещё не прочитана; исполнение ПК "
-                   "приостановлено до проверки"),
-            ),
-            "pc": (
-                tr("ПК"), "#7FA8C9",
-                tr("Исполняется приложением") + (
-                    f": {reason}" if reason else ""
-                ),
-            ),
-            "unsaved": (
-                tr("не записано"), "#C9A86A",
-                tr("Программа ещё не записана в устройство"),
-            ),
-            "off": (
-                tr("выключена"), "#8A8A92",
-                tr("Программа выключена"),
-            ),
-        }.get(owner, (owner, "#8A8A92", ""))
-        self._executor_label.setText(text)
-        self._executor_label.setStyleSheet(f"color: {color};")
-        self._executor_label.setToolTip(tip)
-        self._executor_label.setVisible(True)
+    def set_executor(self, owner: str, reason: str | None) -> None:  # noqa: ARG002
+        """CM-F10 п.5: бейдж владельца исполнения удалён из шапки
+        программы. Внутренняя owner-логика сохранена — состояние
+        запоминается для отладки/проверки сохранения, UI не рисует
+        бейдж «ПК»/«устройство»."""
+        self._executor_state = (owner, reason)
 
     # ---- виджеты -------------------------------------------------------
 
@@ -3508,19 +3583,26 @@ class RuleRowWidget(QWidget):
         # (отчёт мастера).
         self._remove_button = _close_button(font, tr("Удалить программу"))
         self._remove_button.clicked.connect(self._on_remove)
-        self._summary_label = QLabel()
+        # Сводка свёрнутой программы — кликабельна: повторное
+        # открытие/правка программы сколько угодно раз (CM-F10:
+        # «после закрытия дерева настройки строка становится
+        # некликабельной»).
+        self._summary_label = _ClickableSummary(
+            on_click=self._toggle_collapsed, colored=False
+        )
         self._summary_label.setFont(font)
+        self._summary_label.setToolTip(tr("Развернуть программу"))
         self._summary_label.setVisible(False)
         self._counter_label = QLabel("0")
         self._counter_label.setFont(font)
         self._counter_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._counter_label.setFixedWidth(36)
         self._counter_label.setToolTip(tr("Срабатываний"))
-        # Бейдж владельца исполнения — «устройство»/«ПК»/«не
-        # записано» (ревью CM-R4: владелец должен быть виден).
-        self._executor_label = QLabel()
-        self._executor_label.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        self._executor_label.setVisible(False)
+        # CM-F10 п.5: бейдж владельца исполнения («устройство»/«ПК»)
+        # убран из шапки программы. Внутренняя owner-логика
+        # (_device_managed/_pc_flex_allowed) сохраняется — она
+        # управляет исполнением, а о невозможности автономной записи
+        # сообщается на этапе проверки/сохранения.
 
         self._number_label = QLabel("№")
         self._number_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
@@ -3586,7 +3668,6 @@ class RuleRowWidget(QWidget):
         header_layout.addWidget(self._summary_label, 2)
         header_layout.addWidget(_small_label(tr("Срабатываний:"), font))
         header_layout.addWidget(self._counter_label)
-        header_layout.addWidget(self._executor_label)
         header_layout.addWidget(self._collapse_button)
         header_layout.addWidget(self._remove_button)
         layout.addWidget(self._header)
@@ -4373,9 +4454,14 @@ class FlexibleLogicTab(QWidget):
         self._update_executor_badges()
 
     def _update_executor_badges(self) -> None:
-        """Бейджи «устройство/ПК» в шапках программ — по снимку
-        записанных в МК правил (_runtime_rules): именно они
-        исполняются, черновик может отличаться (ревью CM-R4)."""
+        """Владелец исполнения программ — по снимку записанных в МК
+        правил (_runtime_rules): именно они исполняются, черновик
+        может отличаться (ревью CM-R4).
+
+        CM-F10 п.5: визуальный бейдж «устройство/ПК» в шапке удалён —
+        метод теперь только фиксирует состояние владельца в строке
+        (row._executor_state), которое используется внутренней
+        логикой исполнения/проверки сохранения."""
         try:
             proto = self._serial_manager.device_protocol_version()
         except Exception:  # noqa: BLE001
@@ -4439,7 +4525,7 @@ class FlexibleLogicTab(QWidget):
                         )
                     row.set_executor("pc", reason)
             except Exception:  # noqa: BLE001
-                row._executor_label.setVisible(False)
+                pass
 
     def _pc_flex_allowed(self) -> bool:
         """Разрешено ли ПК-исполнение программ ГЛ (ревью CM-R9/R10).
