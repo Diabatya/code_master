@@ -69,6 +69,10 @@ FLEX_AUX_PROTOCOL = 13
 FLEX_VAR_PROTOCOL = 14
 FLEX_MAX_RECORDS = 16  # должен совпадать с trigger.h
 FLEX_MAX_FLAGS = 16  # должен совпадать с trigger.h FLEX_MAX_FLAGS
+# Максимальный id edge-группы алиасов именованного состояния
+# (rx_data_mask[5]) — должен совпадать с FLEX_EDGE_GROUP_MAX
+# в trigger.h. 0 — у записи своя защёлка фронта.
+FLEX_EDGE_GROUP_MAX = 31
 AUX_CH_COUNT = 7  # должен совпадать с aux_out.h
 
 _FLXB_HEADER_SIZE = 12
@@ -206,6 +210,20 @@ class _FlexCtx:
         self.used_control: dict[str, dict[str, Any]] = {}
         self.used_static: dict[str, dict[str, Any]] = {}
         self.used_flag_vars: dict[str, dict[str, Any]] = {}
+        # CM-FR12: id edge-групп алиасов именованных состояний
+        # (rx_data_mask[5] записей RX_VAR). Общие для всего блоба —
+        # одинаковый id в разных программах делил бы защёлку фронта.
+        self._edge_group_next = 0
+
+    def alloc_edge_group(self) -> int | None:
+        """Id edge-группы алиасов именованного состояния (CM-FR12):
+        все RAW-алиасы одного события «var == имя» делят защёлку
+        фронта на МК (rx_data_mask[5]). 0 зарезервировано — у записи
+        своя защёлка; None — идентификаторы исчерпаны."""
+        if self._edge_group_next >= FLEX_EDGE_GROUP_MAX:
+            return None
+        self._edge_group_next += 1
+        return self._edge_group_next
 
     def _alloc(self, key: tuple[str, str]) -> int | None:
         if key in self.flag_idx:
@@ -277,10 +295,13 @@ class _FlexCtx:
         # оставлять занятые слоты и updater без слушателя. Референсы
         # used_* отказ не откатывает — снимок vars фиксирует сам факт
         # ссылки, чтобы verify-вычитка пошла тем же путём отказа.
-        return dict(self.flag_idx), dict(self.static_defs)
+        return (
+            dict(self.flag_idx), dict(self.static_defs),
+            self._edge_group_next,
+        )
 
     def restore(self, snap: tuple) -> None:
-        self.flag_idx, self.static_defs = snap
+        self.flag_idx, self.static_defs, self._edge_group_next = snap
 
     def vars_json(self) -> dict[str, Any]:
         """Снимок задействованных определений для JSON-части FLXB —
@@ -436,6 +457,7 @@ def _dyn_event_to_rxs(
     if extraction is None:
         return None
     off, ln, endian, kind = extraction
+    multi_alias = False
     if kind == 0:
         # dyn_cache: символьное состояние из таблицы привязки.
         # Численно разбираемое значение на ПК сравнивается с
@@ -456,6 +478,7 @@ def _dyn_event_to_rxs(
         if not raws:
             return []
         cmps = [(0, raw) for raw in raws]
+        multi_alias = len(cmps) > 1
     else:
         # Численная: на ПК dir=="gt" → «>», остальные (lt/eq) — «<»
         # (_event_fired сравнивает dir буквально с "gt").
@@ -480,7 +503,7 @@ def _dyn_event_to_rxs(
             off, ln, endian, cmp_op, kind
         )
         data = int(val).to_bytes(8, "little")
-        out.append({
+        rx = {
             "rx_var": True,
             "rx_channel": channel,
             "rx_extended": 1 if ext else 0,
@@ -492,7 +515,14 @@ def _dyn_event_to_rxs(
             "rx_rtr": 0,
             "rx_listen_echo": False,
             "rx_fire_limit": 0,
-        })
+        }
+        if multi_alias:
+            # CM-FR12: несколько RAW одного именованного состояния —
+            # записи делят общую защёлку фронта (edge-группа, id
+            # подставляется в mask[5] при сборке записей правила),
+            # иначе переход между алиасами пересрабатывал бы.
+            rx["dyn_edge_group"] = True
+        out.append(rx)
     ctx.use_read(var)
     return out
 
@@ -1288,7 +1318,24 @@ def _compile_rule(
         return [], None
 
     records: list[dict[str, Any]] = []
+    # CM-FR12: алиасы одного именованного состояния делят защёлку
+    # фронта — id edge-группы общий на событие (не на пару
+    # событие×действие), уникальный в пределах блоба через ctx.
+    edge_groups: dict[int, int] = {}
     for ev_idx, rx in rx_parts:
+        rx = dict(rx)
+        if rx.pop("dyn_edge_group", False):
+            if ev_idx not in edge_groups:
+                gid = ctx.alloc_edge_group()
+                if gid is None:
+                    return None, (
+                        "слишком много алиасов состояний "
+                        "— только на ПК"
+                    )
+                edge_groups[ev_idx] = gid
+            mask = bytearray(rx["rx_data_mask"])
+            mask[5] = edge_groups[ev_idx]
+            rx["rx_data_mask"] = bytes(mask)
         for act_idx, tx in tx_parts:
             # get(), не pop(): один tx участвует в записи каждого
             # события — pop без дефолта падал KeyError на второй

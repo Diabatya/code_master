@@ -10,13 +10,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 
 import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -180,7 +181,9 @@ class TestRecording:
             tbl = dlg._tables["pos"]
             tbl.toggle_record()
             tbl.capture(b"\x01\x02")  # 0x0102 = 258
-            r = tbl.table.rowCount() - 1
+            # Журнал — сверху DATA-колонок: новейшее первым, десять
+            # пустых DATA-ячеек делителей над историей нет (CM-FR07-R2).
+            r = 0
             assert tbl.table.item(r, tbl.COL_HEX).text() == "01 02"
             assert tbl.table.item(r, tbl.COL_DEC).text() == "258"
         finally:
@@ -188,9 +191,10 @@ class TestRecording:
                 pass
 
     def test_history_rows_are_journal_only(self, qapp) -> None:
-        """CM-FR06: строки истории — журнал без активных условий:
-        галочек и делителя нет, правило стороны они не меняют,
-        и лежат НИЖЕ десяти фиксированных делителей."""
+        """CM-FR06/CM-FR07-R2: строки истории — журнал без активных
+        условий: галочек и делителя нет, правило стороны они не
+        меняют, и лежат СВЕРХУ DATA-колонок — новейшее первым,
+        делители ниже журнала."""
         gen = _dialog(qapp)
         dlg = next(gen)
         try:
@@ -198,7 +202,8 @@ class TestRecording:
             tbl.toggle_record()
             for value in (b"\x10", b"\x20"):
                 tbl.capture(value)
-            for r in (10, 11):
+            # Журнальные строки — первые две (новейшая сверху).
+            for r in (0, 1):
                 assert tbl._req_boxes(r) is None, (
                     "строка истории не должна иметь галочек требования"
                 )
@@ -228,13 +233,14 @@ class TestRecording:
             tbl.toggle_record()
             tbl.capture(b"\x20")
             assert tbl.table.rowCount() == 12
-            # Журнал и фиксированные делители на своих местах.
+            # Журнал и фиксированные делители на своих местах: история
+            # сверху (новейшая строка 0), делители ниже неё.
             divs = [
                 int(tbl.table.item(r, tbl.COL_NUM).text())
-                for r in range(10)
+                for r in range(2, 12)
             ]
             assert divs == list(sd.DIVISORS)
-            assert tbl._row_hex(10) == "10" and tbl._row_hex(11) == "20"
+            assert tbl._row_hex(0) == "20" and tbl._row_hex(1) == "10"
             assert tbl.sign_rules() == {8: "div"}
         finally:
             for _ in gen:
@@ -275,15 +281,17 @@ class TestCaptureContract:
         return dlg._tables["neg"]._row_hex(r)
 
     def test_le_decodes_513_not_258(self, qapp) -> None:
-        """bytes=[0,1], sblp='le', DATA 01 02 → журнал и делители
-        читают 513 (0x0201), а не 258 — единый контракт с live."""
+        """bytes=[0,1], sblp='le', DATA 01 02 → DATA 10 и делители
+        читают 513 (0x0201) — единый контракт с live. CM-FR07-R2:
+        DATA 16 показывает байты ПРОВОДА «01 02» как пришли,
+        а не переставленные «02 01»."""
         gen = _dialog(qapp, live=self._live(sblp="le"))
         dlg = next(gen)
         try:
             dlg._tables["neg"].toggle_record()
             assert self._feed(dlg, [self._frame()]) == 1
-            assert self._hex(dlg, 10) == "02 01"
-            assert self._dec(dlg, 10) == "513"
+            assert self._hex(dlg, 0) == "01 02"
+            assert self._dec(dlg, 0) == "513"
         finally:
             for _ in gen:
                 pass
@@ -297,15 +305,17 @@ class TestCaptureContract:
             neg = dlg._tables["neg"]
             neg.toggle_record()
             assert self._feed(dlg, [self._frame()]) == 1
-            assert self._dec(dlg, 10) == "258"
+            assert self._dec(dlg, 0) == "258"
             dlg2_gen = _dialog(qapp, live=self._live(sblp="le"))
             dlg2 = next(dlg2_gen)
             try:
                 dlg2._tables["neg"].toggle_record()
                 self._feed(dlg2, [self._frame(data=b"\x00\x01")])
-                assert self._hex(dlg2, 10) == "01 00"
+                # Ведущий нуль провода виден в DATA 16; число — по
+                # контракту извлечения (CM-FR07-R2).
+                assert self._hex(dlg2, 0) == "00 01"
                 assert dlg2._tables["neg"].table.item(
-                    10, dlg2._tables["neg"].COL_DEC
+                    0, dlg2._tables["neg"].COL_DEC
                 ).text() == "256"
             finally:
                 for _ in dlg2_gen:
@@ -322,7 +332,7 @@ class TestCaptureContract:
         try:
             dlg._tables["neg"].toggle_record()
             self._feed(dlg, [self._frame(data=b"\x01\x02\x03")])
-            assert self._dec(dlg, 10) == "197121"  # 0x030201
+            assert self._dec(dlg, 0) == "197121"  # 0x030201
         finally:
             for _ in gen:
                 pass
@@ -331,7 +341,10 @@ class TestCaptureContract:
         try:
             dlg._tables["neg"].toggle_record()
             self._feed(dlg, [self._frame()])
-            assert self._dec(dlg, 10) == "3"       # сумма 1+2
+            assert self._dec(dlg, 0) == "3"       # сумма 1+2
+            # CM-FR07-R2: журнал показывает окно провода «01 02»,
+            # а не HEX суммы «00 03».
+            assert self._hex(dlg, 0) == "01 02"
         finally:
             for _ in gen:
                 pass
@@ -348,7 +361,7 @@ class TestCaptureContract:
                 self._frame(channel=0, data=b"\x01\x02"),
             ])
             assert dlg._tables["neg"].table.rowCount() == 11
-            assert self._hex(dlg, 10) == "01 02"
+            assert self._hex(dlg, 0) == "01 02"
         finally:
             for _ in gen:
                 pass
@@ -383,7 +396,7 @@ class TestCaptureContract:
                 self._frame(data=b"\x11\x22"),
             ])
             assert dlg._tables["neg"].table.rowCount() == 11
-            assert self._hex(dlg, 10) == "11 22"
+            assert self._hex(dlg, 0) == "11 22"
         finally:
             for _ in gen:
                 pass
@@ -436,6 +449,100 @@ class TestCaptureContract:
             assert not tbl.recording
             assert "источник" in tbl.status.text()
             assert dlg._pending == []
+        finally:
+            for _ in gen:
+                pass
+
+
+class TestQueueOwnershipR2:
+    """CM-FR07-R2: принадлежность образца и его байты решаются при
+    приёме — не при сливе. «Стоп» осушает свой хвост; журнал
+    показывает провод и канал приёма; записи — сверху."""
+
+    def _live(self, **kw):
+        state = {
+            "fid": 0x100, "extended": False, "channel": None,
+            "bytes": [0, 1], "sblp": "", "get_frame": None,
+        }
+        state.update(kw)
+        return state
+
+    def _frame(self, data=b"\x01\x02", **kw):
+        frame = {
+            "id": 0x100, "channel": 0, "extended": False,
+            "rtr": False, "data": bytes(data),
+        }
+        frame.update(kw)
+        return frame
+
+    def test_stop_drains_own_tail_immediately(self, qapp) -> None:
+        """Проба ревью: «Записать»(−) → образец A → «Стоп»(−) до
+        ближайшего тика → «Записать»(+) → тик. A — в журнале (−),
+        а не потерян и не переложен в (+)."""
+        gen = _dialog(qapp, live=self._live(sblp="be"))
+        dlg = next(gen)
+        try:
+            neg, pos = dlg._tables["neg"], dlg._tables["pos"]
+            neg.record_btn.click()
+            dlg._on_frames([self._frame(data=b"\x0A\x0B")])
+            neg.record_btn.click()          # Стоп — до тика
+            # Хвост своей сессии долит немедленно, не дожидаясь
+            # 100-мс тика.
+            assert neg.table.rowCount() == 11
+            assert neg._row_hex(0) == "0A 0B"
+            assert dlg._pending == []
+            pos.record_btn.click()
+            dlg._on_frames([self._frame(data=b"\x0C\x0D")])
+            dlg._tick()
+            # Старый образец не переложен в (+) — та видит только
+            # кадры своей сессии.
+            assert pos.table.rowCount() == 11
+            assert pos._row_hex(0) == "0C 0D"
+            assert neg.table.rowCount() == 11
+        finally:
+            for _ in gen:
+                pass
+
+    def test_tick_delivers_by_arrival_tags(self, qapp) -> None:
+        """Обе записывают при приходе A → A принадлежит обеим;
+        после «Стоп»(−) образец B — только (+). Тик не пересматривает
+        владельцев."""
+        gen = _dialog(qapp, live=self._live(sblp="be"))
+        dlg = next(gen)
+        try:
+            neg, pos = dlg._tables["neg"], dlg._tables["pos"]
+            neg.record_btn.click()
+            pos.record_btn.click()
+            dlg._on_frames([self._frame(data=b"\x0A\x0B")])
+            neg.record_btn.click()          # стоп: A долит в (−)
+            assert neg._row_hex(0) == "0A 0B"
+            dlg._on_frames([self._frame(data=b"\x0C\x0D")])
+            dlg._tick()
+            # A — у обеих (обе записывали при приёме), B — только (+).
+            assert pos.table.rowCount() == 12
+            assert pos._row_hex(0) == "0C 0D"
+            assert pos._row_hex(1) == "0A 0B"
+            assert neg.table.rowCount() == 11
+        finally:
+            for _ in gen:
+                pass
+
+    def test_journal_keeps_wire_bytes_and_channel(self, qapp) -> None:
+        """le: DATA 16 — байты провода «01 02» как пришли, DATA 10 —
+        число по контракту; канал приёма — в подсказке строки."""
+        gen = _dialog(qapp, live=self._live(sblp="le"))
+        dlg = next(gen)
+        try:
+            neg = dlg._tables["neg"]
+            neg.record_btn.click()
+            dlg._on_frames([
+                self._frame(channel=1, data=b"\x01\x02"),
+            ])
+            dlg._tick()
+            item = neg.table.item(0, neg.COL_HEX)
+            assert item.text() == "01 02"
+            assert "CAN2" in item.toolTip()
+            assert neg.table.item(0, neg.COL_DEC).text() == "513"
         finally:
             for _ in gen:
                 pass
@@ -559,6 +666,13 @@ class TestUnifiedDecode:
         assert res["unit"] == "fahrenheit" and res["value"] == -45.0
 
 
+class _FramesEmitter(QObject):
+    """Настоящий Qt-сигнал потока кадров — для проверки отписки и
+    запоздалых сигналов через реальный механизм connect/disconnect
+    (CM-FR08-R2), а не фейковый список колбэков."""
+    frames = Signal(list)
+
+
 class _FakeSignal:
     """Минимальный connect/disconnect/emit для device_signal."""
 
@@ -679,6 +793,95 @@ class TestLifecycle:
             assert not tbl.recording
             assert dlg._pending == []
             assert "отключено" in tbl.status.text()
+        finally:
+            for _ in gen:
+                pass
+
+    def test_done_path_finalizes(self, qapp) -> None:
+        """Прямой done() обходит accept/reject/closeEvent — но не
+        финализацию (CM-FR08-R2): guard, таймер, записи, отписки —
+        те же, что у обычного закрытия."""
+        subs, sig = [], _FakeSignal()
+        gen = _dialog(qapp, live=self._live(subs, sig))
+        dlg = next(gen)
+        try:
+            dlg._tables["neg"].toggle_record()
+            dlg.done(1)
+            assert dlg._closed
+            assert not dlg._live_timer.isActive()
+            assert not dlg._tables["neg"].recording
+            assert subs == [] and sig._subs == []
+        finally:
+            for _ in gen:
+                pass
+
+    def test_deferred_delete_finalizes(self, qapp) -> None:
+        """Разрушение минуя done (deleteLater — как у смерти
+        родителя или deferred delete) вызывает ту же финализацию
+        из destroyed() (CM-FR08-R2): отписка от настоящего
+        Qt-сигнала подтверждается сторонним списком."""
+        emitter = _FramesEmitter()
+        unsubscribed: list = []
+
+        def _sub(cb):
+            emitter.frames.connect(cb)
+
+            def _unsub():
+                # Разрушенный получатель уже снят Qt'ом —
+                # disconnect кинет; финализация всё равно считается.
+                with contextlib.suppress(Exception):
+                    emitter.frames.disconnect(cb)
+                unsubscribed.append(cb)
+
+            return _unsub
+
+        live = {
+            "fid": 0x100, "extended": False, "channel": None,
+            "bytes": [0, 1], "sblp": "", "get_frame": None,
+            "subscribe": _sub, "device_signal": None,
+        }
+        dlg = vt._DegreesDecoderDialog(dict(_V2), QFont(), live=live)
+        dlg._tables["neg"].toggle_record()
+        dlg.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        # destroyed() → та же финализация: отписка исполнена даже без
+        # done()/closeEvent (CM-FR08-R2). Поля мёртвого объекта не
+        # трогаем — проверяем побочный эффект.
+        assert len(unsubscribed) == 1
+        # Поздняя эмиссия реального сигнала никому не доставляется.
+        emitter.frames.emit([{"id": 0x100, "channel": 0,
+                              "extended": False, "rtr": False,
+                              "data": b"\x01\x02"}])
+
+    def test_late_real_signal_after_done(self, qapp) -> None:
+        """Запоздалый сигнал настоящего Qt после done() не пишет в
+        закрытый диалог и не поднимает исключений (CM-FR08-R2)."""
+        emitter = _FramesEmitter()
+
+        def _sub(cb):
+            emitter.frames.connect(cb)
+            return lambda: emitter.frames.disconnect(cb)
+
+        live = {
+            "fid": 0x100, "extended": False, "channel": None,
+            "bytes": [0, 1], "sblp": "", "get_frame": None,
+            "subscribe": _sub, "device_signal": None,
+        }
+        gen = _dialog(qapp, live=live)
+        dlg = next(gen)
+        try:
+            tbl = dlg._tables["neg"]
+            tbl.record_btn.click()
+            emitter.frames.emit([{"id": 0x100, "channel": 0,
+                                  "extended": False, "rtr": False,
+                                  "data": b"\x01\x02"}])
+            assert dlg._pending
+            dlg.done(0)
+            emitter.frames.emit([{"id": 0x100, "channel": 0,
+                                  "extended": False, "rtr": False,
+                                  "data": b"\x03\x04"}])
+            assert dlg._pending == []
+            assert tbl.table.rowCount() == len(sd.DIVISORS)
         finally:
             for _ in gen:
                 pass

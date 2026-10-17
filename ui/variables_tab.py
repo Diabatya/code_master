@@ -37,7 +37,7 @@ import re
 import time
 from pathlib import Path
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -772,6 +772,21 @@ def _parse_axis_value(text: str) -> float | None:
     return None
 
 
+class _CapSample(NamedTuple):
+    """Образец записи, помеченный В МОМЕНТ ПРИЁМА (CM-FR07-R2):
+    ``wire`` — байты выбранного окна DATA в порядке провода (как
+    пришли, с ведущими нулями); ``raw`` — число по выбранному
+    контракту извлечения (SBLP/сумма) для DATA 10 и кратности;
+    ``channel`` — принявший CAN-канал кадра; ``receivers`` —
+    таблицы (sign), у которых запись была активна при приходе —
+    «Стоп» осушает только свой хвост, чужие/более поздние сессии
+    образец не получают."""
+    wire: bytes
+    raw: int
+    channel: Any
+    receivers: frozenset
+
+
 class _SignRecordTable(QWidget):
     """Одна таблица записи DATA декодера «Градусы» (CM-F06).
 
@@ -790,11 +805,16 @@ class _SignRecordTable(QWidget):
         sign: str,
         font: QFont,
         on_changed: Callable[[], None],
+        on_stop: Callable[[_SignRecordTable], None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.sign = sign
         self._on_changed = on_changed
+        # CM-FR07-R2: диалог подсовывает слив «своего хвоста» очереди —
+        # образцы, принятые при активной записи этой таблицы, должны
+        # дойти до журнала, даже если «Стоп» нажат до ближайшего тика.
+        self._on_stop = on_stop
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -841,25 +861,43 @@ class _SignRecordTable(QWidget):
         self.table.insertRow(r)
         self._fill_row(r, "", div)
 
-    def _add_history_row(self, hex_text: str) -> None:
-        """Строка записанного значения — журнал БЕЗ активных условий
-        (F06 п.3/п.5): только DATA 16/10; галочек и делителя нет, и
-        правило стороны она не меняет — десять делителей
-        фиксированы, история ниже них не участвует в кратности."""
-        r = self.table.rowCount()
-        self.table.insertRow(r)
-        hex_item = QTableWidgetItem(hex_text)
-        hex_item.setToolTip(tr("Сырое значение поля DATA в HEX"))
+    def _add_history_row(
+        self, wire_text: str, raw: int, channel: Any
+    ) -> None:
+        """Строка записанного образца — журнал БЕЗ активных условий
+        (F06 п.3/п.5): галочек и делителя нет, правило стороны она
+        не меняет — десять делителей фиксированы.
+
+        CM-FR07-R2: строка встаёт СВЕРХУ DATA-колонок (новейшее
+        значение первым — над журналом не висит десять пустых
+        DATA-ячеек делителей). DATA 16 показывает байты окна в
+        порядке провода — как пришли, с ведущими нулями; число по
+        выбранному контракту и принявший канал зафиксированы при
+        приёме (подсказка + DATA 10), а не выводятся заново из
+        переставленного HEX."""
+        self.table.insertRow(0)
+        hex_item = QTableWidgetItem(wire_text)
+        hex_item.setData(Qt.ItemDataRole.UserRole, raw)
+        chan = (
+            f"CAN{channel + 1}" if isinstance(channel, int)
+            else tr("шина не указана")
+        )
+        hex_item.setToolTip(
+            tr("Принято: %1 · байты провода: %2 · значение: %3")
+            .replace("%1", str(chan))
+            .replace("%2", wire_text or "—")
+            .replace("%3", str(raw))
+        )
         self.table.blockSignals(True)
-        self.table.setItem(r, self.COL_HEX, hex_item)
-        dec = QTableWidgetItem("")
+        self.table.setItem(0, self.COL_HEX, hex_item)
+        dec = QTableWidgetItem(str(raw))
         dec.setFlags(dec.flags() & ~Qt.ItemFlag.ItemIsEditable)
         dec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.table.setItem(r, self.COL_DEC, dec)
+        self.table.setItem(0, self.COL_DEC, dec)
         for col in (self.COL_DIV, self.COL_NUM, self.COL_NOT):
             empty = QTableWidgetItem("")
             empty.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            self.table.setItem(r, col, empty)
+            self.table.setItem(0, col, empty)
         self.table.blockSignals(False)
 
     def _fill_row(self, r: int, hex_text: str, div: int) -> None:
@@ -872,21 +910,25 @@ class _SignRecordTable(QWidget):
         dec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table.setItem(r, self.COL_DEC, dec)
         # «Кратно»/«Не кратно» — взаимоисключающие галочки требования
-        # (третье состояние — обе сняты, строка вне таблицы).
+        # (третье состояние — обе сняты, строка вне таблицы). Строка
+        # галочки ищется ДИНАМИЧЕСКИ по item — журнал вставляется
+        # сверху и сдвигает индексы делителей (CM-FR07-R2).
         for col in (self.COL_DIV, self.COL_NOT):
+            placeholder = QTableWidgetItem("")
+            placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.table.setItem(r, col, placeholder)
             cell = QWidget()
             lay = QHBoxLayout(cell)
             lay.setContentsMargins(0, 0, 0, 0)
             lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cb = QCheckBox()
             cb.toggled.connect(
-                lambda _on, rr=r, cc=col: self._on_req(rr, cc)
+                lambda _on, it=placeholder, cc=col: self._on_req(
+                    self.table.row(it), cc
+                )
             )
             lay.addWidget(cb)
             self.table.setCellWidget(r, col, cell)
-            placeholder = QTableWidgetItem("")
-            placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            self.table.setItem(r, col, placeholder)
         num = QTableWidgetItem(str(div))
         num.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         num.setFlags(num.flags() & ~Qt.ItemFlag.ItemIsEditable)
@@ -971,6 +1013,19 @@ class _SignRecordTable(QWidget):
         вся переработка под блокировкой сигналов."""
         self.table.blockSignals(True)
         raw_hex = self._row_hex(r)
+        hex_item = self.table.item(r, self.COL_HEX)
+        # Журнальная строка: число зафиксировано при приёме по
+        # контракту извлечения — DATA 16 хранит байты провода и не
+        # обязано декодироваться в то же число (CM-FR07-R2).
+        hist_raw = (
+            hex_item.data(Qt.ItemDataRole.UserRole)
+            if hex_item is not None else None
+        )
+        # Подсказка происхождения (канал/провод/значение) — не
+        # затирается меткой валидации (CM-FR07-R2).
+        hist_tip = (
+            hex_item.toolTip() if hist_raw is not None else ""
+        )
         dec_item = self.table.item(r, self.COL_DEC)
         data = _data_text_bytes(raw_hex)
         if not raw_hex:
@@ -982,7 +1037,10 @@ class _SignRecordTable(QWidget):
                 dec_item.setText("—")
             self._mark(r, "#F44336", tr("Неполный/невалидный HEX"))
         else:
-            raw = int.from_bytes(data, "big")
+            raw = (
+                hist_raw if isinstance(hist_raw, int)
+                else int.from_bytes(data, "big")
+            )
             if dec_item is not None:
                 dec_item.setText(str(raw))
             d = self._row_div(r)
@@ -1000,6 +1058,12 @@ class _SignRecordTable(QWidget):
                 )
             else:
                 self._mark(r, "#4CAF50")
+        if hist_tip and hex_item is not None:
+            err_tip = hex_item.toolTip()
+            hex_item.setToolTip(
+                hist_tip if not err_tip or err_tip == hist_tip
+                else f"{hist_tip} · {err_tip}"
+            )
         self.table.blockSignals(False)
 
     def _on_item(self, item: QTableWidgetItem) -> None:
@@ -1038,7 +1102,12 @@ class _SignRecordTable(QWidget):
 
     def toggle_record(self) -> None:
         if self.recording:
+            # «Стоп» кнопкой — дослить свой хвост очереди до журнала
+            # (CM-FR07-R2): образцы, принятые при активной записи,
+            # доставляются именной этой таблице и не теряются.
             self.stop_record()
+            if self._on_stop is not None:
+                self._on_stop(self)
         else:
             # Старт ТОЛЬКО по явной команде (F06 п.14): история и
             # прошлые значения не трогаем — «Записать» продолжает их.
@@ -1048,18 +1117,35 @@ class _SignRecordTable(QWidget):
 
     def stop_record(self) -> None:
         """Стоп — подтверждённые делители и правила не меняет
-        (F06 п.12): история остаётся, запись просто отключается."""
+        (F06 п.12): история остаётся, запись просто отключается.
+        Слив хвоста очереди здесь НЕ делается — он идёт из кнопки
+        (toggle_record) или оркестрации диалога, чтобы доставка
+        образца не рекурсировала в новый стоп (лимит истории)."""
         self.recording = False
         self._set_record_idle()
 
     def capture(self, data: bytes) -> None:
-        """Принять кадр: выделенное поле → новая строка истории.
+        """Прямой приём байтов (тесты/внутренние вызовы): значение
+        уже в каноническом порядке, канал неизвестен."""
+        self.capture_sample(_CapSample(
+            wire=data, raw=int.from_bytes(data, "big"),
+            channel=None, receivers=frozenset(),
+        ))
 
+    def capture_sample(
+        self, sample: _CapSample, *, tail: bool = False
+    ) -> None:
+        """Принять помеченный образец очереди → строка журнала.
+
+        DATA 16 — байты провода как пришли; DATA 10 — число по
+        контракту извлечения, вычисленное при приёме (CM-FR07-R2).
+        ``tail`` — доставка хвоста сессии после «Стоп»: образец был
+        принят, пока таблица записывала, и обязан дойти в журнал.
         Повторяющееся подряд значение не плодит строки (F06 п.18);
         потолок HISTORY_LIMIT — явный стоп с подписью (F06 п.16)."""
-        if not self.recording or data is None:
+        if not self.recording and not tail:
             return
-        raw = int.from_bytes(data, "big")
+        raw = sample.raw
         if raw == self._last_raw:
             return
         self._last_raw = raw
@@ -1071,10 +1157,10 @@ class _SignRecordTable(QWidget):
                 )
             )
             return
-        hex_text = " ".join(f"{b:02X}" for b in data)
-        self._add_history_row(hex_text)
+        hex_text = " ".join(f"{b:02X}" for b in sample.wire)
+        self._add_history_row(hex_text, raw, sample.channel)
         self._history += 1
-        self._revalidate_row(self.table.rowCount() - 1)
+        self._revalidate_row(0)
         self.status.setText(
             tr("Записано: %1").replace("%1", str(self._history))
         )
@@ -1207,7 +1293,10 @@ class _DegreesDecoderDialog(QDialog):
         signs = conf["signs"]
         self._tables: dict[str, _SignRecordTable] = {}
         for sign in ("neg", "pos"):
-            tbl = _SignRecordTable(sign, font, self._on_rules_changed)
+            tbl = _SignRecordTable(
+                sign, font, self._on_rules_changed,
+                on_stop=self._drain_tail,
+            )
             self._restore_rules(tbl, signs.get(sign) or {})
             tables_row.addWidget(tbl, 1)
             self._tables[sign] = tbl
@@ -1289,6 +1378,10 @@ class _DegreesDecoderDialog(QDialog):
         self._live_timer.timeout.connect(self._tick)
         self._live_timer.start()
         self._subscribe()
+        # CM-FR08-R2: разрушение объекта (deleteLater/смерть родителя
+        # минуя done/closeEvent) — та же финализация; stop_all
+        # идемпотентен и терпит уже мёртвых Qt-детей.
+        self.destroyed.connect(lambda *_: self.stop_all())
 
     PENDING_LIMIT = 512  # потолок очереди записи декодера (CM-FR07)
 
@@ -1318,30 +1411,76 @@ class _DegreesDecoderDialog(QDialog):
 
     def _on_device_changed(self, connected: bool) -> None:
         """Отключение/смена устройства — запись останавливается, её
-        очередь очищается (CM-FR08); подключение ничего не делает —
+        очередь закрывается (CM-FR08); подключение ничего не делает —
         старт записи только руками оператора."""
         if connected or self._closed:
             return
-        self._pending.clear()
+        self._stop_all_recording(tr("Стоп: устройство отключено"))
+
+    def _check_source(self) -> bool:
+        """Сверка ключа источника записи (CM-FR07-R2). ``True`` —
+        источник сменился: активные записи остановлены с явным
+        статусом, принятые ими «своей сессией» образцы досланы,
+        остаток очереди выброшен. Новые кадры уже другого источника
+        в чужие журналы не попадают."""
+        src = self._source_key()
+        if self._src_key is None:
+            self._src_key = src
+            return False
+        if src == self._src_key:
+            return False
+        self._src_key = src
+        self._stop_all_recording(tr("Стоп: источник изменён"))
+        return True
+
+    def _stop_all_recording(self, reason: str) -> None:
+        """Общий стоп всех записей с досылкой хвостов: каждая
+        таблица получает образцы, помеченные ею при приёме
+        (CM-FR07-R2), затем очередь сбрасывается."""
         for tbl in self._tables.values():
             if tbl.recording:
                 tbl.stop_record()
-                tbl.status.setText(tr("Стоп: устройство отключено"))
+                self._drain_tail(tbl)
+                tbl.status.setText(reason)
+        self._pending.clear()
+        self._pending_dropped = 0
+
+    def _drain_tail(self, tbl: _SignRecordTable) -> None:
+        """«Стоп» таблицы осушает ТОЛЬКО её хвост: образцы очереди,
+        помеченные этой таблицей при приёме, доходят до её журнала;
+        образцы без неё остаются на месте, пустые выкидываются
+        (CM-FR07-R2)."""
+        keep: list[_CapSample] = []
+        for sample in self._pending:
+            if tbl.sign in sample.receivers:
+                tbl.capture_sample(sample, tail=True)
+                receivers = sample.receivers - {tbl.sign}
+                if receivers:
+                    keep.append(
+                        sample._replace(receivers=frozenset(receivers))
+                    )
+            else:
+                keep.append(sample)
+        self._pending = keep
 
     def _on_frames(self, frames: list[dict[str, Any]]) -> None:
         """Кадры шины → выбранное поле → очередь записи (CM-FR07).
 
-        Копим ТОЛЬКО пока запись активна хотя бы в одной таблице —
-        выключенные кнопки не дают очереди расти. Фильтруем: чужой
-        канал (провайдер channel=None — явный «любой»), RTR,
-        неполное/битое DATA, несовпавшие ID/разрядность. Число
-        берётся тем же контрактом, что рабочий декод (SBLP/сумма —
-        extract_var_raw), и кладётся в очередь каноническими
-        байтами — журнал и делители дальше одинаково читают
-        big-endian (единый контракт извлечения)."""
-        if self._closed or not any(
-            tbl.recording for tbl in self._tables.values()
-        ):
+        CM-FR07-R2: образец помечается ПРИ ПРИЁМЕ — байтами окна в
+        порядке провода, числом по контракту извлечения, каналом
+        приёма и набором таблиц, записывавших в этот момент. Поздний
+        выбор получателя в _tick по текущим кнопкам убран: «Стоп»
+        осушает свой хвост, старт другой таблицы не забирает чужие
+        образцы. Смена источника проверяется и здесь, а не только
+        на тике — кадры нового источника не прилипают к старой
+        сессии."""
+        if self._closed:
+            return
+        self._check_source()
+        receivers = frozenset(
+            sign for sign, tbl in self._tables.items() if tbl.recording
+        )
+        if not receivers:
             return
         fid = self._live_value("fid")
         if fid is None:
@@ -1366,13 +1505,17 @@ class _DegreesDecoderDialog(QDialog):
             window = self._field_window(bytes(data))
             if window is None:
                 continue
-            canonical = self._extract(window)
-            if canonical is None:
+            raw = self._extract(window)
+            if raw is None:
                 continue
             if len(self._pending) >= self.PENDING_LIMIT:
                 self._pending_dropped += 1
                 continue
-            self._pending.append(canonical)
+            self._pending.append(_CapSample(
+                wire=window, raw=raw,
+                channel=frame.get("channel"),
+                receivers=receivers,
+            ))
 
     def _field_window(self, data: bytes) -> bytes | None:
         """Байты поля переменной из кадра; ``None`` — кадр не покрыл
@@ -1382,21 +1525,19 @@ class _DegreesDecoderDialog(QDialog):
             return None
         return bytes(data[p] for p in used)
 
-    def _extract(self, window: bytes) -> bytes | None:
-        """Окно поля → канонические big-endian байты значения —
-        тот же контракт, что ``extract_var_raw`` рабочего декода
-        (CM-FR07): SBLP при выбранном порядке, иначе сумма байтов
-        (легаси). ``None`` — значение невалидно (sblp без ≥2 байт)."""
+    def _extract(self, window: bytes) -> int | None:
+        """Окно поля → число значения — тот же контракт, что
+        ``extract_var_raw`` рабочего декода (CM-FR07): SBLP при
+        выбранном порядке, иначе сумма байтов (легаси). ``None`` —
+        значение невалидно (sblp без ≥2 байт). CM-FR07-R2: число
+        живёт ОТДЕЛЬНО от байтов провода — журнал показывает окно
+        как пришло, а не переставленное в канонический порядок."""
         sblp = str(self._live_value("sblp") or "")
-        raw = (
+        return (
             variable_decode.sblp_decode(window, sblp)
             if sblp
             else sum(window)
         )
-        if raw is None:
-            return None
-        width = max(len(window), (raw.bit_length() + 7) // 8)
-        return raw.to_bytes(width, "big")
 
     def _source_key(self) -> tuple:
         """Идентичность источника записи: ID/разрядность/канал/байты/
@@ -1414,17 +1555,9 @@ class _DegreesDecoderDialog(QDialog):
 
         Смена источника посреди записи: запись останавливается, а не
         смешивает значения разных источников в одной истории
-        (CM-FR07)."""
-        src = self._source_key()
-        if self._src_key is None:
-            self._src_key = src
-        elif src != self._src_key:
-            self._src_key = src
-            self._pending.clear()
-            for tbl in self._tables.values():
-                if tbl.recording:
-                    tbl.stop_record()
-                    tbl.status.setText(tr("Стоп: источник изменён"))
+        (CM-FR07). Слив очереди — по меткам получателей при приёме,
+        а не по текущим кнопкам (CM-FR07-R2)."""
+        self._check_source()
         fid = self._live_value("fid")
         ext = bool(self._live_value("extended"))
         get_frame = self._live.get("get_frame")
@@ -1440,9 +1573,8 @@ class _DegreesDecoderDialog(QDialog):
         window = self._field_window(data) if data is not None else None
         field_text = "—"
         if window is not None:
-            canonical = self._extract(window)
-            if canonical is not None:
-                raw = int.from_bytes(canonical, "big")
+            raw = self._extract(window)
+            if raw is not None:
                 field_text = f"0x{raw:X} ({raw})"
         self._live_label.setText(
             f"CAN ID {id_text}   |   DATA {data_text}   |   "
@@ -1450,9 +1582,11 @@ class _DegreesDecoderDialog(QDialog):
         )
         if self._pending:
             pending, self._pending = self._pending, []
-            for window in pending:
-                for tbl in self._tables.values():
-                    tbl.capture(window)
+            for sample in pending:
+                for sign in sample.receivers:
+                    tbl = self._tables.get(sign)
+                    if tbl is not None:
+                        tbl.capture_sample(sample, tail=True)
         if self._pending_dropped:
             dropped, self._pending_dropped = self._pending_dropped, 0
             for tbl in self._tables.values():
@@ -1527,31 +1661,48 @@ class _DegreesDecoderDialog(QDialog):
         return cfg
 
     def stop_all(self) -> None:
-        """Идемпотентная финализация (F06 п.17, CM-FR08): закрытый
-        guard для запоздалых сигналов, отписка от кадров и сигнала
-        устройства, стоп таймера и обеих записей, очистка очереди и
-        временной истории. Любой выход — OK/Отмена/крестик/смена
-        устройства — приходит сюда."""
+        """Идемпотентная финализация (F06 п.17, CM-FR08/CM-FR08-R2):
+        закрытый guard для запоздалых сигналов, отписка от кадров и
+        сигнала устройства, стоп таймера и обеих записей, очистка
+        очереди и временной истории. Любой выход — OK/Отмена/крестик/
+        done()/смена устройства/разрушение — приходит сюда ровно один
+        раз. При срабатывании из destroyed() дети-виджеты могут быть
+        уже мёртвы — обращения к QObject идут под suppress."""
         if self._closed:
             return
         self._closed = True
-        self._live_timer.stop()
+        with contextlib.suppress(RuntimeError):
+            self._live_timer.stop()
         unsubscribe, self._unsubscribe = self._unsubscribe, None
         if callable(unsubscribe):
-            with contextlib.suppress(RuntimeError, TypeError):
+            # При вызове из destroyed() Qt уже снял соединения
+            # мёртвого получателя — disconnect в отписке может кинуть
+            # SystemError/RuntimeError (CM-FR08-R2).
+            with contextlib.suppress(Exception):
                 unsubscribe()
         if self._device_sig is not None:
-            with contextlib.suppress(RuntimeError, TypeError):
+            with contextlib.suppress(Exception):
                 self._device_sig.disconnect(self._on_device_changed)
             self._device_sig = None
         self._pending.clear()
         self._pending_dropped = 0
         for tbl in self._tables.values():
-            tbl.stop_record()
-            tbl._last_raw = None
-            while tbl.table.rowCount() > len(steering_decoder.DIVISORS):
-                tbl.table.removeRow(tbl.table.rowCount() - 1)
-            tbl._history = 0
+            with contextlib.suppress(RuntimeError):
+                tbl.stop_record()
+                tbl._last_raw = None
+                # Журнал лежит сверху — снимаются первые _history
+                # строк, делители остаются (CM-FR07-R2).
+                for _r in range(tbl._history):
+                    tbl.table.removeRow(0)
+                tbl._history = 0
+
+    def done(self, result: int) -> None:
+        """Прямой done() — тот же контракт финализации, что у
+        accept/reject/closeEvent (CM-FR08-R2): accept/reject и так
+        зовут done внутри super(), один guard делает путь
+        идемпотентным."""
+        self.stop_all()
+        super().done(result)
 
     def accept(self) -> None:  # noqa: A003
         self.stop_all()
@@ -2162,6 +2313,11 @@ class _ValuePage(QWidget):
             )
             line1.addWidget(self.out_range)
             self.steering_cfg: dict[str, Any] = {}
+            # CM-FR09-R2: знак, под которым сейчас отрисована колонка
+            # «Величина» (сырая сторона × знак = экранное значение).
+            # Смена «Инвертирования»/режима переворачивает показанные
+            # значения — сырые точки в конфиге не трогаются.
+            self._displayed_sign = 1.0
             self.steering_btn = QPushButton(tr("Декодер…"))
             self.steering_btn.setFont(font)
             self.steering_btn.setFixedHeight(28)
@@ -2368,6 +2524,12 @@ class _ValuePage(QWidget):
             self._dyn_recording = False
             self._dyn_recorded = 0
             self._dyn_last_raw: bytes | None = None
+            # CM-FR08-R2: источник захвата фиксируется на старте
+            # (ID/разрядность/байты) и отслеживается сигнал
+            # подключения — чужие кадры нового источника/устройства
+            # не должны молча продолжать чужую сессию.
+            self._dyn_src_key: tuple | None = None
+            self._dyn_conn_sig: Any = None
             self._dyn_record_status = QLabel("")
             self._dyn_record_status.setFont(font)
             buttons.addWidget(self._dyn_record_status)
@@ -2463,6 +2625,7 @@ class _ValuePage(QWidget):
         # «Градусы» — три роли привязки «−»/«0»/«+» с пояснениями;
         # добираются только недостающие, введённое не затирается
         # (CM-FR09).
+        self._sync_display_sign()
         if self._degrees_mode():
             self._ensure_degree_role_rows()
         self._on_edits_changed()
@@ -2500,6 +2663,11 @@ class _ValuePage(QWidget):
         try:
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 self.steering_cfg = dialog.config()
+                # CM-FR09-R2: смена «Инвертирования» меняет эффективный
+                # вывод каждой точки — колонка «Величина»
+                # перерисовывается с новым знаком, сырая привязка
+                # при этом не меняется.
+                self._sync_display_sign()
                 # Новые делители/инверсия — перевалидация кодов
                 # точек по новой эффективной стороне (CM-FR09).
                 self._recolor_degree_cells()
@@ -2521,7 +2689,9 @@ class _ValuePage(QWidget):
         manager.new_can_frames.connect(callback)
 
         def _unsub() -> None:
-            with contextlib.suppress(RuntimeError, TypeError):
+            # Получатель уже разрушен — Qt снял соединение сам,
+            # disconnect кинет; для отписки это успех (CM-FR08-R2).
+            with contextlib.suppress(Exception):
                 manager.new_can_frames.disconnect(callback)
 
         return _unsub
@@ -2538,7 +2708,8 @@ class _ValuePage(QWidget):
         if self._dyn_recording:
             self._stop_dyn_record()
             return
-        if hex_to_int(self.can_id.text()) is None:
+        fid = hex_to_int(self.can_id.text())
+        if fid is None:
             self._dyn_record_status.setText(tr("— укажите ID"))
             return
         if not self.bytes_used():
@@ -2547,6 +2718,13 @@ class _ValuePage(QWidget):
             )
             return
         self._dyn_recording = True
+        # CM-FR08-R2: ключ источника фиксируется на старте — смена
+        # ID/разрядности/байтов или отключение устройства останавливают
+        # сессию, а не продолжают её чужими кадрами.
+        self._dyn_src_key = (
+            fid, bool(self.bit.currentData()),
+            tuple(self.bytes_used()),
+        )
         # CM-FR10: старт НЕ очищает историю — захват продолжает её;
         # повтор последнего значения после рестарта дедупится как
         # подряд идущий (_dyn_last_raw сохраняется).
@@ -2558,6 +2736,13 @@ class _ValuePage(QWidget):
         )
         tab = self._get_tab() if self._get_tab is not None else None
         self._subscribe_frames(tab, self._on_dyn_frames)
+        sig = getattr(
+            getattr(tab, "_serial_manager", None),
+            "connection_changed", None,
+        )
+        if sig is not None:
+            sig.connect(self._on_dyn_device_changed)
+            self._dyn_conn_sig = sig
         self._dyn_record_status.setText(tr("• запись"))
 
     def _stop_dyn_record(self) -> None:
@@ -2567,19 +2752,48 @@ class _ValuePage(QWidget):
         if not getattr(self, "_dyn_recording", False):
             return
         self._dyn_recording = False
+        self._dyn_src_key = None
         tab = self._get_tab() if self._get_tab is not None else None
         manager = getattr(tab, "_serial_manager", None)
         if manager is not None:
-            with contextlib.suppress(RuntimeError, TypeError):
+            with contextlib.suppress(Exception):
                 manager.new_can_frames.disconnect(self._on_dyn_frames)
-        self._dyn_record_btn.setText(tr("Записать"))
-        self._dyn_record_btn.setStyleSheet(
-            "background: #2E7D32; color: white; border-radius: 4px;"
-        )
-        self._dyn_record_status.setText(
-            tr("• записано {0}").format(self._dyn_recorded)
-            if self._dyn_recorded else ""
-        )
+        sig, self._dyn_conn_sig = self._dyn_conn_sig, None
+        if sig is not None:
+            with contextlib.suppress(Exception):
+                sig.disconnect(self._on_dyn_device_changed)
+        # CM-FR08-R2: при вызове из destroyed() дети-виджеты могут
+        # быть уже мёртвы — подписи кнопок/статуса под suppress.
+        with contextlib.suppress(RuntimeError):
+            self._dyn_record_btn.setText(tr("Записать"))
+            self._dyn_record_btn.setStyleSheet(
+                "background: #2E7D32; color: white; border-radius: 4px;"
+            )
+            self._dyn_record_status.setText(
+                tr("• записано {0}").format(self._dyn_recorded)
+                if self._dyn_recorded else ""
+            )
+
+    def _on_dyn_device_changed(self, connected: bool) -> None:
+        """Отключение/смена устройства — динамический захват
+        останавливается с явным статусом (CM-FR08-R2): кадры новой
+        сессии не попадут в журнал старой."""
+        if connected or not self._dyn_recording:
+            return
+        self._stop_dyn_record()
+        with contextlib.suppress(RuntimeError):
+            self._dyn_record_status.setText(
+                tr("• стоп: устройство отключено")
+            )
+
+    def _dyn_source_key(self) -> tuple | None:
+        """Текущий ключ источника динамического захвата —
+        ID/разрядность/набор байтов (CM-FR08-R2)."""
+        fid = hex_to_int(self.can_id.text())
+        used = self.bytes_used()
+        if fid is None or not used:
+            return None
+        return (fid, bool(self.bit.currentData()), tuple(used))
 
     def _on_dyn_frames(self, frames: list[dict[str, Any]]) -> None:
         """Кадры шины → окно выбранного поля → временная история
@@ -2588,19 +2802,23 @@ class _ValuePage(QWidget):
 
         CM-FR07: RTR/битые кадры и неполное поле — не образцы; у
         переменной нет выбора канала — явный «любой», фильтра по
-        шине нет. CM-FR10: дедуп только ПОДРЯД идущего значения —
+        шине нет. CM-FR08-R2: источник зафиксирован на старте —
+        смена ID/разрядности/байтов посреди записи останавливает
+        сессию, а не подмешивает кадры другого источника в журнал.
+        CM-FR10: дедуп только ПОДРЯД идущего значения —
         возврат к прежнему значению (A→B→A) это новая строка;
         история ограничена — потолок останавливает запись с явным
         статусом."""
         if not self._dyn_recording:
             return
-        fid = hex_to_int(self.can_id.text())
-        if fid is None:
+        src = self._dyn_source_key()
+        if src is None or src != self._dyn_src_key:
+            self._stop_dyn_record()
+            self._dyn_record_status.setText(
+                tr("• стоп: источник изменён")
+            )
             return
-        ext = bool(self.bit.currentData())
-        used = self.bytes_used()
-        if not used:
-            return
+        fid, ext, used = src[0], src[1], list(src[2])
         for frame in frames:
             if frame.get("rtr"):
                 continue
@@ -2814,7 +3032,8 @@ class _ValuePage(QWidget):
             y = _parse_axis_value(y_item.text())
             if x is None or y is None:
                 continue
-            points.append((x, y * sign))
+            yv = y * sign
+            points.append((x, 0.0 if yv == 0 else yv))  # −0.0 → 0.0
         return points
 
     def read_bindings(self) -> list[tuple[int, str]]:
@@ -2939,6 +3158,31 @@ class _ValuePage(QWidget):
             if conf["inverted"]:
                 return -1.0
         return 1.0
+
+    def _sync_display_sign(self) -> None:
+        """Сменился знак отображения колонки «Величина» («Градусы» +
+        инверсия): показанные значения переворачиваются по знаку —
+        сырые точки привязки в конфиге при этом не меняются, потому
+        что read_points() переводит экранное значение обратно на
+        сырую сторону тем же знаком (CM-FR09-R2). Непарсящийся ввод
+        и нейтраль (0 знако-инвариантен) не трогаются; перерисовка
+        под блокировкой сигналов — itemChanged не всплывает."""
+        new_sign = self._eff_sign()
+        if new_sign == self._displayed_sign:
+            return
+        self.points_table.blockSignals(True)
+        try:
+            for row in range(self.points_table.rowCount()):
+                y_item = self.points_table.item(row, 1)
+                if y_item is None:
+                    continue
+                v = _parse_axis_value(y_item.text())
+                if v is None or v == 0:
+                    continue
+                y_item.setText(str(-v))
+        finally:
+            self.points_table.blockSignals(False)
+        self._displayed_sign = new_sign
 
     def _recolor_degree_cells(self) -> None:
         """Проверка кодов точек привязки по кратности ЭФФЕКТИВНОЙ
@@ -3364,6 +3608,7 @@ class _ValuePage(QWidget):
         # колонка «Величина» показывает эффективный вывод декодера —
         # инверсия переводит их на границе UI один раз (CM-FR09).
         y_sign = self._eff_sign()
+        self._displayed_sign = y_sign
         for point in merged_points:
             try:
                 x, y = point
@@ -3382,8 +3627,13 @@ class _ValuePage(QWidget):
                 y_disp: Any = y
             else:
                 # Без инверсии оставляем исходное представление
-                # («45», а не «45.0»); инверсия — перевод знака.
-                y_disp = -y_num if y_sign < 0 else y
+                # («45», а не «45.0»); инверсия — перевод знака;
+                # нейтраль 0 знако-инвариантна («-0.0» не показываем).
+                y_disp = (
+                    -y_num
+                    if y_sign < 0 and y_num != 0
+                    else (0 if y_num == 0 else y)
+                )
             self.points_table.setItem(
                 row, 1, QTableWidgetItem(str(y_disp))
             )

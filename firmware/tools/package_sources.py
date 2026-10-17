@@ -33,6 +33,7 @@ INCLUDE_ROOTS = (
     "firmware/application/tests",
     "firmware/bootloader/Inc",
     "firmware/bootloader/Src",
+    "firmware/bootloader/tests",
     "firmware/tools",
 )
 INCLUDE_FILES = (
@@ -104,10 +105,42 @@ def _cube_sha() -> str:
         return "(коммит сабмодуля не зафиксирован — см. .gitmodules)"
 
 
+# Вложенные зависимости CubeF1, нужные для сборки, на коммитах,
+# зафиксированных gitlink'ами пина CubeF1 (CM-FR11-R2): путь внутри
+# CubeF1 → (репозиторий, SHA).
+CUBE_NESTED_DEPS = (
+    (
+        "Drivers/CMSIS/Device/ST/STM32F1xx",
+        "https://github.com/STMicroelectronics/cmsis_device_f1.git",
+        "c8e9a4a4f16b6d2cb2a2083cbe5161025280fb22",
+    ),
+    (
+        "Drivers/STM32F1xx_HAL_Driver",
+        "https://github.com/STMicroelectronics/stm32f1xx_hal_driver.git",
+        "c3f749241cd2d55074b60775c77824d0eb13b931",
+    ),
+    (
+        "Middlewares/ST/STM32_USB_Device_Library",
+        "https://github.com/STMicroelectronics/stm32-mw-usb-device.git",
+        "e5a58ee2260204bfed632c7c56da0fdb41514a51",
+    ),
+)
+
+
 def _manifest(version: str, sha: str) -> str:
     repo_sha = sha or _git("rev-parse", "HEAD")
     cube = _cube_sha()
     ver = version or "VERSION"
+    # CM-FR11-R2: nested-зависимости — git submodule update
+    # --init --recursive после checkout пина либо те же gitlink-SHA
+    # tarball'ами для пути без git.
+    nested_tarballs = "\n".join(
+        f"      https://github.com/STMicroelectronics/"
+        f"{url.rsplit('/', 1)[-1].removesuffix('.git')}"
+        f"/archive/{dep_sha}.tar.gz\n"
+        f"        -> firmware/libs/STM32CubeF1/{path}"
+        for path, url, dep_sha in CUBE_NESTED_DEPS
+    )
     return f"""CodeMaster — исходники прошивки (CM-F12)
 
 Версия релиза:        {version or 'не указана'}
@@ -127,23 +160,38 @@ STM32CubeF1 (пин):    {cube}
   - arm-none-eabi-gcc + make (GNU Arm Embedded Toolchain);
   - Python 3.9+; для упаковки образов: pip install intelhex;
   - STM32CubeF1 ровно на коммите {cube}
-    в каталоге firmware/libs/STM32CubeF1. Получить:
+    в каталоге firmware/libs/STM32CubeF1, С ЕГО ВЛОЖЕННЫМИ
+    сабмодулями (plain clone/tarball не содержит их содержимое —
+    Makefile'ы требуют HAL/CMSIS/USB-библиотеку). Получить:
+
       git clone https://github.com/STMicroelectronics/STM32CubeF1.git \\
           firmware/libs/STM32CubeF1
       git -C firmware/libs/STM32CubeF1 checkout {cube}
-    или tarball без git:
-      https://github.com/STMicroelectronics/STM32CubeF1/archive/{cube}.tar.gz
-    Либо вместо этого ZIP клонируйте проект на зафиксированный SHA:
-      git clone --recursive https://github.com/Diabatya/code_master.git
-      git checkout {repo_sha}
+      git -C firmware/libs/STM32CubeF1 submodule update --init \\
+          --recursive \\
+          Drivers/CMSIS/Device/ST/STM32F1xx \\
+          Drivers/STM32F1xx_HAL_Driver \\
+          Middlewares/ST/STM32_USB_Device_Library
 
-Сборка:
-  cd firmware/bootloader  && make   # загрузчик  @0x08000000
-  cd firmware/application && make   # приложение @0x08009000
-                                    # (APP1-метаданные генерируются
-                                    #  отдельно @0x08008800)
+    или tarball'ами без git (CubeF1 + три вложенные зависимости
+    на gitlink-коммитах пина — распаковать поверх пустых каталогов):
+      https://github.com/STMicroelectronics/STM32CubeF1/\\
+          archive/{cube}.tar.gz
+        -> firmware/libs/STM32CubeF1
+{nested_tarballs}
+
+    Либо вместо этого ZIP клонируйте проект на зафиксированный SHA:
+      git clone https://github.com/Diabatya/code_master.git
+      git -C code_master checkout {repo_sha}
+      git -C code_master submodule update --init --recursive
+
+Сборка (независимые команды из корня распакованного архива):
+  make -C firmware/bootloader   # загрузчик  @0x08000000
+  make -C firmware/application  # приложение @0x08009000
+                                # (APP1-метаданные генерируются
+                                #  отдельно @0x08008800)
   Вне git-репозитория передайте SHA явно, иначе прошивка
-  отчитается «unknown»:  make GIT_COMMIT=<короткий sha>
+  отчитается «unknown»:  make -C firmware/application GIT_COMMIT=<sha>
 
 Упаковка образов релиза:
   python3 firmware/tools/make_full_image.py \\
@@ -153,13 +201,17 @@ STM32CubeF1 (пин):    {cube}
       --cdc-hex "2 CAN CDC ({ver}) 111.hex" \\
       --cdc-bin "2 CAN CDC ({ver}) 111.bin" \\
       --version {ver}
-  Полный (DFU) образ покрывает 0x08000000-0x0803FFFF. CDC-образ
-  начинается с легаси-записи VER1 по 0x08008400 (миграция старых
-  прошивок), затем метаданные APP1 @0x08008800 и код @0x08009000;
-  страница идентичности в CDC-образе отсутствует.
+  Полный (DFU) образ содержит загрузчик @0x08000000, метаданные
+  APP1 @0x08008800 и код @0x08009000 — только реально
+  присутствующие области; пустые страницы до конца Flash
+  упаковщик не добавляет. CDC-образ начинается с легаси-записи
+  VER1 по 0x08008400 (миграция старых прошивок), затем метаданные
+  APP1 @0x08008800 и код @0x08009000; страница идентичности в
+  CDC-образе отсутствует.
 
-Хост-тесты: firmware/application/tests (cc + стабы, см. CI
-.github/workflows/build.yml в основном репозитории).
+Хост-тесты: firmware/application/tests и firmware/bootloader/tests
+(cc + стабы, см. CI .github/workflows/build.yml в основном
+репозитории).
 
 Это ИСХОДНЫЙ КОД прошивки тега. Готовые образы для заливки —
 отдельные артефакты релиза «2 CAN DFU (VERSION) 111» и

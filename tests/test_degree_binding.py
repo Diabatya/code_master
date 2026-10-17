@@ -76,6 +76,21 @@ _RED = "#f44336"
 _AMBER = "#ffb74d"
 
 
+def _toggle_inversion(page, monkeypatch, to: bool) -> None:
+    """«Декодер…» → НАСТОЯЩИЙ _DegreesDecoderDialog → клик по
+    «Инвертирование» → OK. Подменяется только exec() (блокирующий
+    показ в тесте невозможен) — сам диалог, чекбокс и путь
+    config() настоящие (ревью раунд 2)."""
+    from PySide6.QtWidgets import QDialog
+
+    def fake_exec(dlg):
+        dlg._inverted.setChecked(to)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(vt._DegreesDecoderDialog, "exec", fake_exec)
+    page._edit_steering()
+
+
 class TestEffectiveSideColors:
     """Цвета кратности — по ЭФФЕКТИВНОЙ стороне (CM-FR09 п.3)."""
 
@@ -333,3 +348,100 @@ class TestInversionConsistency:
             assert stored[8.0] == -45.0
         finally:
             dlg.deleteLater()
+
+class TestInversionToggleR2:
+    """CM-FR09-R2: переключение «Инвертирование» в реальном окне
+    декодера не портит сырые точки — колонка «Величина»
+    перерисовывается новым знаком, привязка хранится по сырой
+    стороне и переживает сохранение/переоткрытие."""
+
+    def test_toggle_flips_display_not_points(
+        self, qapp, monkeypatch
+    ) -> None:
+        """Асимметричная шкала [[0,0],[8,-30],[12,45]]: toggle ON →
+        ячейки [0, 30, -45]; read() → исходные сырые точки
+        без изменений и дублей."""
+        dlg = _dialog(
+            qapp, points=[[0x00, 0], [0x08, -30], [0x0C, 45]],
+        )
+        try:
+            page = _page(dlg)
+            assert page.points_table.rowCount() == 3
+            _toggle_inversion(page, monkeypatch, True)
+            ys = [
+                page.points_table.item(r, 1).text()
+                for r in range(page.points_table.rowCount())
+            ]
+            assert ys == ["0", "30.0", "-45.0"]
+            stored = dict(page.read_points())
+            assert stored == {0.0: 0.0, 8.0: -30.0, 12.0: 45.0}
+            assert page.points_table.rowCount() == 3
+            # Код 0x08 — «−»-класс, показываемая величина +30 —
+            # эффективная позитивная сторона, валидна.
+            assert _cell_color(dlg, 1) == _GREEN
+            assert _cell_color(dlg, 2) == _GREEN
+            cfg = page.read()
+            assert cfg["steering"]["inverted"] is True
+        finally:
+            dlg.deleteLater()
+
+    def test_toggle_twice_restores_cells_and_points(
+        self, qapp, monkeypatch
+    ) -> None:
+        dlg = _dialog(
+            qapp, points=[[0x00, 0], [0x08, -30], [0x0C, 45]],
+        )
+        try:
+            page = _page(dlg)
+            before = [
+                (page.points_table.item(r, 0).text(),
+                 page.points_table.item(r, 1).text())
+                for r in range(page.points_table.rowCount())
+            ]
+            _toggle_inversion(page, monkeypatch, True)
+            _toggle_inversion(page, monkeypatch, False)
+            after = [
+                (page.points_table.item(r, 0).text(),
+                 page.points_table.item(r, 1).text())
+                for r in range(page.points_table.rowCount())
+            ]
+            assert [x for x, _y in after] == [x for x, _y in before]
+            assert dict(page.read_points()) == {
+                0.0: 0.0, 8.0: -30.0, 12.0: 45.0,
+            }
+            cfg = page.read()
+            assert cfg["steering"]["inverted"] is False
+        finally:
+            dlg.deleteLater()
+
+    def test_toggle_save_reopen_identical(
+        self, qapp, monkeypatch
+    ) -> None:
+        """Toggle → OK → сохранённый конфиг открывается заново:
+        точки и инверсия переживают round-trip дословно."""
+        dlg = _dialog(
+            qapp, points=[[0x00, 0], [0x08, -30], [0x0C, 45]],
+        )
+        try:
+            page = _page(dlg)
+            _toggle_inversion(page, monkeypatch, True)
+            cfg = page.read()
+            assert dict(page.read_points()) == {
+                0.0: 0.0, 8.0: -30.0, 12.0: 45.0,
+            }
+        finally:
+            dlg.deleteLater()
+        dlg2 = _dialog(qapp, points=cfg["points"],
+                       steering=cfg["steering"])
+        try:
+            page2 = _page(dlg2)
+            ys = [
+                page2.points_table.item(r, 1).text()
+                for r in range(page2.points_table.rowCount())
+            ]
+            assert ys == ["0", "30.0", "-45.0"]
+            assert dict(page2.read_points()) == {
+                0.0: 0.0, 8.0: -30.0, 12.0: 45.0,
+            }
+        finally:
+            dlg2.deleteLater()

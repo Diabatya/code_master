@@ -25,6 +25,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -96,6 +97,7 @@ static int s_tx_fail_always;   /* nonzero: transmit never succeeds */
 static int s_tx_fail_channel;  /* 0: s_tx_fail hits any channel;
                                   1/2: only that wire channel —
                                   CAN1/CAN2 independence (CM-R8) */
+static int s_vector_mode;      /* argv-режим: печатать каждую отправку */
 
 uint8_t CanBridge_Transmit(const can_frame_t *frame)
 {
@@ -115,6 +117,15 @@ uint8_t CanBridge_Transmit(const can_frame_t *frame)
     s->id = frame->id;
     s->dlc = frame->dlc;
     memcpy(s->data, frame->data, 8);
+  }
+  if (s_vector_mode) {
+    printf("SEND %u %u %08lX %u", (unsigned)s_tick,
+           (unsigned)frame->channel, (unsigned long)frame->id,
+           (unsigned)frame->dlc);
+    for (uint8_t i = 0; i < frame->dlc && i < 8U; i++) {
+      printf(" %02X", frame->data[i]);
+    }
+    printf("\n");
   }
   return 1U;
 }
@@ -277,12 +288,11 @@ static uint32_t build_flex_blob(const trigger_t *records, uint8_t count)
   return build_flex_blob_ver(records, count, 1U);
 }
 
-/* Fresh engine state: no user records, the FLXB tail rebuilt from the
- * blob — same boundary condition Trigger_Init() produces. */
-static void load_flex(const trigger_t *records, uint8_t count)
+/* Fresh engine state: no user records, the FLXB tail rebuilt from
+ * s_flex_blob/s_flex_len — same boundary condition Trigger_Init()
+ * produces. */
+static void reset_engine(void)
 {
-  s_flex_len = build_flex_blob(records, count);
-  s_flex_blob = s_blob;
   s_sent_count = 0;
   s_tx_fail = 0;
   s_tx_fail_always = 0;
@@ -301,6 +311,13 @@ static void load_flex(const trigger_t *records, uint8_t count)
   s_dropped_count = 0U;
   aux_reset();
   Trigger_ReloadFlex();
+}
+
+static void load_flex(const trigger_t *records, uint8_t count)
+{
+  s_flex_len = build_flex_blob(records, count);
+  s_flex_blob = s_blob;
+  reset_engine();
 }
 
 static can_frame_t mk_frame(uint8_t ch, uint32_t id, uint8_t dlc,
@@ -1390,8 +1407,191 @@ static void test_setflag_pulse_auto_off(void)
   CHECK(s_sent_count == 1, "auto-off edge must fire OFF listener");
 }
 
-int main(void)
+/* CM-FR12: RAW-алиасы одного именованного состояния делят общую
+ * защёлку фронта (rx_data_mask[5] = id edge-группы): переход 8→72
+ * внутри «Драйв» пересрабатывать не должен, состояние→состояние и
+ * выход→повторный вход дают ровно одну сработку — как единый
+ * _dyn_flags-флаг события на ПК. */
+static void test_dyn_alias_group_single_edge(void)
 {
+  trigger_t recs[4];
+  /* «Драйв» = raw 8/72 (группа 1), «Спорт» = raw 9/73 (группа 2):
+   * по записи на каждый алиас — как раскладывает компилятор. */
+  make_var_record(&recs[0], 2U, 0x200U, 2U, 1U, 0U, 0U, 0U, 8U,
+                  0x321U);
+  make_var_record(&recs[1], 2U, 0x200U, 2U, 1U, 0U, 0U, 0U, 72U,
+                  0x321U);
+  make_var_record(&recs[2], 2U, 0x200U, 2U, 1U, 0U, 0U, 0U, 9U,
+                  0x322U);
+  make_var_record(&recs[3], 2U, 0x200U, 2U, 1U, 0U, 0U, 0U, 73U,
+                  0x322U);
+  recs[0].rx_data_mask[5] = 1U;
+  recs[1].rx_data_mask[5] = 1U;
+  recs[2].rx_data_mask[5] = 2U;
+  recs[3].rx_data_mask[5] = 2U;
+  fix_crc(&recs[0]); fix_crc(&recs[1]);
+  fix_crc(&recs[2]); fix_crc(&recs[3]);
+  load_flex(recs, 4);
+
+  uint8_t d8[8] = {0, 0, 8}, d72[8] = {0, 0, 72};
+  uint8_t d9[8] = {0, 0, 9}, d73[8] = {0, 0, 73}, d0[8] = {0, 0, 0};
+  can_frame_t f8 = mk_frame(0U, 0x200U, 3U, d8);
+  can_frame_t f72 = mk_frame(0U, 0x200U, 3U, d72);
+  can_frame_t f9 = mk_frame(0U, 0x200U, 3U, d9);
+  can_frame_t f73 = mk_frame(0U, 0x200U, 3U, d73);
+  can_frame_t f0 = mk_frame(0U, 0x200U, 3U, d0);
+
+  Trigger_OnFrame(&f8);          /* холодный вход в «Драйв» */
+  CHECK(s_sent_count == 1 && s_sent[0].id == 0x321U,
+        "first alias entry must fire once");
+  Trigger_OnFrame(&f8);
+  CHECK(s_sent_count == 1, "sustained alias must not refire");
+  Trigger_OnFrame(&f72);         /* алиас того же состояния — не фронт */
+  CHECK(s_sent_count == 1, "alias switch must not refire the state");
+  Trigger_OnFrame(&f9);          /* «Драйв» → «Спорт»: один фронт */
+  CHECK(s_sent_count == 2 && s_sent[1].id == 0x322U,
+        "state transition must fire the new state once");
+  Trigger_OnFrame(&f73);         /* алиас «Спорта» — не фронт */
+  CHECK(s_sent_count == 2, "second-state alias must not refire");
+  Trigger_OnFrame(&f0);          /* выход из всех состояний */
+  Trigger_OnFrame(&f72);         /* повторный вход в «Драйв» — фронт */
+  CHECK(s_sent_count == 3 && s_sent[2].id == 0x321U,
+        "re-entry after leaving must fire again");
+}
+
+/* CM-FR12: групповой id допустим только у dyn_cache-сравнения «==» —
+ * группа на численной записи (kind=1) отвергает блоб целиком, как и
+ * любое другое нарушение контракта записи. */
+static void test_edge_group_rejected_on_non_eq_record(void)
+{
+  trigger_t recs[2];
+  make_var_record(&recs[0], 2U, 0x200U, 2U, 1U, 0U, 0U, 0U, 8U,
+                  0x321U);
+  recs[0].rx_data_mask[5] = 1U;                    /* допустимо: eq+dyn */
+  make_var_record(&recs[1], 2U, 0x100U, 0U, 2U, 1U, 1U, 1U, 100U,
+                  0x322U);
+  recs[1].rx_data_mask[5] = 1U;                    /* kind=1 — запрет */
+  fix_crc(&recs[0]); fix_crc(&recs[1]);
+  s_flex_len = build_flex_blob_ver(recs, 2U, 3U);
+  s_flex_blob = s_blob;
+  reset_engine();
+
+  uint8_t d8[8] = {0, 0, 8}, d200[8] = {200, 0};
+  can_frame_t f8 = mk_frame(0U, 0x200U, 3U, d8);
+  can_frame_t f200 = mk_frame(0U, 0x100U, 2U, d200);
+  Trigger_OnFrame(&f8);
+  Trigger_OnFrame(&f200);
+  CHECK(s_sent_count == 0,
+        "blob with a grouped non-eq record must be rejected whole");
+}
+
+/* Одно-членная группа ведёт себя как обычная защёлка — компилятор
+ * группирует только множественные алиасы, но контракт прошивки не
+ * требует минимальной численности группы. */
+static void test_edge_group_single_member(void)
+{
+  trigger_t recs[1];
+  make_var_record(&recs[0], 2U, 0x200U, 2U, 1U, 0U, 0U, 0U, 8U,
+                  0x321U);
+  recs[0].rx_data_mask[5] = 1U;
+  fix_crc(&recs[0]);
+  s_flex_len = build_flex_blob_ver(recs, 1U, 3U);
+  s_flex_blob = s_blob;
+  reset_engine();
+
+  uint8_t d8[8] = {0, 0, 8}, d0[8] = {0, 0, 0};
+  can_frame_t f8 = mk_frame(0U, 0x200U, 3U, d8);
+  can_frame_t f0 = mk_frame(0U, 0x200U, 3U, d0);
+  Trigger_OnFrame(&f8);
+  CHECK(s_sent_count == 1, "single-member group must fire on edge");
+  Trigger_OnFrame(&f8);
+  CHECK(s_sent_count == 1, "sustained single-member group");
+  Trigger_OnFrame(&f0);
+  Trigger_OnFrame(&f8);
+  CHECK(s_sent_count == 2, "single-member group must refire");
+}
+
+/* ---- Vector mode: реальный FLXB из компилятора ПК (CM-FR12) --------
+ * argv[1] = бинарный файл вектора:
+ *   u32 blob_len | blob[ blob_len ] | u32 nsteps | шаги;
+ * шаг (21 B, LE): u32 delta_ms | u8 kind (0=frame, 1=poll) |
+ * u8 channel | u8 extended | u8 rtr | u32 id | u8 dlc | u8 data[8].
+ * На каждом шаге: s_tick += delta, OnFrame (kind=0), Trigger_Poll.
+ * Отправки печатаются «SEND <tick> <ch> <id> <dlc> <data...>». */
+static uint32_t rd_le32(const uint8_t *p)
+{
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+         | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int run_vector(const char *path)
+{
+  FILE *fp = fopen(path, "rb");
+  if (fp == NULL) {
+    fprintf(stderr, "cannot open %s\n", path);
+    return 2;
+  }
+  fseek(fp, 0, SEEK_END);
+  long sz = ftell(fp);
+  rewind(fp);
+  uint8_t *buf = (uint8_t *)malloc((size_t)sz);
+  if (buf == NULL || fread(buf, 1, (size_t)sz, fp) != (size_t)sz) {
+    fprintf(stderr, "cannot read %s\n", path);
+    fclose(fp);
+    return 2;
+  }
+  fclose(fp);
+  if (sz < 8L) {
+    return 2;
+  }
+  uint32_t blob_len = rd_le32(buf);
+  if (4L + (long)blob_len + 4L > sz) {
+    fprintf(stderr, "bad vector: blob_len\n");
+    return 2;
+  }
+  s_flex_blob = buf + 4;
+  s_flex_len = blob_len;
+  s_vector_mode = 1;
+  s_tick = 0U;
+  reset_engine();
+  s_tick = 0U;
+
+  const uint8_t *p = buf + 4 + blob_len;
+  uint32_t nsteps = rd_le32(p);
+  p += 4;
+  if ((long)(p - buf) + (long)nsteps * 21L > sz) {
+    fprintf(stderr, "bad vector: nsteps\n");
+    return 2;
+  }
+  for (uint32_t i = 0; i < nsteps; i++) {
+    uint32_t delta = rd_le32(p);
+    uint8_t kind = p[4], ch = p[5], ext = p[6], rtr = p[7];
+    uint32_t id = rd_le32(p + 8);
+    uint8_t dlc = p[12];
+    const uint8_t *data = p + 13;
+    p += 21;
+    s_tick += delta;
+    if (kind == 0U) {
+      can_frame_t fr;
+      memset(&fr, 0, sizeof(fr));
+      fr.channel = ch;
+      fr.extended = ext;
+      fr.rtr = rtr;
+      fr.id = id;
+      fr.dlc = dlc;
+      memcpy(fr.data, data, dlc < 8U ? dlc : 8U);
+      Trigger_OnFrame(&fr);
+    }
+    Trigger_Poll();
+  }
+  return 0;
+}
+
+int main(int argc, char **argv)
+{
+  if (argc > 1) {
+    return run_vector(argv[1]);
+  }
   test_flex_record_fires();
   test_two_programs_same_event();
   test_series_schedules_preserved();
@@ -1422,6 +1622,9 @@ int main(void)
   test_static_flag_listener_and_updater();
   test_dyn_var_threshold_edge();
   test_dyn_cache_partial_then_complete();
+  test_dyn_alias_group_single_edge();
+  test_edge_group_rejected_on_non_eq_record();
+  test_edge_group_single_member();
   test_cond_flag_gates_frame();
   test_setflag_pulse_auto_off();
 

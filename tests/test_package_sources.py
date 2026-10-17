@@ -57,6 +57,40 @@ class TestSourcePackage:
         assert "STM32CubeF1.git" in text
         # Возможность задать GIT_COMMIT при сборке из ZIP.
         assert "GIT_COMMIT" in text
+        # CM-FR11-R2: вложенные сабмодули CubeF1 — обязательная
+        # recursive-инициализация после checkout пина (plain clone/
+        # tarball не содержат gitlink-содержимого).
+        assert "submodule update --init" in text
+        assert "recursive" in text
+        assert "Drivers/STM32F1xx_HAL_Driver" in text
+        assert "Middlewares/ST/STM32_USB_Device_Library" in text
+        # Путь без git — те же зависимости tarball'ами на
+        # gitlink-коммитах.
+        assert "stm32f1xx_hal_driver" in text
+        assert "stm32-mw-usb-device" in text
+        assert "cmsis_device_f1" in text
+        # Клон основного проекта — checkout SHA + recursive update.
+        assert "git -C code_master checkout deadbeef" in text
+        # Независимые make -C команды — cd цепочка не ломает вторую
+        # сборку.
+        assert "make -C firmware/bootloader" in text
+        assert "make -C firmware/application" in text
+        # DFU-образ содержит реальные области, а не «покрывает Flash
+        # до 0x0803FFFF» — пустые страницы не добавляются.
+        assert "покрывает 0x08000000-0x0803FFFF" not in text
+        # Host-тесты обеих прошивок — и в архиве, и в манифесте.
+        assert "firmware/bootloader/tests" in text
+        files = {p.as_posix() for p in _collect()}
+        assert any(
+            f.endswith(
+                "firmware/bootloader/tests/test_bootloader_boundary.c"
+            )
+            for f in files
+        )
+        assert any(
+            f.endswith("firmware/bootloader/tests/stubs/usbd_cdc.h")
+            for f in files
+        )
 
     def test_extracted_zip_make_full_image(self, tmp_path) -> None:
         """CM-FR11: чистая распаковка → make_full_image.py --version

@@ -459,12 +459,17 @@ def record_fields_valid(payload: bytes) -> bool:
                 return False
         else:
             # «Динамическая»: mask = offset/len/endian/cmp/kind,
-            # позиции 5..7 нулевые, rx_data — значение u64.
+            # позиции 6..7 нулевые, rx_data — значение u64.
+            # mask[5] — id edge-группы алиасов состояния (CM-FR12):
+            # >0 допустим только у dyn_cache-сравнения «==»
+            # (зеркало trigger_fields_valid в trigger.c).
             m = t["rx_data_mask"]
             if not (
                 m[1] >= 1 and m[0] + m[1] <= 8
                 and m[2] <= 1 and m[3] <= 3 and m[4] <= 1
-                and m[5] == 0 and m[6] == 0 and m[7] == 0
+                and (m[5] == 0
+                     or (m[3] == 0 and m[4] == 0 and m[5] <= 31))
+                and m[6] == 0 and m[7] == 0
             ):
                 return False
     if not (

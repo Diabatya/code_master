@@ -120,6 +120,12 @@ static uint8_t s_flag_ev_head, s_flag_ev_tail;
 static uint8_t s_flex_var_win[FLEX_MAX_RECORDS][8];
 static uint16_t s_flex_var_valid[FLEX_MAX_RECORDS];
 static uint32_t s_flex_var_prev;
+/* CM-FR12: защёлка истинности edge-группы алиасов (бит = id группы
+ * из rx_data_mask[5]). Сырые значения одного именованного состояния
+ * dyn_cache раскладываются в несколько eq-записей — их условия
+ * взаимоисключающие, фронт считается от OR: переход «Драйв» 8→72
+ * защёлку не сбрасывает и повторной сработки не даёт. */
+static uint32_t s_flex_grp_prev;
 
 /* Состояние «кол-во сработок до смены DATA» (формат v3): на запись —
  * счётчик сработок на неизменном содержимом и защёлка «лимит исчерпан»
@@ -301,6 +307,7 @@ static void append_flex(void)
   memset(s_flex_var_win, 0, sizeof(s_flex_var_win));
   memset(s_flex_var_valid, 0, sizeof(s_flex_var_valid));
   s_flex_var_prev = 0U;
+  s_flex_grp_prev = 0U;
   uint32_t len = 0U;
   const uint8_t *p = Storage_FlexPayload(&len);
   if (p == NULL || len < 12U) {
@@ -744,14 +751,20 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
     } else {
       /* «Динамическая переменная»: mask — offset/len/endian/cmp/
        * kind (извлечение и вид сравнения), rx_data — значение u64.
-       * Позиции [5..7] маски зарезервированы нулями. */
+       * mask[5] — id edge-группы алиасов состояния (CM-FR12): >0
+       * допустим только у dyn_cache-сравнения «==»; старая прошивка
+       * требует 0 и отвергает сгруппированный блоб целиком.
+       * Позиции [6..7] маски зарезервированы нулями. */
       uint8_t off = trig->rx_data_mask[0];
       uint8_t len = trig->rx_data_mask[1];
       if (len < 1U || (uint16_t)off + len > 8U
           || trig->rx_data_mask[2] > 1U
           || trig->rx_data_mask[3] > 3U
           || trig->rx_data_mask[4] > 1U
-          || trig->rx_data_mask[5] != 0U
+          || (trig->rx_data_mask[5] != 0U
+              && (trig->rx_data_mask[5] > FLEX_EDGE_GROUP_MAX
+                  || trig->rx_data_mask[3] != 0U
+                  || trig->rx_data_mask[4] != 0U))
           || trig->rx_data_mask[6] != 0U
           || trig->rx_data_mask[7] != 0U) {
         return 0U;
@@ -1485,13 +1498,19 @@ static uint8_t setflag_exec(const trigger_t *t)
  * поле должно быть в этом кадре целиком — неполный кадр переменную
  * не меняет (на ПК значение попадает в invalid и флаг сохраняется —
  * _event_fired выходит до обновления _dyn_flags). */
-static uint8_t flex_var_edge(uint8_t flex_idx, const trigger_t *t,
-                             const can_frame_t *frame)
+/* Текущая истинность условия RX_VAR-записи без защёлки: обновляет
+ * кэш окна и возвращает cond. *evaluated = 0 — значение не вычислено
+ * (окно ещё не заполнено покадрово): защёлки такой кадр не трогает —
+ * на ПК неполная переменная уходит в invalid до обновления флага. */
+static uint8_t flex_var_cond(uint8_t flex_idx, const trigger_t *t,
+                             const can_frame_t *frame,
+                             uint8_t *evaluated)
 {
   uint8_t off = t->rx_data_mask[0];
   uint8_t len = t->rx_data_mask[1];
   uint8_t *win = s_flex_var_win[flex_idx];
   uint8_t complete = 1U;
+  *evaluated = 0U;
   if (t->rx_data_mask[4] == 0U) {
     /* dyn_cache: покадровое обновление кэша позиций. */
     uint16_t need = (uint16_t)((1U << len) - 1U);
@@ -1519,6 +1538,7 @@ static uint8_t flex_var_edge(uint8_t flex_idx, const trigger_t *t,
   if (complete == 0U) {
     return 0U;
   }
+  *evaluated = 1U;
   uint64_t raw = 0U;
   if (t->rx_data_mask[2] == 0U) {
     /* Big-endian окна: первая позиция — старший байт (порядок
@@ -1540,9 +1560,22 @@ static uint8_t flex_var_edge(uint8_t flex_idx, const trigger_t *t,
   for (uint8_t i = 0U; i < 8U; i++) {
     val |= ((uint64_t)t->rx_data[i]) << (8U * i);
   }
-  uint8_t cond =
-      (cmp == 0U) ? (raw == val)
-                  : ((cmp == 1U) ? (raw > val) : (raw < val));
+  return (cmp == 0U) ? (uint8_t)(raw == val)
+                     : (uint8_t)((cmp == 1U) ? (raw > val)
+                                            : (raw < val));
+}
+
+static uint8_t flex_var_edge(uint8_t flex_idx, const trigger_t *t,
+                             const can_frame_t *frame)
+{
+  uint8_t evaluated = 0U;
+  uint8_t cond = flex_var_cond(flex_idx, t, frame, &evaluated);
+  if (evaluated == 0U) {
+    return 0U;
+  }
+  if (t->rx_data_mask[3] == 3U) {
+    return 1U; /* «импульсная» — без защёлки, каждый кадр */
+  }
   uint32_t bit = 1UL << flex_idx;
   uint8_t fired = (cond != 0U
                    && (s_flex_var_prev & bit) == 0U) ? 1U : 0U;
@@ -1686,6 +1719,49 @@ void Trigger_OnAuxEvent(uint8_t channel, uint8_t is_on)
 
 void Trigger_OnFrame(const can_frame_t *frame)
 {
+  /* CM-FR12: члены edge-группы (алиасы одного именованного состояния,
+   * rx_data_mask[5] > 0) делят защёлку фронта — истинность группы есть
+   * OR условий членов, и фронт считается от состояния группы ПРОШЛОГО
+   * кадра. Поэтому cond всех членов вычисляется отдельным проходом ДО
+   * решений о сработках: иначе раньше оцененный член обновил бы свою
+   * защёлку и переход между алиасами (8→72) выглядел бы как выход из
+   * состояния и вход в него же. Неполное окно (evaluated=0) группу не
+   * сбрасывает — как неполная переменная на ПК не трогает _dyn_flags. */
+  uint32_t grp_seen = 0U;
+  uint32_t grp_cond = 0U;
+  uint32_t var_cond_now = 0U;
+  for (uint8_t i = s_user_count; i < s_count; i++) {
+    const trigger_t *t = &s_triggers[i];
+    uint8_t grp;
+    uint8_t evaluated = 0U;
+    if (!t->enabled
+        || (t->rx_flags & TRIGGER_F_RX_VAR) == 0U
+        || (t->rx_flags
+            & (TRIGGER_F_FIRE_ON_BOOT | TRIGGER_F_RX_AUX_EVENT)) != 0U
+        || (frame->echo != 0U
+            && (t->rx_flags & TRIGGER_F_MUTE_ECHO) != 0U)
+        || !rx_header_matches(t, frame)
+        || t->rx_channel == TRIGGER_VAR_CHAN_FLAG) {
+      continue;
+    }
+    grp = t->rx_data_mask[5];
+    if (grp == 0U || grp > FLEX_EDGE_GROUP_MAX) {
+      continue;
+    }
+    uint8_t fidx = (uint8_t)(i - s_user_count);
+    uint8_t cond = flex_var_cond(fidx, t, frame, &evaluated);
+    if (evaluated == 0U) {
+      continue;
+    }
+    grp_seen |= 1UL << grp;
+    if (cond != 0U) {
+      grp_cond |= 1UL << grp;
+      var_cond_now |= 1UL << fidx;
+    }
+  }
+  uint32_t grp_edge = grp_cond & ~s_flex_grp_prev;
+  s_flex_grp_prev = (s_flex_grp_prev & ~grp_seen) | grp_cond;
+
   for (uint8_t i = 0; i < s_count; i++) {
     const trigger_t *t = &s_triggers[i];
     if (!t->enabled) {
@@ -1757,8 +1833,23 @@ void Trigger_OnFrame(const can_frame_t *frame)
          * извлечения и сравнения, а не фильтр DATA. Слушатель фронта
          * флага (rx_channel==0xFF) сюда не доходит — не проходит
          * rx_header_matches по каналу. */
-        if (t->rx_channel == TRIGGER_VAR_CHAN_FLAG
-            || !flex_var_edge((uint8_t)(i - s_user_count), t, frame)) {
+        if (t->rx_channel == TRIGGER_VAR_CHAN_FLAG) {
+          continue;
+        }
+        uint8_t fidx = (uint8_t)(i - s_user_count);
+        uint8_t grp = t->rx_data_mask[5];
+        uint8_t fired;
+        if (grp != 0U && grp <= FLEX_EDGE_GROUP_MAX
+            && (grp_seen & (1UL << grp)) != 0U) {
+          /* CM-FR12: общая защёлка группы алиасов — сработка при
+           * своём условии И фронте группы (условия членов
+           * взаимоисключающие — стреляет не более одной записи). */
+          fired = (uint8_t)((var_cond_now & (1UL << fidx)) != 0U
+                            && (grp_edge & (1UL << grp)) != 0U);
+        } else {
+          fired = flex_var_edge(fidx, t, frame);
+        }
+        if (!fired) {
           continue;
         }
       } else {

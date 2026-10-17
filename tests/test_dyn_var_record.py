@@ -18,7 +18,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QLabel
 
@@ -51,6 +51,9 @@ class _Signal:
 class _Manager:
     def __init__(self) -> None:
         self.new_can_frames = _Signal()
+        # CM-FR08-R2: захват подписывается на смену/отключение
+        # устройства — сигнал должен существовать у менеджера.
+        self.connection_changed = _Signal()
 
 
 def _row():
@@ -312,3 +315,64 @@ def test_parent_dialog_close_stops_recording(qapp) -> None:
         assert manager.new_can_frames._subs == []
     finally:
         dlg.deleteLater()
+
+
+def test_source_change_stops_dyn_record(qapp) -> None:
+    """CM-FR08-R2: источник зафиксирован на старте — смена ID (и
+    любой части ключа) посреди записи останавливает сессию с явным
+    статусом; кадры нового источника не попадают в журнал."""
+    page, manager = _page(qapp)
+    try:
+        page._toggle_dyn_record()
+        manager.new_can_frames.emit([_frame(data=b"\x01\x02")])
+        assert _history_hex(page) == ["01 02"]
+        page.can_id.setText("200")          # оператор сменил ID
+        manager.new_can_frames.emit([
+            _frame(can_id=0x200, data=b"\x03\x04"),
+        ])
+        assert not page._dyn_recording
+        assert "источник" in page._dyn_record_status.text()
+        # Журнал старой сессии не смешался с новым источником.
+        assert _history_hex(page) == ["01 02"]
+        # Подписки сняты — запись не живёт после стопа.
+        assert manager.new_can_frames._subs == []
+        assert manager.connection_changed._subs == []
+    finally:
+        page.deleteLater()
+
+
+def test_device_disconnect_stops_dyn_record(qapp) -> None:
+    """CM-FR08-R2: отключение устройства во время захвата — стоп
+    со статусом; подписки на кадры и сигнал подключения сняты."""
+    page, manager = _page(qapp)
+    try:
+        page._toggle_dyn_record()
+        assert manager.new_can_frames._subs == [page._on_dyn_frames]
+        assert manager.connection_changed._subs == [
+            page._on_dyn_device_changed
+        ]
+        manager.new_can_frames.emit([_frame(data=b"\x01\x02")])
+        manager.connection_changed.emit(False)   # устройство ушло
+        assert not page._dyn_recording
+        assert "отключено" in page._dyn_record_status.text()
+        assert manager.new_can_frames._subs == []
+        assert manager.connection_changed._subs == []
+        # История сессии остаётся на просмотр.
+        assert _history_hex(page) == ["01 02"]
+    finally:
+        page.deleteLater()
+
+
+def test_dyn_deferred_delete_stops_recording(qapp) -> None:
+    """Разрушение страницы без явного «Стоп» (deleteLater) —
+    захват останавливается и отписывается (CM-FR08-R2, реальный
+    путь destroyed Qt)."""
+    page, manager = _page(qapp)
+    page._toggle_dyn_record()
+    assert manager.new_can_frames._subs == [page._on_dyn_frames]
+    page.deleteLater()
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    # Виджет мёртв — проверяем побочный эффект: подписок нет,
+    # поздняя эмиссия никому не доставляется и не падает.
+    assert manager.new_can_frames._subs == []
+    manager.new_can_frames.emit([_frame(data=b"\x01\x02")])
