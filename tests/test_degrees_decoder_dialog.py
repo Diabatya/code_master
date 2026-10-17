@@ -19,7 +19,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 import ui.variables_tab as vt
 from core import steering_decoder as sd
@@ -142,14 +142,16 @@ class TestRecording:
             assert pos.record_btn.text() == "Записать"
             for i in range(15):
                 neg.capture(bytes([0x10 + i]))
-            # 15 значений → история длиннее десяти (F06 п.3).
-            assert neg.table.rowCount() == 10 + 15
+            # 15 значений → история длиннее десяти (F06 п.3):
+            # первые 10 занимают DATA строк делителей, дальше —
+            # добавленные строки журнала (CM-FR13).
+            assert neg.table.rowCount() == 10 + 5
             # Повтор подряд не плодит строку (F06 п.18).
             neg.capture(b"\x40")
-            assert neg.table.rowCount() == 10 + 16
+            assert neg.table.rowCount() == 10 + 6
             neg.capture(b"\x40")
             neg.capture(b"\x40")
-            assert neg.table.rowCount() == 10 + 16
+            assert neg.table.rowCount() == 10 + 6
             neg.stop_record()
             assert neg.record_btn.text() == "Записать"
             # Стоп не меняет правила (F06 п.12).
@@ -181,8 +183,7 @@ class TestRecording:
             tbl = dlg._tables["pos"]
             tbl.toggle_record()
             tbl.capture(b"\x01\x02")  # 0x0102 = 258
-            # Журнал — сверху DATA-колонок: новейшее первым, десять
-            # пустых DATA-ячеек делителей над историей нет (CM-FR07-R2).
+            # Первая запись — DATA-ячейки строки 0 (CM-FR13).
             r = 0
             assert tbl.table.item(r, tbl.COL_HEX).text() == "01 02"
             assert tbl.table.item(r, tbl.COL_DEC).text() == "258"
@@ -191,25 +192,35 @@ class TestRecording:
                 pass
 
     def test_history_rows_are_journal_only(self, qapp) -> None:
-        """CM-FR06/CM-FR07-R2: строки истории — журнал без активных
-        условий: галочек и делителя нет, правило стороны они не
-        меняют, и лежат СВЕРХУ DATA-колонок — новейшее первым,
-        делители ниже журнала."""
+        """CM-FR06/CM-FR13: добавленные строки истории (за
+        пределами десяти) — журнал без активных условий: галочек
+        и делителя нет, правило стороны они не меняют; десять
+        делителей остаются на своих строках с журнальными DATA."""
         gen = _dialog(qapp)
         dlg = next(gen)
         try:
             tbl = dlg._tables["neg"]
             tbl.toggle_record()
-            for value in (b"\x10", b"\x20"):
-                tbl.capture(value)
-            # Журнальные строки — первые две (новейшая сверху).
-            for r in (0, 1):
+            for i in range(12):
+                tbl.capture(bytes([0x10 + i]))
+            # Первые десять строк — делители с галочками, DATA
+            # занята журналом в порядке прихода.
+            for r in range(10):
+                assert tbl._req_boxes(r) is not None
+                assert (
+                    tbl.table.item(r, tbl.COL_NUM).text()
+                    == str(list(sd.DIVISORS)[r])
+                )
+                assert tbl._row_hex(r) == f"{0x10 + r:02X}"
+            # Добавленные строки 10–11 — журнал без условий.
+            for r in (10, 11):
                 assert tbl._req_boxes(r) is None, (
                     "строка истории не должна иметь галочек требования"
                 )
                 num = tbl.table.item(r, tbl.COL_NUM)
                 assert num.text() == ""
                 assert not (num.flags() & Qt.ItemFlag.ItemIsEditable)
+                assert tbl._row_hex(r) == f"{0x10 + r:02X}"
             # Постоянное правило (кратно 8) не затронуто записью —
             # и ни одна строка истории не порождает правила.
             assert tbl.sign_rules() == {8: "div"}
@@ -229,18 +240,18 @@ class TestRecording:
             tbl.capture(b"\x10")
             tbl.stop_record()
             tbl.capture(b"\x20")          # вне записи — не пишется
-            assert tbl.table.rowCount() == 11
+            assert tbl.table.rowCount() == 10
             tbl.toggle_record()
             tbl.capture(b"\x20")
-            assert tbl.table.rowCount() == 12
-            # Журнал и фиксированные делители на своих местах: история
-            # сверху (новейшая строка 0), делители ниже неё.
+            assert tbl.table.rowCount() == 10
+            # Журнал продолжается в порядке прихода: «10» в DATA
+            # строки 0, «20» — строки 1; делители на своих местах.
             divs = [
                 int(tbl.table.item(r, tbl.COL_NUM).text())
-                for r in range(2, 12)
+                for r in range(10)
             ]
             assert divs == list(sd.DIVISORS)
-            assert tbl._row_hex(0) == "20" and tbl._row_hex(1) == "10"
+            assert tbl._row_hex(0) == "10" and tbl._row_hex(1) == "20"
             assert tbl.sign_rules() == {8: "div"}
         finally:
             for _ in gen:
@@ -272,7 +283,7 @@ class TestCaptureContract:
     def _feed(self, dlg, frames):
         dlg._on_frames(frames)
         dlg._tick()
-        return dlg._tables["neg"].table.rowCount() - 10
+        return dlg._tables["neg"]._history
 
     def _dec(self, dlg, r):
         return dlg._tables["neg"].table.item(r, dlg._tables["neg"].COL_DEC).text()
@@ -360,7 +371,7 @@ class TestCaptureContract:
                 self._frame(channel=1, data=b"\xAA\xBB"),  # чужая шина
                 self._frame(channel=0, data=b"\x01\x02"),
             ])
-            assert dlg._tables["neg"].table.rowCount() == 11
+            assert dlg._tables["neg"]._history == 1
             assert self._hex(dlg, 0) == "01 02"
         finally:
             for _ in gen:
@@ -374,7 +385,9 @@ class TestCaptureContract:
                 self._frame(channel=0, data=b"\x01\x02"),
                 self._frame(channel=1, data=b"\x03\x04"),
             ])
-            assert dlg._tables["neg"].table.rowCount() == 12
+            assert dlg._tables["neg"]._history == 2
+            assert self._hex(dlg, 0) == "01 02"
+            assert self._hex(dlg, 1) == "03 04"
         finally:
             for _ in gen:
                 pass
@@ -395,7 +408,7 @@ class TestCaptureContract:
                  "rtr": False, "data": b"\x01\x02"},  # битый ID
                 self._frame(data=b"\x11\x22"),
             ])
-            assert dlg._tables["neg"].table.rowCount() == 11
+            assert dlg._tables["neg"]._history == 1
             assert self._hex(dlg, 0) == "11 22"
         finally:
             for _ in gen:
@@ -488,7 +501,7 @@ class TestQueueOwnershipR2:
             neg.record_btn.click()          # Стоп — до тика
             # Хвост своей сессии долит немедленно, не дожидаясь
             # 100-мс тика.
-            assert neg.table.rowCount() == 11
+            assert neg._history == 1
             assert neg._row_hex(0) == "0A 0B"
             assert dlg._pending == []
             pos.record_btn.click()
@@ -496,9 +509,9 @@ class TestQueueOwnershipR2:
             dlg._tick()
             # Старый образец не переложен в (+) — та видит только
             # кадры своей сессии.
-            assert pos.table.rowCount() == 11
+            assert pos._history == 1
             assert pos._row_hex(0) == "0C 0D"
-            assert neg.table.rowCount() == 11
+            assert neg._history == 1
         finally:
             for _ in gen:
                 pass
@@ -519,10 +532,11 @@ class TestQueueOwnershipR2:
             dlg._on_frames([self._frame(data=b"\x0C\x0D")])
             dlg._tick()
             # A — у обеих (обе записывали при приёме), B — только (+).
-            assert pos.table.rowCount() == 12
-            assert pos._row_hex(0) == "0C 0D"
-            assert pos._row_hex(1) == "0A 0B"
-            assert neg.table.rowCount() == 11
+            # Порядок журнала — приход: A на строке 0, B на строке 1.
+            assert pos._history == 2
+            assert pos._row_hex(0) == "0A 0B"
+            assert pos._row_hex(1) == "0C 0D"
+            assert neg._history == 1
         finally:
             for _ in gen:
                 pass
@@ -543,6 +557,192 @@ class TestQueueOwnershipR2:
             assert item.text() == "01 02"
             assert "CAN2" in item.toolTip()
             assert neg.table.item(0, neg.COL_DEC).text() == "513"
+        finally:
+            for _ in gen:
+                pass
+
+
+class TestJournalLayoutR3:
+    """CM-FR13/CM-FR14: журнал — в порядке прихода сверху вниз;
+    первые десять образцов занимают DATA-ячейки строк делителей,
+    дальше — строки без условий; делители и галочки не
+    сдвигаются и не размножаются; журнальная запись не связана
+    с делителем своей строки; дедуп — по окну провода."""
+
+    def _live(self, **kw):
+        state = {
+            "fid": 0x100, "extended": False, "channel": None,
+            "bytes": [0], "sblp": "", "get_frame": None,
+        }
+        state.update(kw)
+        return state
+
+    def _frame(self, data=b"\x01", **kw):
+        frame = {
+            "id": 0x100, "channel": 0, "extended": False,
+            "rtr": False, "data": bytes(data),
+        }
+        frame.update(kw)
+        return frame
+
+    def test_arrival_order_top_down(self, qapp) -> None:
+        """Проба ревью: пришло 01 → 02 → 03, журнал сверху вниз —
+        01, 02, 03 в DATA-ячейках строк 0..2."""
+        gen = _dialog(qapp, live=self._live())
+        dlg = next(gen)
+        try:
+            tbl = dlg._tables["neg"]
+            tbl.record_btn.click()
+            dlg._on_frames([self._frame(b"\x01"), self._frame(b"\x02"),
+                            self._frame(b"\x03")])
+            dlg._tick()
+            assert tbl._history == 3
+            assert [tbl._row_hex(r) for r in range(3)] == [
+                "01", "02", "03",
+            ]
+            assert [
+                tbl.table.item(r, tbl.COL_DEC).text()
+                for r in range(3)
+            ] == ["1", "2", "3"]
+            # Делители не сдвинулись и не размножились.
+            divs = [
+                int(tbl.table.item(r, tbl.COL_NUM).text())
+                for r in range(10)
+            ]
+            assert divs == list(sd.DIVISORS)
+        finally:
+            for _ in gen:
+                pass
+
+    def test_layout_after_fifteen_samples(self, qapp) -> None:
+        """15 образцов: десять условий на своих строках с журнальными
+        DATA; строки 10–14 — добавленный журнал без условий."""
+        gen = _dialog(qapp, live=self._live())
+        dlg = next(gen)
+        try:
+            tbl = dlg._tables["neg"]
+            tbl.record_btn.click()
+            dlg._on_frames([
+                self._frame(bytes([0x10 + i])) for i in range(15)
+            ])
+            dlg._tick()
+            assert tbl._history == 15
+            assert tbl.table.rowCount() == 15
+            for r in range(10):
+                assert tbl._req_boxes(r) is not None
+                assert (
+                    tbl.table.item(r, tbl.COL_NUM).text()
+                    == str(list(sd.DIVISORS)[r])
+                )
+            for r in range(10, 15):
+                assert tbl._req_boxes(r) is None
+                assert tbl.table.item(r, tbl.COL_NUM).text() == ""
+                assert tbl._row_hex(r) == f"{0x10 + r:02X}"
+        finally:
+            for _ in gen:
+                pass
+
+    def test_journal_independent_of_divisor(self, qapp) -> None:
+        """CM-FR13 п.5: образец 03 в DATA строки «кратно 2» не
+        нарушает настройку — журнал и условие не связаны; галочки
+        после захвата работают и взаимоисключают."""
+        gen = _dialog(qapp, live=self._live())
+        dlg = next(gen)
+        try:
+            tbl = dlg._tables["neg"]
+            tbl.record_btn.click()
+            dlg._on_frames([self._frame(b"\x03")])   # 3 — в строку 0
+            dlg._tick()
+            # Ставим «кратно 2» на строке с образцом 03: журнал —
+            # не нарушение правила строки.
+            cb_div, cb_not = tbl._req_boxes(0)
+            cb_div.setChecked(True)
+            assert not tbl.errors()
+            # Взаимоисключение и корректный делитель после захвата.
+            cb_not.setChecked(True)
+            assert not cb_div.isChecked()
+            assert tbl.sign_rules()[2] == "not"
+            # OK не блокируется журнальным образцом.
+            dlg._on_accept()
+            assert dlg.result() == QDialog.DialogCode.Accepted
+        finally:
+            for _ in gen:
+                pass
+
+    def test_stop_start_continues_and_close_clears(self, qapp) -> None:
+        """Стоп/старт продолжает историю следующей записью; закрытие
+        очищает DATA и снимает добавленные строки, правила целы."""
+        gen = _dialog(qapp, live=self._live())
+        dlg = next(gen)
+        try:
+            tbl = dlg._tables["neg"]
+            tbl.record_btn.click()
+            dlg._on_frames([self._frame(b"\x10")])
+            dlg._tick()
+            tbl.record_btn.click()                 # Стоп
+            tbl.record_btn.click()                 # снова Записать
+            dlg._on_frames([self._frame(bytes([0x20 + i]))
+                            for i in range(11)])
+            dlg._tick()
+            assert tbl._history == 12
+            assert tbl._row_hex(0) == "10"
+            assert tbl._row_hex(11) == "2A"
+            dlg.reject()
+            # Добавленные строки сняты, DATA условий очищены,
+            # делители и правила не потеряны.
+            assert tbl.table.rowCount() == 10
+            assert tbl._history == 0
+            for r in range(10):
+                assert tbl._row_hex(r) == ""
+                assert tbl.table.item(
+                    r, tbl.COL_HEX
+                ).data(Qt.ItemDataRole.UserRole) is None
+            assert tbl.sign_rules() == {8: "div"}
+        finally:
+            for _ in gen:
+                pass
+
+    def test_dedup_by_wire_window(self, qapp) -> None:
+        """Проба ревью CM-FR14: окна 01 02, 01 02, 02 01, 01 02 при
+        одинаковой сумме — три строки 01 02, 02 01, 01 02 сверху
+        вниз, DATA 10 у всех 3. Подаём настоящие кадры."""
+        gen = _dialog(qapp, live=self._live(bytes=[0, 1]))
+        dlg = next(gen)
+        try:
+            tbl = dlg._tables["neg"]
+            tbl.record_btn.click()
+            for wire in (b"\x01\x02", b"\x01\x02", b"\x02\x01",
+                         b"\x01\x02"):
+                dlg._on_frames([self._frame(wire)])
+            dlg._tick()
+            assert tbl._history == 3
+            assert [tbl._row_hex(r) for r in range(3)] == [
+                "01 02", "02 01", "01 02",
+            ]
+            assert [
+                tbl.table.item(r, tbl.COL_DEC).text()
+                for r in range(3)
+            ] == ["3", "3", "3"]
+        finally:
+            for _ in gen:
+                pass
+
+    def test_dedup_wire_window_be_le(self, qapp) -> None:
+        """BE/LE: разные окна с одним числом не схлопываются;
+        окно провода и число по контракту сохранены."""
+        gen = _dialog(qapp, live=self._live(bytes=[0, 1], sblp="le"))
+        dlg = next(gen)
+        try:
+            tbl = dlg._tables["neg"]
+            tbl.record_btn.click()
+            dlg._on_frames([self._frame(b"\x01\x02"),
+                            self._frame(b"\x02\x01")])
+            dlg._tick()
+            assert tbl._history == 2
+            assert tbl._row_hex(0) == "01 02"
+            assert tbl._row_hex(1) == "02 01"
+            assert tbl.table.item(0, tbl.COL_DEC).text() == "513"
+            assert tbl.table.item(1, tbl.COL_DEC).text() == "258"
         finally:
             for _ in gen:
                 pass
@@ -747,10 +947,12 @@ class TestLifecycle:
             dlg._on_frames([{"id": 0x100, "channel": 0, "extended": False,
                              "rtr": False, "data": b"\x01\x02"}])
             dlg._tick()
-            assert dlg._tables["neg"].table.rowCount() == 11
+            assert dlg._tables["neg"]._history == 1
             dlg.reject()
-            # История закрытого диалога очищена финализацией.
+            # История закрытого диалога очищена финализацией —
+            # DATA строк условий пусты, делители на месте.
             assert dlg._tables["neg"].table.rowCount() == 10
+            assert dlg._tables["neg"]._row_hex(0) == ""
         finally:
             for _ in gen:
                 pass

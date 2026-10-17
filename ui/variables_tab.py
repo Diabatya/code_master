@@ -791,11 +791,14 @@ class _SignRecordTable(QWidget):
     """Одна таблица записи DATA декодера «Градусы» (CM-F06).
 
     Десять фиксированных строк-делителей 2..20 (колонка «Числу») с
-    тремя состояниями «Кратно»/«Не кратно»/не участвует; ниже —
-    растущая история записанных значений (ОЗУ, не сохраняется;
+    тремя состояниями «Кратно»/«Не кратно»/не участвует; журнал
+    записанных значений растёт в порядке прихода: первые десять
+    образцов заполняют DATA-ячейки строк делителей, дальше —
+    добавляемые строки без условий (ОЗУ, не сохраняется;
     F06 п.3 — история длиннее десяти не обрезается, п.5 — делители
-    фиксированы и от истории не зависят). Колонки: DATA 16 |
-    DATA 10 | Кратно | Числу | Не кратно."""
+    фиксированы и от истории не зависят; CM-FR13 — журнал и
+    делитель одной визуальной строки семантически не связаны).
+    Колонки: DATA 16 | DATA 10 | Кратно | Числу | Не кратно."""
 
     COL_HEX, COL_DEC, COL_DIV, COL_NUM, COL_NOT = range(5)
     HISTORY_LIMIT = 512  # потолок записей на таблицу (F06 п.16)
@@ -850,7 +853,7 @@ class _SignRecordTable(QWidget):
         for d in steering_decoder.DIVISORS:
             self._add_divisor_row(d)
         self.recording = False
-        self._last_raw: int | None = None
+        self._last_wire: bytes | None = None
         self._history = 0
 
     # ---- строки ----------------------------------------------------
@@ -863,42 +866,57 @@ class _SignRecordTable(QWidget):
 
     def _add_history_row(
         self, wire_text: str, raw: int, channel: Any
-    ) -> None:
-        """Строка записанного образца — журнал БЕЗ активных условий
-        (F06 п.3/п.5): галочек и делителя нет, правило стороны она
-        не меняет — десять делителей фиксированы.
+    ) -> int:
+        """Положить образец в журнал в порядке прихода (CM-FR13):
+        запись 1 → DATA-ячейки строки 0, запись 2 → строки 1 и
+        т.д. — первые десять занимают DATA-колонки фиксированных
+        строк делителей, начиная с одиннадцатой под делителями
+        добавляются строки БЕЗ условий (F06 п.3/п.5: правило
+        стороны журнал не меняет — десять делителей фиксированы).
 
-        CM-FR07-R2: строка встаёт СВЕРХУ DATA-колонок (новейшее
-        значение первым — над журналом не висит десять пустых
-        DATA-ячеек делителей). DATA 16 показывает байты окна в
-        порядке провода — как пришли, с ведущими нулями; число по
+        CM-FR07-R2: DATA 16 показывает байты окна в порядке
+        провода — как пришли, с ведущими нулями; число по
         выбранному контракту и принявший канал зафиксированы при
         приёме (подсказка + DATA 10), а не выводятся заново из
-        переставленного HEX."""
-        self.table.insertRow(0)
-        hex_item = QTableWidgetItem(wire_text)
-        hex_item.setData(Qt.ItemDataRole.UserRole, raw)
+        переставленного HEX. Возвращает индекс затронутой строки
+        для перевалидации."""
         chan = (
             f"CAN{channel + 1}" if isinstance(channel, int)
             else tr("шина не указана")
         )
-        hex_item.setToolTip(
+        tip = (
             tr("Принято: %1 · байты провода: %2 · значение: %3")
             .replace("%1", str(chan))
             .replace("%2", wire_text or "—")
             .replace("%3", str(raw))
         )
         self.table.blockSignals(True)
-        self.table.setItem(0, self.COL_HEX, hex_item)
-        dec = QTableWidgetItem(str(raw))
-        dec.setFlags(dec.flags() & ~Qt.ItemFlag.ItemIsEditable)
-        dec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.table.setItem(0, self.COL_DEC, dec)
-        for col in (self.COL_DIV, self.COL_NUM, self.COL_NOT):
-            empty = QTableWidgetItem("")
-            empty.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            self.table.setItem(0, col, empty)
+        if self._history < len(steering_decoder.DIVISORS):
+            r = self._history
+            hex_item = QTableWidgetItem(wire_text)
+            hex_item.setData(Qt.ItemDataRole.UserRole, raw)
+            hex_item.setToolTip(tip)
+            self.table.setItem(r, self.COL_HEX, hex_item)
+            dec = self.table.item(r, self.COL_DEC)
+            if dec is not None:
+                dec.setText(str(raw))
+        else:
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            hex_item = QTableWidgetItem(wire_text)
+            hex_item.setData(Qt.ItemDataRole.UserRole, raw)
+            hex_item.setToolTip(tip)
+            self.table.setItem(r, self.COL_HEX, hex_item)
+            dec = QTableWidgetItem(str(raw))
+            dec.setFlags(dec.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            dec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(r, self.COL_DEC, dec)
+            for col in (self.COL_DIV, self.COL_NUM, self.COL_NOT):
+                empty = QTableWidgetItem("")
+                empty.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                self.table.setItem(r, col, empty)
         self.table.blockSignals(False)
+        return r
 
     def _fill_row(self, r: int, hex_text: str, div: int) -> None:
         hex_item = QTableWidgetItem(hex_text)
@@ -911,8 +929,8 @@ class _SignRecordTable(QWidget):
         self.table.setItem(r, self.COL_DEC, dec)
         # «Кратно»/«Не кратно» — взаимоисключающие галочки требования
         # (третье состояние — обе сняты, строка вне таблицы). Строка
-        # галочки ищется ДИНАМИЧЕСКИ по item — журнал вставляется
-        # сверху и сдвигает индексы делителей (CM-FR07-R2).
+        # галочки ищется ДИНАМИЧЕСКИ по item — добавление строк
+        # журнала сдвигает индексы делителей (CM-FR07-R2).
         for col in (self.COL_DIV, self.COL_NOT):
             placeholder = QTableWidgetItem("")
             placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
@@ -1043,21 +1061,30 @@ class _SignRecordTable(QWidget):
             )
             if dec_item is not None:
                 dec_item.setText(str(raw))
-            d = self._row_div(r)
-            req = self._row_req(r)
-            if req and d is not None and (
-                (req == "div" and raw % d != 0)
-                or (req == "not" and raw % d == 0)
-            ):
-                req_text = (
-                    tr("кратно") if req == "div" else tr("не кратно")
-                )
-                self._mark(
-                    r, "#FFB74D",
-                    tr("Код не подходит «") + req_text + f" {d}" + tr("»"),
-                )
+            if isinstance(hist_raw, int):
+                # Журнальный образец в DATA-ячейке строки делителя:
+                # журнал и условие визуально рядом, но семантически
+                # не связаны — проверка кратности не применяется
+                # (CM-FR13 п.5).
+                self._mark(r, None)
             else:
-                self._mark(r, "#4CAF50")
+                d = self._row_div(r)
+                req = self._row_req(r)
+                if req and d is not None and (
+                    (req == "div" and raw % d != 0)
+                    or (req == "not" and raw % d == 0)
+                ):
+                    req_text = (
+                        tr("кратно") if req == "div"
+                        else tr("не кратно")
+                    )
+                    self._mark(
+                        r, "#FFB74D",
+                        tr("Код не подходит «") + req_text + f" {d}"
+                        + tr("»"),
+                    )
+                else:
+                    self._mark(r, "#4CAF50")
         if hist_tip and hex_item is not None:
             err_tip = hex_item.toolTip()
             hex_item.setToolTip(
@@ -1071,6 +1098,16 @@ class _SignRecordTable(QWidget):
         на commit редактора — аналог editingFinished, F06 п.8).
         Невалидный текст НЕ стирается — подменяется только
         кириллица на той же клавише."""
+        if item.column() == self.COL_HEX and (
+            item.data(Qt.ItemDataRole.UserRole) is not None
+        ):
+            # Ручная правка журнальной ячейки превращает её в
+            # введённый код — метка происхождения снимается, строка
+            # проверяется по правилам делителя (CM-FR13 п.5).
+            self.table.blockSignals(True)
+            item.setData(Qt.ItemDataRole.UserRole, None)
+            item.setToolTip(tr("Сырое значение поля DATA в HEX"))
+            self.table.blockSignals(False)
         if item.column() in (self.COL_HEX, self.COL_NUM):
             text = (
                 translate_cyrillic_hex(item.text())
@@ -1112,7 +1149,7 @@ class _SignRecordTable(QWidget):
             # Старт ТОЛЬКО по явной команде (F06 п.14): история и
             # прошлые значения не трогаем — «Записать» продолжает их.
             self.recording = True
-            self._last_raw = None
+            self._last_wire = None
             self._set_record_active()
 
     def stop_record(self) -> None:
@@ -1141,14 +1178,16 @@ class _SignRecordTable(QWidget):
         контракту извлечения, вычисленное при приёме (CM-FR07-R2).
         ``tail`` — доставка хвоста сессии после «Стоп»: образец был
         принят, пока таблица записывала, и обязан дойти в журнал.
-        Повторяющееся подряд значение не плодит строки (F06 п.18);
+        Повторяющееся подряд ОКНО ПРОВОДА не плодит строки (F06
+        п.18, CM-FR14 — дедуп по исходным байтам, а не по числу:
+        разные пришедшие данные с одной суммой — разные образцы);
         потолок HISTORY_LIMIT — явный стоп с подписью (F06 п.16)."""
         if not self.recording and not tail:
             return
-        raw = sample.raw
-        if raw == self._last_raw:
+        if sample.wire == self._last_wire:
             return
-        self._last_raw = raw
+        self._last_wire = sample.wire
+        raw = sample.raw
         if self._history >= self.HISTORY_LIMIT:
             self.stop_record()
             self.status.setText(
@@ -1158,9 +1197,9 @@ class _SignRecordTable(QWidget):
             )
             return
         hex_text = " ".join(f"{b:02X}" for b in sample.wire)
-        self._add_history_row(hex_text, raw, sample.channel)
+        row = self._add_history_row(hex_text, raw, sample.channel)
         self._history += 1
-        self._revalidate_row(0)
+        self._revalidate_row(row)
         self.status.setText(
             tr("Записано: %1").replace("%1", str(self._history))
         )
@@ -1193,6 +1232,13 @@ class _SignRecordTable(QWidget):
                     )
                 )
             if data is None:
+                continue
+            hex_item = self.table.item(r, self.COL_HEX)
+            if hex_item is not None and (
+                hex_item.data(Qt.ItemDataRole.UserRole) is not None
+            ):
+                # Журнальный образец не связан с делителем своей
+                # строки — в ошибки настройки не входит (CM-FR13).
                 continue
             raw = int.from_bytes(data, "big")
             d = self._row_div(r)
@@ -1689,11 +1735,27 @@ class _DegreesDecoderDialog(QDialog):
         for tbl in self._tables.values():
             with contextlib.suppress(RuntimeError):
                 tbl.stop_record()
-                tbl._last_raw = None
-                # Журнал лежит сверху — снимаются первые _history
-                # строк, делители остаются (CM-FR07-R2).
-                for _r in range(tbl._history):
-                    tbl.table.removeRow(0)
+                tbl._last_wire = None
+                # Добавленные строки журнала снимаются целиком;
+                # DATA-ячейки строк условий очищаются — сами
+                # делители и галочки остаются на местах (CM-FR13).
+                n_div = len(steering_decoder.DIVISORS)
+                while tbl.table.rowCount() > n_div:
+                    tbl.table.removeRow(n_div)
+                for r in range(n_div):
+                    hex_item = tbl.table.item(r, tbl.COL_HEX)
+                    if hex_item is not None and (
+                        hex_item.data(Qt.ItemDataRole.UserRole)
+                        is not None
+                    ):
+                        fresh = QTableWidgetItem("")
+                        fresh.setToolTip(
+                            tr("Сырое значение поля DATA в HEX")
+                        )
+                        tbl.table.setItem(r, tbl.COL_HEX, fresh)
+                        dec = tbl.table.item(r, tbl.COL_DEC)
+                        if dec is not None:
+                            dec.setText("")
                 tbl._history = 0
 
     def done(self, result: int) -> None:
