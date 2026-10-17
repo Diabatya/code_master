@@ -37,6 +37,84 @@ class TestSourcePackage:
         # Ясно обозначено: это исходники, не образы.
         assert "ИСХОДНЫЙ КОД" in text
 
+    def test_collect_includes_core_for_make_full_image(self) -> None:
+        """CM-FR11: make_full_image.py --version импортирует
+        core.stm32_info — модуль обязан быть в архиве."""
+        files = {p.as_posix() for p in _collect()}
+        assert any(f.endswith("core/stm32_info.py") for f in files)
+        assert any(f.endswith("core/__init__.py") for f in files)
+
+    def test_manifest_addresses_and_real_instructions(self) -> None:
+        text = _manifest("9.9.9", "deadbeef")
+        # Код приложения — 0x08009000 (метаданные отдельно);
+        # база CDC-образа — VER1 @0x08008400.
+        assert "0x08009000" in text
+        assert "0x08008400" in text
+        assert "0x08008800" in text
+        # `git submodule update` в распакованном ZIP не работает —
+        # манифест обязан давать реальный способ получить CubeF1.
+        assert "НЕ работает" in text
+        assert "STM32CubeF1.git" in text
+        # Возможность задать GIT_COMMIT при сборке из ZIP.
+        assert "GIT_COMMIT" in text
+
+    def test_extracted_zip_make_full_image(self, tmp_path) -> None:
+        """CM-FR11: чистая распаковка → make_full_image.py --version
+        работает без репозитория (core/ в архиве), CDC-база
+        0x08008400, VER1-дубль на странице APP1."""
+        import subprocess
+        import sys
+
+        from intelhex import IntelHex
+
+        import firmware.tools.package_sources as pkg
+
+        out = tmp_path / "src.zip"
+        argv = sys.argv
+        sys.argv = [
+            "package_sources.py", str(out), "--version", "1.2.3",
+        ]
+        try:
+            assert pkg.main() == 0
+        finally:
+            sys.argv = argv
+        dest = tmp_path / "extract"
+        with zipfile.ZipFile(out) as zf:
+            zf.extractall(dest)
+        # Минимальные HEX-входы на реальных базах.
+        bl = IntelHex()
+        bl.puts(0x08000000, b"\x01\x02\x03\x04")
+        app = IntelHex()
+        app.puts(0x08009000, b"\x05\x06\x07\x08")
+        bl_hex = dest / "bl.hex"
+        app_hex = dest / "app.hex"
+        bl.write_hex_file(str(bl_hex))
+        app.write_hex_file(str(app_hex))
+        res = subprocess.run(
+            [
+                sys.executable,
+                str(dest / "firmware" / "tools" / "make_full_image.py"),
+                str(bl_hex), str(app_hex), str(dest / "out.hex"),
+                "--cdc-hex", str(dest / "cdc.hex"),
+                "--version", "1.2.3",
+            ],
+            capture_output=True, text=True,
+        )
+        assert res.returncode == 0, res.stderr
+        image = IntelHex(str(dest / "out.hex"))
+        cdc = IntelHex(str(dest / "cdc.hex"))
+        # VER1 @0x08008400 (страница идентичности, легаси) и дубль
+        # на странице метаданных APP1 @0x08008820. Магия пишется
+        # little-endian словом — «1REV» в байтах.
+        magic = int.from_bytes(b"VER1", "big").to_bytes(4, "little")
+        assert bytes(
+            image.tobinarray(start=0x08008400, size=4)
+        ) == magic
+        assert bytes(
+            image.tobinarray(start=0x08008820, size=4)
+        ) == magic
+        assert cdc.minaddr() == 0x08008400
+
     def test_zip_written(self, tmp_path) -> None:
         import firmware.tools.package_sources as pkg
 

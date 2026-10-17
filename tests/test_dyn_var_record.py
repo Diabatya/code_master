@@ -174,20 +174,83 @@ def test_apply_selected_to_binding(qapp) -> None:
         page.deleteLater()
 
 
-def test_dedupe_consecutive_and_seen(qapp) -> None:
-    """Повтор подряд и уже пойманное значение не плодят строки
-    истории; порядок — по приходу (A,B,A → A,B)."""
+def test_dedupe_adjacent_only(qapp) -> None:
+    """Дедуп только подряд идущего значения: возврат к прежнему
+    значению — новая строка истории (A,B,A → A,B,A; CM-FR10)."""
     page, manager = _page(qapp)
     try:
         page._toggle_dyn_record()
         manager.new_can_frames.emit([
             _frame(data=b"\x01\x02"),
-            _frame(data=b"\x01\x02"),  # повтор подряд
+            _frame(data=b"\x01\x02"),  # повтор подряд — дедуп
             _frame(data=b"\x03\x04"),
-            _frame(data=b"\x01\x02"),  # уже поймано ранее
+            _frame(data=b"\x01\x02"),  # возврат — новая строка
+        ])
+        assert _history_hex(page) == ["01 02", "03 04", "01 02"]
+        assert page._dyn_recorded == 3
+    finally:
+        page.deleteLater()
+
+
+def test_stop_start_preserves_history(qapp) -> None:
+    """«Стоп»/повторный «Записать» НЕ очищают историю (CM-FR10):
+    захват продолжает журнал, дедуп действует через границу
+    старта, очистка — только явной «Очистить»."""
+    page, manager = _page(qapp)
+    try:
+        page._toggle_dyn_record()
+        manager.new_can_frames.emit([_frame(data=b"\x01\x02")])
+        page._stop_dyn_record()
+        page._toggle_dyn_record()
+        manager.new_can_frames.emit([
+            _frame(data=b"\x01\x02"),  # подряд к прежнему — дедуп
+            _frame(data=b"\x03\x04"),
         ])
         assert _history_hex(page) == ["01 02", "03 04"]
         assert page._dyn_recorded == 2
+        # Явный сброс — история пуста, дедуп-опора снята.
+        page._dyn_clear_btn.click()
+        assert _history_hex(page) == [] and page._dyn_recorded == 0
+        manager.new_can_frames.emit([_frame(data=b"\x01\x02")])
+        assert _history_hex(page) == ["01 02"]
+        page._stop_dyn_record()
+    finally:
+        page.deleteLater()
+
+
+def test_rtr_and_malformed_frames_are_not_samples(qapp) -> None:
+    """RTR и битые кадры не становятся образцами (CM-FR07)."""
+    page, manager = _page(qapp)
+    try:
+        page._toggle_dyn_record()
+        manager.new_can_frames.emit([
+            _frame(data=b"\xAA\xBB", ) | {"rtr": True},
+            {"id": 0x100, "channel": 0, "extended": False,
+             "rtr": False, "data": "не байты"},
+            {"id": "мусор", "channel": 0, "extended": False,
+             "rtr": False, "data": b"\xAA\xBB"},
+            _frame(data=b"\x11\x22"),
+        ])
+        assert _history_hex(page) == ["11 22"]
+        page._stop_dyn_record()
+    finally:
+        page.deleteLater()
+
+
+def test_history_limit_stops_with_status(qapp) -> None:
+    """Потолок временной истории — явный стоп со статусом
+    (CM-FR07): записи дальше лимита не молча плодятся."""
+    page, manager = _page(qapp)
+    try:
+        page._toggle_dyn_record()
+        page._dyn_history.clear()
+        for i in range(page.DYN_HISTORY_LIMIT + 3):
+            manager.new_can_frames.emit([
+                _frame(data=bytes([i % 256, i // 256]))
+            ])
+        assert page._dyn_history.count() == page.DYN_HISTORY_LIMIT
+        assert not page._dyn_recording
+        assert "лимит" in page._dyn_record_status.text().lower()
     finally:
         page.deleteLater()
 
@@ -225,3 +288,27 @@ def test_stop_unsubscribes(qapp) -> None:
         assert manager.new_can_frames._subs == []
     finally:
         page.deleteLater()
+
+
+def test_parent_dialog_close_stops_recording(qapp) -> None:
+    """Закрытие РОДИТЕЛЬСКОГО модального окна (не только прямой
+    «Стоп») останавливает захват и отписывает от кадров
+    (CM-FR08): OK, Отмена и крестик идут через done()."""
+    manager = _Manager()
+    tab = _tab(manager)
+    dlg = vt.VariableDialog(config={
+        "type": "dyn_cache", "id": "100", "dlc": 8,
+        "from": "01 02", "to": "X",
+        "points": [[0x0102, "a"]],
+    })
+    dlg._var_tab = tab  # родитель-QWidget подменить нельзя — поле напрямую
+    try:
+        page = dlg._dyn_page
+        page._toggle_dyn_record()
+        assert page._dyn_recording
+        assert manager.new_can_frames._subs == [page._on_dyn_frames]
+        dlg.reject()
+        assert not page._dyn_recording
+        assert manager.new_can_frames._subs == []
+    finally:
+        dlg.deleteLater()

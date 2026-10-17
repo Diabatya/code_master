@@ -811,8 +811,10 @@ static uint8_t trigger_fields_valid(const trigger_t *trig)
   if (trig->src_flags & TRIGGER_F_COND_FLAG) {
     /* Условие «флаг в состоянии» (FLXB v3): src_id = индекс флага,
      * src_dlc = 1 («есть 1») / 2 («есть 0»); src_channel/src_ext
-     * не используются. Может соседствовать с COND_AUX (оба
-     * проверяются по И). */
+     * не используются. Одновременный COND_AUX недостижим: его
+     * src_channel обязан быть 1..7 — поля условий на проводе
+     * взаимоисключающие (CM-FR04), компилятор такую программу
+     * оставляет на ПК. */
     if (trig->cache_enabled != 0U
         || trig->src_id >= FLEX_MAX_FLAGS
         || (trig->src_dlc != 1U && trig->src_dlc != 2U)
@@ -1584,6 +1586,40 @@ static uint8_t flex_enqueue(uint8_t index, const trigger_t *t,
   return 0U;
 }
 
+/* «Последняя команда канала побеждает» (CM-FR05): новая команда
+ * доп. канала отменяет ещё не исполненные отложенные команды того же
+ * канала — OFF, выданный пока тикает чужая «Задержка», обязан погасить
+ * старый отложенный ON, а не лечь под него (на ПК тот же контракт
+ * даёт _aux_cmd_seq). Отмена — до выбора пути (мгновенная отправка или
+ * очередь): OFF с delay=0 исполняется сразу, но висящий в очереди ON
+ * того же канала должен быть снят ДО этого. Пользовательские записи
+ * (s_pending) с aux-действием сканируются так же — проводной
+ * валидатор допускает TX_AUX и в них. */
+static void flex_cancel_aux(uint8_t channel)
+{
+  for (uint8_t q = 0U; q < FLEX_QUEUE_DEPTH; q++) {
+    flex_firing_t *e = &s_flex_queue[q];
+    if (e->used == 0U || e->trigger_index >= s_count) {
+      continue;
+    }
+    const trigger_t *old = &s_triggers[e->trigger_index];
+    if ((old->src_flags & TRIGGER_F_TX_AUX) != 0U
+        && old->tx_channel == channel) {
+      e->used = 0U;
+    }
+  }
+  for (uint8_t i = 0U; i < TRIGGER_MAX_RECORDS; i++) {
+    if (s_pending[i].armed == 0U) {
+      continue;
+    }
+    const trigger_t *old = &s_triggers[s_pending[i].trigger_index];
+    if ((old->src_flags & TRIGGER_F_TX_AUX) != 0U
+        && old->tx_channel == channel) {
+      s_pending[i].armed = 0U;
+    }
+  }
+}
+
 /* Взвод запуска записи ГЛ: мгновенную отправку (delay=0, count=1)
  * пробуем сразу — отказ ящиков ставит серию в очередь с нулевым
  * сроком (ретраи в Trigger_Poll), остальные серии ждут свой тик.
@@ -1595,6 +1631,9 @@ static void flex_fire_ex(uint8_t index, const trigger_t *t,
 {
   if (!aux_cond_ok(t)) {
     return;
+  }
+  if ((t->src_flags & TRIGGER_F_TX_AUX) != 0U) {
+    flex_cancel_aux(t->tx_channel);
   }
   uint8_t sends = t->tx_count ? t->tx_count : 1U;
   if (t->delay_ms == 0U && sends == 1U) {

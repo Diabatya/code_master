@@ -1169,6 +1169,16 @@ def _compile_rule(
             continue
         return None, "условие ПРИ — только на ПК"
 
+    # CM-FR04: запись несёт одно условие — aux кладёт канал в
+    # src_channel, flag требует src_channel==0 и индекс в src_id,
+    # src_dlc общее: поля взаимоисключающие, логическое И двух
+    # условий в одной записи на проводе не выражается. Компилировать
+    # невалидную запись нельзя — программа остаётся на ПК.
+    if aux_cond is not None and flag_cond is not None:
+        return None, (
+            "условия по доп. каналу и флагу одновременно — только на ПК"
+        )
+
     rx_parts: list[tuple[int, dict[str, Any]]] = []
     for idx, event in enumerate(events):
         if not isinstance(event, dict):
@@ -1439,6 +1449,17 @@ def _compile_rule(
                 # (group_seq прошивкой не читается).
                 "group_seq": 0xFF,
             })
+
+    # CM-FR04: managed=True — обещание «камень это исполняет».
+    # Каждая сгенерированная запись обязана проходить тот же
+    # контракт, что record_valid_at в trigger.c и parse_flex_blob:
+    # запись, которую отвергли бы ПК и МК, в блоб не идёт —
+    # программа честно остаётся на ПК.
+    for record in records:
+        if not record_fields_valid(pack_trigger(record)):
+            return None, (
+                "запись не проходит контракт trigger_t — только на ПК"
+            )
     return records, None
 
 
@@ -1627,7 +1648,16 @@ def build_flex_blob(
     packed += json_part
     for record in records:
         packed += pack_trigger(record)
-    return bytes(packed)
+    blob = bytes(packed)
+    # CM-FR04: до отправки весь блоб проходит ту же проверку, что и
+    # append_flex в прошивке — контейнер с невалидной записью устройство
+    # отверг бы целиком, уронив и рабочие программы.
+    if parse_flex_blob(blob) is None:
+        raise ValueError(
+            "собранный FLXB не проходит контракт прошивки — запись "
+            "не выполнялась"
+        )
+    return blob
 
 
 def parse_flex_blob(blob: bytes) -> tuple[bytes, int] | None:

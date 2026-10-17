@@ -45,6 +45,7 @@ from core.aux_channels import (
 from core.flex_compiler import (
     analyze_device_flex,
     build_flex_blob,
+    executor_info,
     extract_flex_json,
 )
 from core.can_protocol import (
@@ -2051,6 +2052,11 @@ class SettingsWindow(QMainWindow):
             if hasattr(self._gateway_tab, "_save_config"):
                 self._gateway_tab._save_config()
             if self._serial_manager.is_open() and not self._config.get("emulation", False):
+                # CM-FR03: до первой записи в устройство — план
+                # автономного исполнения ГЛ. Активная программа,
+                # которую камень не исполнит, отклоняет сохранение
+                # целиком — после отключения ПК она бы молчала.
+                self._preflight_flex_plan()
                 # Прогрузка в МК — под оверлеем с процентным индикатором:
                 # запись триггеров (чтение списка → STAGE → COMMIT →
                 # проверка) занимает заметное время, оператор должен
@@ -2131,6 +2137,52 @@ class SettingsWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить: {0}").format(exc))
             return False
+
+    def _preflight_flex_plan(self) -> None:
+        """CM-FR03: явный отказ неподдерживаемой автономной записи.
+
+        Для прошивки с автономной ГЛ (протокол ≥12) каждая АКТИВНАЯ
+        программа обязана компилироваться в записи камня — иначе
+        после отключения приложения она молчала бы при «успешном»
+        сохранении. План строится до первой записи настроек:
+        программа и причина показываются оператору, устройство не
+        тронуто. Протокол 11 (чистый JSON, исполнение на ПК) этой
+        проверки не требует — автономности там нет и не заявлено."""
+        proto = self._serial_manager.device_protocol_version()
+        if proto < 12:
+            return
+        rules = self._flexible_tab.get_config()
+        _aux_cfgs_fn = getattr(
+            self._variables_tab, "aux_channel_configs", None
+        )
+        aux_cfgs = _aux_cfgs_fn() if callable(_aux_cfgs_fn) else []
+        resolved = [
+            resolve_rule_actions(rule, aux_cfgs) for rule in rules
+        ]
+        info = executor_info(
+            resolved, proto, self._variables_tab.export_config()
+        )
+        problems: list[str] = []
+        for rule, entry in zip(resolved, info, strict=False):
+            if not rule.get("active") or entry["managed"]:
+                continue
+            title = str(rule.get("title", "")).strip() or tr("Программа")
+            problems.append(
+                tr("«{0}»: {1}").format(
+                    title, entry["reason"] or tr("не поддерживается камнем")
+                )
+            )
+        if not problems:
+            return
+        QMessageBox.warning(
+            self,
+            tr("Автономное исполнение программ"),
+            tr("Следующие активные программы устройство исполнить "
+               "не сможет — после отключения приложения они "
+               "молчали бы:\n\n{0}\n\nСохранение отменено, "
+               "устройство не изменено.").format("\n".join(problems)),
+        )
+        raise TriggerValidationAborted()
 
     def _upload_config_blobs(self) -> None:
         """Пишет блобы переменных и программ ГЛ в маркерное хранилище

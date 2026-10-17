@@ -47,7 +47,7 @@ from core.stm32_info import (
 def test_write_region_rejects_bootloader_addr() -> None:
     ok, reason = validate_write_region(0x08000000, 256)
     assert not ok
-    assert "идентификац" in reason
+    assert "идентичн" in reason  # «страница идентичности» read-only
 
 
 def test_write_region_allows_app_start() -> None:
@@ -55,9 +55,19 @@ def test_write_region_allows_app_start() -> None:
     assert ok
 
 
-def test_write_region_allows_config_page() -> None:
+def test_write_region_rejects_identity_page() -> None:
+    # CM-FR02: страница идентичности (тип/серийник) через AN3155
+    # read-only — записать её нельзя ни на клиенте, ни в загрузчике.
     ok, _ = validate_write_region(DEVICE_CONFIG_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE)
-    assert ok
+    assert not ok
+    ok, _ = validate_write_region(DEVICE_CONFIG_PAGE_ADDR + 0x400, 32)
+    assert not ok
+
+
+def test_write_region_rejects_identity_boundary_crossing() -> None:
+    # Пересечение границы идентичность→метаданные отклоняется целиком.
+    ok, _ = validate_write_region(DEVICE_CONFIG_PAGE_ADDR + 0x7F0, 32)
+    assert not ok
 
 
 def test_write_region_allows_meta_page() -> None:

@@ -1126,6 +1126,92 @@ static void test_flxb_v2_container(void)
   CHECK(s_sent_count == 0, "FLXB v4 must be rejected whole");
 }
 
+/* ---- CM-FR05: «последняя команда канала побеждает» ---------------- */
+
+/* Отложенный ON (delay=120) отменяется мгновенным OFF того же канала:
+ * команда OFF, выданная пока тикает чужая задержка, снимает висящий
+ * в s_flex_queue ON — иначе канал включался бы ПОСЛЕ OFF. */
+static void test_aux_off_cancels_pending_on(void)
+{
+  trigger_t recs[2];
+  make_aux_action_record(&recs[0], 0x100U, 2U, AUX_MODE_ON, NULL);
+  recs[0].delay_ms = 120U;
+  fix_crc(&recs[0]);
+  make_aux_action_record(&recs[1], 0x101U, 2U, AUX_MODE_OFF, NULL);
+  load_flex(recs, 2);
+
+  const uint8_t d[1] = {0x01};
+  can_frame_t f_on = mk_frame(0U, 0x100U, 1U, d);
+  can_frame_t f_off = mk_frame(0U, 0x101U, 1U, d);
+
+  Trigger_OnFrame(&f_on);          /* ON вооружён на t=1120 */
+  run_ms(10);                      /* t=1010 */
+  Trigger_OnFrame(&f_off);         /* OFF — сейчас + отмена ON */
+  CHECK(s_aux_set_calls == 1 && s_aux_last.mode == AUX_MODE_OFF
+        && s_aux_last.channel == 2U,
+        "OFF must execute immediately and alone");
+  run_ms(140);                     /* t=1150 — срок ON давно вышел */
+  CHECK(s_aux_set_calls == 1,
+        "cancelled delayed ON must never execute");
+  CHECK(s_aux_active[2] == 0U && s_aux_mode[2] == 0U,
+        "channel must stay OFF after the pending ON is cancelled");
+}
+
+/* Отложенная команда снимает более СТАРУЮ отложенную того же канала:
+ * ON@120 сменяется позже выданным OFF@50 — исполняется только OFF. */
+static void test_aux_late_command_supersedes_queued(void)
+{
+  trigger_t recs[2];
+  make_aux_action_record(&recs[0], 0x100U, 2U, AUX_MODE_ON, NULL);
+  recs[0].delay_ms = 120U;
+  fix_crc(&recs[0]);
+  make_aux_action_record(&recs[1], 0x101U, 2U, AUX_MODE_OFF, NULL);
+  recs[1].delay_ms = 50U;
+  fix_crc(&recs[1]);
+  load_flex(recs, 2);
+
+  const uint8_t d[1] = {0x01};
+  can_frame_t f_on = mk_frame(0U, 0x100U, 1U, d);
+  can_frame_t f_off = mk_frame(0U, 0x101U, 1U, d);
+
+  Trigger_OnFrame(&f_on);          /* ON вооружён на 1120 */
+  run_ms(10);                      /* t=1010 */
+  Trigger_OnFrame(&f_off);         /* OFF вооружён на 1060, ON снят */
+  run_ms(45);                      /* t=1055 — ещё ничего */
+  CHECK(s_aux_set_calls == 0, "nothing may fire before the OFF delay");
+  run_ms(100);                     /* t=1155 — оба срока прошли */
+  CHECK(s_aux_set_calls == 1 && s_aux_last.mode == AUX_MODE_OFF,
+        "only the newer OFF command executes");
+  CHECK(s_aux_active[2] == 0U, "channel must be OFF, not ON");
+}
+
+/* Отмена — строго по каналу: OFF канала 3 не трогает отложенный ON
+ * канала 2 — чужие расписания сохраняются. */
+static void test_aux_cancel_is_per_channel(void)
+{
+  trigger_t recs[2];
+  make_aux_action_record(&recs[0], 0x100U, 2U, AUX_MODE_ON, NULL);
+  recs[0].delay_ms = 40U;
+  fix_crc(&recs[0]);
+  make_aux_action_record(&recs[1], 0x101U, 3U, AUX_MODE_OFF, NULL);
+  load_flex(recs, 2);
+
+  const uint8_t d[1] = {0x01};
+  can_frame_t f_on = mk_frame(0U, 0x100U, 1U, d);
+  can_frame_t f_off = mk_frame(0U, 0x101U, 1U, d);
+
+  Trigger_OnFrame(&f_on);          /* ON ch2 вооружён на 1040 */
+  run_ms(10);                      /* t=1010 */
+  Trigger_OnFrame(&f_off);         /* OFF ch3 — мгновенно, чужой канал */
+  CHECK(s_aux_set_calls == 1, "OFF ch3 executes now");
+  run_ms(40);                      /* t=1050 — срок ON ch2 */
+  CHECK(s_aux_set_calls == 2 && s_aux_last.mode == AUX_MODE_ON
+        && s_aux_last.channel == 2U,
+        "delayed ON of another channel must still fire");
+  CHECK(s_aux_active[2] == 1U && s_aux_active[3] == 0U,
+        "per-channel states: ch2 ON, ch3 OFF");
+}
+
 /* ---- CM-F02: записи переменных (FLXB v3, протокол 14) -------------- */
 
 /* Updater статической переменной: кадр → псевдо-действие SETFLAG
@@ -1330,6 +1416,9 @@ int main(void)
   test_aux_action_executes_without_can();
   test_aux_event_budget_per_poll();
   test_flxb_v2_container();
+  test_aux_off_cancels_pending_on();
+  test_aux_late_command_supersedes_queued();
+  test_aux_cancel_is_per_channel();
   test_static_flag_listener_and_updater();
   test_dyn_var_threshold_edge();
   test_dyn_cache_partial_then_complete();

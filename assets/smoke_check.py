@@ -4,6 +4,7 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from core.serial_manager import SerialManager
+from models.translations import get_language, set_language
 from ui.main_window import MainWindow
 
 app = QApplication(sys.argv)
@@ -72,9 +73,15 @@ print(f"monitor id after paste: {monitor_tab._monitor1._send_id_edit.text()}", f
 print(f"monitor dlc after paste: {monitor_tab._monitor1._send_dlc_spin.value()}", flush=True)
 print(f"monitor data after paste: {[e.text() for e in monitor_tab._monitor1._send_data_edits[:3]]}", flush=True)
 
+# Смена языка через комбобокс пишет «language» в config.json и в
+# глобальный транслятор — запоминаем и возвращаем прежнее значение,
+# чтобы скрипт не оставлял приложение/пользователя на английском.
+_prev_lang = w._config.get("language", get_language())
 w._language_combo.setCurrentIndex(1)
 app.processEvents()
 print(f"flash english: {repr(w._flash_button.text())}", flush=True)
+w._config.set("language", _prev_lang)
+set_language(_prev_lang)
 
 QTimer.singleShot(500, app.quit)
 app.exec()

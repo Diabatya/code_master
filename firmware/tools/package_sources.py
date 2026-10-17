@@ -46,6 +46,11 @@ INCLUDE_FILES = (
     "firmware/PINOUT.md",
     "firmware/HARDWARE_TEST_PROCEDURE.md",
     "firmware/FIRMWARE_INPUT_REQUEST.md",
+    # make_full_image.py --version импортирует core.stm32_info за
+    # адресами/VER1 — без core/ в ZIP упаковка с версией падает
+    # (CM-FR11).
+    "core/__init__.py",
+    "core/stm32_info.py",
     ".gitmodules",
 )
 # Суффиксы/имена, которые не являются исходным кодом.
@@ -80,25 +85,81 @@ def _collect() -> list[Path]:
     return files
 
 
-def _manifest(version: str, sha: str) -> str:
+def _cube_sha() -> str:
+    """Зафиксированный коммит сабмодуля STM32CubeF1 — из индекса
+    git (работает и без инициализированного сабмодуля)."""
     try:
-        cube = _git("submodule", "status", "firmware/libs/STM32CubeF1")
+        line = _git("ls-tree", "HEAD", "firmware/libs/STM32CubeF1")
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] == "commit":
+            return parts[2]
     except subprocess.CalledProcessError:
-        cube = "(сабмодуль не инициализирован — см. .gitmodules)"
+        pass
+    try:
+        line = _git(
+            "submodule", "status", "firmware/libs/STM32CubeF1"
+        ).lstrip(" +-U")
+        return line.split()[0]
+    except (subprocess.CalledProcessError, IndexError):
+        return "(коммит сабмодуля не зафиксирован — см. .gitmodules)"
+
+
+def _manifest(version: str, sha: str) -> str:
+    repo_sha = sha or _git("rev-parse", "HEAD")
+    cube = _cube_sha()
+    ver = version or "VERSION"
     return f"""CodeMaster — исходники прошивки (CM-F12)
 
 Версия релиза:        {version or 'не указана'}
-Коммит репозитория:   {sha or _git('rev-parse', 'HEAD')}
-Сабмодуль STM32CubeF1: {cube}
+Коммит репозитория:   {repo_sha}
+STM32CubeF1 (пин):    {cube}
 Репозиторий:          https://github.com/Diabatya/code_master.git
-Зависимости:          git clone --recursive
-                      (либо git submodule update --init --
-                      firmware/libs/STM32CubeF1)
 
-Сборка (требуется arm-none-eabi-gcc и make):
-  cd firmware/bootloader  && make   # загрузчик, 0x08000000
-  cd firmware/application && make   # приложение, 0x08008000
-Хост-тесты: firmware/application/tests (cc + стабы, см. CI build.yml)
+Карта Flash STM32F105RCT6:
+  0x08000000-0x08007FFF  bootloader (32 КБ)
+  0x08008000-0x080087FF  DEVICE INFO (CFG0/TNM0/VER1, стр. 16)
+  0x08008800-0x08008FFF  метаданные приложения APP1 (стр. 17)
+  0x08009000-0x0803BFFF  код приложения
+  0x0803C000-0x0803FFFF  конец Flash (резерв/хранилище)
+
+Зависимости (в ZIP их нет — .git/gitlink не включается, команда
+`git submodule update` внутри распакованного архива НЕ работает):
+  - arm-none-eabi-gcc + make (GNU Arm Embedded Toolchain);
+  - Python 3.9+; для упаковки образов: pip install intelhex;
+  - STM32CubeF1 ровно на коммите {cube}
+    в каталоге firmware/libs/STM32CubeF1. Получить:
+      git clone https://github.com/STMicroelectronics/STM32CubeF1.git \\
+          firmware/libs/STM32CubeF1
+      git -C firmware/libs/STM32CubeF1 checkout {cube}
+    или tarball без git:
+      https://github.com/STMicroelectronics/STM32CubeF1/archive/{cube}.tar.gz
+    Либо вместо этого ZIP клонируйте проект на зафиксированный SHA:
+      git clone --recursive https://github.com/Diabatya/code_master.git
+      git checkout {repo_sha}
+
+Сборка:
+  cd firmware/bootloader  && make   # загрузчик  @0x08000000
+  cd firmware/application && make   # приложение @0x08009000
+                                    # (APP1-метаданные генерируются
+                                    #  отдельно @0x08008800)
+  Вне git-репозитория передайте SHA явно, иначе прошивка
+  отчитается «unknown»:  make GIT_COMMIT=<короткий sha>
+
+Упаковка образов релиза:
+  python3 firmware/tools/make_full_image.py \\
+      firmware/bootloader/build/codemaster_bootloader.hex \\
+      firmware/application/build/codemaster_app.hex \\
+      "2 CAN DFU ({ver}) 111.hex" "2 CAN DFU ({ver}) 111.bin" \\
+      --cdc-hex "2 CAN CDC ({ver}) 111.hex" \\
+      --cdc-bin "2 CAN CDC ({ver}) 111.bin" \\
+      --version {ver}
+  Полный (DFU) образ покрывает 0x08000000-0x0803FFFF. CDC-образ
+  начинается с легаси-записи VER1 по 0x08008400 (миграция старых
+  прошивок), затем метаданные APP1 @0x08008800 и код @0x08009000;
+  страница идентичности в CDC-образе отсутствует.
+
+Хост-тесты: firmware/application/tests (cc + стабы, см. CI
+.github/workflows/build.yml в основном репозитории).
 
 Это ИСХОДНЫЙ КОД прошивки тега. Готовые образы для заливки —
 отдельные артефакты релиза «2 CAN DFU (VERSION) 111» и

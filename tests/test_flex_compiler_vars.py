@@ -608,3 +608,103 @@ def test_flexb_flags_wire_format() -> None:
     assert raw[83] & TRIGGER_F_RX_VAR          # слушатель флага
     assert raw[86] & TRIGGER_F_COND_FLAG      # условие по флагу
     assert raw[86] & TRIGGER_F_TX_SETFLAG     # действие-флаг
+
+
+# ------------------------------------------------------------------
+# CM-FR04: условие aux + условие flag в одной программе — проводной
+# формат одной записи их не выражает (src_channel/src_id/src_dlc
+# взаимоисключающие), программа остаётся на ПК целиком.
+# ------------------------------------------------------------------
+
+
+def _aux_cond(channel: int = 2, state: int = 1) -> dict:
+    return {"type": "aux", "channel": channel, "state": state}
+
+
+def _flag_cond(name: str = "Блок", state: int = 1) -> dict:
+    return {"type": "flag", "var": name, "state": state}
+
+
+def test_aux_and_flag_condition_stays_pc() -> None:
+    """Обе полярности обоих условий: aux+flag → managed=False и
+    невалидной записи в блобе нет (проба ревью CM-FR04)."""
+    for aux_state in (1, 0):
+        for flag_state in (1, 0):
+            rules = [_rule(conditions=[
+                _aux_cond(state=aux_state),
+                _flag_cond(state=flag_state),
+            ])]
+            recs, managed = compile_rules(
+                rules, protocol=15,
+                variables=_vars(aux=[_flag_var()]))
+            assert managed == [False], (aux_state, flag_state)
+            assert recs == []
+
+
+def test_aux_and_flag_condition_does_not_break_neighbors() -> None:
+    """Программа с двойным условием уходит на ПК, но рабочая
+    соседняя программа компилируется и блоб проходит сверку."""
+    bad = _rule(title="both", conditions=[_aux_cond(), _flag_cond()])
+    good = _rule(title="ok", conditions=[_aux_cond()])
+    rules = [bad, good]
+    recs, managed = compile_rules(
+        rules, protocol=15, variables=_vars(aux=[_flag_var()]))
+    assert managed == [False, True] and len(recs) == 1
+    analysis = analyze_device_flex(
+        build_flex_blob(rules, protocol=15,
+                        variables=_vars(aux=[_flag_var()])))
+    # Раньше невалидная запись роняла ВЕСЬ контейнер (state no-tail)
+    # и добрососедская программа молчала — теперь хвост «verified».
+    assert analysis["state"] == "verified"
+    assert analysis["managed"] == [False, True]
+
+
+def test_single_flag_condition_encodes_flag_fields() -> None:
+    """Контракт COND_FLAG: src_channel==0, src_id=индекс, src_dlc=1/2."""
+    rules = [_rule(conditions=[_flag_cond(state=0)])]
+    recs, managed = compile_rules(
+        rules, protocol=15, variables=_vars(aux=[_flag_var()]))
+    assert managed == [True]
+    rec = unpack_trigger(pack_trigger(recs[0]))
+    assert rec["cond_flag"] is True
+    assert rec["src_channel"] == 0 and rec["src_dlc"] == 2
+    assert rec["src_id"] < 16
+
+
+def test_single_aux_condition_encodes_aux_fields() -> None:
+    """Контракт COND_AUX: src_channel=1..7, src_id==0, src_dlc=1/2."""
+    rules = [_rule(conditions=[_aux_cond(channel=5, state=0)])]
+    recs, managed = compile_rules(
+        rules, protocol=15, variables=_vars(aux=[_flag_var()]))
+    assert managed == [True]
+    rec = unpack_trigger(pack_trigger(recs[0]))
+    assert rec["cond_aux"] is True
+    assert rec["src_channel"] == 5 and rec["src_id"] == 0
+    assert rec["src_dlc"] == 2
+
+
+def test_every_generated_record_passes_firmware_contract() -> None:
+    """Все записи компиляции из тестового набора выше по файлу:
+    managed=True только у записей, принимаемых и ПК, и МК."""
+    from core.trigger_protocol import record_fields_valid
+    variables = _vars(
+        read=[_num_var(), _cache_var(), _static_var()],
+        control=[_command()],
+        aux=[_flag_var("Блок"), _flag_var("Сигнал")],
+    )
+    rules = [
+        _rule(events=[{"type": "num", "var": "V", "value": "100",
+                       "dir": "gt"}]),
+        _rule(conditions=[_flag_cond(state=1)],
+              actions=[{"type": "var", "flag_var": "Сигнал",
+                        "flag_mode": "on"}]),
+        _rule(events=[{"type": "static", "var": "Зажигание",
+                       "edge": "on"}],
+              actions=[{"type": "var", "var": "Старт"}]),
+    ]
+    recs, managed = compile_rules(rules, protocol=15,
+                                  variables=variables)
+    assert managed == [True, True, True]
+    assert all(
+        record_fields_valid(pack_trigger(rec)) for rec in recs
+    )

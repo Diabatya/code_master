@@ -167,6 +167,13 @@ jobs:
             firmware/bootloader/Src/device_identity.c \
             -o /tmp/test_device_identity
           /tmp/test_device_identity
+          # CM-FR02: настоящая граница AN3155 — идентичность read-only
+          # для WRITE/ERASE любого вида, ноль flash-операций на запретах.
+          cc -I firmware/bootloader/tests/stubs \
+            -I firmware/bootloader/Inc -I firmware/bootloader/Src \
+            firmware/bootloader/tests/test_bootloader_boundary.c \
+            -o /tmp/test_bootloader_boundary
+          /tmp/test_bootloader_boundary
       - name: Verify application metadata
         run: |
           python3 -m pip install intelhex

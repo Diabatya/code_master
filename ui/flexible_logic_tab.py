@@ -5428,6 +5428,17 @@ class FlexibleLogicTab(QWidget):
         if has_abort:
             self._pending_actions.append(entry)
         if delay > 0:
+            # CM-FR05: «последняя команда канала побеждает» считается
+            # по моменту ВЫДАЧИ, а не срабатывания таймера — иначе
+            # OFF/новый режим, пришедший во время чужой «Задержки»,
+            # проигрывал бы старому отложенному ON. seq канала
+            # резервируется при постановке на таймер, а не в
+            # _run_actions_now.
+            if action.get("aux_enabled"):
+                ch = int(action.get("aux_channel", 1) or 1)
+                seq = self._aux_cmd_seq.get(ch, 0) + 1
+                self._aux_cmd_seq[ch] = seq
+                entry["action"]["_aux_seq"] = seq
             # Программа занята до исполнения отложенного действия —
             # повторный пакет с той же DATA в это время не
             # перезапускает её (отчёт мастера).
@@ -5668,8 +5679,13 @@ class FlexibleLogicTab(QWidget):
             # «Последняя команда побеждает» на канал: OFF/новый режим,
             # выданный позже, отменяет ещё не сработавший отложенный
             # коллбек — устаревший таймер не гасит новый запуск.
-            aux_seq = self._aux_cmd_seq.get(channel, 0) + 1
-            self._aux_cmd_seq[channel] = aux_seq
+            # CM-FR05: для действий с «Задержкой» seq уже зарезервирован
+            # в _run_actions — иначе поздний OFF не отменял отложенный
+            # ON (seq присваивался бы только при срабатывании таймера).
+            aux_seq = action.get("_aux_seq")
+            if aux_seq is None:
+                aux_seq = self._aux_cmd_seq.get(channel, 0) + 1
+                self._aux_cmd_seq[channel] = aux_seq
 
             def fire_aux(
                 ch=channel, m=mode, kw=kwargs, mn=mode_name,

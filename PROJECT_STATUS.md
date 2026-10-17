@@ -261,7 +261,7 @@
 - ✅ `ui/can_monitor_tab.py`: добавлена секция «Переход в режим сна» с полем времени (0–9999 с) и выпадающим списком режимов («Не переходить в сон», «Слип мод», «Стоп мод»); значения сохраняются/загружаются через `Config`.
 - ✅ `models/config.py`: добавлены поля `sleep_time` и `sleep_mode` в `DEFAULT_CONFIG`.
 - ✅ `models/translations.py`: добавлены переводы для новых строк задержек и режима сна.
-- ✅ `python3 -m py_compile` проходит без ошибок; smoke-test (`python3 assets/test_smoke.py`) и тест сохранения настроек (`/tmp/test_settings_persist.py`) проходят успешно.
+- ✅ `python3 -m py_compile` проходит без ошибок; smoke-test (`python3 assets/smoke_check.py`) и тест сохранения настроек (`/tmp/test_settings_persist.py`) проходят успешно.
 
 ## 26. Финализация интерфейса и поведения (21.07.2026)
 
@@ -275,7 +275,7 @@
 - ✅ `core/serial_manager.py`: добавлен `ping_device()` для проверки связи с устройством.
 - ✅ `ui/settings_window.py`: кнопка «Сохранить» проверяет связь через `ping_device()` и предупреждает «Нет связи с устройством. Переподключите USB»; кнопка «Сохранить конфигурацию» предлагает имя файла `{device_name}_config.cfg` в зависимости от `device_type`.
 - ✅ `models/translations.py`: добавлены переводы для новых строк интерфейса.
-- ✅ `python3 -m py_compile` и `python3 assets/test_smoke.py` проходят успешно.
+- ✅ `python3 -m py_compile` и `python3 assets/smoke_check.py` проходят успешно.
 
 ## 27. Новые модули: мастер запуска, горячие клавиши, сниффер по триггеру, справка, тема StarLine, топология CAN (22.07.2026)
 

@@ -18,6 +18,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from core.aux_channels import resolve_rule_actions
@@ -183,3 +184,76 @@ def test_device_readback_rules_marked_resolved(tab) -> None:
     tab.process_frame(_rx_frame())
     _ch, _mode, kw = tab._aux_calls[-1]
     assert kw["pwm_freq_hz"] == 50 and kw["pwm_duty_pct"] == 25
+
+
+# ---- CM-FR05: OFF отменяет ещё не сработавший отложенный ON --------
+
+
+def _delay_rule(
+    event_id: str, channel: int, mode: str, exec_delay: int
+) -> dict[str, Any]:
+    return {
+        "title": f"{mode}-{channel}", "active": True,
+        "events": [{"type": "frame", "channel": 2, "extended": False,
+                    "id": event_id, "dlc": 0, "data": "",
+                    "fire_limit": 0}],
+        "conditions": [{"type": "none"}],
+        "actions": [{
+            "aux_enabled": True, "aux_channel": channel,
+            "aux_mode": mode, "exec_delay": exec_delay,
+        }],
+    }
+
+
+def _enable(tab) -> None:
+    tab.set_device_flex_state("no-tail")
+
+
+def test_off_cancels_pending_delayed_on(tab) -> None:
+    """Мгновенный OFF канала 2, выданный пока тикает «Задержка»
+    ON того же канала, отменяет отложенный ON — канал не включается
+    после OFF (CM-FR05)."""
+    tab.set_config([
+        _delay_rule("123", 2, "on", 60),
+        _delay_rule("124", 2, "off", 0),
+    ])
+    _enable(tab)
+    tab.process_frame(_rx_frame(0x123))      # ON вооружён на +60 мс
+    tab.process_frame(_rx_frame(0x124))      # OFF — сейчас, отменяет ON
+    assert tab._aux_calls == [(2, 0, tab._aux_calls[0][2])]
+    QTest.qWait(80)                          # срок ON вышел
+    assert len(tab._aux_calls) == 1, "отложенный ON исполнился после OFF"
+    assert tab._aux_states[2] == 0
+
+
+def test_later_delayed_command_supersedes_queued(tab) -> None:
+    """Позже выданный OFF с собственной задержкой снимает более
+    старый отложенный ON — исполняется только OFF (CM-FR05)."""
+    tab.set_config([
+        _delay_rule("123", 2, "on", 90),
+        _delay_rule("124", 2, "off", 30),
+    ])
+    _enable(tab)
+    tab.process_frame(_rx_frame(0x123))      # ON вооружён на +90 мс
+    tab.process_frame(_rx_frame(0x124))      # OFF вооружён на +30 мс
+    QTest.qWait(110)                         # оба срока прошли
+    assert len(tab._aux_calls) == 1
+    ch, mode, _kw = tab._aux_calls[0]
+    assert (ch, mode) == (2, 0)
+    assert tab._aux_states[2] == 0
+
+
+def test_cancel_is_per_channel(tab) -> None:
+    """OFF канала 3 не отменяет отложенный ON канала 2 — чужие
+    расписания сохраняются (CM-FR05)."""
+    tab.set_config([
+        _delay_rule("123", 2, "on", 40),
+        _delay_rule("124", 3, "off", 0),
+    ])
+    _enable(tab)
+    tab.process_frame(_rx_frame(0x123))      # ON ch2 вооружён на +40 мс
+    tab.process_frame(_rx_frame(0x124))      # OFF ch3 — мгновенно
+    QTest.qWait(60)
+    calls = [(c, m) for c, m, _ in tab._aux_calls]
+    assert calls == [(3, 0), (2, 1)]
+    assert tab._aux_states[2] == 1 and tab._aux_states[3] == 0

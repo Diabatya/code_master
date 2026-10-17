@@ -20,7 +20,10 @@
 #define ACK_BYTE   0x79U
 #define NACK_BYTE  0x1FU
 
-#define BOOTLOADER_VERSION 0x31U
+/* 0x32: страница идентичности (стр. 16, тип/серийник) через AN3155 не
+ * стирается и не пишется — CM-FR02. Get Version >= 0x32 = защита
+ * идентичности на низкой границе загрузчика (а не только в клиенте). */
+#define BOOTLOADER_VERSION 0x32U
 #define STM32F105_PID      0x0418U
 
 #define FLASH_START        0x08000000U
@@ -35,9 +38,15 @@
  * перенесена в начало Flash, хранилища — маркерные области без
  * фиксированных адресов (storage.c): FLXH за концом кода, TRGH посередине
  * зазора, EVLH + VARH у конца Flash и растут вниз.
- *   0x08008000-0x080087FF  device info page (page 16) — тип/s/n/версия,
- *                          writable via AN3155 for config-only updates
- *   0x08008800-0x08008FFF  app metadata page (page 17)
+ *   0x08008000-0x080087FF  device info page (page 16) — тип/s/n/версия.
+ *                          CM-FR02: через AN3155 страница READ-ONLY —
+ *                          не стирается и не пишется ни одной командой;
+ *                          идентичность задаётся только первичным
+ *                          программированием (DFU/ST-Link/J-Link).
+ *                          Чтение разрешено — загрузчик отдаёт её хосту.
+ *   0x08008800-0x08008FFF  app metadata page (page 17) — стирается и
+ *                          пишется (APP1 + слот VER1: версия обновляется
+ *                          здесь, без стирания идентичности)
  *   0x08009000-0x0803BFFF  application code + нижние маркерные области
  *                          (FLXH/TRGH могут жить здесь — обновление кода
  *                          может их затереть; ПК перезаливает блобы после
@@ -50,9 +59,13 @@
 #define DEVICE_INFO_ADDR   0x08008000U
 #define DEVICE_CFG_ADDR    DEVICE_INFO_ADDR
 #define EVENT_LOG_ADDR     0x0803C000U /* граница записи, не база журнала */
-#define APP_PAGES_START    16U    /* первая стираемая страница = info page */
-#define ERASABLE_PAGE_END  120U   /* pages 16..119: info+metadata+app code */
+#define APP_PAGES_START    17U    /* первая стираемая страница = metadata;
+                                   * стр. 16 (идентичность) не стирается */
+#define ERASABLE_PAGE_END  120U   /* pages 17..119: metadata + app code */
 #define APP_PAGES_TOTAL    (ERASABLE_PAGE_END - APP_PAGES_START)
+#define WRITABLE_START     APP_METADATA_ADDR /* запись — со страницы
+                                   * метаданных; идентичность ниже —
+                                   * read-only (CM-FR02) */
 #define WRITABLE_END       EVENT_LOG_ADDR
 
 static const uint8_t ack = ACK_BYTE;
@@ -116,14 +129,17 @@ static bool bl_address_readable(uint32_t address, uint16_t len)
   return true;
 }
 
-/* Write Memory is restricted to the device info page + metadata +
- * application code (0x08008000–0x0803BFFF). The upper 16 KB under marker
- * storage are never writable through AN3155: they are owned by the
- * application protocol (CMD_STORAGE_*), so a corrupted or malicious
- * .hex cannot silently rewrite them. */
+/* Write Memory is restricted to the metadata page + application code
+ * (0x08008800–0x0803BFFF). The identity page (0x08008000–0x080087FF)
+ * is read-only through AN3155 — тип и серийный номер задаёт только
+ * первичное программирование (CM-FR02); диапазон, пересекающий её
+ * границу снизу или сверху, отклоняется целиком до первой записи.
+ * The upper 16 KB under marker storage are never writable through
+ * AN3155: they are owned by the application protocol (CMD_STORAGE_*),
+ * so a corrupted or malicious .hex cannot silently rewrite them. */
 static bool bl_address_writable(uint32_t address, uint16_t len)
 {
-  if (address < DEVICE_INFO_ADDR || address >= WRITABLE_END) {
+  if (address < WRITABLE_START || address >= WRITABLE_END) {
     return false;
   }
   if ((uint32_t)len > (WRITABLE_END - address)) {
@@ -307,9 +323,9 @@ static bool bl_flash_erase_app(void)
   uint32_t error = 0;
 
   erase.TypeErase = FLASH_TYPEERASE_PAGES;
-  /* Массовое стирание покрывает страницу идентификации, метаданные и
-   * код приложения (страницы 16..119) — журнал и хранилище у конца
-   * Flash намеренно не трогаем. */
+  /* Массовое стирание покрывает метаданные и код приложения
+   * (страницы 17..119) — страница идентификации (16) не стирается
+   * (CM-FR02), журнал и хранилище у конца Flash не трогаем. */
   erase.PageAddress = FLASH_START + ((uint32_t)APP_PAGES_START * 2048U);
   erase.NbPages = APP_PAGES_TOTAL;
 
@@ -422,7 +438,7 @@ static void bl_cmd_write_memory(void)
   uint32_t address = ((uint32_t)addr[0] << 24) | ((uint32_t)addr[1] << 16) |
                      ((uint32_t)addr[2] << 8) | (uint32_t)addr[3];
 
-  if (address < DEVICE_INFO_ADDR || address >= WRITABLE_END) { bl_send_nack(); return; }
+  if (address < WRITABLE_START || address >= WRITABLE_END) { bl_send_nack(); return; }
 
   bl_send_ack();
 
@@ -488,17 +504,21 @@ static bool bl_flash_erase_pages(const uint16_t *pages, uint16_t count)
   erase.TypeErase = FLASH_TYPEERASE_PAGES;
   erase.NbPages = 1U;
 
-  HAL_FLASH_Unlock();
+  /* Весь список проверяется ДО первого стирания (CM-FR02): запрещённая
+   * страница в середине/конце списка не должна оставлять частично
+   * стёртую Flash — команда отклоняется целиком, ноль операций.
+   * Допустимы только metadata + app code pages (17..119); страница
+   * идентичности (16), event log (120..123) и триггерные страницы
+   * 124..127 исключены. Mass erase (0xFFFF) стирает тот же диапазон
+   * 17..119. */
   for (uint16_t i = 0U; i < count; i++) {
-    /* Individual page erase: device info + metadata + app code pages
-     * only (16..119). Event log (120..123) and trigger pages 124..127
-     * are excluded — they are owned by the application protocol. Mass
-     * erase (0xFFFF) wipes the same 16..119 range deliberately. */
     if (pages[i] < APP_PAGES_START || pages[i] >= ERASABLE_PAGE_END) {
-      HAL_FLASH_Lock();
       return false;
     }
-    /* До count страниц (<= APP_PAGES_TOTAL=112) по ~40 мс — кормим
+  }
+  HAL_FLASH_Unlock();
+  for (uint16_t i = 0U; i < count; i++) {
+    /* До count страниц (<= APP_PAGES_TOTAL=103) по ~40 мс — кормим
      * между страницами, а не только в начале/конце. */
     App_KickWatchdog();
     erase.PageAddress = FLASH_START + ((uint32_t)pages[i] * 2048U);
