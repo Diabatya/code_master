@@ -175,20 +175,58 @@ void DeviceConfig_Init(void)
     load_names_defaults(&s_trigger_names);
   }
 
-  /* Версия ПО (VER1) — читается из нового смещения; при его отсутствии
-   * пробуем legacy-offset 32: образы до переноса шили VER1 туда
-   * (перетиралась ext-записью при первом же сохранении конфигурации,
-   * поэтому попадётся редко — но безвредно проверить). */
+  /* Версия ПО (VER1, CM-F03): актуальное место — слот на странице
+   * метаданных APP1 (записывается конфигуратором вместе с APP1 при
+   * обновлении, страница идентичности при этом не стирается). Если
+   * там пусто — страница идентичности: смещение 1024, затем legacy 32
+   * (образы до переноса). Найденная в странице идентичности запись
+   * один раз мигрирует на страницу APP1 — дальше она перезаписывается
+   * при каждом обновлении, а идентичность не трогается. */
   memset(&s_fw_ver, 0, sizeof(s_fw_ver));
   const device_fw_ver_t *ver =
-      (const device_fw_ver_t *)(page_addr + DEVICE_CONFIG_VER_OFFSET);
+      (const device_fw_ver_t *)(APP_METADATA_ADDR + APP_METADATA_VER_OFFSET);
+  uint8_t ver_on_meta = 0U;
   if (fw_ver_valid(ver)) {
     memcpy(&s_fw_ver, ver, sizeof(s_fw_ver));
+    ver_on_meta = 1U;
   } else {
-    ver = (const device_fw_ver_t *)(page_addr
-                                    + DEVICE_CONFIG_VER_OFFSET_LEGACY);
+    ver = (const device_fw_ver_t *)(page_addr + DEVICE_CONFIG_VER_OFFSET);
     if (fw_ver_valid(ver)) {
       memcpy(&s_fw_ver, ver, sizeof(s_fw_ver));
+    } else {
+      ver = (const device_fw_ver_t *)(page_addr
+                                      + DEVICE_CONFIG_VER_OFFSET_LEGACY);
+      if (fw_ver_valid(ver)) {
+        memcpy(&s_fw_ver, ver, sizeof(s_fw_ver));
+      }
+    }
+  }
+  if (fw_ver_valid(&s_fw_ver) && !ver_on_meta) {
+    /* Миграция VER1 на страницу APP1: только дописываем в стёртую
+     * область (0xFF) — стирание чужой страницы метаданных не делаем.
+     * Запись полусловами без erase безопасна: обрыв оставляет битый
+     * CRC8, слот просто считается пустым. */
+    const uint8_t *slot =
+        (const uint8_t *)(APP_METADATA_ADDR + APP_METADATA_VER_OFFSET);
+    uint8_t blank = 1U;
+    for (uint32_t i = 0; i < sizeof(device_fw_ver_t); i++) {
+      if (slot[i] != 0xFFU) {
+        blank = 0U;
+        break;
+      }
+    }
+    if (blank) {
+      HAL_FLASH_Unlock();
+      const uint16_t *src = (const uint16_t *)&s_fw_ver;
+      uint32_t addr = APP_METADATA_ADDR + APP_METADATA_VER_OFFSET;
+      for (uint32_t i = 0; i < sizeof(device_fw_ver_t) / 2U; i++) {
+        if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr,
+                              src[i]) != HAL_OK) {
+          break;
+        }
+        addr += 2U;
+      }
+      HAL_FLASH_Lock();
     }
   }
 

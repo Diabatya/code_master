@@ -17,9 +17,12 @@
   */
 
 /* Includes ------------------------------------------------------------------ */
+#include <string.h>
+
 #include "usbd_core.h"
 #include "usbd_desc.h"
 #include "usbd_conf.h"
+#include "device_identity.h"
 
 /* STM32F105 unique device ID registers */
 #define DEVICE_ID1          0x1FFFF7E8U
@@ -148,7 +151,21 @@ static uint8_t *USBD_FS_LangIDStrDescriptor(USBD_SpeedTypeDef speed,
 static uint8_t *USBD_FS_ProductStrDescriptor(USBD_SpeedTypeDef speed,
                                        uint16_t * length)
 {
-  USBD_GetString((uint8_t *) USBD_PRODUCT_FS_STRING, USBD_StrDesc, length);
+  device_identity_t ident;
+
+  /* CM-F04: «Тип устройства» из CFG0, как у приложения. Лимит 9
+   * ASCII-символов — по ТЗ 11.2; значения длиннее/пустые —
+   * фолбэк на фиксированную строку, усечения нет. */
+  if (DeviceIdentity_Read(&ident) && ident.name_len > 0U
+      && ident.name_len <= DEVICE_IDENT_NAME_MAX) {
+    static char name_buf[DEVICE_IDENT_NAME_MAX + 1U];
+    memcpy(name_buf, ident.name, ident.name_len);
+    name_buf[ident.name_len] = '\0';
+    USBD_GetString((uint8_t *) name_buf, USBD_StrDesc, length);
+  } else {
+    USBD_GetString((uint8_t *) USBD_PRODUCT_FS_STRING, USBD_StrDesc,
+                   length);
+  }
   return USBD_StrDesc;
 }
 
@@ -174,6 +191,20 @@ static uint8_t *USBD_FS_ManufacturerStrDescriptor(USBD_SpeedTypeDef speed,
 static uint8_t *USBD_FS_SerialStrDescriptor(USBD_SpeedTypeDef speed,
                                       uint16_t * length)
 {
+  device_identity_t ident;
+
+  /* CM-F04: серийный номер из CFG0 — тот же, что показывает
+   * приложение, чтобы Windows не считала загрузчик другим
+   * устройством. Пустая страница — фолбэк на серийник из UID. */
+  if (DeviceIdentity_Read(&ident) && ident.serial_len > 0U
+      && ident.serial_len <= DEVICE_IDENT_SERIAL_MAX) {
+    static char serial_buf[DEVICE_IDENT_SERIAL_MAX + 1U];
+    memcpy(serial_buf, ident.serial, ident.serial_len);
+    serial_buf[ident.serial_len] = '\0';
+    USBD_GetString((uint8_t *) serial_buf, USBD_StrDesc, length);
+    return USBD_StrDesc;
+  }
+
   *length = USB_SIZ_STRING_SERIAL;
 
   /* Update the serial number string descriptor with the data from the unique

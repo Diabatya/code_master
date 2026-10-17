@@ -40,6 +40,18 @@ TRIGGER_F_RX_AUX_EVENT = 0x40
 TRIGGER_F_TX_AUX = 0x04
 TRIGGER_F_COND_AUX = 0x08
 AUX_CH_COUNT = 7
+# FLXB v3 (протокол 14) — автономные переменные ГЛ:
+# rx_flags 0x80 — событие по переменной: rx_channel 0..2 —
+# «динамическая» (извлечение mask[0..4], значение u64 в rx_data),
+# 0xFF — слушатель фронта статического флага (rx_dlc=фронт,
+# mask[0]=индекс). src_flags 0x10 — псевдо-действие «установить
+# флаг» (tx_data[0]=idx, [1]=значение, [2..5]=авто-выкл мс);
+# 0x20 — условие по флагу (src_id=idx, src_dlc=1/2).
+TRIGGER_F_RX_VAR = 0x80
+TRIGGER_F_TX_SETFLAG = 0x10
+TRIGGER_F_COND_FLAG = 0x20
+TRIGGER_VAR_CHAN_FLAG = 0xFF
+FLEX_MAX_FLAGS = 16
 # src_flags бит 1 = CACHE_ONLY: запись только наполняет кэш, ответ не
 # вооружается — так «автозапись DATA в кэш» и обычные «Фреймы ответа»
 # работают в одном триггере вместе (филлеры + ответные записи группы).
@@ -270,6 +282,8 @@ def pack_trigger(values: dict[str, Any], fmt_version: int = TRIGGER_FORMAT_VERSI
             rx_flags |= TRIGGER_F_TX_EVENT_DATA
         if values.get("rx_aux_event"):
             rx_flags |= TRIGGER_F_RX_AUX_EVENT
+        if values.get("rx_var"):
+            rx_flags |= TRIGGER_F_RX_VAR
         rx_flags |= (
             int(values.get("rx_cond_idx", 0)) << TRIGGER_F_COND_SHIFT
         ) & TRIGGER_F_COND_MASK
@@ -280,6 +294,10 @@ def pack_trigger(values: dict[str, Any], fmt_version: int = TRIGGER_FORMAT_VERSI
             src_flags |= TRIGGER_F_TX_AUX
         if values.get("cond_aux"):
             src_flags |= TRIGGER_F_COND_AUX
+        if values.get("tx_setflag"):
+            src_flags |= TRIGGER_F_TX_SETFLAG
+        if values.get("cond_flag"):
+            src_flags |= TRIGGER_F_COND_FLAG
         raw = bytearray(
             struct.pack(
                 _TRIGGER_FORMAT,
@@ -309,12 +327,15 @@ def unpack_trigger(payload: bytes) -> dict[str, Any]:
             "rx_listen_echo": not (values[29] & TRIGGER_F_MUTE_ECHO),
             "rx_fire_on_boot": bool(values[29] & TRIGGER_F_FIRE_ON_BOOT),
             "rx_aux_event": bool(values[29] & TRIGGER_F_RX_AUX_EVENT),
+            "rx_var": bool(values[29] & TRIGGER_F_RX_VAR),
             "rx_cond_idx": (values[29] & TRIGGER_F_COND_MASK) >> TRIGGER_F_COND_SHIFT,
             "src_fire_limit": values[30],
             "src_listen_echo": not (values[31] & TRIGGER_F_MUTE_ECHO),
             "src_cache_only": bool(values[31] & TRIGGER_F_CACHE_ONLY),
             "tx_aux": bool(values[31] & TRIGGER_F_TX_AUX),
             "cond_aux": bool(values[31] & TRIGGER_F_COND_AUX),
+            "tx_setflag": bool(values[31] & TRIGGER_F_TX_SETFLAG),
+            "cond_flag": bool(values[31] & TRIGGER_F_COND_FLAG),
             "rx_boot_delay": values[32],
         }
     elif len(payload) == TRIGGER_SIZE_V2:
@@ -334,6 +355,9 @@ def unpack_trigger(payload: bytes) -> dict[str, Any]:
             "src_cache_only": False,
             "tx_aux": False,
             "cond_aux": False,
+            "rx_var": False,
+            "tx_setflag": False,
+            "cond_flag": False,
             "rx_boot_delay": 0,
         }
     else:
@@ -398,17 +422,56 @@ def record_fields_valid(payload: bytes) -> bool:
     if rx_flags & ~(
         TRIGGER_F_MUTE_ECHO | TRIGGER_F_FIRE_ON_BOOT
         | TRIGGER_F_COND_MASK | TRIGGER_F_TX_EVENT_DATA
-        | TRIGGER_F_RX_AUX_EVENT
+        | TRIGGER_F_RX_AUX_EVENT | TRIGGER_F_RX_VAR
     ):
         return False
     if src_flags & ~(
         TRIGGER_F_MUTE_ECHO | TRIGGER_F_CACHE_ONLY
         | TRIGGER_F_TX_AUX | TRIGGER_F_COND_AUX
+        | TRIGGER_F_TX_SETFLAG | TRIGGER_F_COND_FLAG
     ):
         return False
     rx_aux = bool(rx_flags & TRIGGER_F_RX_AUX_EVENT)
+    rx_var = bool(rx_flags & TRIGGER_F_RX_VAR)
     tx_aux = bool(src_flags & TRIGGER_F_TX_AUX)
+    tx_setflag = bool(src_flags & TRIGGER_F_TX_SETFLAG)
     cond_aux = bool(src_flags & TRIGGER_F_COND_AUX)
+    cond_flag = bool(src_flags & TRIGGER_F_COND_FLAG)
+    if rx_var:
+        # Событие по переменной (FLXB v3): несовместимо с другими
+        # некадровыми типами и с лимитом сработок (зеркало trigger.c).
+        if (
+            rx_flags & (TRIGGER_F_RX_AUX_EVENT | TRIGGER_F_FIRE_ON_BOOT)
+            or t["rx_rtr"] != 0 or t["rx_fire_limit"] != 0
+        ):
+            return False
+        if t["rx_channel"] == TRIGGER_VAR_CHAN_FLAG:
+            # Слушатель фронта статического флага: rx_dlc — фронт
+            # (0/1/2), mask[0] — индекс флага; остальное нули.
+            if not (
+                t["rx_dlc"] <= 2 and t["rx_extended"] == 0
+                and t["rx_id"] == 0 and t["rx_id_mask"] == 0
+                and t["rx_data_mask"][0] < FLEX_MAX_FLAGS
+                and t["rx_data_mask"][1:] == b"\x00" * 7
+                and t["rx_data"] == b"\x00" * 8
+                and not (rx_flags & TRIGGER_F_TX_EVENT_DATA)
+            ):
+                return False
+        else:
+            # «Динамическая»: mask = offset/len/endian/cmp/kind,
+            # позиции 6..7 нулевые, rx_data — значение u64.
+            # mask[5] — id edge-группы алиасов состояния (CM-FR12):
+            # >0 допустим только у dyn_cache-сравнения «==»
+            # (зеркало trigger_fields_valid в trigger.c).
+            m = t["rx_data_mask"]
+            if not (
+                m[1] >= 1 and m[0] + m[1] <= 8
+                and m[2] <= 1 and m[3] <= 3 and m[4] <= 1
+                and (m[5] == 0
+                     or (m[3] == 0 and m[4] == 0 and m[5] <= 31))
+                and m[6] == 0 and m[7] == 0
+            ):
+                return False
     if not (
         t["rx_extended"] <= 1 and t["tx_extended"] <= 1
         and t["rx_dlc"] <= 8 and t["tx_dlc"] <= 8
@@ -433,7 +496,7 @@ def record_fields_valid(payload: bytes) -> bool:
             and t["rx_data_mask"] == b"\x00" * 8
         ):
             return False
-    elif t["rx_channel"] > 2:
+    elif t["rx_channel"] > 2 and not rx_var:
         return False
     if tx_aux:
         # Действие над доп. каналом: tx_channel — канал, tx_dlc —
@@ -448,6 +511,28 @@ def record_fields_valid(payload: bytes) -> bool:
         ):
             return False
     elif t["tx_channel"] > 2:
+        return False
+    if tx_setflag and not (
+        # Псевдо-действие «установить флаг» (FLXB v3): tx_data[0] =
+        # индекс, [1] = значение, [2..5] = авто-выкл мс; кадровые
+        # tx-поля нулевые, несовместимо с aux-действием.
+        not tx_aux
+        and t["tx_channel"] == 0 and t["tx_dlc"] == 0
+        and t["tx_extended"] == 0 and t["tx_id"] == 0
+        and t["tx_rtr"] == 0 and t["cache_enabled"] == 0
+        and t["tx_data"][0] < FLEX_MAX_FLAGS
+        and t["tx_data"][1] <= 1
+    ):
+        return False
+    if cond_flag and not (
+        # Условие «флаг в состоянии» (FLXB v3): src_id = индекс,
+        # src_dlc = 1/2; src_channel/src_extended не используются.
+        t["cache_enabled"] == 0
+        and t["src_id"] < FLEX_MAX_FLAGS
+        and t["src_dlc"] in (1, 2)
+        and t["src_channel"] == 0 and t["src_extended"] == 0
+        and not (src_flags & TRIGGER_F_CACHE_ONLY)
+    ):
         return False
     if cond_aux:
         # Условие «доп. канал работает/не работает»: src_channel —

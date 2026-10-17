@@ -71,7 +71,11 @@ def test_aux_action_roundtrip(tab) -> None:
     out = tab.get_config()
     action = out[0]["action"]
     assert action["aux_channel"] == 3 and action["aux_mode"] == "pulse"
-    assert action["aux_delay"] == 250 and action["aux_pulse_count"] == 7
+    # CM-F11: легаси aux_delay мигрируется в единую «Задержку» —
+    # реальная задержка старта сохраняется, старый ключ уходит.
+    assert action.get("aux_delay", 0) == 0
+    assert action["exec_delay"] == 250
+    assert action["aux_pulse_count"] == 7
     assert action["aux_pwm_duty"] == 25 and action["aux_pwm_time"] == 3000
     cond = out[0]["conditions"][0]
     assert cond == {"type": "aux", "channel": 2, "state": 1}

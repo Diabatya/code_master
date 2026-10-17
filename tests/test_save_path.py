@@ -684,3 +684,79 @@ def test_proto11_area_is_no_tail(window) -> None:
     serial.download_by_region[STORAGE_REGION_FLEX] = blob
     w._refresh_device_flexb()
     assert w._flexible_tab.flex_state == "no-tail"
+
+
+# ---- CM-FR03: явный отказ неподдерживаемой автономной записи -------
+
+
+def _unsupported_rule(title: str = "П1", active: bool = True) -> dict:
+    """Активная программа с условием ПРИ — на камень не переносится."""
+    return {
+        "title": title, "active": active,
+        "events": [{"type": "frame", "id": "123", "data": ""}],
+        "conditions": [{"type": "if", "var": "X", "state": 1}],
+        "actions": [{"type": "frame", "id": "456", "data": "01",
+                     "dlc": 1, "channel": 0}],
+    }
+
+
+def _frame_only_rule(title: str, actions: int = 1) -> dict:
+    return {
+        "title": title, "active": True,
+        "events": [{"type": "frame", "id": "123", "data": ""}],
+        "conditions": [],
+        "actions": [
+            {"type": "frame", "id": "456", "data": "01",
+             "dlc": 1, "channel": 0}
+            for _ in range(actions)
+        ],
+    }
+
+
+def test_unsupported_flex_program_refuses_save(window) -> None:
+    """Активная программа, не переносимая на камень: сохранение
+    отклоняется до первой записи — ни triggers, ни блобы, устройство
+    не тронуто, оператор видит программу и причину (CM-FR03)."""
+    w, serial, _c, toasts, dialogs = window
+    serial.proto = 15
+    w._flexible_tab.get_config = lambda: [_unsupported_rule("Греть")]
+    assert w._save_current_config() is False
+    assert serial.uploads == []
+    assert "write_to_device" not in w._trigger_tab.calls
+    assert not toasts
+    warn = [d for d in dialogs if d[0] == "warning"]
+    assert warn and "Греть" in str(warn[-1][1])
+
+
+def test_inactive_flex_program_does_not_refuse(window) -> None:
+    """Неактивная программа не исполняется никем — её формат не
+    блокирует сохранение."""
+    w, serial, _c, toasts, _d = window
+    serial.proto = 15
+    w._flexible_tab.get_config = lambda: [
+        _unsupported_rule("Спящая", active=False)
+    ]
+    assert w._save_current_config() is True
+
+
+def test_flex_record_quota_refuses_save(window) -> None:
+    """Переполнение квоты записей МК (16) — тот же явный отказ до
+    записи, а не тихий частичный блоб (CM-FR03)."""
+    w, serial, _c, toasts, _d = window
+    serial.proto = 15
+    w._flexible_tab.get_config = lambda: [
+        _frame_only_rule("Десять", actions=10),
+        _frame_only_rule("Ещё десять", actions=10),
+    ]
+    assert w._save_current_config() is False
+    assert serial.uploads == []
+    assert not toasts
+
+
+def test_supported_flex_programs_save_normally(window) -> None:
+    """Компилируемые программы проходят тот же preflight прозрачно."""
+    w, serial, _c, toasts, _d = window
+    serial.proto = 15
+    w._flexible_tab.get_config = lambda: [_frame_only_rule("Рабочая")]
+    assert w._save_current_config() is True
+    assert serial.uploads

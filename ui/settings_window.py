@@ -45,6 +45,7 @@ from core.aux_channels import (
 from core.flex_compiler import (
     analyze_device_flex,
     build_flex_blob,
+    executor_info,
     extract_flex_json,
 )
 from core.can_protocol import (
@@ -78,7 +79,7 @@ from ui.event_log_tab import EventLogTab
 from ui.flexible_logic_tab import FlexibleLogicTab
 from ui.hex_edit import HexDataEdit
 from ui.variables_tab import VariablesTab
-from ui.library_browser import LibraryBrowser
+
 from ui.memory_indicator import MemoryIndicator
 from ui.toast import show_toast
 import contextlib
@@ -453,7 +454,7 @@ class SettingsWindow(QMainWindow):
         # Загрузка файла переменных — тоже правка, «Сохранить» должна
         # включиться (отчёт мастера).
         self._variables_tab.loaded.connect(self._mark_dirty)
-        self._library_tab = LibraryBrowser(self._trigger_tab, self._flexible_tab, self)
+        # CM-F10 п.6: вкладка «Библиотека» удалена из окна настроек.
         self._analyzer_tab = CanAnalyzer(self._serial_manager, self)
         self._topology_tab = CanTopologyWidget(self)
         self._event_log_tab = EventLogTab(self._serial_manager, self)
@@ -465,7 +466,6 @@ class SettingsWindow(QMainWindow):
         self._tabs.addTab(self._gateway_tab, "🚦 " + tr("Шлюз"))
         self._tabs.addTab(self._monitor_tab, "🔍 " + tr("Мониторинг"))
         self._tabs.addTab(self._analyzer_tab, "\U0001F52C " + tr("Трейс"))
-        self._tabs.addTab(self._library_tab, "\U0001F4DA " + tr("Библиотека"))
         self._tabs.addTab(self._topology_tab, "🌐 " + tr("Топология"))
         self._tabs.addTab(self._event_log_tab, "🧾 " + tr("Лог МК"))
         self._update_analog_tab()
@@ -1444,7 +1444,6 @@ class SettingsWindow(QMainWindow):
             self._gateway_tab: "🚦 " + tr("Шлюз"),
             self._flexible_tab: "🧩 " + tr("Гибкая логика"),
             self._variables_tab: "🎛 " + tr("Переменные"),
-            self._library_tab: "📚 " + tr("Библиотека"),
             self._analyzer_tab: "🔬 " + tr("Трейс"),
             self._topology_tab: "🌐 " + tr("Топология"),
             self._event_log_tab: "🧾 " + tr("Лог МК"),
@@ -1467,7 +1466,6 @@ class SettingsWindow(QMainWindow):
             self._gateway_tab,
             self._flexible_tab,
             self._variables_tab,
-            self._library_tab,
             self._analyzer_tab,
             self._topology_tab,
             self._event_log_tab,
@@ -2054,6 +2052,11 @@ class SettingsWindow(QMainWindow):
             if hasattr(self._gateway_tab, "_save_config"):
                 self._gateway_tab._save_config()
             if self._serial_manager.is_open() and not self._config.get("emulation", False):
+                # CM-FR03: до первой записи в устройство — план
+                # автономного исполнения ГЛ. Активная программа,
+                # которую камень не исполнит, отклоняет сохранение
+                # целиком — после отключения ПК она бы молчала.
+                self._preflight_flex_plan()
                 # Прогрузка в МК — под оверлеем с процентным индикатором:
                 # запись триггеров (чтение списка → STAGE → COMMIT →
                 # проверка) занимает заметное время, оператор должен
@@ -2135,6 +2138,52 @@ class SettingsWindow(QMainWindow):
             QMessageBox.critical(self, tr("Ошибка"), tr("Не удалось сохранить: {0}").format(exc))
             return False
 
+    def _preflight_flex_plan(self) -> None:
+        """CM-FR03: явный отказ неподдерживаемой автономной записи.
+
+        Для прошивки с автономной ГЛ (протокол ≥12) каждая АКТИВНАЯ
+        программа обязана компилироваться в записи камня — иначе
+        после отключения приложения она молчала бы при «успешном»
+        сохранении. План строится до первой записи настроек:
+        программа и причина показываются оператору, устройство не
+        тронуто. Протокол 11 (чистый JSON, исполнение на ПК) этой
+        проверки не требует — автономности там нет и не заявлено."""
+        proto = self._serial_manager.device_protocol_version()
+        if proto < 12:
+            return
+        rules = self._flexible_tab.get_config()
+        _aux_cfgs_fn = getattr(
+            self._variables_tab, "aux_channel_configs", None
+        )
+        aux_cfgs = _aux_cfgs_fn() if callable(_aux_cfgs_fn) else []
+        resolved = [
+            resolve_rule_actions(rule, aux_cfgs) for rule in rules
+        ]
+        info = executor_info(
+            resolved, proto, self._variables_tab.export_config()
+        )
+        problems: list[str] = []
+        for rule, entry in zip(resolved, info, strict=False):
+            if not rule.get("active") or entry["managed"]:
+                continue
+            title = str(rule.get("title", "")).strip() or tr("Программа")
+            problems.append(
+                tr("«{0}»: {1}").format(
+                    title, entry["reason"] or tr("не поддерживается камнем")
+                )
+            )
+        if not problems:
+            return
+        QMessageBox.warning(
+            self,
+            tr("Автономное исполнение программ"),
+            tr("Следующие активные программы устройство исполнить "
+               "не сможет — после отключения приложения они "
+               "молчали бы:\n\n{0}\n\nСохранение отменено, "
+               "устройство не изменено.").format("\n".join(problems)),
+        )
+        raise TriggerValidationAborted()
+
     def _upload_config_blobs(self) -> None:
         """Пишет блобы переменных и программ ГЛ в маркерное хранилище
         МК (CMD_STORAGE_*, протокол v11 — в сборке v10 парсер ронял
@@ -2188,7 +2237,11 @@ class SettingsWindow(QMainWindow):
             rules_for_blob = [
                 resolve_rule_actions(rule, aux_cfgs) for rule in rules
             ]
-            flex_blob = build_flex_blob(rules_for_blob, protocol=proto)
+            flex_blob = build_flex_blob(
+                rules_for_blob,
+                protocol=proto,
+                variables=self._variables_tab.export_config(),
+            )
         else:
             # Протокол 11 хранит блобы, но FLXB-записей не исполняет —
             # пишем прежний JSON, исполнение ГЛ остаётся на ПК.

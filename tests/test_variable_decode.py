@@ -112,17 +112,16 @@ class TestDecodeVarValue:
         assert not res["valid"] and res["status"] == "conflict"
         assert res["value"] is None
 
-    def test_steering_no_calibration(self) -> None:
+    def test_steering_no_points(self) -> None:
         res = vd.decode_var_value(
             _steering_cfg(steering={
                 "enabled": True, "version": 2,
                 "signs": {"pos": {4: "div"}, "neg": {}},
-                "neutral": 0, "calib": [],
-            }),
+            }, points=[]),
             b"\x04",
         )
         assert not res["valid"]
-        assert res["status"] == "no-calibration"
+        assert res["status"] == "no-points"
 
     def test_steering_neutral_is_zero(self) -> None:
         res = vd.decode_var_value(_steering_cfg(), b"\x00")

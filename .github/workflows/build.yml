@@ -161,6 +161,19 @@ jobs:
             firmware/application/tests/test_storage_select.c \
             -o /tmp/test_storage_select
           /tmp/test_storage_select
+          # CM-F04: чтение идентичности загрузчиком из страницы CFG0.
+          cc -I firmware/bootloader/Inc \
+            firmware/application/tests/test_device_identity.c \
+            firmware/bootloader/Src/device_identity.c \
+            -o /tmp/test_device_identity
+          /tmp/test_device_identity
+          # CM-FR02: настоящая граница AN3155 — идентичность read-only
+          # для WRITE/ERASE любого вида, ноль flash-операций на запретах.
+          cc -I firmware/bootloader/tests/stubs \
+            -I firmware/bootloader/Inc -I firmware/bootloader/Src \
+            firmware/bootloader/tests/test_bootloader_boundary.c \
+            -o /tmp/test_bootloader_boundary
+          /tmp/test_bootloader_boundary
       - name: Verify application metadata
         run: |
           python3 -m pip install intelhex
@@ -186,6 +199,19 @@ jobs:
             --cdc-hex firmware-artifacts/codemaster_app_cdc.hex \
             --cdc-bin firmware-artifacts/codemaster_app_cdc.bin \
             --version "$FW_VERSION"
+          # CM-F12: сервисный образ только загрузчика (0x08000000) —
+          # для стендового/первичного программирования отдельно от
+          # полного DFU; маршрутом обновления не является.
+          cp firmware/bootloader/build/codemaster_bootloader.hex \
+            firmware-artifacts/codemaster_bootloader.hex
+          cp firmware/bootloader/build/codemaster_bootloader.bin \
+            firmware-artifacts/codemaster_bootloader.bin
+          # CM-F12: архив исходников прошивки этой ревизии
+          # (application+bootloader+tools+манифест SHA/версии/
+          # сабмодуля CubeF1; без собранных образов и конфигов).
+          python3 firmware/tools/package_sources.py \
+            firmware-artifacts/codemaster_firmware_src.zip \
+            --version "$FW_VERSION" --sha "$GITHUB_SHA"
           (cd firmware-artifacts && sha256sum * > SHA256SUMS.txt)
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v5
@@ -239,15 +265,30 @@ jobs:
           mv artifacts/CodeMaster-windows/CodeMaster.exe "dist/CODMaster ($VER).exe"
           mv artifacts/CodeMaster-macos/CodeMaster.dmg "dist/CODMaster ($VER).dmg"
           mv artifacts/CodeMaster-linux/CodeMaster "dist/CODMaster ($VER)"
-          # Две прошивки по отчёту мастера: «2 CAN DFU» — полный образ
-          # для первичной прошивки, «2 CAN CDC» — application для
-          # обновления кнопкой «Обновить» (загрузчик уже на плате).
-          mv artifacts/CodeMaster-firmware/codemaster_full.hex "dist/2 CAN DFU ($VER).hex"
-          mv artifacts/CodeMaster-firmware/codemaster_full.bin "dist/2 CAN DFU ($VER).bin"
-          mv artifacts/CodeMaster-firmware/codemaster_app_cdc.hex "dist/2 CAN CDC ($VER).hex"
-          mv artifacts/CodeMaster-firmware/codemaster_app_cdc.bin "dist/2 CAN CDC ($VER).bin"
+          # Маркировка маршрута «111» (CM-F12): суффикс стоит
+          # непосредственно перед расширением и переживает
+          # преобразование пробелов/скобок GitHub в имени скачанного
+          # файла (basename всё равно оканчивается на 111).
+          # «2 CAN DFU … 111» — требуемый маршрут этой версии для
+          # первичной прошивки и для плат со старым загрузчиком
+          # (новый загрузчик/карта Flash/USB-контракт входят только
+          # в полный образ); «2 CAN CDC … 111» — обновление
+          # application кнопкой «Обновить» на платах, где уже стоит
+          # совместимый загрузчик этой же раскладки.
+          mv artifacts/CodeMaster-firmware/codemaster_full.hex "dist/2 CAN DFU ($VER) 111.hex"
+          mv artifacts/CodeMaster-firmware/codemaster_full.bin "dist/2 CAN DFU ($VER) 111.bin"
+          mv artifacts/CodeMaster-firmware/codemaster_app_cdc.hex "dist/2 CAN CDC ($VER) 111.hex"
+          mv artifacts/CodeMaster-firmware/codemaster_app_cdc.bin "dist/2 CAN CDC ($VER) 111.bin"
+          # Сервисные артефакты (CM-F12): образ только загрузчика
+          # по адресу 0x08000000 — для первичного программирования/
+          # сервиса, не маршрут обновления (маркера 111 нет).
+          mv artifacts/CodeMaster-firmware/codemaster_bootloader.hex "dist/2 CAN bootloader service 0x08000000 ($VER).hex"
+          mv artifacts/CodeMaster-firmware/codemaster_bootloader.bin "dist/2 CAN bootloader service 0x08000000 ($VER).bin"
+          # Архив исходников прошивки этого тега (CM-F12).
+          mv artifacts/CodeMaster-firmware/codemaster_firmware_src.zip "dist/2 CAN firmware sources v$VER.zip"
           chmod +x "dist/CODMaster ($VER)"
-          # Контрольные суммы — уже под финальными именами файлов.
+          # Контрольные суммы — под финальными именами файлов
+          # (ровно те, что уходят в assets релиза).
           (cd dist && sha256sum * > SHA256SUMS.txt)
       - name: Create/Update latest release
         id: release_latest

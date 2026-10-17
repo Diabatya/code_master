@@ -108,6 +108,14 @@ typedef struct __attribute__((packed)) {
 #define DEVICE_CONFIG_VER_OFFSET_LEGACY 32U
 #define DEVICE_CONFIG_VER_MAGIC    0x56455231U /* "VER1" */
 #define DEVICE_CONFIG_VERSION_MAX  16U
+/* CM-F03: актуальное место версионной записи — страница метаданных
+ * APP1 (0x08008800), смещение 32 (за 16-байтной записью APP1).
+ * VER1 пишется туда тем же стиранием/записью, что и метаданные —
+ * страница идентичности при обновлении ПО НЕ стирается, тип и
+ * серийный номер меняет только первичное программирование
+ * (DFU/ST-Link). Смещения 1024/32 в странице идентичности читаются
+ * для совместимости и служат источником одноразовой миграции. */
+#define APP_METADATA_VER_OFFSET    32U
 
 typedef struct __attribute__((packed)) {
   uint32_t magic;   /* DEVICE_CONFIG_VER_MAGIC */

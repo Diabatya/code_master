@@ -47,7 +47,7 @@ from core.stm32_info import (
 def test_write_region_rejects_bootloader_addr() -> None:
     ok, reason = validate_write_region(0x08000000, 256)
     assert not ok
-    assert "идентификац" in reason
+    assert "идентичн" in reason  # «страница идентичности» read-only
 
 
 def test_write_region_allows_app_start() -> None:
@@ -55,9 +55,19 @@ def test_write_region_allows_app_start() -> None:
     assert ok
 
 
-def test_write_region_allows_config_page() -> None:
+def test_write_region_rejects_identity_page() -> None:
+    # CM-FR02: страница идентичности (тип/серийник) через AN3155
+    # read-only — записать её нельзя ни на клиенте, ни в загрузчике.
     ok, _ = validate_write_region(DEVICE_CONFIG_PAGE_ADDR, DEVICE_CONFIG_PAGE_SIZE)
-    assert ok
+    assert not ok
+    ok, _ = validate_write_region(DEVICE_CONFIG_PAGE_ADDR + 0x400, 32)
+    assert not ok
+
+
+def test_write_region_rejects_identity_boundary_crossing() -> None:
+    # Пересечение границы идентичность→метаданные отклоняется целиком.
+    ok, _ = validate_write_region(DEVICE_CONFIG_PAGE_ADDR + 0x7F0, 32)
+    assert not ok
 
 
 def test_write_region_allows_meta_page() -> None:
@@ -179,48 +189,57 @@ def test_flash_firmware_image_metadata_goes_last() -> None:
 
 def test_flash_firmware_trims_bootloader_region() -> None:
     """Объединённый образ (full): область bootloader через AN3155 не
-    пишется — запись начинается со страницы идентификации 0x08008000."""
+    пишется — запись начинается со страницы идентификации 0x08008000.
+    CM-F03: страница идентичности в образе пустая (стёртая) —
+    CDC-путь её не пишет, запись идёт с метаданных/кода."""
     from core.stm32_info import BOOTLOADER_BASE_ADDR, DEVICE_INFO_PAGE_ADDR
 
-    image = b"\xBB" * (APPLICATION_BASE_ADDR - BOOTLOADER_BASE_ADDR + 512)
-    writes = _flash_app(image, base_address=BOOTLOADER_BASE_ADDR)
+    image = bytearray(b"\xBB" * (APPLICATION_BASE_ADDR - BOOTLOADER_BASE_ADDR + 512))
+    info_off = DEVICE_INFO_PAGE_ADDR - BOOTLOADER_BASE_ADDR
+    image[info_off : info_off + DEVICE_CONFIG_PAGE_SIZE] = b"\xFF" * DEVICE_CONFIG_PAGE_SIZE
+    writes = _flash_app(bytes(image), base_address=BOOTLOADER_BASE_ADDR)
 
     assert writes, "записей нет"
     assert all(addr >= DEVICE_INFO_PAGE_ADDR for addr in writes)
+    # Страница идентичности не писалась (CM-F03).
+    assert all(not (DEVICE_INFO_PAGE_ADDR <= addr < DEVICE_INFO_PAGE_ADDR + DEVICE_CONFIG_PAGE_SIZE) for addr in writes)
 
 
 def test_flash_firmware_writes_info_page_separately() -> None:
-    """Образ info+meta+code (как codemaster_full без bootloader):
-    страница идентификации пишется отдельным регионом в 0x08008000,
-    метаданные — последними."""
+    """CM-F03: образ info+meta+code с CFG0 (тип/серийник) — отказ ДО
+    подключения к устройству: идентичность меняет только первичное
+    программирование (DFU/ST-Link/J-Link), CDC-путь её не трогает."""
+    from core.bootloader import BootloaderError
     from core.stm32_info import DEVICE_INFO_PAGE_ADDR
 
     info_page = build_device_config_page("GATE", "SN1")
     code = b"\x22" * 2048
     meta = build_app_metadata(code)
-    image = (
-        info_page
-        + meta
-        + b"\xFF" * (APPLICATION_BASE_ADDR - APP_METADATA_PAGE_ADDR - len(meta))
-        + code
-    )
-    writes = _flash_app(image, base_address=DEVICE_INFO_PAGE_ADDR)
-
-    assert DEVICE_INFO_PAGE_ADDR in writes
-    # metadata всё равно последняя (пишется блоками по BLOCK_SIZE)
-    assert writes[-1] <= APP_METADATA_PAGE_ADDR
-    assert APP_METADATA_PAGE_ADDR in writes
+    image = info_page + meta + b"\xFF" * (APPLICATION_BASE_ADDR - APP_METADATA_PAGE_ADDR - len(meta)) + code
+    with pytest.raises(BootloaderError, match="идентичности"):
+        _flash_app(image, base_address=DEVICE_INFO_PAGE_ADDR)
 
 
 def test_flash_firmware_config_only_keeps_metadata() -> None:
-    """Образ одной страницы идентификации: метаданные приложения не
-    инвалидируются и не перезаписываются — иначе приложение перестало
-    бы загружаться."""
-    image = build_device_config_page("GATE", "SN1") + b"\xFF" * (DEVICE_CONFIG_PAGE_SIZE - 32)
-    writes = _flash_app(image, base_address=DEVICE_CONFIG_PAGE_ADDR)
+    """CM-F03: образ одной VER1-записи на странице идентичности —
+    страница 0x08008000 не пишется, версия переносится в слот
+    страницы метаданных APP1, запись APP1 устройства сохраняется."""
+    from core.stm32_info import build_ver_record
 
-    assert writes, "страница идентификации должна записываться"
-    assert all(addr == DEVICE_CONFIG_PAGE_ADDR for addr in writes)
+    info_page = bytearray(b"\xFF" * DEVICE_CONFIG_PAGE_SIZE)
+    info_page[1024:1056] = build_ver_record("1.9.9")
+    writes = _flash_app(bytes(info_page), base_address=DEVICE_CONFIG_PAGE_ADDR)
+
+    assert writes, "страница метаданных должна записываться"
+    # Записи — только страница метаданных и, при пустом слоте,
+    # легаси-копия VER1 @1024 (дозапись без стирания, CM-F03).
+    assert all(
+        (APP_METADATA_PAGE_ADDR <= addr < APP_METADATA_PAGE_ADDR + DEVICE_CONFIG_PAGE_SIZE)
+        or addr == DEVICE_CONFIG_PAGE_ADDR + 1024
+        for addr in writes
+    )
+    # Основная запись конфигурации (@0, тип/серийник) не пишется.
+    assert DEVICE_CONFIG_PAGE_ADDR not in writes
 
 
 def test_flash_firmware_rejects_forbidden_region(tmp_path) -> None:

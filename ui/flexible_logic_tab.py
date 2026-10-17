@@ -317,13 +317,19 @@ def _close_button(font: QFont, tooltip: str) -> QPushButton:
 
 
 class _ClickableSummary(QLabel):
-    """Строка-сводка события/условия: клик разворачивает редактор.
-    Пока тип «Не выбрано» — строка обведена голубой рамкой
-    (отчёт мастера)."""
+    """Строка-сводка события/условия/программы: клик разворачивает
+    редактор. Пока тип «Не выбрано» — строка обведена голубой рамкой
+    (отчёт мастера).
 
-    def __init__(self, parent=None) -> None:
+    ``on_click`` — явный обработчик клика (для сводки свёрнутой
+    программы — _toggle_collapsed строки, CM-F10); без него клик
+    идёт в ``_toggle_editor`` родителя, как раньше."""
+
+    def __init__(self, parent=None, on_click=None, colored: bool = True) -> None:
         super().__init__(parent)
         self.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self._on_click = on_click
+        self._colored = colored
         self._unselected = False
         self._apply_style()
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -341,14 +347,18 @@ class _ClickableSummary(QLabel):
             " border: 1px solid #3A7BD5; border-radius: 4px;"
             " padding: 1px 8px;" if self._unselected else ""
         )
-        self.setStyleSheet(f"color: #7C9EFF;{border}")
+        color = "color: #7C9EFF;" if self._colored else ""
+        self.setStyleSheet(f"{color}{border}")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            p = self.parent()
-            toggle = getattr(p, "_toggle_editor", None)
-            if callable(toggle):
-                toggle()
+            if callable(self._on_click):
+                self._on_click()
+            else:
+                p = self.parent()
+                toggle = getattr(p, "_toggle_editor", None)
+                if callable(toggle):
+                    toggle()
         super().mousePressEvent(event)
 
 
@@ -494,6 +504,57 @@ class _VarCombo(QComboBox):
         if self.currentIndex() >= 1:
             return self.currentText()
         return self._desired
+
+
+class _AuxChannelCombo(QComboBox):
+    """Выбор доп. канала по ИМЕНИ из вкладки «Переменные» (CM-F10).
+
+    Модель хранит неизменный номер канала в itemData — переименование
+    канала меняет только отображаемый текст, физическое назначение
+    остаётся. Безымянный канал показывается как «Канал №N».
+    ``get_rows`` — callable → [(имя, канал, функция)] из
+    ``_aux_channel_names``."""
+
+    def __init__(
+        self, font: QFont, get_rows=None, parent=None
+    ) -> None:
+        super().__init__(parent)
+        self.setFont(font)
+        self._get_rows = get_rows
+        for ch in range(1, AUX_CH_COUNT + 1):
+            self.addItem("", ch)
+        self.setCurrentIndex(0)
+        self.refresh_names()
+
+    def refresh_names(self) -> None:
+        """Обновляет подписи пунктов по текущим настройкам каналов —
+        вызывается при refresh_variables вкладки."""
+        names: dict[int, str] = {}
+        if callable(self._get_rows):
+            try:
+                for name, ch, _func in self._get_rows():
+                    names[ch] = name
+            except Exception:  # noqa: BLE001
+                pass
+        self.blockSignals(True)
+        for i in range(self.count()):
+            ch = int(self.itemData(i) or (i + 1))
+            label = names.get(ch) or tr("Канал №{0}").format(ch)
+            self.setItemText(i, label)
+            self.setItemData(
+                i,
+                tr("Канал №{0}").format(ch),
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        self.blockSignals(False)
+
+    def value(self) -> int:  # noqa: N802 — совместимость с QSpinBox
+        data = self.currentData()
+        return int(data) if data is not None else self.currentIndex() + 1
+
+    def setValue(self, ch: int) -> None:  # noqa: N802
+        idx = self.findData(int(ch))
+        self.setCurrentIndex(idx if idx >= 0 else 0)
 
 
 class _DynEventPage(QWidget):
@@ -770,12 +831,14 @@ class _ImpulseVarPage(QWidget):
 
 
 class _AuxEventPage(QWidget):
-    """Событие «Доп канал»: направление «Вход»/«Выход», номер канала
-    и состояние «Активен»/«Не активен» (отчёт мастера: помимо входов
-    в событиях доступны и выходы — программа срабатывает по включению
-    выбранного выхода)."""
+    """Событие «Доп канал»: направление «Вход»/«Выход», канал по
+    имени из «Переменных» и состояние «Активен»/«Не активен»
+    (отчёт мастера: помимо входов в событиях доступны и выходы —
+    программа срабатывает по включению выбранного выхода)."""
 
-    def __init__(self, font: QFont, mark_dirty, parent=None) -> None:
+    def __init__(
+        self, font: QFont, mark_dirty, get_rows=None, parent=None
+    ) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setSpacing(2)
@@ -787,12 +850,8 @@ class _AuxEventPage(QWidget):
         self.direction.addItem(tr("Вход"), "in")
         self.direction.addItem(tr("Выход"), "out")
         row.addWidget(self.direction)
-        row.addWidget(_small_label(tr("Доп канал №"), font))
-        self.channel = QSpinBox()
-        self.channel.setFont(font)
-        self.channel.setRange(1, 8)
-        self.channel.setValue(1)
-        self.channel.setFixedWidth(64)
+        row.addWidget(_small_label(tr("Доп канал"), font))
+        self.channel = _AuxChannelCombo(font, get_rows)
         row.addWidget(self.channel)
         self.state = QComboBox()
         self.state.setFont(font)
@@ -804,8 +863,11 @@ class _AuxEventPage(QWidget):
         layout.addStretch()
 
         self.direction.currentIndexChanged.connect(mark_dirty)
-        self.channel.valueChanged.connect(mark_dirty)
+        self.channel.currentIndexChanged.connect(mark_dirty)
         self.state.currentIndexChanged.connect(mark_dirty)
+
+    def refresh_names(self) -> None:
+        self.channel.refresh_names()
 
     def read(self) -> dict[str, Any]:
         return {
@@ -1219,7 +1281,12 @@ class _AbortEventEditor(QWidget):
         self._dyn = _DynEventPage(font, mark_dirty, _EVENT_DYN, get_tab=get_tab)
         self._num = _DynEventPage(font, mark_dirty, _EVENT_NUM)
         self._impulse = _ImpulseVarPage(font, mark_dirty)
-        self._aux = _AuxEventPage(font, mark_dirty)
+        self._aux = _AuxEventPage(
+            font, mark_dirty,
+            get_rows=lambda: _aux_channel_names_from_tab(
+                self._get_tab() if callable(self._get_tab) else None
+            ),
+        )
         self._flag = _FlagEventPage(font, mark_dirty)
         self._frame = _FrameEventPage(font, mark_dirty)
         for page in (
@@ -1298,6 +1365,9 @@ class _AbortEventEditor(QWidget):
         self._impulse.var.set_names(imp, tr("— не выбрано —"))
         self._flag.var.set_names(flags, tr("— не выбрано —"))
         self._dyn.refresh_binding_names()
+        # Имена доп. каналов в комбобоксе события-прерывателя
+        # (CM-F10).
+        self._aux.refresh_names()
 
 
 def _detach_item(item, sep) -> None:
@@ -1488,27 +1558,52 @@ def _popup_type_selector(item) -> None:
     QTimer.singleShot(0, _popup)
 
 
-def _aux_channel_names(item) -> list[tuple[str, int, str]]:
-    """Именованные доп. каналы из третьей колонки «Переменных»:
-    (имя, пин/канал, функция) — для каскадного меню пунктов ГЛ."""
-    tab = item._row._tab._variables_tab
-    if tab is None:
+def _aux_channel_names_from_tab(tab) -> list[tuple[str, int, str]]:
+    """Доп. каналы вкладки «Переменных»: (отображаемое имя, номер
+    канала, функция).
+
+    CM-F10: показывается ИМЯ назначенного канала вместо номера;
+    безымянный настроенный канал отображается как «Канал №N».
+    Ссылка в модели — по неизменному номеру канала, переименование
+    обновляет только текст."""
+    export = getattr(tab, "export_config", None)
+    if not callable(export):
         return []
-    aux = getattr(tab, "aux_channel_configs", None)
-    if not callable(aux):
+    try:
+        data = export()
+    except Exception:  # noqa: BLE001
         return []
     out = []
-    for cfg in aux():
+    for cfg in data.get("aux") or []:
+        if cfg.get("type") != "aux":
+            continue
+        ch = int(cfg.get("channel", 1) or 1)
         name = str(cfg.get("name", "")).strip()
-        if name:
-            out.append(
-                (
-                    name,
-                    int(cfg.get("channel", 1) or 1),
-                    str(cfg.get("function", "")),
-                )
+        out.append(
+            (
+                name or tr("Канал №{0}").format(ch),
+                ch,
+                str(cfg.get("function", "")),
             )
+        )
     return out
+
+
+def _aux_channel_names(item) -> list[tuple[str, int, str]]:
+    """Доп. каналы из третьей колонки «Переменных» — для каскадного
+    меню и подписей пунктов ГЛ (CM-F10)."""
+    row = getattr(item, "_row", item)
+    tab = getattr(getattr(row, "_tab", None), "_variables_tab", None)
+    return _aux_channel_names_from_tab(tab) if tab is not None else []
+
+
+def _aux_channel_label(item, ch: int) -> str:
+    """Отображаемое имя доп. канала: настроенное имя либо
+    «Канал №N» (CM-F10)."""
+    for name, channel, _func in _aux_channel_names(item):
+        if channel == ch:
+            return name
+    return tr("Канал №{0}").format(ch)
 
 
 def _apply_menu_choice(item, code: str, patch: dict[str, Any]) -> None:
@@ -1666,7 +1761,10 @@ class _EventItem(QWidget):
         self._impulse = _ImpulseVarPage(
             font, row._mark_dirty, caption=tr("получено")
         )
-        self._aux = _AuxEventPage(font, row._mark_dirty)
+        self._aux = _AuxEventPage(
+            font, row._mark_dirty,
+            get_rows=lambda row=row: _aux_channel_names(row),
+        )
         self._flag = _FlagEventPage(font, row._mark_dirty)
         self._frame = _FrameEventPage(font, row._mark_dirty)
         self._power = _PowerEventPage(font, row._mark_dirty)
@@ -1839,6 +1937,10 @@ class _EventItem(QWidget):
         # Список состояний «Динамической переменной» подтягивается
         # из её таблицы привязки (отчёт мастера).
         self._dyn.refresh_binding_names()
+        # Имена доп. каналов — из третьей колонки «Переменных»
+        # (CM-F10); сводка обновляется текстом имени.
+        self._aux.refresh_names()
+        self._update_summary()
 
     def _menu_spec(self) -> list[tuple[str, list | None]]:
         """Виды событий → заполненные переменные → команды/события —
@@ -2020,8 +2122,11 @@ class _EventItem(QWidget):
                 tr("активен") if self._aux.state.currentData() == 1
                 else tr("не активен")
             )
-            text = tr("Доп канал №{0} {1} {2}").format(
-                self._aux.channel.value(), direction, state
+            # CM-F10: имя назначенного канала, не номер.
+            text = tr("{0} {1} {2}").format(
+                _aux_channel_label(self, self._aux.channel.value()),
+                direction,
+                state,
             )
         self._summary.set_unselected(etype == _EVENT_NONE)
         self._summary.setText(text)
@@ -2122,15 +2227,12 @@ class _CondItem(QWidget):
         aux_layout.setSpacing(2)
         aux_layout.setContentsMargins(0, 0, 0, 0)
         aux_row = QHBoxLayout()
-        aux_row.addWidget(_small_label(tr("Доп канал №"), font))
-        self.aux_channel = QSpinBox()
-        self.aux_channel.setFont(font)
-        self.aux_channel.setRange(1, AUX_CH_COUNT)
-        self.aux_channel.setValue(1)
-        self.aux_channel.setFixedWidth(64)
-        self.aux_channel.setToolTip(tr(
-            "1=PA14, 2=PA15, 3=PC10, 4=PC11, 5=PC12, 6=PD2, 7=PB3"
-        ))
+        aux_row.addWidget(_small_label(tr("Доп канал"), font))
+        # CM-F10: выбор канала по имени из «Переменных» — модель
+        # хранит номер канала (itemData).
+        self.aux_channel = _AuxChannelCombo(
+            font, get_rows=lambda: _aux_channel_names(self)
+        )
         aux_row.addWidget(self.aux_channel)
         self.aux_state = QComboBox()
         self.aux_state.setFont(font)
@@ -2185,7 +2287,7 @@ class _CondItem(QWidget):
         self.num_op.currentIndexChanged.connect(self._update_summary)
         self.num_value.textChanged.connect(self._update_summary)
         self.imp_var.currentIndexChanged.connect(self._update_summary)
-        self.aux_channel.valueChanged.connect(self._update_summary)
+        self.aux_channel.currentIndexChanged.connect(self._update_summary)
         self.aux_state.currentIndexChanged.connect(self._update_summary)
         self.flag_var.currentIndexChanged.connect(self._update_summary)
         self.flag_state.currentIndexChanged.connect(self._update_summary)
@@ -2197,7 +2299,7 @@ class _CondItem(QWidget):
         self.st_state.currentIndexChanged.connect(row._mark_dirty)
         self.dyn_var.currentIndexChanged.connect(row._mark_dirty)
         self.imp_var.currentIndexChanged.connect(row._mark_dirty)
-        self.aux_channel.valueChanged.connect(row._mark_dirty)
+        self.aux_channel.currentIndexChanged.connect(row._mark_dirty)
         self.aux_state.currentIndexChanged.connect(row._mark_dirty)
 
         if cond is not None:
@@ -2348,6 +2450,9 @@ class _CondItem(QWidget):
         # Состояния «Динамической переменной» — из её таблицы привязки
         # (отчёт мастера: список состояний в условии был пуст).
         self._dyn_page.refresh_binding_names()
+        # Имена доп. каналов (CM-F10).
+        self.aux_channel.refresh_names()
+        self._update_summary()
 
     def _menu_spec(self) -> list[tuple[str, list | None]]:
         """Виды условий → заполненные переменные → проверки — для
@@ -2448,13 +2553,15 @@ class _CondItem(QWidget):
                 f"{tr('— импульс активен')}"
             )
         elif ctype == _COND_AUX:
-            # «Доп канал 1 активен».
+            # «Вентилятор активен» — имя канала из «Переменных»
+            # (CM-F10), безымянный — «Канал №N».
             state = (
                 tr("активен") if self.aux_state.currentData() == 1
                 else tr("не активен")
             )
-            text = tr("Доп канал {0} {1}").format(
-                self.aux_channel.value(), state
+            text = tr("{0} {1}").format(
+                _aux_channel_label(self, self.aux_channel.value()),
+                state,
             )
         elif ctype == _COND_FLAG:
             # «Свет салона 1» — имя переменной + состояние.
@@ -2590,22 +2697,23 @@ class _ActionItem(QWidget):
     # ---- страницы настроек -------------------------------------------
 
     def _build_aux_page(self, font: QFont, mark_dirty) -> None:
-        """«Доп канал»: №, режим Вкл/Выкл/Импульсы/ШИМ, пауза до
-        действия и под-страница параметров (отчёт мастера)."""
+        """«Доп канал»: канал по имени, режим Вкл/Выкл/Импульсы/ШИМ
+        и под-страница параметров. Отложенный старт — единая
+        «Задержка» действия вверху редактора (CM-F11: отдельная
+        «Пауза до действия» удалена)."""
         page = QWidget()
         pl = QVBoxLayout(page)
         pl.setSpacing(2)
         pl.setContentsMargins(0, 0, 0, 0)
         top = QHBoxLayout()
-        top.addWidget(_small_label(tr("Канал №"), font))
-        self.aux_channel = QSpinBox()
-        self.aux_channel.setFont(font)
-        self.aux_channel.setRange(1, AUX_CH_COUNT)
-        self.aux_channel.setValue(1)
-        self.aux_channel.setFixedWidth(64)
-        self.aux_channel.setToolTip(tr(
-            "1=PA14, 2=PA15, 3=PC10, 4=PC11, 5=PC12, 6=PD2, 7=PB3"
-        ))
+        top.addWidget(_small_label(tr("Канал"), font))
+        # CM-F10: выбор канала по имени из «Переменных» — модель
+        # хранит номер канала (itemData), переименование меняет
+        # только подпись.
+        self.aux_channel = _AuxChannelCombo(
+            font, get_rows=lambda: _aux_channel_names(self)
+        )
+        self.aux_channel.setMinimumWidth(120)
         top.addWidget(self.aux_channel)
         self.aux_mode = QComboBox()
         self.aux_mode.setFont(font)
@@ -2625,13 +2733,6 @@ class _ActionItem(QWidget):
             "останутся запасным вариантом"
         ))
         top.addWidget(self.aux_use_var)
-        top.addWidget(_small_label(tr("Пауза до действия"), font))
-        self.aux_delay = QSpinBox()
-        self.aux_delay.setFont(font)
-        self.aux_delay.setRange(0, 999999)
-        self.aux_delay.setSuffix(tr(" мс"))
-        self.aux_delay.setFixedWidth(96)
-        top.addWidget(self.aux_delay)
         top.addStretch()
         pl.addLayout(top)
 
@@ -2640,39 +2741,34 @@ class _ActionItem(QWidget):
         plain_layout = QVBoxLayout(plain)
         plain_layout.setContentsMargins(0, 0, 0, 0)
         plain_layout.setSpacing(2)
-        # «Время включения» для «Вкл»: снятая галочка — до команды
-        # «Выкл»/снятия питания; установленная — авто-выключение МК
-        # через указанный срок (CM-HW-02: нулевой срок бессрочность
-        # молча не означает — для неё галочка снята).
+        # «вкл постоянно» для «Вкл» (CM-F11): галочка по умолчанию —
+        # канал работает до команды «Выкл»/снятия питания; снятая —
+        # активно «Время включения, мс» (строго положительное) и МК
+        # выключает сам по дедлайну.
         on_row = QHBoxLayout()
-        self.aux_on_time_en = QCheckBox(tr("время включения"))
-        self.aux_on_time_en.setFont(font)
-        self.aux_on_time_en.setToolTip(
-            tr("Снята — работает до команды «Выкл»; "
-               "установлена — выключается через указанное время")
+        self.aux_on_perm = QCheckBox(tr("вкл постоянно"))
+        self.aux_on_perm.setFont(font)
+        self.aux_on_perm.setChecked(True)
+        self.aux_on_perm.setToolTip(
+            tr("Установлена — работает до команды «Выкл» или снятия "
+               "питания; снята — МК выключает через указанное время")
         )
-        on_row.addWidget(self.aux_on_time_en)
+        on_row.addWidget(self.aux_on_perm)
+        on_row.addWidget(_small_label(tr("Время включения, мс"), font))
         self.aux_on_time = QSpinBox()
         self.aux_on_time.setFont(font)
         self.aux_on_time.setRange(1, 999999)
         self.aux_on_time.setValue(100)
-        self.aux_on_time.setSuffix(tr(" мс"))
         self.aux_on_time.setFixedWidth(96)
         self.aux_on_time.setEnabled(False)
         on_row.addWidget(self.aux_on_time)
         on_row.addStretch()
         plain_layout.addLayout(on_row)
-        plain_hint = QLabel(
-            tr("«Вкл» без срока — до команды «Выкл» или до снятия "
-               "питания МК")
-        )
-        plain_hint.setFont(font)
-        plain_hint.setStyleSheet("color: #9A9AA5;")
-        plain_hint.setWordWrap(True)
-        plain_layout.addWidget(plain_hint)
         plain_layout.addStretch()
-        self.aux_on_time_en.toggled.connect(self.aux_on_time.setEnabled)
-        self.aux_on_time_en.toggled.connect(mark_dirty)
+        self.aux_on_perm.toggled.connect(
+            lambda on: self.aux_on_time.setEnabled(not on)
+        )
+        self.aux_on_perm.toggled.connect(mark_dirty)
         self.aux_on_time.valueChanged.connect(mark_dirty)
 
         pulse = QWidget()
@@ -2731,40 +2827,43 @@ class _ActionItem(QWidget):
         self.aux_pwm_duty.setFixedWidth(80)
         pwm_row.addWidget(_small_label(tr("Заполнение"), font))
         pwm_row.addWidget(self.aux_pwm_duty)
-        # «время включения» с галочкой (отчёт мастера): без галочки
-        # ШИМ работает до команды «Выкл»; с галочкой — указанное
-        # время 1–999999 мс и выключается сам.
-        self.aux_pwm_time_en = QCheckBox(tr("время включения"))
-        self.aux_pwm_time_en.setFont(font)
-        self.aux_pwm_time_en.setToolTip(
-            tr("Снята — ШИМ работает до команды «Выкл»; "
-               "установлена — выключается через указанное время")
+        # «вкл постоянно» для ШИМ (CM-F11): галочка по умолчанию —
+        # ШИМ до команды «Выкл»/снятия питания; снятая — «Время
+        # включения, мс» (строго положительное) и МК выключает сам.
+        self.aux_pwm_perm = QCheckBox(tr("вкл постоянно"))
+        self.aux_pwm_perm.setFont(font)
+        self.aux_pwm_perm.setChecked(True)
+        self.aux_pwm_perm.setToolTip(
+            tr("Установлена — ШИМ до команды «Выкл» или снятия "
+               "питания; снята — МК выключает через указанное время")
         )
-        pwm_row.addWidget(self.aux_pwm_time_en)
+        pwm_row.addWidget(self.aux_pwm_perm)
+        pwm_row.addWidget(_small_label(tr("Время включения, мс"), font))
         self.aux_pwm_time = QSpinBox()
         self.aux_pwm_time.setFont(font)
         self.aux_pwm_time.setRange(1, 999999)
         self.aux_pwm_time.setValue(100)
-        self.aux_pwm_time.setSuffix(tr(" мс"))
         self.aux_pwm_time.setFixedWidth(96)
         self.aux_pwm_time.setEnabled(False)
         pwm_row.addWidget(self.aux_pwm_time)
         pwm_row.addStretch()
         pwm_layout.addLayout(pwm_row)
-        self.aux_pwm_time_en.toggled.connect(self.aux_pwm_time.setEnabled)
+        self.aux_pwm_perm.toggled.connect(
+            lambda on: self.aux_pwm_time.setEnabled(not on)
+        )
 
         for sub in (plain, pulse, pwm):
             self._aux_stack.addWidget(sub)
         pl.addWidget(self._aux_stack)
         self._stack.addWidget(page)
 
-        self.aux_channel.valueChanged.connect(mark_dirty)
+        self.aux_channel.currentIndexChanged.connect(mark_dirty)
+        self.aux_channel.currentIndexChanged.connect(self._update_summary)
         self.aux_use_var.toggled.connect(mark_dirty)
         self.aux_use_var.toggled.connect(self._refresh_aux_override)
         self.aux_mode.currentIndexChanged.connect(self._on_aux_mode)
         self.aux_mode.currentIndexChanged.connect(mark_dirty)
-        self.aux_delay.valueChanged.connect(mark_dirty)
-        self.aux_pwm_time_en.toggled.connect(mark_dirty)
+        self.aux_pwm_perm.toggled.connect(mark_dirty)
         for spin in (
             self.aux_pulse_on, self.aux_pulse_off, self.aux_pulse_count,
             self.aux_pwm_freq, self.aux_pwm_duty, self.aux_pwm_time,
@@ -3100,6 +3199,9 @@ class _ActionItem(QWidget):
         # «Запись DATA в кэш» — та же кэш-переменная (отчёт мастера).
         self.cache_var.set_names(cache, tr("— не выбрано —"))
         self._abort.refresh_variables()
+        # Имена доп. каналов (CM-F10).
+        self.aux_channel.refresh_names()
+        self._update_summary()
 
     def _menu_spec(self) -> list[tuple[str, list | None]]:
         """Виды действий → заполненные переменные → команды — для
@@ -3128,8 +3230,10 @@ class _ActionItem(QWidget):
                     for label, p in aux_modes
                 ],
             )
+            # Все семь назначенных пинов — выходы (CM-F09): фильтра
+            # «OUT1-4» больше нет, действия доступны всем каналам.
             for name, ch, _func in _aux_channel_names(self)
-            if 1 <= ch <= 4  # выходные каналы OUT1-4 (отчёт мастера)
+            if 1 <= ch <= AUX_CH_COUNT
         ]
         return [
             (_ACT_AUX, aux_vars),
@@ -3204,22 +3308,22 @@ class _ActionItem(QWidget):
                 # явные поля ниже — видимый запасной вариант.
                 "aux_use_var": self.aux_use_var.isChecked(),
                 "aux_mode": self.aux_mode.currentData(),
-                "aux_delay": self.aux_delay.value(),
                 "aux_pulse_on": self.aux_pulse_on.value(),
                 "aux_pulse_off": self.aux_pulse_off.value(),
                 "aux_pulse_count": self.aux_pulse_count.value(),
                 "aux_pwm_freq": self.aux_pwm_freq.value(),
                 "aux_pwm_duty": self.aux_pwm_duty.value(),
-                # Без галочки «время включения» — 0: до «Выкл»
-                # (нулевой срок бессрочность молча не означает —
-                # CM-HW-02).
+                # CM-F11: галочка «вкл постоянно» — 0 срока = до
+                # «Выкл»/питания; снятая — положительное время
+                # включения, выключает сам МК. Старое скрытое
+                # значение не влияет на выполнение.
                 "aux_pwm_time": (
-                    self.aux_pwm_time.value()
-                    if self.aux_pwm_time_en.isChecked() else 0
+                    0 if self.aux_pwm_perm.isChecked()
+                    else self.aux_pwm_time.value()
                 ),
                 "aux_on_time": (
-                    self.aux_on_time.value()
-                    if self.aux_on_time_en.isChecked() else 0
+                    0 if self.aux_on_perm.isChecked()
+                    else self.aux_on_time.value()
                 ),
             }
         elif atype == _ACT_CACHE:
@@ -3309,7 +3413,6 @@ class _ActionItem(QWidget):
             self.aux_use_var.setChecked(bool(action.get("aux_use_var")))
             midx = self.aux_mode.findData(action.get("aux_mode", "on"))
             self.aux_mode.setCurrentIndex(midx if midx >= 0 else 0)
-            self.aux_delay.setValue(int(action.get("aux_delay", 0) or 0))
             self.aux_pulse_on.setValue(
                 int(action.get("aux_pulse_on", 100) or 100)
             )
@@ -3326,10 +3429,10 @@ class _ActionItem(QWidget):
                 int(action.get("aux_pwm_duty", 50) or 50)
             )
             pwm_time = int(action.get("aux_pwm_time", 0) or 0)
-            self.aux_pwm_time_en.setChecked(pwm_time > 0)
+            self.aux_pwm_perm.setChecked(pwm_time <= 0)
             self.aux_pwm_time.setValue(max(1, pwm_time))
             on_time = int(action.get("aux_on_time", 0) or 0)
-            self.aux_on_time_en.setChecked(on_time > 0)
+            self.aux_on_perm.setChecked(on_time <= 0)
             self.aux_on_time.setValue(max(1, on_time))
             self._refresh_pulse_graph()
         elif atype == _ACT_CACHE:
@@ -3353,7 +3456,16 @@ class _ActionItem(QWidget):
                 self.cv_op.currentData() == _CACHE_OP_SEND
             )
         # Общие параметры действия (отчёт мастера).
-        self.exec_delay.setValue(int(action.get("exec_delay", 0) or 0))
+        # CM-F11: единая «Задержка» — легаси aux_delay складывается
+        # в exec_delay один раз (старый файл: отдельная «Пауза до
+        # действия» срабатывала ПОСЛЕ exec_delay-таймера, поэтому
+        # реальная задержка до начала действия — их сумма). Ключ
+        # type у старых действий может отсутствовать — сверяем
+        # разрешённый тип.
+        delay = int(action.get("exec_delay", 0) or 0)
+        if atype == _ACT_AUX:
+            delay += int(action.get("aux_delay", 0) or 0)
+        self.exec_delay.setValue(min(delay, self.exec_delay.maximum()))
         self._abort.write(action.get("abort"))
         self._update_summary()
 
@@ -3362,20 +3474,21 @@ class _ActionItem(QWidget):
         импульсы доп канал №1», «ВКЛ ШИМ №2», «Фрейм» (отчёт мастера)."""
         atype = self._type.currentData()
         if atype == _ACT_AUX:
-            ch = self.aux_channel.value()
+            # Имя назначенного канала вместо номера (CM-F10).
+            ch = _aux_channel_label(self, self.aux_channel.value())
             mode = self.aux_mode.currentData()
             if mode == "off":
-                text = tr("Выкл доп канал №{0}").format(ch)
+                text = tr("Выкл {0}").format(ch)
             elif mode == "pulse":
-                text = tr("Вкл импульсы доп канал №{0}").format(ch)
+                text = tr("Вкл импульсы {0}").format(ch)
             elif mode == "pwm":
-                text = tr("ВКЛ ШИМ №{0}").format(ch)
-            elif self.aux_on_time_en.isChecked():
-                text = tr("Вкл доп канал №{0} на {1} мс").format(
+                text = tr("ВКЛ ШИМ {0}").format(ch)
+            elif not self.aux_on_perm.isChecked():
+                text = tr("Вкл {0} на {1} мс").format(
                     ch, self.aux_on_time.value()
                 )
             else:
-                text = tr("Вкл доп канал №{0}").format(ch)
+                text = tr("Вкл {0}").format(ch)
             if self.aux_use_var.isChecked():
                 text += tr(" (настройки выхода)")
         elif atype == _ACT_VAR:
@@ -3437,50 +3550,12 @@ class RuleRowWidget(QWidget):
         """Оранжевый треугольник «программа ≠ записи в МК»."""
         self._dirty_badge.setVisible(bool(dirty))
 
-    def set_executor(self, owner: str, reason: str | None) -> None:
-        """Бейдж владельца исполнения программы (ревью CM-R4):
-        «устройство» — камень исполняет автономно, «ПК» — программа
-        живёт в приложении (причина — в подсказке), «не записано» —
-        программа ещё не уходила в камень, «выключена» — неактивна."""
-        text, color, tip = {
-            "device": (
-                tr("устройство"), "#7FBF7F",
-                tr("Исполняется устройством автономно — работает "
-                   "без приложения") + (
-                    f"; {reason}" if reason else ""
-                ),
-            ),
-            "conflict": (
-                tr("конфликт"), "#C96A6A",
-                tr("Содержимое устройства не совпадает с "
-                   "конфигурацией приложения — исполнение ПК "
-                   "приостановлено, пересохраните настройки"),
-            ),
-            "suspended": (
-                tr("пауза"), "#C9A86A",
-                tr("Владелец исполнения не подтверждён — область "
-                   "устройства ещё не прочитана; исполнение ПК "
-                   "приостановлено до проверки"),
-            ),
-            "pc": (
-                tr("ПК"), "#7FA8C9",
-                tr("Исполняется приложением") + (
-                    f": {reason}" if reason else ""
-                ),
-            ),
-            "unsaved": (
-                tr("не записано"), "#C9A86A",
-                tr("Программа ещё не записана в устройство"),
-            ),
-            "off": (
-                tr("выключена"), "#8A8A92",
-                tr("Программа выключена"),
-            ),
-        }.get(owner, (owner, "#8A8A92", ""))
-        self._executor_label.setText(text)
-        self._executor_label.setStyleSheet(f"color: {color};")
-        self._executor_label.setToolTip(tip)
-        self._executor_label.setVisible(True)
+    def set_executor(self, owner: str, reason: str | None) -> None:  # noqa: ARG002
+        """CM-F10 п.5: бейдж владельца исполнения удалён из шапки
+        программы. Внутренняя owner-логика сохранена — состояние
+        запоминается для отладки/проверки сохранения, UI не рисует
+        бейдж «ПК»/«устройство»."""
+        self._executor_state = (owner, reason)
 
     # ---- виджеты -------------------------------------------------------
 
@@ -3508,19 +3583,26 @@ class RuleRowWidget(QWidget):
         # (отчёт мастера).
         self._remove_button = _close_button(font, tr("Удалить программу"))
         self._remove_button.clicked.connect(self._on_remove)
-        self._summary_label = QLabel()
+        # Сводка свёрнутой программы — кликабельна: повторное
+        # открытие/правка программы сколько угодно раз (CM-F10:
+        # «после закрытия дерева настройки строка становится
+        # некликабельной»).
+        self._summary_label = _ClickableSummary(
+            on_click=self._toggle_collapsed, colored=False
+        )
         self._summary_label.setFont(font)
+        self._summary_label.setToolTip(tr("Развернуть программу"))
         self._summary_label.setVisible(False)
         self._counter_label = QLabel("0")
         self._counter_label.setFont(font)
         self._counter_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._counter_label.setFixedWidth(36)
         self._counter_label.setToolTip(tr("Срабатываний"))
-        # Бейдж владельца исполнения — «устройство»/«ПК»/«не
-        # записано» (ревью CM-R4: владелец должен быть виден).
-        self._executor_label = QLabel()
-        self._executor_label.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        self._executor_label.setVisible(False)
+        # CM-F10 п.5: бейдж владельца исполнения («устройство»/«ПК»)
+        # убран из шапки программы. Внутренняя owner-логика
+        # (_device_managed/_pc_flex_allowed) сохраняется — она
+        # управляет исполнением, а о невозможности автономной записи
+        # сообщается на этапе проверки/сохранения.
 
         self._number_label = QLabel("№")
         self._number_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
@@ -3586,7 +3668,6 @@ class RuleRowWidget(QWidget):
         header_layout.addWidget(self._summary_label, 2)
         header_layout.addWidget(_small_label(tr("Срабатываний:"), font))
         header_layout.addWidget(self._counter_label)
-        header_layout.addWidget(self._executor_label)
         header_layout.addWidget(self._collapse_button)
         header_layout.addWidget(self._remove_button)
         layout.addWidget(self._header)
@@ -4057,6 +4138,10 @@ class FlexibleLogicTab(QWidget):
         # Состояние доп. каналов OUT1-4 (ПК-зеркало команд CMD_AUX_SET):
         # канал → 0/1. События/условия «Доп канал» опираются на него.
         self._aux_states: dict[int, int] = {}
+        # CM-F11: счётчик команд на канал — отложенный коллбек
+        # устаревшей команды не перекрывает более новую (OFF должен
+        # отменять ещё не сработавший ON, а не наоборот).
+        self._aux_cmd_seq: dict[int, int] = {}
         self._aux_flags: dict[tuple[int, int, int], bool] = {}
         # Признак «условие дин. события уже истинно» — событие «Стало
         # больше/меньше» — фронт булева состояния, а не каждый кадр.
@@ -4355,8 +4440,14 @@ class FlexibleLogicTab(QWidget):
         (protocol>=12)."""
         try:
             proto = self._serial_manager.device_protocol_version()
+            variables = (
+                self._variables_tab.export_config()
+                if self._variables_tab is not None else None
+            )
             flags = (
-                managed_flags(self._runtime_rules, proto)
+                managed_flags(
+                    self._runtime_rules, proto, variables=variables
+                )
                 if self._device_flex_state == "verified" else []
             )
         except Exception:  # noqa: BLE001
@@ -4367,15 +4458,26 @@ class FlexibleLogicTab(QWidget):
         self._update_executor_badges()
 
     def _update_executor_badges(self) -> None:
-        """Бейджи «устройство/ПК» в шапках программ — по снимку
-        записанных в МК правил (_runtime_rules): именно они
-        исполняются, черновик может отличаться (ревью CM-R4)."""
+        """Владелец исполнения программ — по снимку записанных в МК
+        правил (_runtime_rules): именно они исполняются, черновик
+        может отличаться (ревью CM-R4).
+
+        CM-F10 п.5: визуальный бейдж «устройство/ПК» в шапке удалён —
+        метод теперь только фиксирует состояние владельца в строке
+        (row._executor_state), которое используется внутренней
+        логикой исполнения/проверки сохранения."""
         try:
             proto = self._serial_manager.device_protocol_version()
         except Exception:  # noqa: BLE001
             proto = 0
         try:
-            info = executor_info(self._runtime_rules, proto)
+            variables = (
+                self._variables_tab.export_config()
+                if self._variables_tab is not None else None
+            )
+            info = executor_info(
+                self._runtime_rules, proto, variables=variables
+            )
         except Exception:  # noqa: BLE001
             info = []
         for i, row in enumerate(self._row_widgets):
@@ -4427,7 +4529,7 @@ class FlexibleLogicTab(QWidget):
                         )
                     row.set_executor("pc", reason)
             except Exception:  # noqa: BLE001
-                row._executor_label.setVisible(False)
+                pass
 
     def _pc_flex_allowed(self) -> bool:
         """Разрешено ли ПК-исполнение программ ГЛ (ревью CM-R9/R10).
@@ -5326,6 +5428,17 @@ class FlexibleLogicTab(QWidget):
         if has_abort:
             self._pending_actions.append(entry)
         if delay > 0:
+            # CM-FR05: «последняя команда канала побеждает» считается
+            # по моменту ВЫДАЧИ, а не срабатывания таймера — иначе
+            # OFF/новый режим, пришедший во время чужой «Задержки»,
+            # проигрывал бы старому отложенному ON. seq канала
+            # резервируется при постановке на таймер, а не в
+            # _run_actions_now.
+            if action.get("aux_enabled"):
+                ch = int(action.get("aux_channel", 1) or 1)
+                seq = self._aux_cmd_seq.get(ch, 0) + 1
+                self._aux_cmd_seq[ch] = seq
+                entry["action"]["_aux_seq"] = seq
             # Программа занята до исполнения отложенного действия —
             # повторный пакет с той же DATA в это время не
             # перезапускает её (отчёт мастера).
@@ -5523,8 +5636,10 @@ class FlexibleLogicTab(QWidget):
                     )
 
         # 3. Доп канал OUT1-4: «Вкл» держится до «Выкл»/питания,
-        #    импульсы и ШИМ крутит сам МК (aux_out.c). «Пауза до
-        #    действия» — PC-таймер, как у фреймов.
+        #    импульсы и ШИМ крутит сам МК (aux_out.c). CM-F11:
+        #    единая «Задержка» уже оттикала в _run_actions; aux_delay
+        #    остаётся только для старых снимков из файла/камня без
+        #    прохода через редактор (legacy-совместимость).
         if action.get("aux_enabled"):
             # CM-N7: «из настроек выхода» — режим и ШИМ-параметры
             # берутся из настроек выхода переменной этого канала
@@ -5561,15 +5676,31 @@ class FlexibleLogicTab(QWidget):
             }
 
             aux_gen = self._exec_generation
+            # «Последняя команда побеждает» на канал: OFF/новый режим,
+            # выданный позже, отменяет ещё не сработавший отложенный
+            # коллбек — устаревший таймер не гасит новый запуск.
+            # CM-FR05: для действий с «Задержкой» seq уже зарезервирован
+            # в _run_actions — иначе поздний OFF не отменял отложенный
+            # ON (seq присваивался бы только при срабатывании таймера).
+            aux_seq = action.get("_aux_seq")
+            if aux_seq is None:
+                aux_seq = self._aux_cmd_seq.get(channel, 0) + 1
+                self._aux_cmd_seq[channel] = aux_seq
 
             def fire_aux(
                 ch=channel, m=mode, kw=kwargs, mn=mode_name,
-                g=aux_gen,
+                g=aux_gen, s=aux_seq,
             ) -> None:
                 if g != self._exec_generation:
                     logger.info(
                         "ГЛ: команда доп канала №%d отброшена — "
                         "сменилось поколение исполнения", ch,
+                    )
+                    return
+                if s != self._aux_cmd_seq.get(ch):
+                    logger.info(
+                        "ГЛ: команда доп канала №%d отброшена — "
+                        "выдана более новая", ch,
                     )
                     return
                 if not self._pc_flex_allowed():

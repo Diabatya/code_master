@@ -37,6 +37,7 @@ LDFLAGS = $(MCU) -specs=nano.specs -specs=nosys.specs -TSTM32F105RCTx_BOOTLOADER
 C_SOURCES = \
   Src/main.c \
   Src/bootloader.c \
+  Src/device_identity.c \
   Src/event_log_bl.c \
   Src/usbd_cdc_if.c \
   Src/usbd_conf.c \

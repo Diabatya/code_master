@@ -274,33 +274,303 @@ class TestStoragePreserve:
         assert writes[0] == ("w", APP_METADATA_PAGE_ADDR, 4)
 
     def test_config_only_update_keeps_metadata(self) -> None:
-        """Образ только страницы идентификации (без кода) не гасит APP1
-        и не пишет синтетические метаданные поверх чужого образа."""
+        """CM-F03: образ только с VER1 (без кода) дописывает версию в
+        слот страницы метаданных — запись APP1 и идентичность
+        устройства не трогаются."""
+        from core.stm32_info import (
+            APP_METADATA_VER_OFFSET,
+            build_ver_record,
+            parse_device_fw_version,
+        )
+
         sim = FlashSim()
         old_code = _app_code(2 * PAGE, 0x11)
         _flash_app(sim, old_code)
         bl = _bl_on_sim(sim)
         sim.ops.clear()
         info_page = bytearray(b"\xFF" * PAGE)
-        info_page[0:4] = (0x43464730).to_bytes(4, "little")  # CFG0
-        info_page[1024:1028] = (0x56455231).to_bytes(4, "little")  # VER1
+        info_page[1024:1056] = build_ver_record("1.2.3")
         path = _tmp_bin(bytes(info_page))
         try:
             bl.flash_firmware(
-                path, DEVICE_INFO_PAGE_ADDR, page_size=PAGE,
+                path,
+                DEVICE_INFO_PAGE_ADDR,
+                page_size=PAGE,
                 skip_blank=False,
             )
         finally:
             os.unlink(path)
-        # Метаданные приложения не инвалидировались и не перезаписаны.
+        # Метаданные приложения остались валидными, VER1 — в слоте @32.
         meta = sim.read(APP_METADATA_PAGE_ADDR, 4)
         assert meta == APP_METADATA_MAGIC.to_bytes(4, "little")
+        ver = parse_device_fw_version(sim.read(APP_METADATA_PAGE_ADDR, APP_METADATA_PAGE_SIZE))
+        assert ver == "1.2.3"
+        slot = sim.read(APP_METADATA_PAGE_ADDR + APP_METADATA_VER_OFFSET, 32)
+        assert slot == build_ver_record("1.2.3")
+        # Страница идентичности не стиралась; допустима только дозапись
+        # VER1 в пустой слот (0xFF→данные), никаких иных операций.
         assert not [
-            op for op in sim.ops
-            if op[1] == APP_METADATA_PAGE_ADDR
+            op for op in sim.ops if op[0] == "e" and DEVICE_INFO_PAGE_ADDR <= op[1] < DEVICE_INFO_PAGE_ADDR + PAGE
         ]
+        assert all(
+            op[1] == DEVICE_INFO_PAGE_ADDR + 1024 and op[2] == 32
+            for op in sim.ops
+            if op[0] == "w" and DEVICE_INFO_PAGE_ADDR <= op[1] < DEVICE_INFO_PAGE_ADDR + PAGE
+        )
         # Код приложения не пострадал.
         assert sim.read(APPLICATION_BASE_ADDR, len(old_code)) == old_code
+
+    def test_config_page_with_cfg0_refused_before_device(self) -> None:
+        """CM-F03: образ, несущий CFG0/конфигурацию (тип/серийник) —
+        отказ ДО любых операций с устройством: CDC-путь идентичность
+        не меняет, только первичное программирование (DFU/ST-Link)."""
+        sim = FlashSim()
+        old_code = _app_code(2 * PAGE, 0x11)
+        _flash_app(sim, old_code)
+        # Идентичность на устройстве — «TESTDEVICE01».
+        self._plant = bytearray(b"\xFF" * PAGE)
+        self._plant[0:4] = (0x43464730).to_bytes(4, "little")
+        self._plant[4] = 3
+        self._plant[5:8] = b"DEV"
+        sim.erase(DEVICE_INFO_PAGE_ADDR, PAGE)
+        sim.write(DEVICE_INFO_PAGE_ADDR, bytes(self._plant))
+        bl = _bl_on_sim(sim)
+        sim.ops.clear()
+        # Образ: код + страница идентичности с ДРУГОЙ конфигурацией.
+        info_page = bytearray(b"\xFF" * PAGE)
+        info_page[0:4] = (0x43464730).to_bytes(4, "little")  # CFG0
+        info_page[4] = 4
+        info_page[5:9] = b"HACK"
+        from intelhex import IntelHex
+
+        ih = IntelHex()
+        ih.puts(APPLICATION_BASE_ADDR, _app_code(2 * PAGE, 0x22))
+        ih.puts(DEVICE_INFO_PAGE_ADDR, bytes(info_page))
+        fd_, path = tempfile.mkstemp(suffix=".hex")
+        os.close(fd_)
+        ih.write_hex_file(path)
+        try:
+            with pytest.raises(BootloaderError, match="идентичности"):
+                bl.flash_firmware(
+                    path,
+                    DEVICE_INFO_PAGE_ADDR,
+                    page_size=PAGE,
+                    skip_blank=False,
+                )
+        finally:
+            os.unlink(path)
+        assert sim.ops == []  # ни чтения, ни стирания, ни записи
+        # Идентичность устройства не изменилась.
+        assert sim.read(DEVICE_INFO_PAGE_ADDR, PAGE) == bytes(self._plant)
+
+    def test_cdc_update_preserves_identity_and_updates_ver(self) -> None:
+        """CM-F03: обновление прошивки с VER1 — страница идентичности
+        ни разу не стирается и не пишется (тип/серийник физически
+        сохраняются даже при обрыве), версия едет на страницу APP1."""
+        from core.stm32_info import (
+            APP_METADATA_VER_OFFSET,
+            build_device_config_page,
+            build_ver_record,
+            parse_device_fw_version,
+        )
+
+        sim = FlashSim()
+        old_code = _app_code(2 * PAGE, 0x11)
+        _flash_app(sim, old_code)
+        # Идентичность с уже занятым слотом VER1 (устройство обновлялось
+        # раньше): страница вообще не получает операций.
+        id_page = build_device_config_page("2CAN", "SN-001", fw_version="1.1.73")
+        sim.erase(DEVICE_INFO_PAGE_ADDR, PAGE)
+        sim.write(DEVICE_INFO_PAGE_ADDR, id_page)
+        bl = _bl_on_sim(sim)
+        sim.ops.clear()
+        # Релизный CDC-образ: код + VER1 на странице идентичности.
+        from intelhex import IntelHex
+
+        ih = IntelHex()
+        new_code = _app_code(2 * PAGE, 0x33)
+        ih.puts(APPLICATION_BASE_ADDR, new_code)
+        ih.puts(DEVICE_INFO_PAGE_ADDR + 1024, build_ver_record("1.1.74"))
+        fd_, path = tempfile.mkstemp(suffix=".hex")
+        os.close(fd_)
+        ih.write_hex_file(path)
+        try:
+            bl.flash_firmware(
+                path,
+                APPLICATION_BASE_ADDR,
+                page_size=PAGE,
+                skip_blank=False,
+                preserve_storage=False,
+            )
+        finally:
+            os.unlink(path)
+        # Идентичность: ни одной операции на странице 0x08008000.
+        assert not [op for op in sim.ops if DEVICE_INFO_PAGE_ADDR <= op[1] < DEVICE_INFO_PAGE_ADDR + PAGE]
+        assert sim.read(DEVICE_INFO_PAGE_ADDR, PAGE) == id_page
+        # VER1 записана на страницу метаданных по смещению 32.
+        meta_page = sim.read(APP_METADATA_PAGE_ADDR, APP_METADATA_PAGE_SIZE)
+        assert parse_device_fw_version(meta_page) == "1.1.74"
+        assert meta_page[:4] == APP_METADATA_MAGIC.to_bytes(4, "little")
+        assert meta_page[APP_METADATA_VER_OFFSET : APP_METADATA_VER_OFFSET + 32] == build_ver_record("1.1.74")
+        # Код записан.
+        assert sim.read(APPLICATION_BASE_ADDR, len(new_code)) == new_code
+
+    def test_cdc_update_appends_ver_to_blank_identity_slot(self) -> None:
+        """CM-F03: второе устройство — слот VER1 страницы идентичности
+        пуст (свежая DFU-заливка). VER1 дозаписывается туда БЕЗ
+        стирания (0xFF→данные) для прошивок <15, читающих версию со
+        страницы идентичности; CFG0 не трогается."""
+        from core.stm32_info import (
+            build_device_config_page,
+            build_ver_record,
+            parse_device_config,
+            parse_device_fw_version,
+        )
+
+        sim = FlashSim()
+        old_code = _app_code(2 * PAGE, 0x11)
+        _flash_app(sim, old_code)
+        id_page = build_device_config_page("2CAN", "SN-002")  # без VER1
+        sim.erase(DEVICE_INFO_PAGE_ADDR, PAGE)
+        sim.write(DEVICE_INFO_PAGE_ADDR, id_page)
+        bl = _bl_on_sim(sim)
+        sim.ops.clear()
+        from intelhex import IntelHex
+
+        ih = IntelHex()
+        new_code = _app_code(2 * PAGE, 0x33)
+        ih.puts(APPLICATION_BASE_ADDR, new_code)
+        ih.puts(DEVICE_INFO_PAGE_ADDR + 1024, build_ver_record("1.1.74"))
+        fd_, path = tempfile.mkstemp(suffix=".hex")
+        os.close(fd_)
+        ih.write_hex_file(path)
+        try:
+            bl.flash_firmware(
+                path,
+                APPLICATION_BASE_ADDR,
+                page_size=PAGE,
+                skip_blank=False,
+                preserve_storage=False,
+            )
+        finally:
+            os.unlink(path)
+        # Страница идентичности: ни одного СТИРАНИЯ; единственная
+        # запись — VER1 в пустой слот (0xFF→данные).
+        assert not [
+            op for op in sim.ops if op[0] == "e" and DEVICE_INFO_PAGE_ADDR <= op[1] < DEVICE_INFO_PAGE_ADDR + PAGE
+        ]
+        writes_on_page = [
+            op for op in sim.ops if op[0] == "w" and DEVICE_INFO_PAGE_ADDR <= op[1] < DEVICE_INFO_PAGE_ADDR + PAGE
+        ]
+        assert writes_on_page == [("w", DEVICE_INFO_PAGE_ADDR + 1024, 32)]
+        # CFG0 (тип/серийник) не пострадал, VER1 на месте и там и там.
+        result_page = sim.read(DEVICE_INFO_PAGE_ADDR, PAGE)
+        parsed = parse_device_config(result_page)
+        assert parsed is not None and parsed[1] == "SN-002"
+        assert parse_device_fw_version(result_page) == "1.1.74"
+        assert parse_device_fw_version(sim.read(APP_METADATA_PAGE_ADDR, APP_METADATA_PAGE_SIZE)) == "1.1.74"
+        assert result_page[1024:1056] == build_ver_record("1.1.74")
+        # Всё вне CFG0 и VER1 осталось стёртым — страница не «переписана».
+        untouched = result_page[32:1024] + result_page[1056:]
+        assert all(b == 0xFF for b in untouched)
+
+    def test_cdc_update_keeps_existing_ver_when_image_has_none(self) -> None:
+        """Образ без VER1: версия с устройства (слот APP1, затем —
+        страница идентичности) переносится в новую страницу APP1."""
+        from core.stm32_info import (
+            build_device_config_page,
+            parse_device_fw_version,
+        )
+
+        sim = FlashSim()
+        old_code = _app_code(2 * PAGE, 0x11)
+        _flash_app(sim, old_code)
+        # VER1 живёт на странице идентичности (устройство со старой
+        # прошивки — слота APP1 ещё нет).
+        id_page = bytearray(build_device_config_page("2CAN", "SN-007", fw_version="1.1.70"))
+        sim.erase(DEVICE_INFO_PAGE_ADDR, PAGE)
+        sim.write(DEVICE_INFO_PAGE_ADDR, bytes(id_page))
+        bl = _bl_on_sim(sim)
+        sim.ops.clear()
+        new_code = _app_code(2 * PAGE, 0x44)
+        path = _tmp_bin(new_code)
+        try:
+            bl.flash_firmware(
+                path,
+                APPLICATION_BASE_ADDR,
+                page_size=PAGE,
+                skip_blank=False,
+                preserve_storage=False,
+            )
+        finally:
+            os.unlink(path)
+        meta_page = sim.read(APP_METADATA_PAGE_ADDR, APP_METADATA_PAGE_SIZE)
+        assert parse_device_fw_version(meta_page) == "1.1.70"
+        # Идентичность цела и не трогалась.
+        assert sim.read(DEVICE_INFO_PAGE_ADDR, PAGE) == bytes(id_page)
+
+    def test_cdc_update_ver_from_app1_slot_wins_over_info_page(self) -> None:
+        """Приоритет сохранённой версии: слот APP1 (новое место)
+        важнее страницы идентичности (старая копия)."""
+        from core.stm32_info import (
+            APP_METADATA_VER_OFFSET,
+            build_ver_record,
+            parse_device_fw_version,
+        )
+
+        sim = FlashSim()
+        old_code = _app_code(2 * PAGE, 0x11)
+        _flash_app(sim, old_code)
+        # Устройство с прошлым обновлением: VER1 уже в слоте APP1,
+        # на странице идентичности — старая копия.
+        meta_pg = bytearray(sim.read(APP_METADATA_PAGE_ADDR, APP_METADATA_PAGE_SIZE))
+        sim.erase(APP_METADATA_PAGE_ADDR, PAGE)
+        meta_pg[APP_METADATA_VER_OFFSET : APP_METADATA_VER_OFFSET + 32] = build_ver_record("1.1.72")
+        sim.write(APP_METADATA_PAGE_ADDR, bytes(meta_pg))
+        id_page = bytearray(b"\xFF" * PAGE)
+        id_page[1024:1056] = build_ver_record("1.1.70")
+        sim.erase(DEVICE_INFO_PAGE_ADDR, PAGE)
+        sim.write(DEVICE_INFO_PAGE_ADDR, bytes(id_page))
+        bl = _bl_on_sim(sim)
+        new_code = _app_code(2 * PAGE, 0x55)
+        path = _tmp_bin(new_code)
+        try:
+            bl.flash_firmware(
+                path,
+                APPLICATION_BASE_ADDR,
+                page_size=PAGE,
+                skip_blank=False,
+                preserve_storage=False,
+            )
+        finally:
+            os.unlink(path)
+        assert parse_device_fw_version(sim.read(APP_METADATA_PAGE_ADDR, APP_METADATA_PAGE_SIZE)) == "1.1.72"
+
+    def test_legacy_ver_offset_in_image_extracted(self) -> None:
+        """VER1 по легаси-смещению 32 (старые образы) извлекается и
+        едет на страницу APP1 как обычно."""
+        from core.stm32_info import (
+            build_ver_record,
+            parse_device_fw_version,
+        )
+
+        sim = FlashSim()
+        old_code = _app_code(2 * PAGE, 0x11)
+        _flash_app(sim, old_code)
+        bl = _bl_on_sim(sim)
+        info_page = bytearray(b"\xFF" * PAGE)
+        info_page[32:64] = build_ver_record("1.0.9")
+        path = _tmp_bin(bytes(info_page))
+        try:
+            bl.flash_firmware(
+                path,
+                DEVICE_INFO_PAGE_ADDR,
+                page_size=PAGE,
+                skip_blank=False,
+            )
+        finally:
+            os.unlink(path)
+        assert parse_device_fw_version(sim.read(APP_METADATA_PAGE_ADDR, APP_METADATA_PAGE_SIZE)) == "1.0.9"
 
 
 class TestStoragePlanCMN1:
@@ -682,7 +952,11 @@ class TestStorageBackupCMN9:
         bl.write_memory = _dying_write  # type: ignore[method-assign]
         path = _tmp_bin(_app_code(4 * PAGE, 0x22))
         try:
-            with pytest.raises(OSError):
+            # CM-F01: restore идёт общим чанкованным путём — обрыв
+            # порта отрабатывается ограниченными повторами и
+            # заканчивается честным BootloaderError, а не «голым»
+            # OSError на целом блобе.
+            with pytest.raises(BootloaderError):
                 bl.flash_firmware(
                     path, APPLICATION_BASE_ADDR, page_size=PAGE,
                     skip_blank=False, preserve_storage=True,
@@ -715,9 +989,85 @@ class TestStorageBackupCMN9:
         written = {b for _a, b in regions}
         assert cfg_blob in written and flx_blob in written
 
-    def test_backup_write_failure_aborts_before_erase(
-        self, monkeypatch
+    def test_abort_on_metadata_page_preserves_identity_and_retries(
+        self,
     ) -> None:
+        """CM-F03: обрыв на записи страницы метаданных (VER1+APP1) —
+        приложение остаётся невалидным (bootloader повторит), а
+        идентичность не пострадала: страница 0x08008000 ни разу не
+        стиралась. Повторная попытка завершается успехом, тип/серийник
+        и версия на местах."""
+        from core.stm32_info import (
+            build_device_config_page,
+            build_ver_record,
+            parse_device_config,
+            parse_device_fw_version,
+        )
+
+        sim = FlashSim()
+        old_code = _app_code(2 * PAGE, 0x11)
+        _flash_app(sim, old_code)
+        id_page = build_device_config_page("2CAN", "SN-777", fw_version="1.1.70")
+        sim.erase(DEVICE_INFO_PAGE_ADDR, PAGE)
+        sim.write(DEVICE_INFO_PAGE_ADDR, id_page)
+        sim.ops.clear()
+
+        bl = _bl_on_sim(sim)
+        real_write = bl.write_memory
+
+        def _dying_write(addr: int, data: bytes) -> None:
+            # Гасим только запись страницы метаданных (invalidate —
+            # 4-байтную — пропускаем: обрыв случается позже).
+            if addr == APP_METADATA_PAGE_ADDR and len(data) > 4:
+                raise OSError("port lost")
+            real_write(addr, data)
+
+        bl.write_memory = _dying_write  # type: ignore[method-assign]
+        from intelhex import IntelHex
+
+        ih = IntelHex()
+        new_code = _app_code(2 * PAGE, 0x33)
+        ih.puts(APPLICATION_BASE_ADDR, new_code)
+        ih.puts(DEVICE_INFO_PAGE_ADDR + 1024, build_ver_record("1.1.74"))
+        fd_, path = tempfile.mkstemp(suffix=".hex")
+        os.close(fd_)
+        ih.write_hex_file(path)
+        try:
+            with pytest.raises(BootloaderError):
+                bl.flash_firmware(
+                    path,
+                    APPLICATION_BASE_ADDR,
+                    page_size=PAGE,
+                    skip_blank=False,
+                    preserve_storage=False,
+                )
+            # Страница метаданных стёрта — APP1 невалиден (устройство в
+            # bootloader). Идентичность полностью цела — стираний страницы
+            # не было вообще, записей тоже (слот VER1 занят).
+            assert not [op for op in sim.ops if DEVICE_INFO_PAGE_ADDR <= op[1] < DEVICE_INFO_PAGE_ADDR + PAGE]
+            assert sim.read(DEVICE_INFO_PAGE_ADDR, PAGE) == id_page
+            meta = sim.read(APP_METADATA_PAGE_ADDR, 4)
+            assert meta != APP_METADATA_MAGIC.to_bytes(4, "little")
+
+            # Повторная попытка (новый объект — как новый запуск программы).
+            bl2 = _bl_on_sim(sim)
+            sim.ops.clear()
+            regions = bl2.flash_firmware(
+                path,
+                APPLICATION_BASE_ADDR,
+                page_size=PAGE,
+                skip_blank=False,
+                preserve_storage=False,
+            )
+        finally:
+            os.unlink(path)
+        assert regions
+        assert sim.read(DEVICE_INFO_PAGE_ADDR, PAGE) == id_page
+        assert parse_device_config(sim.read(DEVICE_INFO_PAGE_ADDR, PAGE))[1] == "SN-777"
+        assert parse_device_fw_version(sim.read(APP_METADATA_PAGE_ADDR, APP_METADATA_PAGE_SIZE)) == "1.1.74"
+        assert sim.read(APPLICATION_BASE_ADDR, len(new_code)) == new_code
+
+    def test_backup_write_failure_aborts_before_erase(self, monkeypatch) -> None:
         """Сбой записи резерва на ПК — обновление отменяется ДО
         первого стирания: без файла восстановиться нечем."""
         sim = FlashSim()
@@ -856,18 +1206,24 @@ class TestPartialWriteRecoveryCMN12:
         failed = {"done": False}
 
         def _dying_write(addr: int, data: bytes) -> None:
-            if addr == new_end and not failed["done"]:
-                # Первые 32 байта — заголовок (CRC8 валиден) + кусок
-                # payload; CRC32 полного payload не сойдётся.
-                real_write(addr, data[:32])
-                failed["done"] = True
+            if addr == new_end:
+                if not failed["done"]:
+                    # Первые 32 байта — заголовок (CRC8 валиден) +
+                    # кусок payload; CRC32 полного payload не
+                    # сойдётся. Падение повторяется на каждой
+                    # попытке чанкованного _write_region — иначе
+                    # retry молча дозапишет блок.
+                    real_write(addr, data[:32])
+                    failed["done"] = True
                 raise OSError("port lost")
             real_write(addr, data)
 
         bl.write_memory = _dying_write  # type: ignore[method-assign]
         path = _tmp_bin(code)
         try:
-            with pytest.raises(OSError):
+            # CM-F01: обрыв порта отрабатывается повторами и
+            # заканчивается честным BootloaderError.
+            with pytest.raises(BootloaderError):
                 bl.flash_firmware(
                     path, APPLICATION_BASE_ADDR, page_size=PAGE,
                     skip_blank=False, preserve_storage=True,
@@ -1301,17 +1657,21 @@ class TestExplicitBackupContractCMN19:
         _flash_app(sim, old_code)
         var_blob = _store_region(VAR_MAGIC, 30, fill=0x55)
 
+        from core.stm32_info import build_ver_record
+
         info_page = bytearray(b"\xFF" * PAGE)
-        info_page[0:4] = (0x43464730).to_bytes(4, "little")  # CFG0
-        info_page[1024:1028] = (0x56455231).to_bytes(4, "little")  # VER1
+        info_page[1024:1056] = build_ver_record("1.1.73")  # VER1
         bl = _bl_on_sim(sim)
         sim.ops.clear()
         path = _tmp_bin(bytes(info_page))
         try:
             with pytest.raises(BootloaderError, match="application"):
                 bl.flash_firmware(
-                    path, DEVICE_INFO_PAGE_ADDR, page_size=PAGE,
-                    skip_blank=False, preserve_storage=True,
+                    path,
+                    DEVICE_INFO_PAGE_ADDR,
+                    page_size=PAGE,
+                    skip_blank=False,
+                    preserve_storage=True,
                     explicit_backup=[(0x0803B800, var_blob)],
                 )
         finally:
@@ -1354,28 +1714,35 @@ class TestExplicitBackupContractCMN19:
         assert meta == APP_METADATA_MAGIC.to_bytes(4, "little")
 
     def test_config_only_without_backup_still_works(self) -> None:
-        """Обычная config-only запись без явного резерва — прежнее
-        поведение: страница пишется, APP1 не портится."""
+        """Обычная version-only запись без явного резерва — VER1
+        дописывается в слот страницы APP1, идентичность не трогается."""
+        from core.stm32_info import (
+            build_ver_record,
+            parse_device_fw_version,
+        )
+
         sim = FlashSim()
         self._plant_id_page(sim)
         old_code = _app_code(2 * PAGE, 0x11)
         _flash_app(sim, old_code)
 
         info_page = bytearray(b"\xFF" * PAGE)
-        info_page[0:4] = (0x43464730).to_bytes(4, "little")
-        info_page[1024:1028] = (0x56455231).to_bytes(4, "little")
+        info_page[1024:1056] = build_ver_record("1.1.73")  # VER1
         bl = _bl_on_sim(sim)
         path = _tmp_bin(bytes(info_page))
         try:
             regions = bl.flash_firmware(
-                path, DEVICE_INFO_PAGE_ADDR, page_size=PAGE,
+                path,
+                DEVICE_INFO_PAGE_ADDR,
+                page_size=PAGE,
                 skip_blank=False,
             )
         finally:
             os.unlink(path)
-        assert regions  # страница реально записана
+        assert regions  # страница метаданных реально записана
         meta = sim.read(APP_METADATA_PAGE_ADDR, 4)
         assert meta == APP_METADATA_MAGIC.to_bytes(4, "little")
+        assert parse_device_fw_version(sim.read(APP_METADATA_PAGE_ADDR, APP_METADATA_PAGE_SIZE)) == "1.1.73"
 
     def test_bool_backup_rejected_before_any_device_op(self) -> None:
         """CM-N18: bool (как у Qt clicked) на границе flash_firmware —
@@ -1519,14 +1886,12 @@ class TestExplicitBackupWorkerPath:
         _flash_app(sim, _app_code(2 * PAGE, 0x11))
         var_blob = _store_region(VAR_MAGIC, 30, fill=0x55)
 
-        worker, bl = self._worker(
-            qapp, sim, [(0x0803B800, var_blob)]
-        )
-        monkeypatch.setattr(
-            fd.Bootloader, "open", staticmethod(lambda *_a, **_kw: bl)
-        )
+        worker, bl = self._worker(qapp, sim, [(0x0803B800, var_blob)])
+        monkeypatch.setattr(fd.Bootloader, "open", staticmethod(lambda *_a, **_kw: bl))
+        from core.stm32_info import build_ver_record
+
         info_page = bytearray(b"\xFF" * PAGE)
-        info_page[0:4] = (0x43464730).to_bytes(4, "little")
+        info_page[1024:1056] = build_ver_record("1.1.73")  # VER1, без CFG0
         fd_, cfg_path = tempfile.mkstemp(suffix=".bin")
         os.write(fd_, bytes(info_page))
         os.close(fd_)
@@ -1538,3 +1903,224 @@ class TestExplicitBackupWorkerPath:
         assert not ok
         assert "application" in msg or "резерв" in msg
         assert not [op for op in sim.ops if op[0] == "e"]
+
+
+def _bl_on_sim_strict(sim: FlashSim) -> Bootloader:
+    """Строгий транспорт AN3155: write_memory отклоняет блоки
+    >BLOCK_SIZE — как настоящий Bootloader.write_memory. Ослабленная
+    подмена записи произвольного размера маскировала полевой обрыв
+    CM-F01 («Блок данных слишком большой: 4096 байт»)."""
+    bl = _bl_on_sim(sim)
+
+    def _write_limited(addr: int, data: bytes) -> None:
+        if len(data) > Bootloader.BLOCK_SIZE:
+            raise BootloaderError(
+                f"Блок данных слишком большой: {len(data)} байт"
+            )
+        sim.write(addr, data)
+
+    bl.write_memory = _write_limited  # type: ignore[method-assign]
+    return bl
+
+
+class TestChunkedRestoreCMF01:
+    """CM-F01: восстановление областей хранилища пишется блоками
+    ≤256 Б общим путём _write_region — как код прошивки. Полевой
+    дамп: FLXH gen=7 на 0x0801B000 (blob 4096) при обновлении на
+    45616-Б образ пересаживался на 0x08015000 и одиночный
+    write_memory(dst, blob) падал ПОСЛЕ стирания."""
+
+    @staticmethod
+    def _plant_dump_map(sim: FlashSim) -> dict[str, bytes]:
+        """Карта полевого дампа v1.1.73: CFGH@0x14800 gen1,
+        FLXH gen2..7 @0x16000..0x1B000, VARH gen1..7
+        @0x39000..0x3F000. APP1 стёрт (обрыв) — scan идёт по всему
+        хвосту."""
+        blobs: dict[str, bytes] = {}
+        cfg = _store_region(CFG_MAGIC, 18, fill=0x43, gen=1)
+        sim.erase(0x08014800, PAGE)
+        sim.write(0x08014800, cfg)
+        blobs["cfg"] = cfg
+        for gen in range(2, 8):
+            flx = _store_region(
+                FLX_MAGIC, 2186 if gen == 7 else 120, fill=0x50 + gen,
+                gen=gen,
+            )
+            addr = 0x08016000 + (gen - 2) * 0x1000
+            sim.erase(addr, len(flx))
+            sim.write(addr, flx)
+            blobs["flex"] = flx  # последний (gen=7) перекрывает
+        # В дампе поколения VARH убывают по адресу: gen=7 на 0x39000,
+        # gen=1 на 0x3F000.
+        for gen in range(1, 8):
+            var = _store_region(
+                VAR_MAGIC, 3707 if gen == 7 else 300, fill=0x70 + gen,
+                gen=gen,
+            )
+            addr = 0x08039000 + (7 - gen) * 0x1000
+            sim.erase(addr, len(var))
+            sim.write(addr, var)
+            blobs["var"] = var
+        return blobs
+
+    def test_field_dump_map_restore_4096(self) -> None:
+        """Фактическая карта: FLXH 0x0801B000 → 0x08015000,
+        каждый write ≤256 Б, полный readback, APP1 последним."""
+        sim = FlashSim()
+        blobs = self._plant_dump_map(sim)
+        bl = _bl_on_sim_strict(sim)
+        sim.ops.clear()
+        new_code = _app_code(45616, 0x22)
+        path = _tmp_bin(new_code)
+        try:
+            regions = bl.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=True,
+            )
+        finally:
+            os.unlink(path)
+        # Ни одной записи >256 Б на транспорте.
+        big = [op for op in sim.ops if op[0] == "w" and op[2] > 256]
+        assert not big, f"write_memory >256 Б: {big[:3]}"
+        # FLXH gen=7 переехал на 0x08015000 целиком.
+        assert sim.read(0x08015000, len(blobs["flex"])) == blobs["flex"]
+        # CFGH и VARH gen=7 на месте/перенесены целиком.
+        assert sim.read(0x08014800, len(blobs["cfg"])) == blobs["cfg"]
+        assert sim.read(0x08039000, len(blobs["var"])) == blobs["var"]
+        # APP1 записан последним и валиден.
+        writes = [op for op in sim.ops if op[0] == "w"]
+        assert APP_METADATA_PAGE_ADDR <= writes[-1][1] < (
+            APP_METADATA_PAGE_ADDR + APP_METADATA_PAGE_SIZE
+        )
+        assert sim.read(APP_METADATA_PAGE_ADDR, 4) == (
+            APP_METADATA_MAGIC.to_bytes(4, "little")
+        )
+        assert (0x08015000, blobs["flex"]) in regions
+
+    @pytest.mark.parametrize(
+        "magic,payload_len",
+        [
+            (CFG_MAGIC, 18),
+            (CFG_MAGIC, 255),
+            (CFG_MAGIC, 256),
+            (CFG_MAGIC, 257),
+            (CFG_MAGIC, 1500),
+            (FLX_MAGIC, 2048),   # blob 4096 — полевая ошибка
+            (FLX_MAGIC, 4096),   # blob 6144 — больше двух страниц
+            (FLX_MAGIC, 4300),
+        ],
+    )
+    def test_restore_sizes_chunked(
+        self, magic: int, payload_len: int
+    ) -> None:
+        """Любой размер области: все write ≤256, readback точный.
+        CFGH — строго одна страница, FLXH — цепочка страниц за ним."""
+        sim = FlashSim()
+        old_code = _app_code(3 * PAGE, 0x11)
+        _flash_app(sim, old_code)
+        old_code_end = APPLICATION_BASE_ADDR + 3 * PAGE
+        if magic == CFG_MAGIC:
+            region_addr = old_code_end
+        else:
+            cfg_blob = _store_region(CFG_MAGIC, 40, fill=0x31, gen=1)
+            sim.erase(old_code_end, PAGE)
+            sim.write(old_code_end, cfg_blob)
+            region_addr = old_code_end + PAGE
+        blob = _store_region(magic, payload_len, fill=0x42, gen=3)
+        sim.erase(region_addr, len(blob))
+        sim.write(region_addr, blob)
+
+        bl = _bl_on_sim_strict(sim)
+        sim.ops.clear()
+        new_code = _app_code(4 * PAGE, 0x22)
+        path = _tmp_bin(new_code)
+        try:
+            bl.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=True,
+            )
+        finally:
+            os.unlink(path)
+        big = [op for op in sim.ops if op[0] == "w" and op[2] > 256]
+        assert not big
+        # Область целиком вычитана с новой каноничной позиции.
+        from core.storage_scan import find_storage_regions
+        tail = sim.read(
+            APPLICATION_BASE_ADDR,
+            FLASH_END_ADDR - APPLICATION_BASE_ADDR,
+        )
+        assert blob in [
+            b for _a, b in find_storage_regions(
+                tail, APPLICATION_BASE_ADDR
+            )
+        ]
+
+    def test_abort_mid_restore_retry_from_backup(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Обрыв на втором блоке restore: APP1 инвалиден, честная
+        ошибка; повтор новым процессом из резерва восстанавливает
+        область блоками ≤256."""
+        sim = FlashSim()
+        old_code = _app_code(3 * PAGE, 0x11)
+        _flash_app(sim, old_code)
+        old_code_end = APPLICATION_BASE_ADDR + 3 * PAGE
+        cfg_blob = _store_region(CFG_MAGIC, 2000, fill=0x42, gen=3)
+        sim.erase(old_code_end, len(cfg_blob))
+        sim.write(old_code_end, cfg_blob)
+        # Страница идентификации — отпечаток для резерва.
+        page = bytearray(b"\xFF" * PAGE)
+        page[0:12] = b"TESTDEVICE01"
+        sim.erase(DEVICE_INFO_PAGE_ADDR, PAGE)
+        sim.write(DEVICE_INFO_PAGE_ADDR, bytes(page))
+
+        bl = _bl_on_sim_strict(sim)
+        real_write = bl.write_memory
+        calls = {"n": 0}
+
+        def _die_on_restore(addr: int, data: bytes) -> None:
+            calls["n"] += 1
+            # Падаем при записи второго блока восстановленного CFGH
+            # (новая позиция за концом выросшего кода).
+            if addr == old_code_end + PAGE + 256:
+                raise BootloaderError("USB CDC обрыв")
+            real_write(addr, data)
+
+        bl.write_memory = _die_on_restore  # type: ignore[method-assign]
+        sim.ops.clear()
+        new_code = _app_code(4 * PAGE, 0x22)
+        path = _tmp_bin(new_code)
+        try:
+            with pytest.raises(BootloaderError, match="USB CDC обрыв"):
+                bl.flash_firmware(
+                    path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                    skip_blank=False, preserve_storage=True,
+                )
+        finally:
+            os.unlink(path)
+        # APP1 инвалиден — повторная операция знает о незавершённости.
+        assert sim.read(APP_METADATA_PAGE_ADDR, 4) != (
+            APP_METADATA_MAGIC.to_bytes(4, "little")
+        )
+        # Резерв создан до стирания.
+        backups = list(tmp_path.glob("storage-*.json"))
+        assert backups, "резерв хранилища не создан до стирания"
+
+        # Повтор новым процессом: строгий транспорт, резерв
+        # доказанно свой (отпечаток info-страницы + sha256 образа).
+        bl2 = _bl_on_sim_strict(sim)
+        path = _tmp_bin(new_code)
+        try:
+            bl2.flash_firmware(
+                path, APPLICATION_BASE_ADDR, page_size=PAGE,
+                skip_blank=False, preserve_storage=True,
+            )
+        finally:
+            os.unlink(path)
+        big = [op for op in sim.ops if op[0] == "w" and op[2] > 256]
+        assert not big
+        new_code_end = APPLICATION_BASE_ADDR + 4 * PAGE
+        assert sim.read(new_code_end, len(cfg_blob)) == cfg_blob
+        assert sim.read(APP_METADATA_PAGE_ADDR, 4) == (
+            APP_METADATA_MAGIC.to_bytes(4, "little")
+        )

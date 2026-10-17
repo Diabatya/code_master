@@ -1,12 +1,12 @@
-"""GUI-регрессии настроек выхода в _AuxDialog (CM-N7): константы
-Выкл/Вкл/ШИМ, частота и заполнение сохраняются и читаются обратно,
-видны реальное имя пина и причина ограничения, а для ШИМ — фазы
-после квантования в сетку целых мс."""
+"""GUI-регрессии _AuxDialog после CM-F09: «Канал» вместо
+«Пин (канал)», без физических имён пинов и «Режима выхода»,
+варианты функций — только выходные (analog_out/pwm), ширина ~×1.5,
+точный текст подсказки, сквозное пронесение легаси out_mode/pwm.
+"""
 
 from __future__ import annotations
 
 import sys
-from typing import Any
 
 import pytest
 
@@ -23,89 +23,123 @@ def qapp():
     yield app
 
 
-def _dialog(qapp, config: dict[str, Any] | None = None):
-    d = vt._AuxDialog(config=config)
-    yield d
-    d.deleteLater()
+def test_dialog_width_and_hint(qapp) -> None:
+    """CM-F09 п.2/п.3: ширина ≥630 логических px, точный текст
+    подсказки о роли канала."""
+    dlg = vt._AuxDialog(config={"type": "aux", "channel": 3})
+    try:
+        assert dlg.minimumWidth() >= 630
+        assert dlg._hint.text() == (
+            "Количество выходов и входов и их названия появятся после "
+            "программирования каналов в устройство. Здесь "
+            "настраивается только роль конкретного канала."
+        )
+    finally:
+        dlg.deleteLater()
 
 
-def test_pwm_fields_roundtrip(qapp) -> None:
+def test_no_pin_names_no_out_mode(qapp) -> None:
+    """CM-F09 п.4–5/п.8: ни имён пинов, ни предупреждения SWCLK,
+    ни настройки «Режим выхода»/ШИМ-полей в диалоге нет."""
     dlg = vt._AuxDialog(config={
-        "type": "aux", "name": "Вентилятор", "channel": 3,
-        "function": "pwm", "out_mode": "pwm",
+        "type": "aux", "channel": 1, "out_mode": "pwm",
         "pwm_freq": 250, "pwm_duty": 40,
     })
-    cfg = dlg.config
-    assert cfg["out_mode"] == "pwm"
-    assert cfg["pwm_freq"] == 250 and cfg["pwm_duty"] == 40
-    assert cfg["channel"] == 3
-    dlg.deleteLater()
+    try:
+        for attr in ("_pin_label", "_conflict", "_out_mode",
+                     "_pwm_row", "_pwm_freq", "_pwm_duty", "_applied"):
+            assert not hasattr(dlg, attr), attr
+        # Ни один виджет диалога не показывает физическое имя пина.
+        from PySide6.QtWidgets import QCheckBox, QLabel
+        texts = [
+            w.text()
+            for cls in (QLabel, QCheckBox)
+            for w in dlg.findChildren(cls)
+        ]
+        assert not any(
+            pin in t for t in texts
+            for pin in ("PA14", "PA15", "PC10", "PC11", "PC12",
+                        "PD2", "PB3", "SWCLK")
+        )
+    finally:
+        dlg.deleteLater()
 
 
-def test_mode_switch_shows_pwm_fields(qapp) -> None:
+def test_functions_are_outputs_only(qapp) -> None:
+    """CM-F09 п.7: «Дискретный вход»/«Дискретный выход» убраны —
+    все семь каналов — выходы."""
     dlg = vt._AuxDialog(config={"type": "aux", "channel": 3})
-    idx = dlg._out_mode.findData("pwm")
-    dlg._out_mode.setCurrentIndex(idx)
-    dlg._refresh_aux_out()
-    assert dlg._pwm_row.isVisibleTo(dlg)
-    # Применённая фаза после квантования: 250 Гц → 4 мс, 50% → 2+2.
-    dlg._pwm_freq.setValue(250)
-    dlg._pwm_duty.setValue(50)
-    assert "2+2" in dlg._applied.text()
-    dlg._out_mode.setCurrentIndex(dlg._out_mode.findData("on"))
-    dlg._refresh_aux_out()
-    assert not dlg._pwm_row.isVisibleTo(dlg)
-    dlg.deleteLater()
+    try:
+        items = [
+            dlg._function.itemData(i)
+            for i in range(dlg._function.count())
+        ]
+        assert items == ["analog_out", "pwm"]
+        labels = [
+            dlg._function.itemText(i)
+            for i in range(dlg._function.count())
+        ]
+        assert not any("вход" in t.lower() for t in labels)
+    finally:
+        dlg.deleteLater()
 
 
-def test_pwm_quantization_shown_not_requested(qapp) -> None:
-    """500 Гц 99% квантуется до 100% — подпись честная."""
+def test_config_roundtrip_channel_function(qapp) -> None:
     dlg = vt._AuxDialog(config={
-        "type": "aux", "channel": 3, "out_mode": "pwm",
-        "pwm_freq": 500, "pwm_duty": 99,
+        "type": "aux", "name": "Вентилятор", "channel": 3,
+        "function": "pwm",
     })
-    assert "2+0" in dlg._applied.text()
-    assert "100.0" in dlg._applied.text()
-    dlg.deleteLater()
+    try:
+        cfg = dlg.config
+        assert cfg["type"] == "aux" and cfg["channel"] == 3
+        assert cfg["function"] == "pwm" and cfg["name"] == "Вентилятор"
+        # Новый диалог не создаёт черновые поля настроек выхода.
+        assert "out_mode" not in cfg and "pwm_freq" not in cfg
+    finally:
+        dlg.deleteLater()
 
 
-def test_pin_conflict_reason_shown(qapp) -> None:
-    """PA14/PD2/PB3 — с причиной ограничения; свободный пин — без."""
-    dlg = vt._AuxDialog(config={"type": "aux", "channel": 1})
-    assert "PA14" in dlg._pin_label.text()
-    assert "SWCLK" in dlg._conflict.text()
-    dlg._channel.setValue(3)
-    dlg._refresh_aux_out()
-    assert dlg._pin_label.text() == "PC10"
-    assert not dlg._conflict.isVisibleTo(dlg)
-    dlg._channel.setValue(7)
-    dlg._refresh_aux_out()
-    assert "CAN1" in dlg._conflict.text()
-    dlg.deleteLater()
+def test_legacy_out_fields_passthrough(qapp) -> None:
+    """CM-F09 п.9: сохранённые out_mode/pwm_* проносятся сквозь
+    диалог неизменными — до миграции действий в снимок сигнал
+    не меняется."""
+    dlg = vt._AuxDialog(config={
+        "type": "aux", "channel": 2, "function": "analog_out",
+        "out_mode": "pwm", "pwm_freq": 250, "pwm_duty": 40,
+    })
+    try:
+        cfg = dlg.config
+        assert cfg["out_mode"] == "pwm"
+        assert cfg["pwm_freq"] == 250 and cfg["pwm_duty"] == 40
+    finally:
+        dlg.deleteLater()
 
 
 def test_flag_kind_unchanged(qapp) -> None:
     dlg = vt._AuxDialog(config={
         "type": "flag", "name": "Бит", "storage": "flash",
     })
-    cfg = dlg.config
-    assert cfg["type"] == "flag" and cfg["storage"] == "flash"
-    assert "out_mode" not in cfg
-    dlg.deleteLater()
+    try:
+        cfg = dlg.config
+        assert cfg["type"] == "flag" and cfg["storage"] == "flash"
+        assert "out_mode" not in cfg
+    finally:
+        dlg.deleteLater()
 
 
-def test_row_label_shows_applied_mode(qapp) -> None:
-    """Строка переменной показывает пин и применённый режим выхода."""
+def test_row_label_shows_channel_not_pin(qapp) -> None:
+    """Строка переменной — «Канал №N · функция», без имени пина
+    и применённого режима выхода (CM-F09 п.5)."""
     from PySide6.QtWidgets import QLabel, QPushButton
 
     row = vt._VariableRow.__new__(vt._VariableRow)
     row.config = {
-        "type": "aux", "channel": 3, "out_mode": "pwm",
-        "pwm_freq": 250, "pwm_duty": 50,
+        "type": "aux", "channel": 3, "function": "pwm",
+        "out_mode": "pwm", "pwm_freq": 250, "pwm_duty": 50,
     }
     row._name_label = QLabel()
     row._state_label = QLabel()
     row._test_btn = QPushButton()
     vt._VariableRow._refresh_labels(row)
     text = row._state_label.text()
-    assert "PC10" in text and "ШИМ" in text
+    assert "Канал №3" in text and "PC10" not in text

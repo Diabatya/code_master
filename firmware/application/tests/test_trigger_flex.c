@@ -25,6 +25,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -96,6 +97,7 @@ static int s_tx_fail_always;   /* nonzero: transmit never succeeds */
 static int s_tx_fail_channel;  /* 0: s_tx_fail hits any channel;
                                   1/2: only that wire channel —
                                   CAN1/CAN2 independence (CM-R8) */
+static int s_vector_mode;      /* argv-режим: печатать каждую отправку */
 
 uint8_t CanBridge_Transmit(const can_frame_t *frame)
 {
@@ -115,6 +117,15 @@ uint8_t CanBridge_Transmit(const can_frame_t *frame)
     s->id = frame->id;
     s->dlc = frame->dlc;
     memcpy(s->data, frame->data, 8);
+  }
+  if (s_vector_mode) {
+    printf("SEND %u %u %08lX %u", (unsigned)s_tick,
+           (unsigned)frame->channel, (unsigned long)frame->id,
+           (unsigned)frame->dlc);
+    for (uint8_t i = 0; i < frame->dlc && i < 8U; i++) {
+      printf(" %02X", frame->data[i]);
+    }
+    printf("\n");
   }
   return 1U;
 }
@@ -277,12 +288,11 @@ static uint32_t build_flex_blob(const trigger_t *records, uint8_t count)
   return build_flex_blob_ver(records, count, 1U);
 }
 
-/* Fresh engine state: no user records, the FLXB tail rebuilt from the
- * blob — same boundary condition Trigger_Init() produces. */
-static void load_flex(const trigger_t *records, uint8_t count)
+/* Fresh engine state: no user records, the FLXB tail rebuilt from
+ * s_flex_blob/s_flex_len — same boundary condition Trigger_Init()
+ * produces. */
+static void reset_engine(void)
 {
-  s_flex_len = build_flex_blob(records, count);
-  s_flex_blob = s_blob;
   s_sent_count = 0;
   s_tx_fail = 0;
   s_tx_fail_always = 0;
@@ -301,6 +311,13 @@ static void load_flex(const trigger_t *records, uint8_t count)
   s_dropped_count = 0U;
   aux_reset();
   Trigger_ReloadFlex();
+}
+
+static void load_flex(const trigger_t *records, uint8_t count)
+{
+  s_flex_len = build_flex_blob(records, count);
+  s_flex_blob = s_blob;
+  reset_engine();
 }
 
 static can_frame_t mk_frame(uint8_t ch, uint32_t id, uint8_t dlc,
@@ -1115,19 +1132,466 @@ static void test_flxb_v2_container(void)
   Trigger_Poll();
   CHECK(s_sent_count == 1, "FLXB v2 must load aux records");
 
-  /* v3 — неизвестная версия: контейнер отвергается целиком. */
-  s_flex_len = build_flex_blob_ver(&t, 1, 3U);
+  /* v4 — неизвестная версия: контейнер отвергается целиком. */
+  s_flex_len = build_flex_blob_ver(&t, 1, 4U);
   s_flex_blob = s_blob;
   s_sent_count = 0;
   s_count = s_user_count = 0U;
   Trigger_ReloadFlex();
   aux_push_event(3U, 1U);
   Trigger_Poll();
-  CHECK(s_sent_count == 0, "FLXB v3 must be rejected whole");
+  CHECK(s_sent_count == 0, "FLXB v4 must be rejected whole");
 }
 
-int main(void)
+/* ---- CM-FR05: «последняя команда канала побеждает» ---------------- */
+
+/* Отложенный ON (delay=120) отменяется мгновенным OFF того же канала:
+ * команда OFF, выданная пока тикает чужая задержка, снимает висящий
+ * в s_flex_queue ON — иначе канал включался бы ПОСЛЕ OFF. */
+static void test_aux_off_cancels_pending_on(void)
 {
+  trigger_t recs[2];
+  make_aux_action_record(&recs[0], 0x100U, 2U, AUX_MODE_ON, NULL);
+  recs[0].delay_ms = 120U;
+  fix_crc(&recs[0]);
+  make_aux_action_record(&recs[1], 0x101U, 2U, AUX_MODE_OFF, NULL);
+  load_flex(recs, 2);
+
+  const uint8_t d[1] = {0x01};
+  can_frame_t f_on = mk_frame(0U, 0x100U, 1U, d);
+  can_frame_t f_off = mk_frame(0U, 0x101U, 1U, d);
+
+  Trigger_OnFrame(&f_on);          /* ON вооружён на t=1120 */
+  run_ms(10);                      /* t=1010 */
+  Trigger_OnFrame(&f_off);         /* OFF — сейчас + отмена ON */
+  CHECK(s_aux_set_calls == 1 && s_aux_last.mode == AUX_MODE_OFF
+        && s_aux_last.channel == 2U,
+        "OFF must execute immediately and alone");
+  run_ms(140);                     /* t=1150 — срок ON давно вышел */
+  CHECK(s_aux_set_calls == 1,
+        "cancelled delayed ON must never execute");
+  CHECK(s_aux_active[2] == 0U && s_aux_mode[2] == 0U,
+        "channel must stay OFF after the pending ON is cancelled");
+}
+
+/* Отложенная команда снимает более СТАРУЮ отложенную того же канала:
+ * ON@120 сменяется позже выданным OFF@50 — исполняется только OFF. */
+static void test_aux_late_command_supersedes_queued(void)
+{
+  trigger_t recs[2];
+  make_aux_action_record(&recs[0], 0x100U, 2U, AUX_MODE_ON, NULL);
+  recs[0].delay_ms = 120U;
+  fix_crc(&recs[0]);
+  make_aux_action_record(&recs[1], 0x101U, 2U, AUX_MODE_OFF, NULL);
+  recs[1].delay_ms = 50U;
+  fix_crc(&recs[1]);
+  load_flex(recs, 2);
+
+  const uint8_t d[1] = {0x01};
+  can_frame_t f_on = mk_frame(0U, 0x100U, 1U, d);
+  can_frame_t f_off = mk_frame(0U, 0x101U, 1U, d);
+
+  Trigger_OnFrame(&f_on);          /* ON вооружён на 1120 */
+  run_ms(10);                      /* t=1010 */
+  Trigger_OnFrame(&f_off);         /* OFF вооружён на 1060, ON снят */
+  run_ms(45);                      /* t=1055 — ещё ничего */
+  CHECK(s_aux_set_calls == 0, "nothing may fire before the OFF delay");
+  run_ms(100);                     /* t=1155 — оба срока прошли */
+  CHECK(s_aux_set_calls == 1 && s_aux_last.mode == AUX_MODE_OFF,
+        "only the newer OFF command executes");
+  CHECK(s_aux_active[2] == 0U, "channel must be OFF, not ON");
+}
+
+/* Отмена — строго по каналу: OFF канала 3 не трогает отложенный ON
+ * канала 2 — чужие расписания сохраняются. */
+static void test_aux_cancel_is_per_channel(void)
+{
+  trigger_t recs[2];
+  make_aux_action_record(&recs[0], 0x100U, 2U, AUX_MODE_ON, NULL);
+  recs[0].delay_ms = 40U;
+  fix_crc(&recs[0]);
+  make_aux_action_record(&recs[1], 0x101U, 3U, AUX_MODE_OFF, NULL);
+  load_flex(recs, 2);
+
+  const uint8_t d[1] = {0x01};
+  can_frame_t f_on = mk_frame(0U, 0x100U, 1U, d);
+  can_frame_t f_off = mk_frame(0U, 0x101U, 1U, d);
+
+  Trigger_OnFrame(&f_on);          /* ON ch2 вооружён на 1040 */
+  run_ms(10);                      /* t=1010 */
+  Trigger_OnFrame(&f_off);         /* OFF ch3 — мгновенно, чужой канал */
+  CHECK(s_aux_set_calls == 1, "OFF ch3 executes now");
+  run_ms(40);                      /* t=1050 — срок ON ch2 */
+  CHECK(s_aux_set_calls == 2 && s_aux_last.mode == AUX_MODE_ON
+        && s_aux_last.channel == 2U,
+        "delayed ON of another channel must still fire");
+  CHECK(s_aux_active[2] == 1U && s_aux_active[3] == 0U,
+        "per-channel states: ch2 ON, ch3 OFF");
+}
+
+/* ---- CM-F02: записи переменных (FLXB v3, протокол 14) -------------- */
+
+/* Updater статической переменной: кадр → псевдо-действие SETFLAG
+ * (src_flags&TX_SETFLAG, tx_data[0]=индекс, [1]=значение,
+ * [2..5]=авто-выкл мс). */
+static void make_setflag_record(trigger_t *t, uint32_t rx_id,
+                                uint8_t flag_idx, uint8_t val,
+                                uint32_t auto_off_ms)
+{
+  make_flex_record(t, 2U, rx_id, 0U, 0U);
+  t->src_flags |= TRIGGER_F_TX_SETFLAG;
+  t->tx_channel = 0U;
+  t->tx_dlc = 0U;
+  t->tx_id = 0U;
+  t->tx_data[0] = flag_idx;
+  t->tx_data[1] = val;
+  t->tx_data[2] = (uint8_t)(auto_off_ms & 0xFFU);
+  t->tx_data[3] = (uint8_t)((auto_off_ms >> 8) & 0xFFU);
+  t->tx_data[4] = (uint8_t)((auto_off_ms >> 16) & 0xFFU);
+  t->tx_data[5] = (uint8_t)((auto_off_ms >> 24) & 0xFFU);
+  fix_crc(t);
+}
+
+/* Слушатель фронта флага: rx_flags&RX_VAR, rx_channel=0xFF,
+ * rx_dlc = фронт (0 любой/1 «стал 1»/2 «стал 0»),
+ * rx_data_mask[0] = индекс флага. */
+static void make_flag_listener(trigger_t *t, uint8_t flag_idx,
+                               uint8_t edge, uint32_t tx_id)
+{
+  make_flex_record(t, 0U, 0U, 0U, tx_id);
+  t->rx_flags |= TRIGGER_F_RX_VAR;
+  t->rx_channel = TRIGGER_VAR_CHAN_FLAG;
+  t->rx_dlc = edge;
+  t->rx_id_mask = 0U;
+  t->rx_data_mask[0] = flag_idx;
+  fix_crc(t);
+}
+
+/* «Динамическая переменная»: rx_flags&RX_VAR, rx_channel=CAN-канал,
+ * mask = offset/len/endian/cmp/kind, rx_data = значение u64. */
+static void make_var_record(trigger_t *t, uint8_t ch, uint32_t rx_id,
+                            uint8_t off, uint8_t len, uint8_t endian,
+                            uint8_t cmp, uint8_t kind, uint64_t val,
+                            uint32_t tx_id)
+{
+  make_flex_record(t, ch, rx_id, 0U, tx_id);
+  t->rx_flags |= TRIGGER_F_RX_VAR;
+  t->rx_data_mask[0] = off;
+  t->rx_data_mask[1] = len;
+  t->rx_data_mask[2] = endian;
+  t->rx_data_mask[3] = cmp;
+  t->rx_data_mask[4] = kind;
+  for (uint8_t i = 0; i < 8U; i++) {
+    t->rx_data[i] = (uint8_t)((val >> (8U * i)) & 0xFFU);
+  }
+  fix_crc(t);
+}
+
+/* Статическая переменная «Зажигание»: updater ставит бит по кадру,
+ * слушатель фронта «стала 1» отправляет ответ — как программа
+ * «статическая → команда» из дампа CM-F02. */
+static void test_static_flag_listener_and_updater(void)
+{
+  trigger_t recs[3];
+  make_flag_listener(&recs[0], 0U, 1U, 0x321U);      /* фронт ON → кадр */
+  make_setflag_record(&recs[1], 0x300U, 0U, 1U, 0U); /* ON-кадр */
+  make_setflag_record(&recs[2], 0x301U, 0U, 0U, 0U); /* OFF-кадр */
+  load_flex(recs, 3);
+
+  can_frame_t on = mk_frame(0U, 0x300U, 1U, (const uint8_t *)"\x01");
+  can_frame_t off = mk_frame(0U, 0x301U, 1U, (const uint8_t *)"\x00");
+  Trigger_OnFrame(&on);          /* флаг 0→1, фронт в очереди */
+  Trigger_Poll();                /* раздача фронта слушателю */
+  CHECK(s_sent_count == 1, "flag ON edge must fire the listener");
+  Trigger_OnFrame(&on);          /* уже 1 — повторного фронта нет */
+  Trigger_Poll();
+  CHECK(s_sent_count == 1, "repeated ON frame must not refire");
+  Trigger_OnFrame(&off);         /* 1→0: фронт OFF слушателю ON — нет */
+  Trigger_Poll();
+  CHECK(s_sent_count == 1, "OFF edge must not fire ON listener");
+  Trigger_OnFrame(&on);          /* 0→1 снова — фронт */
+  Trigger_Poll();
+  CHECK(s_sent_count == 2, "second ON edge must fire again");
+}
+
+/* Численная переменная «поле > порог»: фронт истинности — одна
+ * сработка на переходе, пока условие держится — повторов нет
+ * (_dyn_flags на ПК). */
+static void test_dyn_var_threshold_edge(void)
+{
+  trigger_t recs[1];
+  /* bytes[0..1] little-endian > 100 → кадр 0x321. */
+  make_var_record(&recs[0], 2U, 0x100U, 0U, 2U, 1U, 1U, 1U, 100U,
+                  0x321U);
+  load_flex(recs, 1);
+
+  uint8_t lo[8] = {50, 0};
+  uint8_t hi[8] = {200, 0};
+  can_frame_t f_lo = mk_frame(0U, 0x100U, 8U, lo);
+  can_frame_t f_hi = mk_frame(0U, 0x100U, 8U, hi);
+  Trigger_OnFrame(&f_lo);
+  CHECK(s_sent_count == 0, "below threshold must not fire");
+  Trigger_OnFrame(&f_hi);
+  CHECK(s_sent_count == 1, "rising edge must fire once");
+  Trigger_OnFrame(&f_hi);
+  CHECK(s_sent_count == 1, "sustained value must not refire");
+  Trigger_OnFrame(&f_lo);
+  Trigger_OnFrame(&f_hi);
+  CHECK(s_sent_count == 2, "second crossing must fire again");
+}
+
+/* dyn_cache: позиции поля накапливаются покадрово — значение
+ * сравнивается когда все позиции записаны хотя бы раз. */
+static void test_dyn_cache_partial_then_complete(void)
+{
+  trigger_t recs[1];
+  /* bytes[2..3] BE == 0x0201 («Драйв») → кадр 0x321. */
+  make_var_record(&recs[0], 2U, 0x200U, 2U, 2U, 0U, 0U, 0U, 0x0201U,
+                  0x321U);
+  load_flex(recs, 1);
+
+  uint8_t half[8] = {0, 0, 2, 0};   /* DLC 3 — позиция 3 не записана */
+  uint8_t rest[8] = {0, 0, 2, 1};   /* DLC 4 — поле целиком: 0x0201 */
+  uint8_t other[8] = {0, 0, 2, 9};  /* raw 0x0209 — не совпадает */
+  can_frame_t f_half = mk_frame(0U, 0x200U, 3U, half);
+  can_frame_t f_rest = mk_frame(0U, 0x200U, 4U, rest);
+  can_frame_t f_other = mk_frame(0U, 0x200U, 4U, other);
+  Trigger_OnFrame(&f_half);
+  CHECK(s_sent_count == 0, "incomplete field must not fire");
+  Trigger_OnFrame(&f_rest);
+  CHECK(s_sent_count == 1, "completed binding value must fire");
+  Trigger_OnFrame(&f_other);
+  Trigger_OnFrame(&f_other);
+  CHECK(s_sent_count == 1, "non-matching value must stay silent");
+}
+
+/* Условие «флаг в состоянии» (COND_FLAG): кадровая запись срабатывает
+ * только когда бит поднят — как «ПРИ статическая == 1» на ПК. */
+static void test_cond_flag_gates_frame(void)
+{
+  trigger_t recs[2];
+  make_flex_record(&recs[0], 2U, 0x123U, 0U, 0x456U);
+  recs[0].src_flags |= TRIGGER_F_COND_FLAG;
+  recs[0].src_id = 0U;
+  recs[0].src_dlc = 1U;            /* «есть 1» */
+  fix_crc(&recs[0]);
+  make_setflag_record(&recs[1], 0x300U, 0U, 1U, 0U);
+  load_flex(recs, 2);
+
+  can_frame_t ev = mk_frame(0U, 0x123U, 8U, NULL);
+  can_frame_t on = mk_frame(0U, 0x300U, 1U, (const uint8_t *)"\x01");
+  Trigger_OnFrame(&ev);
+  CHECK(s_sent_count == 0, "frame with flag down must not fire");
+  Trigger_OnFrame(&on);
+  Trigger_Poll();
+  Trigger_OnFrame(&ev);
+  CHECK(s_sent_count == 1, "frame with flag up must fire");
+}
+
+/* «вкл на N мс»: SETFLAG с авто-выкл — спустя срок бит падает,
+ * слушатель фронта «стал 0» исполняется. */
+static void test_setflag_pulse_auto_off(void)
+{
+  trigger_t recs[2];
+  make_setflag_record(&recs[0], 0x300U, 0U, 1U, 50U); /* вкл на 50 мс */
+  make_flag_listener(&recs[1], 0U, 2U, 0x321U);       /* фронт OFF */
+  load_flex(recs, 2);
+
+  can_frame_t on = mk_frame(0U, 0x300U, 1U, (const uint8_t *)"\x01");
+  Trigger_OnFrame(&on);
+  run_ms(30);
+  Trigger_Poll();
+  CHECK(s_sent_count == 0, "auto-off must not fire early");
+  run_ms(30);                      /* 60 мс — авто-выкл + фронт OFF */
+  Trigger_Poll();
+  CHECK(s_sent_count == 1, "auto-off edge must fire OFF listener");
+}
+
+/* CM-FR12: RAW-алиасы одного именованного состояния делят общую
+ * защёлку фронта (rx_data_mask[5] = id edge-группы): переход 8→72
+ * внутри «Драйв» пересрабатывать не должен, состояние→состояние и
+ * выход→повторный вход дают ровно одну сработку — как единый
+ * _dyn_flags-флаг события на ПК. */
+static void test_dyn_alias_group_single_edge(void)
+{
+  trigger_t recs[4];
+  /* «Драйв» = raw 8/72 (группа 1), «Спорт» = raw 9/73 (группа 2):
+   * по записи на каждый алиас — как раскладывает компилятор. */
+  make_var_record(&recs[0], 2U, 0x200U, 2U, 1U, 0U, 0U, 0U, 8U,
+                  0x321U);
+  make_var_record(&recs[1], 2U, 0x200U, 2U, 1U, 0U, 0U, 0U, 72U,
+                  0x321U);
+  make_var_record(&recs[2], 2U, 0x200U, 2U, 1U, 0U, 0U, 0U, 9U,
+                  0x322U);
+  make_var_record(&recs[3], 2U, 0x200U, 2U, 1U, 0U, 0U, 0U, 73U,
+                  0x322U);
+  recs[0].rx_data_mask[5] = 1U;
+  recs[1].rx_data_mask[5] = 1U;
+  recs[2].rx_data_mask[5] = 2U;
+  recs[3].rx_data_mask[5] = 2U;
+  fix_crc(&recs[0]); fix_crc(&recs[1]);
+  fix_crc(&recs[2]); fix_crc(&recs[3]);
+  load_flex(recs, 4);
+
+  uint8_t d8[8] = {0, 0, 8}, d72[8] = {0, 0, 72};
+  uint8_t d9[8] = {0, 0, 9}, d73[8] = {0, 0, 73}, d0[8] = {0, 0, 0};
+  can_frame_t f8 = mk_frame(0U, 0x200U, 3U, d8);
+  can_frame_t f72 = mk_frame(0U, 0x200U, 3U, d72);
+  can_frame_t f9 = mk_frame(0U, 0x200U, 3U, d9);
+  can_frame_t f73 = mk_frame(0U, 0x200U, 3U, d73);
+  can_frame_t f0 = mk_frame(0U, 0x200U, 3U, d0);
+
+  Trigger_OnFrame(&f8);          /* холодный вход в «Драйв» */
+  CHECK(s_sent_count == 1 && s_sent[0].id == 0x321U,
+        "first alias entry must fire once");
+  Trigger_OnFrame(&f8);
+  CHECK(s_sent_count == 1, "sustained alias must not refire");
+  Trigger_OnFrame(&f72);         /* алиас того же состояния — не фронт */
+  CHECK(s_sent_count == 1, "alias switch must not refire the state");
+  Trigger_OnFrame(&f9);          /* «Драйв» → «Спорт»: один фронт */
+  CHECK(s_sent_count == 2 && s_sent[1].id == 0x322U,
+        "state transition must fire the new state once");
+  Trigger_OnFrame(&f73);         /* алиас «Спорта» — не фронт */
+  CHECK(s_sent_count == 2, "second-state alias must not refire");
+  Trigger_OnFrame(&f0);          /* выход из всех состояний */
+  Trigger_OnFrame(&f72);         /* повторный вход в «Драйв» — фронт */
+  CHECK(s_sent_count == 3 && s_sent[2].id == 0x321U,
+        "re-entry after leaving must fire again");
+}
+
+/* CM-FR12: групповой id допустим только у dyn_cache-сравнения «==» —
+ * группа на численной записи (kind=1) отвергает блоб целиком, как и
+ * любое другое нарушение контракта записи. */
+static void test_edge_group_rejected_on_non_eq_record(void)
+{
+  trigger_t recs[2];
+  make_var_record(&recs[0], 2U, 0x200U, 2U, 1U, 0U, 0U, 0U, 8U,
+                  0x321U);
+  recs[0].rx_data_mask[5] = 1U;                    /* допустимо: eq+dyn */
+  make_var_record(&recs[1], 2U, 0x100U, 0U, 2U, 1U, 1U, 1U, 100U,
+                  0x322U);
+  recs[1].rx_data_mask[5] = 1U;                    /* kind=1 — запрет */
+  fix_crc(&recs[0]); fix_crc(&recs[1]);
+  s_flex_len = build_flex_blob_ver(recs, 2U, 3U);
+  s_flex_blob = s_blob;
+  reset_engine();
+
+  uint8_t d8[8] = {0, 0, 8}, d200[8] = {200, 0};
+  can_frame_t f8 = mk_frame(0U, 0x200U, 3U, d8);
+  can_frame_t f200 = mk_frame(0U, 0x100U, 2U, d200);
+  Trigger_OnFrame(&f8);
+  Trigger_OnFrame(&f200);
+  CHECK(s_sent_count == 0,
+        "blob with a grouped non-eq record must be rejected whole");
+}
+
+/* Одно-членная группа ведёт себя как обычная защёлка — компилятор
+ * группирует только множественные алиасы, но контракт прошивки не
+ * требует минимальной численности группы. */
+static void test_edge_group_single_member(void)
+{
+  trigger_t recs[1];
+  make_var_record(&recs[0], 2U, 0x200U, 2U, 1U, 0U, 0U, 0U, 8U,
+                  0x321U);
+  recs[0].rx_data_mask[5] = 1U;
+  fix_crc(&recs[0]);
+  s_flex_len = build_flex_blob_ver(recs, 1U, 3U);
+  s_flex_blob = s_blob;
+  reset_engine();
+
+  uint8_t d8[8] = {0, 0, 8}, d0[8] = {0, 0, 0};
+  can_frame_t f8 = mk_frame(0U, 0x200U, 3U, d8);
+  can_frame_t f0 = mk_frame(0U, 0x200U, 3U, d0);
+  Trigger_OnFrame(&f8);
+  CHECK(s_sent_count == 1, "single-member group must fire on edge");
+  Trigger_OnFrame(&f8);
+  CHECK(s_sent_count == 1, "sustained single-member group");
+  Trigger_OnFrame(&f0);
+  Trigger_OnFrame(&f8);
+  CHECK(s_sent_count == 2, "single-member group must refire");
+}
+
+/* ---- Vector mode: реальный FLXB из компилятора ПК (CM-FR12) --------
+ * argv[1] = бинарный файл вектора:
+ *   u32 blob_len | blob[ blob_len ] | u32 nsteps | шаги;
+ * шаг (21 B, LE): u32 delta_ms | u8 kind (0=frame, 1=poll) |
+ * u8 channel | u8 extended | u8 rtr | u32 id | u8 dlc | u8 data[8].
+ * На каждом шаге: s_tick += delta, OnFrame (kind=0), Trigger_Poll.
+ * Отправки печатаются «SEND <tick> <ch> <id> <dlc> <data...>». */
+static uint32_t rd_le32(const uint8_t *p)
+{
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+         | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int run_vector(const char *path)
+{
+  FILE *fp = fopen(path, "rb");
+  if (fp == NULL) {
+    fprintf(stderr, "cannot open %s\n", path);
+    return 2;
+  }
+  fseek(fp, 0, SEEK_END);
+  long sz = ftell(fp);
+  rewind(fp);
+  uint8_t *buf = (uint8_t *)malloc((size_t)sz);
+  if (buf == NULL || fread(buf, 1, (size_t)sz, fp) != (size_t)sz) {
+    fprintf(stderr, "cannot read %s\n", path);
+    fclose(fp);
+    return 2;
+  }
+  fclose(fp);
+  if (sz < 8L) {
+    return 2;
+  }
+  uint32_t blob_len = rd_le32(buf);
+  if (4L + (long)blob_len + 4L > sz) {
+    fprintf(stderr, "bad vector: blob_len\n");
+    return 2;
+  }
+  s_flex_blob = buf + 4;
+  s_flex_len = blob_len;
+  s_vector_mode = 1;
+  s_tick = 0U;
+  reset_engine();
+  s_tick = 0U;
+
+  const uint8_t *p = buf + 4 + blob_len;
+  uint32_t nsteps = rd_le32(p);
+  p += 4;
+  if ((long)(p - buf) + (long)nsteps * 21L > sz) {
+    fprintf(stderr, "bad vector: nsteps\n");
+    return 2;
+  }
+  for (uint32_t i = 0; i < nsteps; i++) {
+    uint32_t delta = rd_le32(p);
+    uint8_t kind = p[4], ch = p[5], ext = p[6], rtr = p[7];
+    uint32_t id = rd_le32(p + 8);
+    uint8_t dlc = p[12];
+    const uint8_t *data = p + 13;
+    p += 21;
+    s_tick += delta;
+    if (kind == 0U) {
+      can_frame_t fr;
+      memset(&fr, 0, sizeof(fr));
+      fr.channel = ch;
+      fr.extended = ext;
+      fr.rtr = rtr;
+      fr.id = id;
+      fr.dlc = dlc;
+      memcpy(fr.data, data, dlc < 8U ? dlc : 8U);
+      Trigger_OnFrame(&fr);
+    }
+    Trigger_Poll();
+  }
+  return 0;
+}
+
+int main(int argc, char **argv)
+{
+  if (argc > 1) {
+    return run_vector(argv[1]);
+  }
   test_flex_record_fires();
   test_two_programs_same_event();
   test_series_schedules_preserved();
@@ -1152,6 +1616,17 @@ int main(void)
   test_aux_action_executes_without_can();
   test_aux_event_budget_per_poll();
   test_flxb_v2_container();
+  test_aux_off_cancels_pending_on();
+  test_aux_late_command_supersedes_queued();
+  test_aux_cancel_is_per_channel();
+  test_static_flag_listener_and_updater();
+  test_dyn_var_threshold_edge();
+  test_dyn_cache_partial_then_complete();
+  test_dyn_alias_group_single_edge();
+  test_edge_group_rejected_on_non_eq_record();
+  test_edge_group_single_member();
+  test_cond_flag_gates_frame();
+  test_setflag_pulse_auto_off();
 
   if (s_failures == 0) {
     printf("PASS: all flex-runtime checks\n");

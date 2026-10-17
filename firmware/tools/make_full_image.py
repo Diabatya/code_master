@@ -13,12 +13,16 @@ bootloader + страница данных устройства (0x08008000, т�
 UART) на устройствах, где загрузчик уже установлен — артефакт
 «2 CAN CDC».
 
-Если передан --version, в страницу данных устройства (смещение DEVICE_CONFIG_VER_OFFSET)
-пишется версионная запись «VER1» с номером релиза — приложение она
-нужна, чтобы устройство могло отчитаться о версии ПО. Первый блок
-страницы (имя/s/n) остаётся стёртым (0xFF): при записи через
-flash_firmware страница объединяется с существующей на устройстве,
-поэтому идентичность не затирается, а версия обновляется.
+Если передан --version, пишется версионная запись «VER1» с номером
+релиза — приложение она нужна, чтобы устройство могло отчитаться о
+версии ПО. CM-F03: актуальное место VER1 — слот на странице
+метаданных APP1 (смещение 32); копия на странице данных устройства
+(смещение DEVICE_CONFIG_VER_OFFSET) остаётся для миграции и старых
+прошивок. Первый блок страницы (имя/s/n) остаётся стёртым (0xFF):
+идентичность устройства присваивается только первичным
+программированием (DFU/ST-Link), а не универсальным релизным
+образом; CDC-путь страницу идентичности вообще не пишет — VER1 из
+образа переносится на страницу APP1.
 
 Использование:
     python3 make_full_image.py <bootloader.hex> <app.hex> <out.hex> [out.bin]
@@ -59,6 +63,8 @@ def main() -> int:
     version = args.version.strip().lstrip("v")
     if version:
         from core.stm32_info import (
+            APP_METADATA_PAGE_ADDR,
+            APP_METADATA_VER_OFFSET,
             DEVICE_CONFIG_PAGE_ADDR,
             DEVICE_CONFIG_VER_OFFSET,
             build_device_config_page,
@@ -73,6 +79,13 @@ def main() -> int:
             DEVICE_CONFIG_VER_OFFSET : DEVICE_CONFIG_VER_OFFSET + 32
         ]
         image.puts(DEVICE_CONFIG_PAGE_ADDR + DEVICE_CONFIG_VER_OFFSET, ver_fragment)
+        # CM-F03: VER1 дублируется на страницу метаданных APP1
+        # (смещение 32) — актуальное место для прошивок протокола ≥15;
+        # копия на странице идентичности остаётся источником миграции
+        # и совместимости со старыми прошивками.
+        image.puts(
+            APP_METADATA_PAGE_ADDR + APP_METADATA_VER_OFFSET, ver_fragment
+        )
         print(f"full image: версия ПО прошивки v{version}", flush=True)
 
     image.write_hex_file(args.out_hex)
@@ -80,14 +93,19 @@ def main() -> int:
         image.tofile(args.out_bin, format="bin")
 
     # «2 CAN CDC»: app-only образ для кнопки «Обновить» — метаданные и
-    # код application плюс версионная запись на странице данных
-    # устройства (идентичность merge не трогает). Загрузчик не входит.
+    # код application плюс версионная запись VER1 (страница данных
+    # устройства @1024 для миграции/совместимости + слот страницы
+    # метаданных @32 — актуальное место протокола ≥15). Страница
+    # идентичности при CDC-обновлении не пишется. Загрузчик не входит.
     if args.cdc_hex or args.cdc_bin:
         cdc = IntelHex(args.app_hex)
         cdc.start_addr = None
         if ver_fragment:
             cdc.puts(
                 DEVICE_CONFIG_PAGE_ADDR + DEVICE_CONFIG_VER_OFFSET, ver_fragment
+            )
+            cdc.puts(
+                APP_METADATA_PAGE_ADDR + APP_METADATA_VER_OFFSET, ver_fragment
             )
         if args.cdc_hex:
             cdc.write_hex_file(args.cdc_hex)

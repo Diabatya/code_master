@@ -288,48 +288,16 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
     }
 
     case CMD_CFG_WRITE: {
-      if (payload_len < 2U) {
-        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
-        break;
-      }
-      uint32_t p = 0;
-      uint8_t name_len = payload[p++];
-      if (name_len > DEVICE_CONFIG_NAME_MAX || (p + name_len) > payload_len) {
-        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
-        break;
-      }
-      const uint8_t *name = &payload[p]; p += name_len;
-      if (p >= payload_len) { send_new_cmd_response(cmd, 0x01U, NULL, 0U); break; }
-      uint8_t serial_len = payload[p++];
-      if (serial_len > DEVICE_CONFIG_SERIAL_MAX || (p + serial_len + 4U) > payload_len) {
-        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
-        break;
-      }
-      const uint8_t *serial = &payload[p]; p += serial_len;
-      uint16_t vid = (uint16_t)(payload[p] | (payload[p + 1] << 8)); p += 2U;
-      uint16_t pid = (uint16_t)(payload[p] | (payload[p + 1] << 8)); p += 2U;
-
-      /* Трейлер-ключ обязателен (протокол v3): без него мусорный 0xC1
-       * из рассинхрона потока переписывал бы имя/серийник и сбрасывал
-       * МК. Старый хост без трейлера получает отказ и уходит на запись
-       * конфигурации через DFU; старая прошивка лишние байты в конце
-       * payload просто игнорирует — обратная совместимость держится. */
-      if ((payload_len - p) != 2U ||
-          payload[p] != CFG_WRITE_TRAILER_0 || payload[p + 1U] != CFG_WRITE_TRAILER_1) {
-        send_new_cmd_response(cmd, 0x01U, NULL, 0U);
-        break;
-      }
-
-      uint8_t ok = DeviceConfig_Write(name, name_len, serial, serial_len, vid, pid);
-      send_new_cmd_response(cmd, ok ? 0x00U : 0x02U, NULL, 0U);
-      if (ok) {
-        /* Re-enumerate with the new name/serial (ТЗ 11.3). Ждём пока
-         * ответ реально уйдёт хосту (TxState==0) — слепая задержка
-         * теряла его при занятом CDC-канале, и хост считал команду
-         * невыполненной, хотя запись исполнилась и МК ушёл в reset. */
-        CDC_FlushTx(200U);
-        reboot_to_application();
-      }
+      /* CM-F03: запись типа/серийного номера через CDC-протокол
+       * запрещена на уровне диспетчера (а не только скрытием полей в
+       * UI) — идентичность меняет только первичное программирование
+       * через сервисный путь (DFU/ST-Link/J-Link с записью страницы
+       * идентичности). Статус 0x03 — «запрещено контрактом», отличается
+       * от ошибки параметров/записи: ПК может показать оператору
+       * осмысленное сообщение. Страницу идентичности CEX0/TNM0-записи
+       * переписывают изнутри прошивки с сохранением CFG0 — на этот
+       * запрет это не влияет. */
+      send_new_cmd_response(cmd, 0x03U, NULL, 0U);
       break;
     }
 
@@ -636,7 +604,7 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
        * версии ПК читают только первые 16 байт. */
       uint8_t out[84] = {
         s_device_version,
-        13U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
+        15U, /* protocol version: 2 = CMD_CAN_SPEED; 3 = ключи
              * деструктивных команд; 4 = записи триггеров v3 (90 Б —
              * fire_limit + флаги эха), старым прошивкам хост шлёт 82 Б;
              * 5 = имена триггеров (CMD_TRIGGER_NAME_*) в config-странице;
@@ -661,7 +629,16 @@ static void handle_new_command(uint8_t cmd, const uint8_t *payload, uint8_t payl
              * 13 = семь доп. каналов выхода: CMD_AUX_SET_EXT/GET/MAP,
              * срок работы Вкл, ШИМ 0%, владение спорными пинами
              * (PA14/PD2/PB3) из CFGH, aux-события/действия в
-             * автономной ГЛ (записи FLXB v2) */
+             * автономной ГЛ (записи FLXB v2);
+             * 14 = автономные переменные ГЛ (записи FLXB v3):
+             * события по динамическим переменным и статическим
+             * флагам (RX_VAR), действия «Переменная» (TX_SETFLAG),
+             * условия по флагу (COND_FLAG), команды «Управления»
+             * как обычные tx-записи со свёрнутым расписанием;
+             * 15 = неперезаписываемая идентичность (CM-F03):
+             * CMD_CFG_WRITE отклоняется (статус 0x03), VER1 живёт
+             * на странице метаданных APP1 (смещение 32) — страница
+             * идентичности при обновлении не стирается */
         0U,
         1U,
         cfg->reserved[0],

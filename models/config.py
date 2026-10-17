@@ -357,6 +357,18 @@ class Config:
         """Применяет настройки из payload, сохраняя идентичность устройства."""
         # Файл затирает текущие настройки — сначала снапшот на откат.
         self.backup_snapshot("before_import")
+        # CM-F09: действия ГЛ «из настроек выхода» резолвятся в
+        # снимок по сохранённым out_mode/pwm_* до снятия этих
+        # черновых полей из конфигов каналов.
+        from core.aux_channels import (
+            migrate_aux_delay_snapshot,
+            migrate_aux_out_snapshot,
+        )
+        payload = migrate_aux_out_snapshot(payload)
+        # CM-F11: легаси «Пауза до действия» aux_delay сворачивается
+        # в единую «Задержку» exec_delay (их сумма — реальная
+        # задержка старта в старой семантике).
+        payload = migrate_aux_delay_snapshot(payload)
         for key in self._RESET_PRESERVE_KEYS:
             if key in self._data:
                 payload[key] = deepcopy(self._data[key])

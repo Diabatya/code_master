@@ -130,9 +130,16 @@ def test_uncompilable_variants() -> None:
         "type": "aux", "aux_enabled": True, "aux_channel": 1,
         "aux_mode": "on",
     }])) is None
-    # «Задержка» выполнения действия — только на ПК.
-    assert compile_rule(_rule(actions=[{
+    # «Задержка» выполнения действия — единая, автономная на МК
+    # (CM-F11): сворачивается в delay_ms первого отправления.
+    recs = compile_rule(_rule(actions=[{
         **_frame_action(), "exec_delay": 100,
+    }]))
+    assert recs is not None and recs[0]["delay_ms"] == 100
+    # Прерыватель действия — только на ПК.
+    assert compile_rule(_rule(actions=[{
+        **_frame_action(),
+        "abort": {"type": "aux", "channel": 1, "state": 1},
     }])) is None
 
 

@@ -428,7 +428,8 @@ def test_old_session_timer_silent_after_reconfirm_verified(tab) -> None:
     """Смешанные managed/PC: reset → verified-подтверждение новой
     сессии — запланированное старой сессии молчит."""
     hw = _frame_rule(event_id="200", title="HW")
-    pc = _frame_rule(event_id="321", title="PC", exec_delay=80)
+    pc = _frame_rule(event_id="321", title="PC", exec_delay=80,
+                    abort={"type": "frame", "id": "999"})
     analysis = analyze_device_flex(build_flex_blob([hw, pc]))
     assert analysis["state"] == "verified"
     assert analysis["managed"] == [True, False]
@@ -468,7 +469,8 @@ def test_verified_swaps_internal_rules(tab) -> None:
     tab.process_frame(_rx_frame())  # internal=OLD, dirty=False
     tab._sent.clear()
     new = _frame_rule(
-        event_id="555", title="NEW", id="888", exec_delay=1
+        event_id="555", title="NEW", id="888", exec_delay=1,
+        abort={"type": "frame", "id": "999"},
     )
     analysis = analyze_device_flex(build_flex_blob([new]))
     assert analysis["state"] == "verified"
@@ -491,7 +493,8 @@ def test_verified_mixed_managed_switches_owners(tab) -> None:
     tab.process_frame(_rx_frame())
     tab._sent.clear()
     hw = _frame_rule(event_id="200", title="HW")
-    pc = _frame_rule(event_id="321", title="PC", exec_delay=1, id="888")
+    pc = _frame_rule(event_id="321", title="PC", exec_delay=1, id="888",
+                    abort={"type": "frame", "id": "999"})
     analysis = analyze_device_flex(build_flex_blob([hw, pc]))
     assert analysis["managed"] == [True, False]
     tab.apply_device_flex_analysis(analysis)
@@ -514,7 +517,8 @@ def test_managed_to_pc_transition(tab) -> None:
     )
     tab.process_frame(_rx_frame(0x200))
     assert tab._sent == []  # managed — камень молчит для ПК
-    pc = _frame_rule(event_id="200", title="HW", exec_delay=1)
+    pc = _frame_rule(event_id="200", title="HW", exec_delay=1,
+                    abort={"type": "frame", "id": "999"})
     analysis = analyze_device_flex(build_flex_blob([pc]))
     assert analysis["managed"] == [False]
     tab.apply_device_flex_analysis(analysis)
@@ -532,7 +536,8 @@ def test_verified_preserves_draft_and_executes_new(tab) -> None:
     tab.process_frame(_rx_frame())
     tab._sent.clear()
     tab._config.set("flexible_rules", [_frame_rule(title="DRAFT")])
-    new = _frame_rule(event_id="555", title="NEW", exec_delay=1)
+    new = _frame_rule(event_id="555", title="NEW", exec_delay=1,
+                        abort={"type": "frame", "id": "999"})
     tab.apply_device_flex_analysis(
         analyze_device_flex(build_flex_blob([new]))
     )
@@ -593,7 +598,9 @@ def test_aux_event_uses_new_runtime(tab) -> None:
 def test_identical_reverify_keeps_exec_delay(tab) -> None:
     """Пробник ревью: тот же verified-анализ повторно — без reset,
     смены устройства, правил и владельца. Поколение и команда живы."""
-    rule = _frame_rule(exec_delay=80)
+    rule = _frame_rule(
+        exec_delay=80, abort={"type": "frame", "id": "999"}
+    )
     analysis = analyze_device_flex(build_flex_blob([rule]))
     assert analysis["state"] == "verified"
     assert analysis["managed"] == [False]
@@ -609,7 +616,8 @@ def test_identical_reverify_keeps_exec_delay(tab) -> None:
 def test_identical_reverify_keeps_send_series(tab) -> None:
     """Повторная вычитка МЕЖДУ повторами серии delay/count/between:
     серия сохраняет число и расписание."""
-    rule = _frame_rule(exec_delay=10, delay=40, count=2, between=70)
+    rule = _frame_rule(exec_delay=10, delay=40, count=2, between=70,
+                        abort={"type": "frame", "id": "999"})
     analysis = analyze_device_flex(build_flex_blob([rule]))
     tab.apply_device_flex_analysis(analysis)
     tab.process_frame(_rx_frame())
@@ -625,7 +633,8 @@ def test_identical_reverify_keeps_aux_delay(tab) -> None:
     верификацией."""
     aux: list = []
     tab._serial_manager.send_aux = lambda *a, **kw: aux.append((a, kw))
-    rule = _frame_rule(exec_delay=10, aux_delay=60)
+    rule = _frame_rule(exec_delay=10, aux_delay=60,
+                        abort={"type": "frame", "id": "999"})
     rule["action"].update(
         frame_enabled=False, aux_enabled=True,
         aux_channel=1, aux_mode="on",
@@ -641,7 +650,9 @@ def test_identical_reverify_keeps_aux_delay(tab) -> None:
 def test_probe_failed_then_same_verified_keeps_actions(tab) -> None:
     """mark_probe_failed → успешное чтение ТОГО ЖЕ verified:
     разрешённые действия не теряются, диагностика снимается."""
-    rule = _frame_rule(exec_delay=80)
+    rule = _frame_rule(
+        exec_delay=80, abort={"type": "frame", "id": "999"}
+    )
     analysis = analyze_device_flex(build_flex_blob([rule]))
     tab.apply_device_flex_analysis(analysis)
     tab.process_frame(_rx_frame())
@@ -659,10 +670,12 @@ def test_changed_verified_still_invalidates(tab) -> None:
     """Контроль: ДРУГИЕ правила в verified — прежняя команда гасится
     (политика смены контекста сохранена)."""
     tab.apply_device_flex_analysis(
-        analyze_device_flex(build_flex_blob([_frame_rule(exec_delay=80)]))
+        analyze_device_flex(build_flex_blob([_frame_rule(
+            exec_delay=80, abort={"type": "frame", "id": "999"})]))
     )
     tab.process_frame(_rx_frame())
-    new = _frame_rule(event_id="555", title="NEW", exec_delay=1)
+    new = _frame_rule(event_id="555", title="NEW", exec_delay=1,
+                      abort={"type": "frame", "id": "999"})
     tab.apply_device_flex_analysis(
         analyze_device_flex(build_flex_blob([new]))
     )
@@ -676,13 +689,15 @@ def test_changed_verified_still_invalidates(tab) -> None:
 def test_changed_managed_still_invalidates(tab) -> None:
     """managed-набор изменился (правило ушло на камень) — прежняя
     PC-команда отменяется: исполнять её значило бы дубль."""
-    pc = _frame_rule(exec_delay=80)
+    pc = _frame_rule(
+        exec_delay=80, abort={"type": "frame", "id": "999"}
+    )
     a1 = analyze_device_flex(build_flex_blob([pc]))
     assert a1["managed"] == [False]
     tab.apply_device_flex_analysis(a1)
     tab.process_frame(_rx_frame())
-    # Теперь то же правило компилируемо (exec_delay убран из JSON) —
-    # владелец сменился на камень.
+    # Теперь то же правило компилируемо (прерыватель убран из
+    # JSON) — владелец сменился на камень.
     hw = _frame_rule()
     a2 = analyze_device_flex(build_flex_blob([hw]))
     assert a2["managed"] == [True]
@@ -694,7 +709,9 @@ def test_changed_managed_still_invalidates(tab) -> None:
 def test_reset_then_same_verified_still_kills_old(tab) -> None:
     """Reset уже сменил поколение: та же verified-вычитка новой
     сессии не воскрешает старые коллбеки и не блокирует новые."""
-    rule = _frame_rule(exec_delay=80)
+    rule = _frame_rule(
+        exec_delay=80, abort={"type": "frame", "id": "999"}
+    )
     analysis = analyze_device_flex(build_flex_blob([rule]))
     tab.apply_device_flex_analysis(analysis)
     tab.process_frame(_rx_frame())          # старый таймер
